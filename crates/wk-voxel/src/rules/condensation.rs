@@ -123,6 +123,15 @@ const THERMAL_SURPLUS_MAX_HITS: usize = 128;
 /// seat would mint the shortfall. Snow does not carry sat today.
 const FLAKE_MASS: f32 = 255.0;
 
+/// Airborne snow is a solid grain. Surplus used to mint up to 128
+/// flakes a tick; each one keeps grain settle on the deep path and
+/// the sky never clears. A light shower, not a blizzard.
+const SNOW_MAX_FLAKES_PER_TICK: u32 = 8;
+
+/// How far up/down a column we look before seating another flake.
+/// Stacking mid-air is what turned a shower into a hanging fog of snow.
+const SNOW_COLUMN_CLEARANCE: i32 = 16;
+
 /// True when this air must not become liquid rain.
 ///
 /// Phase's freeze point wins when present; otherwise 0 °C. Below that
@@ -137,6 +146,19 @@ fn air_is_freezing(air_t: f32, phase: Option<&crate::phase::PhaseConfig>) -> boo
 
 /// Seat a flake and drain the local humidity parcel. Returns mass landed
 /// (0 if the parcel cannot pay [`FLAKE_MASS`] or there is no empty air).
+fn column_has_airborne_snow(world: &World, gx: i32, y: i32) -> bool {
+    let jx = world.wrap_x(gx);
+    for dy in -SNOW_COLUMN_CLEARANCE..=SNOW_COLUMN_CLEARANCE {
+        if world
+            .get_cell(jx, y + dy)
+            .is_some_and(|c| c.material == wk_material::MaterialId::Snow)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn try_snow_from_parcel(
     world: &mut World,
     humidity: &mut crate::humidity::Humidity,
@@ -144,6 +166,9 @@ fn try_snow_from_parcel(
     gy: i32,
 ) -> f32 {
     if humidity.peek_around(gx, gy) + 1e-3 < FLAKE_MASS {
+        return 0.0;
+    }
+    if column_has_airborne_snow(world, gx, gy) {
         return 0.0;
     }
     let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, FLAKE_MASS);
@@ -182,6 +207,7 @@ pub fn precipitate_thermal_surplus(
         return;
     }
     hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut flakes = 0u32;
     for &(_, hx, hy) in hits.iter().take(THERMAL_SURPLUS_MAX_HITS) {
         let mass = humidity.at_tile(hx, hy);
         let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp.at_tile(hx, hy));
@@ -195,8 +221,10 @@ pub fn precipitate_thermal_surplus(
         if air_is_freezing(air_t, phase) {
             // Below freeze: snow from the parcel, or hold. Never liquid.
             let snow_ok = phase.map(|ph| ph.enable_snow_precip).unwrap_or(true);
-            if snow_ok {
-                let _ = try_snow_from_parcel(world, humidity, gx, gy);
+            if snow_ok && flakes < SNOW_MAX_FLAKES_PER_TICK {
+                if try_snow_from_parcel(world, humidity, gx, gy) > 0.0 {
+                    flakes += 1;
+                }
             }
             continue;
         }
@@ -348,7 +376,10 @@ pub fn apply_condensation_rain_phased(
             let snow_ok = phase.map(|ph| ph.enable_snow_precip).unwrap_or(true);
             let gx = hx * tile_cols + tile_cols / 2;
             let gy = hy * tile_cols + tile_cols / 2;
-            if !snow_ok || humidity.peek_around(gx, gy) + 1e-3 < FLAKE_MASS {
+            if !snow_ok
+                || humidity.peek_around(gx, gy) + 1e-3 < FLAKE_MASS
+                || column_has_airborne_snow(world, gx, gy)
+            {
                 continue;
             }
             take_mass = FLAKE_MASS;
@@ -366,6 +397,7 @@ pub fn apply_condensation_rain_phased(
     } else {
         hits.len().min(cfg.max_events_per_tick as usize)
     };
+    let mut flakes = 0u32;
     for &(_mass, hx, hy, take_mass) in hits.iter().take(limit) {
         let mass = humidity.at_tile(hx, hy);
         if mass <= 0.0 {
@@ -389,8 +421,10 @@ pub fn apply_condensation_rain_phased(
         if freezing {
             // Below freeze: snow from the parcel, or hold. Never liquid.
             let snow_ok = phase.map(|ph| ph.enable_snow_precip).unwrap_or(true);
-            if snow_ok {
-                let _ = try_snow_from_parcel(world, humidity, centre_gx, centre_gy);
+            if snow_ok && flakes < SNOW_MAX_FLAKES_PER_TICK {
+                if try_snow_from_parcel(world, humidity, centre_gx, centre_gy) > 0.0 {
+                    flakes += 1;
+                }
             }
             continue;
         }
@@ -892,6 +926,100 @@ mod tests {
             w.get_cell(6, 34).map(|c| c.material),
             Some(MaterialId::Snow),
             "gathered neighbours must seat a flake on the nucleating tile"
+        );
+    }
+
+    #[test]
+    fn surplus_caps_airborne_flakes_per_tick() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(4);
+        for x in 0i32..64 {
+            w.ensure_chunk(ChunkCoord::new(
+                x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                0,
+            ));
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 32i32..40 {
+            for cx in 0..2 {
+                w.ensure_chunk(ChunkCoord::new(
+                    cx,
+                    y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+                ));
+            }
+        }
+        let mut h = Humidity::new(4);
+        for hx in 1..16 {
+            h.cells.insert((hx, 8), 400.0);
+            w.set_cell(hx * 4 + 2, 34, Cell::air());
+        }
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -12.0;
+        }
+        let phase = crate::phase::PhaseConfig::default();
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, Some(&phase));
+        let mut flakes = 0usize;
+        for x in 0..64 {
+            for y in 1..40 {
+                if w.get_cell(x, y)
+                    .is_some_and(|c| c.material == MaterialId::Snow)
+                {
+                    flakes += 1;
+                }
+            }
+        }
+        assert!(
+            flakes > 0 && flakes <= SNOW_MAX_FLAKES_PER_TICK as usize,
+            "surplus must shower, not blizzard (flakes={flakes})"
+        );
+    }
+
+    #[test]
+    fn snow_skips_a_column_that_already_has_a_flake() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 32i32..40 {
+            w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+        }
+        w.set_cell(6, 34, Cell::solid(MaterialId::Snow));
+        let mut h = Humidity::new(4);
+        h.cells.insert((1, 8), 400.0);
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -12.0;
+        }
+        let phase = crate::phase::PhaseConfig::default();
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, Some(&phase));
+        let flakes = (30..40)
+            .filter(|&y| {
+                w.get_cell(6, y)
+                    .is_some_and(|c| c.material == MaterialId::Snow)
+            })
+            .count();
+        assert_eq!(
+            flakes, 1,
+            "must not stack another flake on an occupied column"
+        );
+        assert!(
+            (h.at_tile(1, 8) - 400.0).abs() < 1e-3,
+            "occupied column must hold the vapour, left {}",
+            h.at_tile(1, 8)
         );
     }
 

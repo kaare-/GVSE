@@ -360,9 +360,13 @@ arrive on the ground in the same breath.
 
 Fixed by *odds* rather than a separate pass, which turned out much smaller than the
 plan above assumed: an airborne flake rolls to hold position most passes
-(`SNOWFALL_STEP_ODDS` 0.15), so one step is spread over many passes. The roll's
-irregularity is itself snow-like. Same technique as the fractional seepage rates,
-and it needs no new pass, so the hazard of "grain fall skips snow but the drift pass
+(`SNOWFALL_STEP_ODDS` 0.15), so one step is spread over many passes. The roll
+mixes the settle pass index — hashing only on tick left a flake that held
+sitting through all 64 FPS passes, and the sky filled. Surplus / C mint at
+most 8 flakes a tick and skip a column that already has one nearby, or the
+deep grain settle never goes quiet. The roll's irregularity is itself
+snow-like. Same technique as the fractional seepage rates, and it needs no
+new pass, so the hazard of "grain fall skips snow but the drift pass
 does not run" never arises.
 
 Gated on **airborne** snow only. Once a flake lands it is snowpack and behaves as

@@ -911,6 +911,30 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
 }
 
 #[test]
+fn snow_descends_across_settle_passes_in_one_tick() {
+    // Deep settle used to hash the hold only on tick, so a flake that
+    // held sat through all 64 FPS passes. Mix pass into the roll so the
+    // sky can actually empty.
+    let mut w = setup_column_world();
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.set_cell(2, 20, Cell::solid(MaterialId::Snow));
+    settle_loose_grains(&mut w, None, 32);
+    let snow_y = (1..=20)
+        .rev()
+        .find(|&y| w.get_cell(2, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let snow_y = snow_y.expect("the flake should still exist");
+    assert!(
+        snow_y < 20,
+        "a 32-pass settle must descend the flake (still at {snow_y})"
+    );
+    assert_ne!(
+        w.get_cell(2, 1).unwrap().material,
+        MaterialId::Snow,
+        "one settle must not dump the flake onto the floor"
+    );
+}
+
+#[test]
 fn snow_falls_gently_and_ice_does_not() {
     // The regression: snow nucleated in the air but had no fall behaviour, so grain
     // fall settled it to rest immediately -- flakes appeared in the sky and arrived

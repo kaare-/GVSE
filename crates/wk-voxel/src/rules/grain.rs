@@ -195,8 +195,8 @@ pub fn apply_grain_fall(world: &mut World) {
 /// one cell downwind.
 ///
 /// `wind_vx` is tiles/tick (same units as [`crate::wind::Wind::climate_vx`]).
-/// `tile_cols` converts that to cells. Fall fires on about 15% of ticks
-/// (`SNOWFALL_STEP_ODDS`); default climate drift is 0.05, so the path is
+/// `tile_cols` converts that to cells. Fall fires on about 15% of *settle
+/// passes* (`SNOWFALL_STEP_ODDS`); default climate drift is 0.05, so the path is
 /// about **three down for each sideways**. The tile-scaled wind is
 /// multiplied by [`SNOWDRIFT_WIND_SCALE`] (0.05 × 4 × 0.25 = 0.05).
 ///
@@ -355,7 +355,7 @@ fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
 const SNOWDRIFT_SALT: u64 = 0x51DE_5417;
 /// How hard climate wind translates into a sideways step.
 ///
-/// Fall is gated at [`SNOWFALL_STEP_ODDS`] (0.15 per tick). Playtest at
+/// Fall is gated at [`SNOWFALL_STEP_ODDS`] (0.15 per settle pass). Playtest at
 /// the old `1.0` scale read as "blowing too well"; `0.25` on 4-cell tiles
 /// plus this fall rate makes default wind (~0.05) a 3:1 down:across stair.
 const SNOWDRIFT_WIND_SCALE: f32 = 0.25;
@@ -922,7 +922,7 @@ pub fn settle_loose_grains_regions_ex(
     allow_buoyancy: bool,
 ) {
     let mut cur: Vec<ActiveChunk> = initial.to_vec();
-    for _ in 0..max_passes {
+    for settle_i in 0..max_passes {
         if cur.is_empty() {
             break;
         }
@@ -933,7 +933,7 @@ pub fn settle_loose_grains_regions_ex(
         // is outside this colour's ptr map.
         for pass in &partition_checkerboard(&cur) {
             if !pass.is_empty() {
-                moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy);
+                moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy, settle_i);
             }
         }
         // Re-plan is global dirty, which on a wet world is dominated by pore
@@ -951,7 +951,14 @@ pub fn settle_loose_grains_regions_ex(
             moved += apply_grain_repose_regions(world, pass, rooted);
         }
         if moved == 0 {
-            break;
+            // A flake that held is still unsupported. Aborting here
+            // left it sitting through the rest of the budget — the
+            // pass-indexed roll never got another try, and the sky
+            // filled. Keep the same regions and roll the next pass.
+            if !active_has_unsupported_grain(world, &cur) {
+                break;
+            }
+            continue;
         }
         let next = plan_active(world);
         if next.is_empty() {
@@ -972,10 +979,12 @@ pub fn settle_loose_grains_regions_ex(
 /// enough to read as snow rather than as a falling block.
 ///
 /// Deterministic per cell and pass, so replays match.
-fn snowflake_holds_position(seed: u64, tick: u64, gx: i32, gy: i32) -> bool {
+fn snowflake_holds_position(seed: u64, tick: u64, pass: u32, gx: i32, gy: i32) -> bool {
     let roll = super::hash_prob(
         seed,
-        gx.wrapping_mul(73_856_093).wrapping_add(gy),
+        gx.wrapping_mul(73_856_093)
+            .wrapping_add(gy)
+            .wrapping_add(pass as i32 * 1_039_541),
         tick,
         SNOWFALL_SALT,
     );
@@ -989,14 +998,20 @@ const SNOWFALL_STEP_ODDS: f32 = 0.15;
 const SNOWFALL_SALT: u64 = 0x5F04_FA11;
 
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
-    apply_grain_fall_regions_ex(world, active, true)
+    apply_grain_fall_regions_ex(world, active, true, 0)
 }
 
 /// [`apply_grain_fall_regions`] with optional buoyancy pull.
+///
+/// `fall_pass` is mixed into the snow hold roll so a deep settle
+/// (dozens of passes, same tick) can actually descend flakes. Hashing
+/// only on tick left a flake that held sitting through all 64 FPS
+/// passes — the sky filled and grain settle never went quiet.
 pub fn apply_grain_fall_regions_ex(
     world: &mut World,
     active: &[ActiveChunk],
     allow_buoyancy: bool,
+    fall_pass: u32,
 ) -> u32 {
     let moves = std::sync::atomic::AtomicU32::new(0);
     // Parallel cell writes can't touch `World::mycelium_strains`; replay
@@ -1036,7 +1051,7 @@ pub fn apply_grain_fall_regions_ex(
                     // Only while airborne: once it lands it is snowpack and behaves
                     // as any other loose material, which is what lets drifts build.
                     if above.material == MaterialId::Snow
-                        && snowflake_holds_position(seed, tick_no, gx, gy)
+                        && snowflake_holds_position(seed, tick_no, fall_pass, gx, gy)
                     {
                         continue;
                     }
