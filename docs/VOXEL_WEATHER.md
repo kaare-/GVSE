@@ -510,3 +510,7 @@ Do not re-walk these:
   (was ~6.8 miss-path walks with an empty field). Tall 1064 wall **28.3**,
   humidity.advect **2.5** + rebuild **1.9**, seepage **5.5**, bodies apply
   **6.8**. Dry-halo / empty-sky skips do not change the wet-crust apply.
+
+  After the wet-apply cut (wake tiles stay local, pond-interior seepage
+  skip, FPS topology on interactive): short wall **31.7**, seepage **6.9**,
+  bodies **4.6**. Tall 1064 wall **24.5**, seepage **5.1**, bodies **3.3**.
