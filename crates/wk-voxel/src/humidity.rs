@@ -746,8 +746,9 @@ impl Humidity {
         self.advect_rx = 0.0;
         self.advect_ry = 0.0;
 
-        self.flux_axis(climate_vx, climate_vy, surface, true);
-        self.flux_axis(climate_vx, climate_vy, surface, false);
+        let snap = self.cells.clone();
+        self.flux_axis(&snap, climate_vx, climate_vy, surface, true);
+        self.flux_axis(&snap, climate_vx, climate_vy, surface, false);
 
         if let Some((wind, world, cache)) = surface {
             self.lift_buried_to_free_air(wind, world, cache);
@@ -762,6 +763,7 @@ impl Humidity {
     /// leaves toward the neighbour this tick (capped at 1).
     fn flux_axis(
         &mut self,
+        snap: &HashMap<(i32, i32), f32>,
         climate_vx: f32,
         climate_vy: f32,
         surface: Option<(
@@ -771,9 +773,8 @@ impl Humidity {
         )>,
         horizontal: bool,
     ) {
-        let snap = self.cells.clone();
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
-        for (&(hx, hy), &mass) in &snap {
+        for (&(hx, hy), &mass) in snap {
             if mass.abs() < 1e-9 {
                 continue;
             }

@@ -131,7 +131,15 @@ fn demo_params() -> WorldgenParams {
 fn stress_params() -> WorldgenParams {
     WorldgenParams {
         width_cols: (CHUNK_CELLS_W as i32) * 32,
-        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 6,
+        sky_ceiling_y: wk_voxel::TROPOSPHERE_TOP_Y + wk_voxel::STRATOSPHERE_CELLS,
+        ..WorldgenParams::default()
+    }
+}
+
+/// Pre-tropopause box — same width as demo, old 320-cell sky.
+fn short_sky_params() -> WorldgenParams {
+    WorldgenParams {
+        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 5,
         ..WorldgenParams::default()
     }
 }
@@ -759,6 +767,7 @@ fn run_perf_knob_ab(params: WorldgenParams) {
 fn perf_profile_demo_and_stress() {
     set_parallel_enabled(true);
     run_creature_count_sweep(demo_params());
+    run_profile("short sky 320 (0 plants)", short_sky_params(), 0);
     run_profile("demo (0 plants)", demo_params(), 0);
     run_profile(
         &format!("demo + {PLANT_COUNT} plants"),
@@ -771,12 +780,21 @@ fn perf_profile_demo_and_stress() {
         wk_voxel::MAX_ATOMS,
     );
     run_perf_knob_ab(demo_params());
-    run_profile("stress (32×6 chunks, 0 plants)", stress_params(), 0);
+    run_profile("stress (32-wide × 1064, 0 plants)", stress_params(), 0);
     run_profile(
         &format!("stress + {} plants", wk_voxel::MAX_ATOMS),
         stress_params(),
         wk_voxel::MAX_ATOMS,
     );
+}
+
+/// 320-cell box vs the 1064-cell tropopause default. No plants.
+#[test]
+#[ignore]
+fn perf_profile_sky_height() {
+    set_parallel_enabled(true);
+    run_profile("short sky 320 (0 plants)", short_sky_params(), 0);
+    run_profile("tall sky 1064 (0 plants)", demo_params(), 0);
 }
 
 /// Does organism cost grow with soak age at a *constant* population?

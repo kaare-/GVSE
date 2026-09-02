@@ -255,6 +255,9 @@ pub struct Temperature {
     /// reads this instead of scanning the whole tile row every humidity tick.
     #[serde(skip)]
     row_mean: HashMap<i32, f32>,
+    /// Live skin y per humidity-tile column, rebuilt each [`Self::step`].
+    #[serde(skip)]
+    surf_cache: HashMap<i32, i32>,
 }
 
 impl Temperature {
@@ -283,6 +286,7 @@ impl Temperature {
             props_cache: HashMap::new(),
             props_cache_age: TEMP_PROPS_REFRESH_STEPS,
             row_mean: HashMap::new(),
+            surf_cache: HashMap::new(),
         };
         t.fill_initial(0);
         t
@@ -455,9 +459,24 @@ impl Temperature {
     fn land_factor(&self, world: Option<&World>, hx: i32) -> f32 {
         // Skin height vs sea — waterline, not the excavated bed.
         // A pond at sea is half-sea climate, not a −2 °C hole with two coasts.
-        let s = self.column_surface_y_estimate(world, hx);
-        let d = (s - self.sea_level_y) as f32;
+        Self::land_from_surface(self.column_surface_y_estimate(world, hx), self.sea_level_y)
+    }
+
+    fn land_from_surface(surf_y: i32, sea_level_y: i32) -> f32 {
+        let d = (surf_y - sea_level_y) as f32;
         ((d + 2.0) / 4.0).clamp(0.0, 1.0)
+    }
+
+    fn climate_from_land(&self, land: f32, y_cells: i32) -> f32 {
+        let cfg = &self.config;
+        let elev = (y_cells - self.sea_level_y).max(0) as f32;
+        let drop = lapse_drop(
+            elev,
+            cfg.tropopause_elev_cells as f32,
+            cfg.lapse_c,
+            cfg.strat_lapse_c,
+        );
+        cfg.base_temp_c + cfg.sea_bias_c * (1.0 - land) - drop
     }
 
     fn tile_mid_y(&self, hy: i32) -> i32 {
@@ -496,16 +515,7 @@ impl Temperature {
     /// air tile in the column was leftover column-skin climate: a cold
     /// cap above every hill.
     fn climate_at_height(&self, world: Option<&World>, hx: i32, y_cells: i32) -> f32 {
-        let cfg = &self.config;
-        let land = self.land_factor(world, hx);
-        let elev = (y_cells - self.sea_level_y).max(0) as f32;
-        let drop = lapse_drop(
-            elev,
-            cfg.tropopause_elev_cells as f32,
-            cfg.lapse_c,
-            cfg.strat_lapse_c,
-        );
-        cfg.base_temp_c + cfg.sea_bias_c * (1.0 - land) - drop
+        self.climate_from_land(self.land_factor(world, hx), y_cells)
     }
 
     fn climate_at_tile(&self, world: Option<&World>, hx: i32, hy: i32) -> f32 {
@@ -550,6 +560,19 @@ impl Temperature {
             self.refresh_props_cache(world, &keys);
         }
         self.props_cache_age = self.props_cache_age.saturating_add(1);
+        // One live-surface walk per column per step — a tall sky used
+        // to call this twice per air tile (couple + climate).
+        let mut surf_by_hx: HashMap<i32, i32> = HashMap::new();
+        let mut land_by_hx: HashMap<i32, f32> = HashMap::new();
+        for &(hx, _) in &keys {
+            if surf_by_hx.contains_key(&hx) {
+                continue;
+            }
+            let surf = self.column_surface_y_estimate(world, hx);
+            surf_by_hx.insert(hx, surf);
+            land_by_hx.insert(hx, Self::land_from_surface(surf, self.sea_level_y));
+        }
+        self.surf_cache.clone_from(&surf_by_hx);
         for (hx, hy) in keys {
             let props = self
                 .props_cache
@@ -557,15 +580,18 @@ impl Temperature {
                 .copied()
                 .unwrap_or_else(|| tile_thermal_props(self, world, hx, hy));
             let t = self.at_tile(hx, hy);
-            let (lvx, lvy) = wind
-                .map(|w| w.vector_at(world, hx, hy))
-                .unwrap_or((0.0, 0.0));
-            let wind_k = (lvx.abs().max(lvy.abs()) / 0.14).clamp(0.0, 1.5)
-                * cfg.wind_mix.clamp(0.0, 1.0);
+            let surf = *surf_by_hx.get(&hx).unwrap_or(&self.sea_level_y);
+            let land = *land_by_hx.get(&hx).unwrap_or(&1.0);
+            let wind_k = || {
+                let (lvx, lvy) = wind
+                    .map(|w| w.vector_at(world, hx, hy))
+                    .unwrap_or((0.0, 0.0));
+                (lvx.abs().max(lvy.abs()) / 0.14).clamp(0.0, 1.5)
+                    * cfg.wind_mix.clamp(0.0, 1.0)
+            };
             let next = match props.layer {
                 TileLayer::Air => {
                     let tc = self.tile_cols.max(1);
-                    let surf = self.column_surface_y_estimate(world, hx);
                     let mid = hy * tc + tc / 2;
                     let height_above = (mid - surf).max(0);
                     let band = cfg.near_surface_tiles.max(1) * tc;
@@ -574,24 +600,33 @@ impl Temperature {
                     // that lapse is the draft that lofts humidity.
                     // Cooking the column with solar (even a 25 % aloft
                     // leak) flattened the pipe and left the sky equalised.
-                    let climate = self.climate_at_tile(world, hx, hy);
-                    let mut target = climate;
-                    if height_above <= band && cfg.near_surface_couple > 0.0 {
-                        let surf_hy = surf.div_euclid(tc);
-                        let surf_t = self.at_tile(hx, surf_hy);
-                        let falloff = 1.0
-                            - (height_above as f32 / band as f32).clamp(0.0, 1.0);
-                        let couple = ((cfg.near_surface_couple + 0.25 * wind_k) * falloff)
-                            .clamp(0.0, 0.90);
-                        target = climate * (1.0 - couple) + surf_t * couple;
+                    let climate = self.climate_from_land(land, mid);
+                    // Far sky already on the lapse: skip couple / humidity
+                    // lookup. A 1000-cell column is mostly this case.
+                    if height_above > band && (t - climate).abs() < 0.04 {
+                        t
+                    } else {
+                        let wind_k = wind_k();
+                        let mut target = climate;
+                        if height_above <= band && cfg.near_surface_couple > 0.0 {
+                            let surf_hy = surf.div_euclid(tc);
+                            let surf_t = self.at_tile(hx, surf_hy);
+                            let falloff = 1.0
+                                - (height_above as f32 / band as f32).clamp(0.0, 1.0);
+                            let couple = ((cfg.near_surface_couple + 0.25 * wind_k) * falloff)
+                                .clamp(0.0, 0.90);
+                            target = climate * (1.0 - couple) + surf_t * couple;
+                        }
+                        // Slow leak so ground-heated plumes persist.
+                        // Wet air has more thermal mass (vapor Cp ~1.9× dry).
+                        let cap =
+                            humid_air_capacity_scale(humidity, hx, hy, t, cfg.humid_heat_scale);
+                        let relax = (cfg.sky_relax * 0.40 / cap).clamp(cfg.min_relax, 0.08);
+                        t + (target - t) * relax
                     }
-                    // Slow leak so ground-heated plumes persist.
-                    // Wet air has more thermal mass (vapor Cp ~1.9× dry).
-                    let cap = humid_air_capacity_scale(humidity, hx, hy, t, cfg.humid_heat_scale);
-                    let relax = (cfg.sky_relax * 0.40 / cap).clamp(cfg.min_relax, 0.08);
-                    t + (target - t) * relax
                 }
                 TileLayer::Surface { watery } => {
+                    let wind_k = wind_k();
                     let shade = humidity_column_shade(humidity, hx, hy, &cfg);
                     // Night is the sun being off — no extra night pulse.
                     let sun = dn.max(0.0);
@@ -610,7 +645,7 @@ impl Temperature {
                         * (1.0 - blanket)
                         * (1.0 + 0.45 * wind_k * (1.0 - blanket * 0.5));
                     let radiate = cfg.night_cool_c * cool_scale;
-                    let skin = self.climate_baseline(world, hx);
+                    let skin = self.climate_from_land(land, surf);
                     let relax = (cfg.sky_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale))
                         .clamp(cfg.min_relax, cfg.max_relax);
@@ -657,13 +692,30 @@ impl Temperature {
     /// Upwind mix of **air** tiles along the local wind. Period-20 only.
     /// Buried / surface heat stays put — wind should not drain a lake or
     /// the geothermal profile.
+    ///
+    /// Only tiles in [`crate::wind::Wind::field`] (occupied humidity +
+    /// halo). Mixing the whole sky box with uniform climate wind was a
+    /// 1000-cell no-op that cloned every tile.
     pub(crate) fn advect_air(&mut self, world: Option<&World>, wind: &crate::wind::Wind) {
         let mix = self.config.wind_mix.clamp(0.0, 1.0);
-        if mix < 1e-4 || self.cells.is_empty() {
+        if mix < 1e-4 || self.cells.is_empty() || wind.field.is_empty() {
             return;
         }
-        let snap = self.cells.clone();
-        for (&(hx, hy), &t) in &snap {
+        let mut snap: HashMap<(i32, i32), f32> = HashMap::new();
+        snap.reserve(wind.field.len().saturating_mul(3));
+        for &(hx, hy) in wind.field.keys() {
+            snap.entry((hx, hy)).or_insert_with(|| self.at_tile(hx, hy));
+            snap.entry((hx, hy + 1)).or_insert_with(|| self.at_tile(hx, hy + 1));
+            snap.entry((hx, hy - 1)).or_insert_with(|| self.at_tile(hx, hy - 1));
+            if let Some(sx) = self.wrap_hx(hx + 1) {
+                snap.entry((sx, hy)).or_insert_with(|| self.at_tile(sx, hy));
+            }
+            if let Some(sx) = self.wrap_hx(hx - 1) {
+                snap.entry((sx, hy)).or_insert_with(|| self.at_tile(sx, hy));
+            }
+        }
+        for &(hx, hy) in wind.field.keys() {
+            let t = *snap.get(&(hx, hy)).unwrap_or(&self.config.base_temp_c);
             match self.props_cache.get(&(hx, hy)).map(|p| p.layer) {
                 Some(TileLayer::Buried { .. }) | Some(TileLayer::Surface { .. }) => continue,
                 _ => {}
@@ -749,20 +801,37 @@ impl Temperature {
         sources.dedup();
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
         let base = self.config.base_temp_c;
+        let free_sky = |hx: i32, hy: i32| -> bool {
+            let surf = self
+                .surf_cache
+                .get(&hx)
+                .copied()
+                .unwrap_or(self.sea_level_y);
+            hy * self.tile_cols.max(1) + self.tile_cols.max(1) / 2 > surf + 16
+        };
         for &(hx, hy) in &sources {
             let val = *snap.get(&(hx, hy)).unwrap_or(&base);
+            let here_sky = free_sky(hx, hy);
             if let Some(nx) = self.wrap_hx(hx + 1) {
                 if self.accepts(nx, hy) && nx != hx {
                     let n_val = *snap.get(&(nx, hy)).unwrap_or(&base);
-                    let flow = (val - n_val) * alpha;
-                    if flow.abs() >= 1e-9 {
-                        *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
-                        *deltas.entry((nx, hy)).or_insert(0.0) += flow;
+                    // Same-height free sky is already on the lapse.
+                    if here_sky && free_sky(nx, hy) && (val - n_val).abs() < 0.35 {
+                        // skip
+                    } else {
+                        let flow = (val - n_val) * alpha;
+                        if flow.abs() >= 1e-9 {
+                            *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
+                            *deltas.entry((nx, hy)).or_insert(0.0) += flow;
+                        }
                     }
                 }
             }
             let n_key = (hx, hy + 1);
             if self.accepts(n_key.0, n_key.1) {
+                if here_sky && free_sky(n_key.0, n_key.1) {
+                    continue;
+                }
                 let n_val = *snap.get(&n_key).unwrap_or(&base);
                 // Mild vertical conductivity — geothermal path upward.
                 let flow = (val - n_val) * alpha * 0.35;
