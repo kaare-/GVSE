@@ -911,6 +911,45 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
 }
 
 #[test]
+fn airborne_snow_does_not_count_as_unsupported_freefall() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 10, Cell::solid(MaterialId::Snow));
+    let active = plan_active(&w);
+    assert!(
+        !active_has_unsupported_grain(&w, &active),
+        "snow must not force the ×64 deep settle"
+    );
+    w.set_cell(4, 10, Cell::solid(MaterialId::Sand));
+    let active = plan_active(&w);
+    assert!(
+        active_has_unsupported_grain(&w, &active),
+        "mid-air sand still forces deep settle"
+    );
+}
+
+#[test]
+fn airborne_snow_fall_steps_without_a_deep_settle() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 16, Cell::solid(MaterialId::Snow));
+    let mut moved = 0u32;
+    for _ in 0..20 {
+        moved += apply_airborne_snow_fall(&mut w);
+        w.tick += 1;
+    }
+    assert!(moved > 0, "the once-per-tick fall must be able to step");
+    let snow_y = (1..=16)
+        .rev()
+        .find(|&y| w.get_cell(2, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let snow_y = snow_y.expect("the flake should still exist");
+    assert!(snow_y < 16, "must have descended (still at {snow_y})");
+    assert_ne!(
+        w.get_cell(2, 1).unwrap().material,
+        MaterialId::Snow,
+        "20 cheap steps must not dump a 16-cell column"
+    );
+}
+
+#[test]
 fn snow_descends_across_settle_passes_in_one_tick() {
     // Deep settle used to hash the hold only on tick, so a flake that
     // held sat through all 64 FPS passes. Mix pass into the roll so the
@@ -918,7 +957,10 @@ fn snow_descends_across_settle_passes_in_one_tick() {
     let mut w = setup_column_world();
     w.ensure_chunk(ChunkCoord::new(0, 0));
     w.set_cell(2, 20, Cell::solid(MaterialId::Snow));
-    settle_loose_grains(&mut w, None, 32);
+    for _ in 0..32 {
+        apply_grain_fall(&mut w);
+        w.tick += 1;
+    }
     let snow_y = (1..=20)
         .rev()
         .find(|&y| w.get_cell(2, y).map(|c| c.material) == Some(MaterialId::Snow));
@@ -943,8 +985,8 @@ fn snow_falls_gently_and_ice_does_not() {
     // Ice is the control. Only snow is gated, so if both slow down the gate is
     // catching the wrong material.
     let mut w = setup_column_world();
-    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
-    w.set_cell(3, 6, Cell::solid(MaterialId::Ice));
+    w.set_cell(2, 10, Cell::solid(MaterialId::Snow));
+    w.set_cell(3, 10, Cell::solid(MaterialId::Ice));
     for _ in 0..12 {
         apply_grain_fall(&mut w);
         w.tick += 1;
@@ -960,7 +1002,7 @@ fn snow_falls_gently_and_ice_does_not() {
         "snow should still be on its way down after a dozen passes"
     );
     // ...and it is genuinely descending, not stuck.
-    let started_at = 6;
+    let started_at = 10;
     let snow_y = (1..=started_at)
         .find(|&y| w.get_cell(2, y).map(|c| c.material) == Some(MaterialId::Snow));
     let snow_y = snow_y.expect("the flake should still exist somewhere in the column");
@@ -1204,9 +1246,9 @@ fn falling_snow_walks_a_downwind_stair() {
     // the tick. After enough steps the flake should be both lower and
     // downwind — a gentle diagonal, not a teleport.
     //
-    // Default climate wind (0.05 × 4 × 0.25) is ~1 in 20; fall is 0.15.
-    // Two hundred ticks from a high start lean the path ~3:1 without
-    // landing first or sprinting the chunk.
+    // Default climate wind (0.05 × 4 × 0.25) is ~1 in 20; fall is 0.38.
+    // Two hundred ticks from a high start lean the path several-down
+    // per sideways without sprinting the chunk.
     let mut w = setup_column_world();
     w.set_cell(2, 40, Cell::solid(MaterialId::Snow));
     let start_x = 2;
@@ -1234,9 +1276,10 @@ fn falling_snow_walks_a_downwind_stair() {
         dx <= 80,
         "one cell per tick is the cap; got Δx={dx}"
     );
-    // The playtest number: more down than across. 0.15 / 0.05 is 3:1
-    // in expectation; hash noise is allowed to wander, but a path that
-    // slides more than it drops is the old "blows too well" bug.
+    // The playtest number: more down than across. 0.38 / 0.05 is
+    // several-to-one in expectation; hash noise is allowed to wander,
+    // but a path that slides more than it drops is the old "blows too
+    // well" bug.
     assert!(
         dy >= dx,
         "fall should outrun drift (Δy={dy} Δx={dx})"

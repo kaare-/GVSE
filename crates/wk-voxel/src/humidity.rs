@@ -201,12 +201,22 @@ impl Humidity {
     ///
     /// Full at [`Self::SAT_FULL_TEMP_C`]. Same mass in colder air is
     /// closer to rain / visible cloud. A 255-on-a-cell picture is the
-    /// same curve: 40 °C → 255, 0 °C → ~21, −20 °C → ~4, −100 °C → ~0.
+    /// same curve: 40 °C → 255, 0 °C → ~21, −0.1 °C → ~21, −3 °C → ~16,
+    /// −20 °C → ~4, −100 °C → ~0. Inspector `humidity=` is this tile
+    /// mass (40 °C → 2500, 0 °C → ~207, −0.1 °C → ~206, −3 °C → ~162).
     pub fn saturation_mass_at_temp(temp_c: f32) -> f32 {
         let full = Self::sat_vapor_pressure_hpa(Self::SAT_FULL_TEMP_C);
         let here = Self::sat_vapor_pressure_hpa(temp_c);
         let ratio = (here / full.max(1e-6)).clamp(0.0, 1.0);
         (Self::MAX_MASS_PER_TILE * ratio).max(0.5)
+    }
+
+    /// [`Self::saturation_mass_at_temp`] scaled onto a 0..255 air cell.
+    pub fn saturation_cell_sat_at_temp(temp_c: f32) -> f32 {
+        let full = Self::sat_vapor_pressure_hpa(Self::SAT_FULL_TEMP_C);
+        let here = Self::sat_vapor_pressure_hpa(temp_c);
+        let ratio = (here / full.max(1e-6)).clamp(0.0, 1.0);
+        (u8::MAX as f32 * ratio).max(0.05)
     }
 
     pub fn add(&mut self, gx: i32, gy: i32, mass: f32) {
@@ -1568,6 +1578,22 @@ mod tests {
             "−100 °C holds only a trace (dead={dead:.2})"
         );
         assert!(hot > mild);
+        let just_freeze = Humidity::saturation_mass_at_temp(-0.1);
+        let three_below = Humidity::saturation_mass_at_temp(-3.0);
+        assert!(
+            (just_freeze - 206.0).abs() < 4.0,
+            "−0.1 °C tile hold should be ~206, got {just_freeze:.1}"
+        );
+        assert!(
+            (three_below - 162.0).abs() < 4.0,
+            "−3 °C tile hold should be ~162, got {three_below:.1}"
+        );
+        assert!(
+            (Humidity::saturation_cell_sat_at_temp(-0.1) - 21.0).abs() < 1.0
+        );
+        assert!(
+            (Humidity::saturation_cell_sat_at_temp(-3.0) - 16.5).abs() < 1.0
+        );
     }
 
     #[test]

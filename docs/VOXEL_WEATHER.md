@@ -358,16 +358,19 @@ through the wash and does not. The bug was that grain fall takes one step per pa
 passes a tick — right for sand settling, and it made flakes appear in the sky and
 arrive on the ground in the same breath.
 
-Fixed by *odds* rather than a separate pass, which turned out much smaller than the
-plan above assumed: an airborne flake rolls to hold position most passes
-(`SNOWFALL_STEP_ODDS` 0.15), so one step is spread over many passes. The roll
-mixes the settle pass index — hashing only on tick left a flake that held
-sitting through all 64 FPS passes, and the sky filled. Surplus / C mint at
-most 8 flakes a tick and skip a column that already has one nearby, or the
-deep grain settle never goes quiet. The roll's irregularity is itself
-snow-like. Same technique as the fractional seepage rates, and it needs no
-new pass, so the hazard of "grain fall skips snow but the drift pass
-does not run" never arises.
+Snow starts when a tile is **over** the Clausius–Clapeyron hold and the
+local 3×3 parcel can pay a 255 flake. Inspector `humidity=` is that tile
+mass: **−0.1 °C → ~206** (cell-sat picture ~21/255), **−3 °C → ~162**
+(~16/255). Below freeze we never rain.
+
+Fall is gated (`SNOWFALL_STEP_ODDS` 0.38) plus a cheap once-per-tick
+`apply_airborne_snow_fall` on `has_snow` chunks. Flakes do **not** count
+as unsupported grain — that used to force the ×64 deep settle every
+tick and drop FPS to single digits. Surplus / C mint at most 8 flakes a
+tick and skip a column that already has one nearby. The roll's
+irregularity is itself snow-like. Same technique as the fractional
+seepage rates, so the hazard of "grain fall skips snow but the drift
+pass does not run" never arises.
 
 Gated on **airborne** snow only. Once a flake lands it is snowpack and behaves as
 any other loose material, which is what lets drifts build and repose.
@@ -382,7 +385,7 @@ a flake cross the map in one tick. The drift pass:
 
 - runs **once** after physics (same place rafts already take the wind)
 - moves a flake **at most one cell** downwind
-- fires with odds `|wind_vx| * tile_cols * 0.25`, clamped to 1 (default 0.05 × 4 × 0.25 = 0.05 — about **three down for each sideways** against fall 0.15)
+- fires with odds `|wind_vx| * tile_cols * 0.25`, clamped to 1 (default 0.05 × 4 × 0.25 = 0.05 — several **down for each sideways** against fall 0.38)
 - ignores ice (control) and landed snowpack (repose owns piles)
 - refuses a solid or occupied destination
 - no-ops at zero wind, so every existing fall test stays honest

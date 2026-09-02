@@ -677,6 +677,12 @@ fn tick_with_life_inner(
     }
     mass_checkpoint!("grain settle");
 
+    // Snow is not "unsupported grain" for deep settle. One cheap
+    // downward roll here so a shower still leaves the sky.
+    if world.chunks.values().any(|c| c.has_snow) {
+        let _ = super::grain::apply_airborne_snow_fall(world);
+    }
+
     // Dense cargo cannot ride floating Organic/Snow/Ice. Skip the full
     // loose punch scan when wake saw no raft cargo (demo: 0/200 hits but
     // still ~0.19 ms empty scan). Full wake every 16 still finds cargo

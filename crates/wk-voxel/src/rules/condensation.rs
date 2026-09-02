@@ -124,8 +124,9 @@ const THERMAL_SURPLUS_MAX_HITS: usize = 128;
 const FLAKE_MASS: f32 = 255.0;
 
 /// Airborne snow is a solid grain. Surplus used to mint up to 128
-/// flakes a tick; each one keeps grain settle on the deep path and
-/// the sky never clears. A light shower, not a blizzard.
+/// flakes a tick. A light shower, not a blizzard. Hold at −0.1 °C is
+/// ~206 tile mass; at −3 °C ~162 — we snow only when over that hold
+/// and the parcel can pay a flake.
 const SNOW_MAX_FLAKES_PER_TICK: u32 = 8;
 
 /// How far up/down a column we look before seating another flake.
