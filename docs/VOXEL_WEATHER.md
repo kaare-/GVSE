@@ -514,3 +514,10 @@ Do not re-walk these:
   After the wet-apply cut (wake tiles stay local, pond-interior seepage
   skip, FPS topology on interactive): short wall **31.7**, seepage **6.9**,
   bodies **4.6**. Tall 1064 wall **24.5**, seepage **5.1**, bodies **3.3**.
+
+  After the confined / lake-bed occupancy skip (standing water next to
+  rock only; rain-film sky and groundwater-only crust dropped): short
+  wall **32.3**, seepage **6.9**, confined wake **2.2**. Tall 1064 wall
+  **23.1**, physics **12.6**, seepage **5.0**, confined wake **2.1**,
+  bodies **3.3**. The leftover confined ~2.1 ms is the real ocean/lake
+  communicating-vessel walk, not drizzle columns.
