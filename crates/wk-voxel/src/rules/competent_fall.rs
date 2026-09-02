@@ -2471,27 +2471,44 @@ fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
 
 /// Re-dirty dynamic competent bodies that can still fall or tip.
 pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
+  let regions: Vec<ActiveChunk> = coords
+    .iter()
+    .map(|&coord| ActiveChunk {
+      coord,
+      rect: Rect::full(),
+    })
+    .collect();
+  wake_competent_bodies_regions(world, &regions);
+}
+
+/// Like [`wake_competent_bodies`], but only the supplied dirty rects.
+///
+/// Passing whole-chunk coords after a water splash re-scanned 64×64 of
+/// hillside for every wet chunk and then unioned those seeds back to
+/// chunk-sized apply rects. The floating wake already owns air-below
+/// rock outside the halo.
+pub fn wake_competent_bodies_regions(world: &mut World, regions: &[ActiveChunk]) {
   let cw = CHUNK_CELLS_W as i32;
   let ch = CHUNK_CELLS_H as i32;
   let any_competent = world.chunks.values().any(|c| c.has_competent);
   let mut touches: Vec<(i32, i32)> = Vec::new();
-  for &coord in coords {
-    let Some(chunk) = world.chunks.get(&coord) else {
+  for ac in regions {
+    let Some(chunk) = world.chunks.get(&ac.coord) else {
       continue;
     };
     if any_competent && !chunk.has_competent {
       continue;
-    };
-    let base_gx = coord.cx * cw;
-    let base_gy = coord.cy * ch;
-    for ly in 0..CHUNK_CELLS_H {
-      for lx in 0..CHUNK_CELLS_W {
-        let cell = chunk.get(lx, ly);
+    }
+    let base_gx = ac.coord.cx * cw;
+    let base_gy = ac.coord.cy * ch;
+    for y in ac.rect.y0..=ac.rect.y1 {
+      for x in ac.rect.x0..=ac.rect.x1 {
+        let cell = chunk.get(x as usize, y as usize);
         if !is_competent_rock(cell.material) {
           continue;
         }
-        let gx = world.wrap_x(base_gx + lx as i32);
-        let gy = base_gy + ly as i32;
+        let gx = world.wrap_x(base_gx + x as i32);
+        let gy = base_gy + y as i32;
         // Same gate `build_components` seeds with — waking cells the body pass
         // will immediately reject just re-dirties the whole ridge every cadence
         // (that alone cost ~40 ms/tick on a settled demo world). Also avoids
@@ -3228,6 +3245,31 @@ pub fn apply_competent_fall_regions(
   cfg: &CompetentFallConfig,
   fps_path: bool,
 ) -> CompetentFallStats {
+  apply_competent_fall_inner(world, active, cfg, fps_path, false)
+}
+
+/// Like [`apply_competent_fall_regions`] when `active` is already the
+/// padded wake-tile scan from [`competent_wake_regions`].
+///
+/// Re-running [`competent_active_regions`] unions those tiles per chunk
+/// and pads them again — the leftover that turned ~180 wake cells into
+/// thousands of seed candidates on a quiet demo.
+pub fn apply_competent_fall_wake(
+  world: &mut World,
+  active: &[ActiveChunk],
+  cfg: &CompetentFallConfig,
+  fps_path: bool,
+) -> CompetentFallStats {
+  apply_competent_fall_inner(world, active, cfg, fps_path, true)
+}
+
+fn apply_competent_fall_inner(
+  world: &mut World,
+  active: &[ActiveChunk],
+  cfg: &CompetentFallConfig,
+  fps_path: bool,
+  wake_ready: bool,
+) -> CompetentFallStats {
   #[cfg(test)]
   crate::parallel::set_parallel_enabled(false);
   if !cfg.enable {
@@ -3238,7 +3280,15 @@ pub fn apply_competent_fall_regions(
   } else {
     cfg.max_passes.max(COMPETENT_FALL_PASSES_FPS)
   } as i32;
-  let mut regions = competent_active_regions(world, active, max_drop);
+  let mut regions = if wake_ready {
+    active
+      .iter()
+      .copied()
+      .filter(|ac| world.chunks.contains_key(&ac.coord))
+      .collect()
+  } else {
+    competent_active_regions(world, active, max_drop)
+  };
   if regions.is_empty() {
     return CompetentFallStats::default();
   }
@@ -4684,6 +4734,67 @@ mod tests {
       !w.chunks[&ChunkCoord::new(0, 1)].has_competent,
       "an empty scan must drop the sky chunk from later floating wakes"
     );
+  }
+
+  #[test]
+  fn slope_wake_stays_inside_the_dirty_rect() {
+    let mut w = World::new(13);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..CHUNK_CELLS_W as i32 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(4, 8, Cell::solid(MaterialId::Stone));
+    w.set_cell(50, 8, Cell::solid(MaterialId::Stone));
+    w.competent_wake.clear();
+    let ac = ActiveChunk {
+      coord: ChunkCoord::new(0, 0),
+      rect: Rect {
+        x0: 2,
+        y0: 6,
+        x1: 6,
+        y1: 10,
+      },
+    };
+    wake_competent_bodies_regions(&mut w, &[ac]);
+    assert!(
+      w.competent_wake.iter().any(|&(x, y)| x == 4 && y == 8),
+      "stone inside the rect must wake"
+    );
+    assert!(
+      !w.competent_wake.iter().any(|&(x, _)| x == 50),
+      "stone outside the rect must stay off the wake"
+    );
+  }
+
+  #[test]
+  fn wake_apply_drops_a_floater_from_a_tight_rect() {
+    let mut w = World::new(15);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    stamp_blob(&mut w, 6, 28, 2, 2);
+    let start = (0..16)
+      .flat_map(|x| (1..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(_, y)| y)
+      .min()
+      .unwrap_or(99);
+    w.competent_wake.clear();
+    w.competent_wake_push(6, 28);
+    let body_active = competent_wake_regions(&mut w, SEED_PAD_Y);
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      ..CompetentFallConfig::default()
+    };
+    apply_competent_fall_wake(&mut w, &body_active, &cfg, true);
+    let end = (0..16)
+      .flat_map(|x| (1..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(_, y)| y)
+      .min()
+      .unwrap_or(99);
+    assert!(end < start, "tight wake rect must still drop the floater ({start} → {end})");
   }
 
   #[test]

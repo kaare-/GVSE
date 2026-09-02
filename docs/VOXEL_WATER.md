@@ -220,7 +220,9 @@ flags and narrows the band to the local `x` span of columns where water could
 cross. The seepage accumulate walk itself skips a region whose chunk has
 neither flag (dry rock / empty sky still land in the flow halo from gravity
 and body writes). Bootstrap — no flags set yet — keeps every region so a
-legacy save cannot skip a wet chunk. The span predicate is deliberately looser than the per-column test in
+legacy save cannot skip a wet chunk. Air cells whose +x / +y faces are
+also Air skip the neighbour loop — a 64×64 pond interior cannot infiltrate
+or weep, and diagonals are pore-only. The span predicate is deliberately looser than the per-column test in
 `wake_vertical_chunk_seam_pores` — both sides able to hold or pass water, one
 of them having some — so it cannot exclude a column the wake would couple.
 Result: 0.45 ms demo, 0.83 ms stress.

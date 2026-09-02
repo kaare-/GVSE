@@ -729,13 +729,12 @@ fn tick_with_life_inner(
         if world.tick % GRAIN_WAKE_EVERY == 0 {
             super::competent_fall::wake_floating_competent(world);
             let dirty = plan_active(world);
-            let coords: Vec<_> = if dirty.is_empty() {
-                flow_active.iter().map(|ac| ac.coord).collect()
+            if dirty.is_empty() {
+                if !flow_active.is_empty() {
+                    super::competent_fall::wake_competent_bodies_regions(world, &flow_active);
+                }
             } else {
-                dirty.iter().map(|ac| ac.coord).collect()
-            };
-            if !coords.is_empty() {
-                super::competent_fall::wake_competent_bodies(world, &coords);
+                super::competent_fall::wake_competent_bodies_regions(world, &dirty);
             }
         }
         // Bodies in flight re-dirty themselves every tick (cheap, O(moves)),
@@ -750,11 +749,15 @@ fn tick_with_life_inner(
             );
         if !body_active.is_empty() {
             let t0 = profile.then(Instant::now);
-            let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+            // Interactive default is quiet-early-out. Pairing FPS topology
+            // on `flow_every_other_substep` left the play path on six
+            // rebuilds; fall distance is split across the pass count so
+            // this does not change terminal velocity.
+            let fps_path = perf.flow_quiet_early_out;
             let competent_cfg = competent
                 .copied()
                 .unwrap_or_else(super::competent_fall::CompetentFallConfig::default);
-            let _ = super::competent_fall::apply_competent_fall_regions(
+            let _ = super::competent_fall::apply_competent_fall_wake(
                 world,
                 &body_active,
                 &competent_cfg,

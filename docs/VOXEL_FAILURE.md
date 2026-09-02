@@ -275,6 +275,12 @@ which A/Bs `enable_competent_fall` over a real `tick_with_life` loop.
   chunks are empty sky or bedrock. The flag (raised on write, cleared when a
   scan finds none) skips those. Bootstrap — no flags set yet — still walks
   everything so a legacy save cannot hang a painted boulder.
+- **Wake tiles stay tiles** — cadence seed scans the dirty rect, not the
+  whole chunk, and `apply_competent_fall_wake` does not re-union those
+  tiles per chunk. Re-expanding the wake list was the leftover that turned
+  ~180 exact cells into thousands of seed candidates. Interactive play
+  uses FPS topology (2 rebuilds); fall distance is split across the pass
+  count so terminal velocity is unchanged. `full_feel` keeps 6.
 
 ### Rock body identity (why rocks stop gluing)
 

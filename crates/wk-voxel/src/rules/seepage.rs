@@ -635,6 +635,21 @@ fn accumulate_seepage_xfers_ex(
                     continue;
                 }
                 let a_solid = is_porous_cell(a, &hydro);
+                // Lake / rain interior: Air whose +x / +y faces are also Air
+                // cannot infiltrate or weep. Diagonals are pore-only. Skip
+                // before the neighbour loop so a 64×64 pond does not pay
+                // head math on every cell.
+                if !a_solid {
+                    let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                    let up = read(lx, ly + 1, gx, gy + 1);
+                    let airish = |c: Option<Cell>| match c {
+                        Some(n) => n.material == MaterialId::Air && !is_porous_cell(n, &hydro),
+                        None => true,
+                    };
+                    if airish(right) && airish(up) {
+                        continue;
+                    }
+                }
                 // Air–Air / impermeable–impermeable edges are no-ops —
                 // check materials before head math. Dominates rainy
                 // ocean shore halos.

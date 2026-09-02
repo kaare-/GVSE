@@ -37,7 +37,8 @@ pub use evap::{
     EvapConfig,
 };
 pub use competent_fall::{
-    apply_competent_fall_regions, wake_competent_bodies, wake_competent_bodies_all,
+    apply_competent_fall_regions, apply_competent_fall_wake, wake_competent_bodies,
+    wake_competent_bodies_all, wake_competent_bodies_regions,
     wake_floating_competent,
     CompetentFallConfig, CompetentFallStats, COMPETENT_FALL_PASSES, COMPETENT_FALL_PASSES_FPS,
     COMPETENT_TOPOLOGY_PASSES,
