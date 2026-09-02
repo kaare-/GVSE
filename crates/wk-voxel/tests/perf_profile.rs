@@ -27,7 +27,7 @@ use wk_voxel::{
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
     KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig,
     PhysicsTimings, RainConfig, Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H,
-    CHUNK_CELLS_W, FLOW_SUBSTEPS,
+    CHUNK_CELLS_W, FLOW_SUBSTEPS, WIND_FIELD_PERIOD,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -42,6 +42,7 @@ const CREATURE_SWEEP: &[usize] = &[0, 48, 128, 256];
 struct PassAccum {
     rain: Duration,
     evap: Duration,
+    wind_rebuild: Duration,
     humidity_advect: Duration,
     clouds: Duration,
     condensation: Duration,
@@ -64,6 +65,7 @@ impl PassAccum {
         Self {
             rain: Duration::ZERO,
             evap: Duration::ZERO,
+            wind_rebuild: Duration::ZERO,
             humidity_advect: Duration::ZERO,
             clouds: Duration::ZERO,
             condensation: Duration::ZERO,
@@ -85,6 +87,7 @@ impl PassAccum {
     fn total(&self) -> Duration {
         self.rain
             + self.evap
+            + self.wind_rebuild
             + self.humidity_advect
             + self.clouds
             + self.condensation
@@ -276,6 +279,19 @@ fn profile_label(label: &str, params: &WorldgenParams, chunks: usize) {
     );
 }
 
+fn rebuild_wind_if_due(scene: &mut Scene) {
+    if scene.world.tick % WIND_FIELD_PERIOD == 0 || scene.wind.field.is_empty() {
+        let occupied: Vec<(i32, i32)> = scene.humidity.cells.keys().copied().collect();
+        scene.wind.rebuild_field(
+            Some(&scene.world),
+            Some(&scene.temperature),
+            scene.world.tick,
+            &occupied,
+            None,
+        );
+    }
+}
+
 fn one_stack_tick(
     scene: &mut Scene,
     accum: Option<&mut PassAccum>,
@@ -286,6 +302,7 @@ fn one_stack_tick(
         None => {
             // Match app: shell scans always parallel; CA follows PerfConfig.
             set_parallel_enabled(true);
+            rebuild_wind_if_due(scene);
             if scene.climatic_rain {
                 apply_rain_with_temp(
                     &mut scene.world,
@@ -367,6 +384,10 @@ fn one_stack_tick(
         }
         Some(a) => {
             set_parallel_enabled(true);
+            let t0 = Instant::now();
+            rebuild_wind_if_due(scene);
+            a.wind_rebuild += t0.elapsed();
+
             let t0 = Instant::now();
             if scene.climatic_rain {
                 apply_rain_with_temp(
@@ -505,6 +526,10 @@ fn print_pass_table(accum: &PassAccum, n: u64, wall: Duration) {
     eprintln!("  ------------------------------------------------------------");
     eprintln!("  rain                 {:>8.3} ms/tick", ms_per(accum.rain, n));
     eprintln!("  evap→humidity        {:>8.3} ms/tick", ms_per(accum.evap, n));
+    eprintln!(
+        "  wind.rebuild         {:>8.3} ms/tick",
+        ms_per(accum.wind_rebuild, n)
+    );
     eprintln!(
         "  humidity.advect      {:>8.3} ms/tick",
         ms_per(accum.humidity_advect, n)

@@ -679,7 +679,10 @@ impl Humidity {
     ///
     /// Free-air height is cached per occupied column so the flux pass
     /// does not walk the live surface once per seat (that was the
-    /// humidity-advect FPS cliff).
+    /// humidity-advect FPS cliff). Wind samples are cached once per
+    /// seat before the two axis passes — `vector_at` misses walk the
+    /// world, and calling that twice per tile was the leftover cost
+    /// after the field rebuild.
     pub fn advect_with_surface(
         &mut self,
         vx: f32,
@@ -747,8 +750,30 @@ impl Humidity {
         self.advect_ry = 0.0;
 
         let snap = self.cells.clone();
-        self.flux_axis(&snap, climate_vx, climate_vy, surface, true);
-        self.flux_axis(&snap, climate_vx, climate_vy, surface, false);
+        let vectors = surface.map(|(wind, world, _)| {
+            let mut cache = FxHashMap::default();
+            cache.reserve(snap.len());
+            for &(hx, hy) in snap.keys() {
+                cache.insert((hx, hy), wind.vector_at(Some(world), hx, hy));
+            }
+            cache
+        });
+        self.flux_axis(
+            &snap,
+            climate_vx,
+            climate_vy,
+            surface,
+            true,
+            vectors.as_ref(),
+        );
+        self.flux_axis(
+            &snap,
+            climate_vx,
+            climate_vy,
+            surface,
+            false,
+            vectors.as_ref(),
+        );
 
         if let Some((wind, world, cache)) = surface {
             self.lift_buried_to_free_air(wind, world, cache);
@@ -772,6 +797,7 @@ impl Humidity {
             &FxHashMap<i32, i32>,
         )>,
         horizontal: bool,
+        vectors: Option<&FxHashMap<(i32, i32), (f32, f32)>>,
     ) {
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
         for (&(hx, hy), &mass) in snap {
@@ -779,7 +805,9 @@ impl Humidity {
                 continue;
             }
             let (vx, vy) = match surface {
-                Some((wind, world, _)) => wind.vector_at(Some(world), hx, hy),
+                Some((wind, world, _)) => vectors
+                    .and_then(|v| v.get(&(hx, hy)).copied())
+                    .unwrap_or_else(|| wind.vector_at(Some(world), hx, hy)),
                 None => (climate_vx, climate_vy),
             };
             // Slip / look-ahead / Jacobi can put |vy| ~0.2–1 on a face.
@@ -1005,11 +1033,14 @@ impl Humidity {
         }
         let snap = self.cells.clone();
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut lift_by_hx: FxHashMap<i32, f32> = FxHashMap::default();
         for (&(hx, hy), &mass) in &snap {
             if mass <= 0.0 {
                 continue;
             }
-            let lift = wind.orographic_lift(world, hx);
+            let lift = *lift_by_hx
+                .entry(hx)
+                .or_insert_with(|| wind.orographic_lift(world, hx));
             if lift <= 1e-5 {
                 continue;
             }

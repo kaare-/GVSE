@@ -833,6 +833,9 @@ impl Wind {
             return v;
         }
         // Miss: climate mean + the same downwind climb / slip as the field.
+        // Humidity caches this per seat before the two flux axes so a miss
+        // walks the world once, not twice. Evap after rebuild is the usual
+        // source of new keys.
         let block = self.downwind_blockage(world, hx, hy, self.climate_vx);
         let vx = self.climate_vx * (1.0 - (block * 0.4).min(0.35));
         let vy = self.climate_vy + block;

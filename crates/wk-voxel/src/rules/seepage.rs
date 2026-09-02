@@ -595,12 +595,25 @@ fn accumulate_seepage_xfers_ex(
     let hydro = world.hydro;
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
+    // Sticky occupancy: a chunk that has never held wet Air or a wet
+    // pore has no face that can move water. The flow halo still includes
+    // dry rock / empty sky from gravity and body writes; walking those
+    // was the leftover seepage cost on a tall world. Bootstrap (no flags
+    // set yet) keeps every region so a legacy save cannot skip a wet
+    // chunk whose flags were never stamped.
+    let any_water = world
+        .chunks
+        .values()
+        .any(|c| c.has_wet_air || c.has_wet_pores);
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         // Chunk-local reads — same pattern as water_flow (~10× vs HashMap).
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             return local;
         };
+        if any_water && !chunk.has_wet_air && !chunk.has_wet_pores {
+            return local;
+        }
         let base_gx = ac.coord.cx * cw;
         let base_gy = ac.coord.cy * ch;
         let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {

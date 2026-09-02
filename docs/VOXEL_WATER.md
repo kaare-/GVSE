@@ -217,7 +217,10 @@ while every other seepage component measured 1–3 ms.
 
 It now gates each seam on the sticky `has_wet_pores` / `has_wet_air` chunk
 flags and narrows the band to the local `x` span of columns where water could
-cross. The span predicate is deliberately looser than the per-column test in
+cross. The seepage accumulate walk itself skips a region whose chunk has
+neither flag (dry rock / empty sky still land in the flow halo from gravity
+and body writes). Bootstrap — no flags set yet — keeps every region so a
+legacy save cannot skip a wet chunk. The span predicate is deliberately looser than the per-column test in
 `wake_vertical_chunk_seam_pores` — both sides able to hold or pass water, one
 of them having some — so it cannot exclude a column the wake would couple.
 Result: 0.45 ms demo, 0.83 ms stress.

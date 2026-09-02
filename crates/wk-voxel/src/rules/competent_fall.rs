@@ -2473,9 +2473,13 @@ fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
 pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
   let cw = CHUNK_CELLS_W as i32;
   let ch = CHUNK_CELLS_H as i32;
+  let any_competent = world.chunks.values().any(|c| c.has_competent);
   let mut touches: Vec<(i32, i32)> = Vec::new();
   for &coord in coords {
     let Some(chunk) = world.chunks.get(&coord) else {
+      continue;
+    };
+    if any_competent && !chunk.has_competent {
       continue;
     };
     let base_gx = coord.cx * cw;
@@ -2583,18 +2587,30 @@ pub fn wake_floating_competent(world: &mut World) {
   let coords: Vec<_> = world.chunks.keys().copied().collect();
   let mut touches: Vec<(i32, i32)> = Vec::new();
   let mut settled_scanned = HashSet::default();
+  let mut clear_competent: Vec<ChunkCoord> = Vec::new();
+  let mut stamp_competent: Vec<ChunkCoord> = Vec::new();
+  // Bootstrap (no flags set yet) walks every loaded chunk so a legacy
+  // save still finds sky-painted boulders. After the first scan, empty
+  // sky / bedrock drop out — that was the leftover bodies cost on a
+  // 1000-cell troposphere (most chunks have never held rock).
+  let any_competent = world.chunks.values().any(|c| c.has_competent);
   for coord in coords {
     let Some(chunk) = world.chunks.get(&coord) else {
       continue;
     };
+    if any_competent && !chunk.has_competent {
+      continue;
+    }
     let base_gx = coord.cx * cw;
     let base_gy = coord.cy * ch;
+    let mut saw_competent = false;
     for ly in 0..CHUNK_CELLS_H {
       for lx in 0..CHUNK_CELLS_W {
         let cell = chunk.get(lx, ly);
         if !is_competent_rock(cell.material) {
           continue;
         }
+        saw_competent = true;
         let gx = world.wrap_x(base_gx + lx as i32);
         let gy = base_gy + ly as i32;
         let air_below = match world.get_cell(gx, gy - 1) {
@@ -2619,12 +2635,27 @@ pub fn wake_floating_competent(world: &mut World) {
         touches.push((gx, gy));
       }
     }
+    if saw_competent {
+      stamp_competent.push(coord);
+    } else {
+      clear_competent.push(coord);
+    }
   }
   probe::add(&probe::wake_from_cadence_float, touches.len() as u64);
   for (gx, gy) in touches {
     world.competent_wake_rect(gx, gy, gx, gy);
     world.touch_dirty(gx, gy);
     world.competent_wake_push(gx, gy);
+  }
+  for coord in stamp_competent {
+    if let Some(chunk) = world.chunks.get_mut(&coord) {
+      chunk.has_competent = true;
+    }
+  }
+  for coord in clear_competent {
+    if let Some(chunk) = world.chunks.get_mut(&coord) {
+      chunk.has_competent = false;
+    }
   }
 }
 
@@ -4620,6 +4651,39 @@ mod tests {
       .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
       .count();
     assert_eq!(high, 0, "slept sky island must fall after wake (remaining={high})");
+  }
+
+  #[test]
+  fn floating_wake_bootstraps_and_clears_the_competent_flag() {
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(3, CHUNK_CELLS_H as i32 + 4, Cell::solid(MaterialId::Stone));
+    for chunk in w.chunks.values_mut() {
+      chunk.has_competent = false;
+    }
+    wake_floating_competent(&mut w);
+    assert!(
+      w.chunks[&ChunkCoord::new(0, 1)].has_competent,
+      "bootstrap must stamp rock so later ticks skip empty sky"
+    );
+    assert!(
+      !w.chunks[&ChunkCoord::new(0, 0)].has_competent,
+      "bedrock-only chunks are not competent"
+    );
+    w.set_cell(3, CHUNK_CELLS_H as i32 + 4, Cell::air());
+    assert!(
+      w.chunks[&ChunkCoord::new(0, 1)].has_competent,
+      "writes do not clear sticky occupancy"
+    );
+    wake_floating_competent(&mut w);
+    assert!(
+      !w.chunks[&ChunkCoord::new(0, 1)].has_competent,
+      "an empty scan must drop the sky chunk from later floating wakes"
+    );
   }
 
   #[test]

@@ -270,6 +270,11 @@ which A/Bs `enable_competent_fall` over a real `tick_with_life` loop.
   hasher; SipHash cost more than the lookups it guarded.
 - **Thin fracture is gated on support** — running it on seated strata shredded
   thousands of cells of untouched terrain into rubble.
+- **Sticky `has_competent`** — `wake_floating_competent` used to walk every
+  loaded cell looking for air-below rock. On a 1000-cell troposphere most
+  chunks are empty sky or bedrock. The flag (raised on write, cleared when a
+  scan finds none) skips those. Bootstrap — no flags set yet — still walks
+  everything so a legacy save cannot hang a painted boulder.
 
 ### Rock body identity (why rocks stop gluing)
 

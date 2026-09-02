@@ -202,7 +202,8 @@ voxel wind is climate-scale mean + natural variance, plus a **local tile
 heatmap** (terrain / thermal ∇T / swirl) rebuilt every
 `WIND_FIELD_PERIOD` ticks on occupied humidity seats + a 1-tile halo + a
 thin near-surface band. Humidity uses per-tick fractional flux through
-`vector_at` (free-air height cached per column). Temperature stays on
+`vector_at` (free-air height cached per column; wind samples cached once
+per seat before the two flux axes). Temperature stays on
 period 20. Sun and a standing radiate leak hit the **ground** (night
 is the sun off); humidity shades incoming sun and blankets the leak.
 Air sits on the climate lapse and couples to that skin (no day/night

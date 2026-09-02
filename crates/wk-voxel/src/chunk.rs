@@ -142,6 +142,13 @@ pub struct Chunk {
     /// scan finds no flake left.
     #[serde(default)]
     pub has_snow: bool,
+    /// Sticky occupancy: at least one competent rock cell (stone /
+    /// limestone / flowstone / sandstone / conglomerate). Floating-body
+    /// wake skips empty sky and bedrock chunks. Cleared by
+    /// [`crate::rules::competent_fall::wake_floating_competent`] when a
+    /// scan finds none left.
+    #[serde(default)]
+    pub has_competent: bool,
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -176,6 +183,7 @@ impl Chunk {
             has_organic: false,
             has_buoyant: false,
             has_snow: false,
+            has_competent: false,
         }
     }
 
@@ -241,6 +249,9 @@ impl Chunk {
         }
         if cell.material == MaterialId::Snow {
             self.has_snow = true;
+        }
+        if crate::cell::is_competent_rock(cell.material) {
+            self.has_competent = true;
         }
     }
 
@@ -310,14 +321,18 @@ mod tests {
         assert!(!c.has_limestone);
         assert!(!c.has_loose);
         assert!(!c.has_snow);
+        assert!(!c.has_competent);
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
+        assert!(c.has_competent);
         c.set(3, 3, Cell::solid(MaterialId::Sand));
         assert!(c.has_loose);
         c.set(4, 4, Cell::solid(MaterialId::Snow));
         assert!(c.has_snow);
+        c.set(5, 5, Cell::solid(MaterialId::Stone));
+        assert!(c.has_competent);
         // Dry air / stone do not clear sticky flags.
         c.set(1, 1, Cell::air());
         assert!(c.has_wet_air);
