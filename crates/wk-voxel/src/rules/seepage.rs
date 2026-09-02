@@ -8,7 +8,7 @@ use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::ActiveChunk;
 use crate::cell::{permeability_cell, water_capacity_cell, Cell, Sat};
-use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W, STANDING_AIR_SAT};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
@@ -16,7 +16,7 @@ use super::head::{
     is_porous_cell, sat_move_to_equalize_heads, seepage_conduct_rate_cells, seepage_rate_cell,
     seepage_fire_odds_cell, seepage_uptake_rate_cell,
 };
-use super::plan::{regions_for_standalone, regions_wet_loaded};
+use super::plan::{regions_for_standalone, regions_lake_bed_loaded};
 
 /// Odds a *full* throughput through limestone opens the aperture one step.
 ///
@@ -84,14 +84,16 @@ fn touch_downward_pore_front(
 /// never visits that dry cy-1 chunk.
 pub fn wake_lake_bed_pores(world: &mut World) {
     let hydro = world.hydro;
-    let regions = regions_wet_loaded(world);
+    let regions = regions_lake_bed_loaded(world);
     let mut touches: Vec<(i32, i32)> = Vec::new();
+    let mut standing_updates: Vec<(ChunkCoord, bool)> = Vec::new();
     for ac in &regions {
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             continue;
         };
         let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
         let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
+        let mut any_standing = false;
         for y in ac.rect.y0..=ac.rect.y1 {
             let ly = y as usize;
             let gy = base_gy + y as i32;
@@ -106,7 +108,8 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 // unsaturated cell (the wetting front). Walking through dry
                 // cells marked the whole crust dirty and looked like
                 // groundwater "teleporting" under a dry gap.
-                if cell.material == MaterialId::Air && cell.sat.0 >= 160 {
+                if cell.material == MaterialId::Air && cell.sat.0 >= STANDING_AIR_SAT {
+                    any_standing = true;
                     let mut yy = gy - 1;
                     for _ in 0..(CHUNK_CELLS_H * 2) {
                         let Some(below) = world.get_cell(gx, yy) else {
@@ -177,6 +180,12 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     }
                 }
             }
+        }
+        standing_updates.push((ac.coord, any_standing));
+    }
+    for (coord, any_standing) in standing_updates {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_standing_air = any_standing;
         }
     }
     for (gx, gy) in touches {

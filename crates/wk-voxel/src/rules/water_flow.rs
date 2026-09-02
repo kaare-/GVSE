@@ -18,7 +18,7 @@ use super::head::{
     hydraulic_head, is_porous_cell, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
     seepage_rate_cell, seepage_uptake_rate_cell,
 };
-use super::plan::{regions_for_standalone, regions_wet_air_loaded};
+use super::plan::{refresh_chunk_water_flags, regions_confined_loaded, regions_for_standalone};
 
 /// Priority water flow.
 ///
@@ -135,11 +135,14 @@ pub fn wake_confined_head(world: &mut World) {
     if world.tick % CONFINED_HEAD_WAKE_EVERY != 0 {
         return;
     }
-    // Standing water / pipe films only. Groundwater-only chunks cannot
-    // host a rising column; including them made the period-16 wake walk
-    // the whole wet bed after a drizzle soak.
-    let regions = regions_wet_air_loaded(world);
+    // Standing water / pipe films next to solid only. Rain-film sky and
+    // mid-ocean water with no rock were the leftover period-16 cost
+    // (~38 ms/call → 2.4 ms amortized on the tall box).
+    let regions = regions_confined_loaded(world);
     apply_confined_upward_regions(world, &regions);
+    for ac in &regions {
+        refresh_chunk_water_flags(world, ac.coord);
+    }
 }
 
 fn commit_air_sat_xfers(

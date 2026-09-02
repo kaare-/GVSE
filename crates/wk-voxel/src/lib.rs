@@ -58,7 +58,7 @@ pub use cell::{
     Cell, CellFlags, Sat,
 };
 pub use chunk::{
-    material_is_loose, Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W,
+    material_is_loose, Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W, STANDING_AIR_SAT,
 };
 pub use fasthash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 pub use blueprint::{

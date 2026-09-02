@@ -21,6 +21,9 @@ pub const CHUNK_CELLS_W: usize = 64;
 pub const CHUNK_CELLS_H: usize = 64;
 /// Total cells per chunk.
 pub const CHUNK_CELLS: usize = CHUNK_CELLS_W * CHUNK_CELLS_H;
+/// Air sat at or above this is standing water / a full pipe film.
+/// Rain and falling drizzle sit well below (typically ~33).
+pub const STANDING_AIR_SAT: u8 = 160;
 
 /// Chunk coordinate in world-chunk space. `(cx, cy)` — positive `cy`
 /// is up (sky), negative `cy` is down (bedrock).
@@ -149,6 +152,17 @@ pub struct Chunk {
     /// scan finds none left.
     #[serde(default)]
     pub has_competent: bool,
+    /// Sticky occupancy: at least one `Air` cell with
+    /// `sat >= `[`STANDING_AIR_SAT`] (standing water / full pipe).
+    /// Lake-bed and confined-head wakes skip rain-film sky. Cleared
+    /// when a scan finds none left.
+    #[serde(default)]
+    pub has_standing_air: bool,
+    /// Sticky occupancy: at least one non-`Air` cell. Confined-head
+    /// wake skips mid-ocean chunks that are only water. Cleared when a
+    /// scan finds none left.
+    #[serde(default)]
+    pub has_solid: bool,
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -184,6 +198,8 @@ impl Chunk {
             has_buoyant: false,
             has_snow: false,
             has_competent: false,
+            has_standing_air: false,
+            has_solid: false,
         }
     }
 
@@ -253,6 +269,12 @@ impl Chunk {
         if crate::cell::is_competent_rock(cell.material) {
             self.has_competent = true;
         }
+        if cell.material == MaterialId::Air && cell.sat.0 >= STANDING_AIR_SAT {
+            self.has_standing_air = true;
+        }
+        if cell.material != MaterialId::Air {
+            self.has_solid = true;
+        }
     }
 
     /// Wipe the dirty rectangle. Called at the start of each rule pass
@@ -283,6 +305,7 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell::{Cell, Sat};
     use wk_material::MaterialId;
 
     #[test]
@@ -322,11 +345,21 @@ mod tests {
         assert!(!c.has_loose);
         assert!(!c.has_snow);
         assert!(!c.has_competent);
+        assert!(!c.has_standing_air);
+        assert!(!c.has_solid);
+        let mut rain = Cell::air();
+        rain.sat = Sat(33);
+        c.set(0, 0, rain);
+        assert!(c.has_wet_air);
+        assert!(!c.has_standing_air);
+        assert!(!c.has_solid);
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
+        assert!(c.has_standing_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
         assert!(c.has_competent);
+        assert!(c.has_solid);
         c.set(3, 3, Cell::solid(MaterialId::Sand));
         assert!(c.has_loose);
         c.set(4, 4, Cell::solid(MaterialId::Snow));

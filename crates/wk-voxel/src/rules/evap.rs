@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::{water_capacity_cell, Cell, Sat};
-use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W, STANDING_AIR_SAT};
 use crate::grid::World;
 use crate::parallel::map_chunk_coords_parallel;
 
@@ -55,8 +55,8 @@ pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
     if world.tick % period != 0 {
         return;
     }
-    let (deltas, clear_wet) = collect_evap_deltas(world, cfg, None);
-    clear_dry_wet_air_flags(world, &clear_wet);
+    let (deltas, occupancy) = collect_evap_deltas(world, cfg, None);
+    apply_evap_occupancy_flags(world, &occupancy);
     apply_evap_deltas(world, deltas, None, None);
 }
 
@@ -92,21 +92,16 @@ pub fn apply_evaporation_into_humidity_climate(
     if humidity.atmosphere_overfull() {
         return;
     }
-    let (deltas, clear_wet) = {
+    let (deltas, occupancy) = {
         let climate = temp.map(|t| (t, wind_speed.abs(), humidity as &crate::humidity::Humidity));
         collect_evap_deltas(world, cfg, climate)
     };
-    clear_dry_wet_air_flags(world, &clear_wet);
+    apply_evap_occupancy_flags(world, &occupancy);
     apply_evap_deltas(world, deltas, Some(humidity), temp);
 }
 
 /// Reference `rate_per_tick` is ~18 °C, light breeze, dry air.
-pub(crate) fn evap_climate_rate(
-    base: i32,
-    temp_c: f32,
-    wind_abs: f32,
-    humidity_mass: f32,
-) -> i32 {
+pub(crate) fn evap_climate_rate(base: i32, temp_c: f32, wind_abs: f32, humidity_mass: f32) -> i32 {
     if base <= 0 {
         return 0;
     }
@@ -123,12 +118,16 @@ pub(crate) fn evap_climate_rate(
         .clamp(0.0, cap as f32) as i32
 }
 
-/// Per-chunk scan result: local sat deltas + whether any wet Air remains.
+/// Per-chunk scan result: local sat deltas + wet / standing occupancy.
 fn collect_evap_deltas(
     world: &World,
     cfg: &EvapConfig,
-    climate: Option<(&crate::temperature::Temperature, f32, &crate::humidity::Humidity)>,
-) -> (HashMap<(i32, i32), i32>, Vec<ChunkCoord>) {
+    climate: Option<(
+        &crate::temperature::Temperature,
+        f32,
+        &crate::humidity::Humidity,
+    )>,
+) -> (HashMap<(i32, i32), i32>, Vec<(ChunkCoord, bool, bool)>) {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -139,18 +138,15 @@ fn collect_evap_deltas(
 
     let per_chunk = map_chunk_coords_parallel(&coords, |coord| {
         let Some(chunk) = world.chunks.get(&coord) else {
-            return (coord, false, Vec::new());
+            return (coord, false, false, Vec::new());
         };
-        let above = world
-            .chunks
-            .get(&ChunkCoord::new(coord.cx, coord.cy + 1));
-        let below = world
-            .chunks
-            .get(&ChunkCoord::new(coord.cx, coord.cy - 1));
+        let above = world.chunks.get(&ChunkCoord::new(coord.cx, coord.cy + 1));
+        let below = world.chunks.get(&ChunkCoord::new(coord.cx, coord.cy - 1));
         let base_gx = coord.cx * CHUNK_CELLS_W as i32;
         let base_gy = coord.cy * CHUNK_CELLS_H as i32;
         let mut local: Vec<((i32, i32), i32)> = Vec::new();
         let mut still_wet = false;
+        let mut still_standing = false;
         for y in 0..CHUNK_CELLS_H {
             let gy = base_gy + y as i32;
             for x in 0..CHUNK_CELLS_W {
@@ -160,6 +156,9 @@ fn collect_evap_deltas(
                     continue;
                 }
                 still_wet = true;
+                if cur.sat.0 >= STANDING_AIR_SAT {
+                    still_standing = true;
+                }
                 let sky_above = if y + 1 < CHUNK_CELLS_H {
                     let above_c = chunk.get(x, y + 1);
                     above_c.material == MaterialId::Air && above_c.sat.0 <= cfg.dry_above_max
@@ -189,7 +188,12 @@ fn collect_evap_deltas(
                 }
                 let mut rate = cfg.rate_per_tick as i32;
                 if let Some((temp, wind_abs, hum)) = climate {
-                    rate = evap_climate_rate(rate, temp.at_cell(gx, gy), wind_abs, hum.at_cell(gx, gy));
+                    rate = evap_climate_rate(
+                        rate,
+                        temp.at_cell(gx, gy),
+                        wind_abs,
+                        hum.at_cell(gx, gy),
+                    );
                 }
                 // Orphaned crest film: no Air neighbour anywhere on the
                 // surface (same-y or diagonal-down) → evaporate hard so
@@ -203,26 +207,27 @@ fn collect_evap_deltas(
                 local.push(((gx, gy), -rate));
             }
         }
-        (coord, still_wet, local)
+        (coord, still_wet, still_standing, local)
     });
 
     let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
-    let mut clear_wet = Vec::new();
-    for (coord, still_wet, local) in per_chunk {
-        if !still_wet {
-            clear_wet.push(coord);
-        }
+    let mut occupancy = Vec::new();
+    for (coord, still_wet, still_standing, local) in per_chunk {
+        occupancy.push((coord, still_wet, still_standing));
         for (key, delta) in local {
             *deltas.entry(key).or_insert(0) += delta;
         }
     }
-    (deltas, clear_wet)
+    (deltas, occupancy)
 }
 
-fn clear_dry_wet_air_flags(world: &mut World, clear: &[ChunkCoord]) {
-    for &coord in clear {
+fn apply_evap_occupancy_flags(world: &mut World, occupancy: &[(ChunkCoord, bool, bool)]) {
+    for &(coord, still_wet, still_standing) in occupancy {
         if let Some(chunk) = world.chunks.get_mut(&coord) {
-            chunk.has_wet_air = false;
+            if !still_wet {
+                chunk.has_wet_air = false;
+            }
+            chunk.has_standing_air = still_standing;
         }
     }
 }

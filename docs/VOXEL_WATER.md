@@ -71,7 +71,7 @@ Per wet Air cell (compute-then-apply, mass-conserving):
    - Scan up to 12 standing cells for a cascade outlet; push toward it.
    - Pairwise head-equalise each `+x` standing edge (avoids checkerboard terraces on wide lakes).
 4. **Throughflow** — weep through a saturated porous stack (≤24 deep) at seepage rate into the **nearest opening**: a side Air face (cliff / spring) or Air below the stack.
-5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (`wake_confined_head` — not the dirty halo, so ocean evaporation cannot starve a quiet shaft).
+5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (`wake_confined_head` — not the dirty halo, so ocean evaporation cannot starve a quiet shaft). The wake visits chunks with solid **and** standing water / wet pores (`has_solid && (has_standing_air || has_wet_pores)`). Rain-film sky and mid-ocean water with no rock already reject per-cell; walking those 64×64s was the leftover period-16 cost. Evap / the wake refresh `has_standing_air` so a drained lake drops out.
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 
@@ -231,6 +231,11 @@ The lake-bed and seam pore wakes were also being called twice per tick: once
 under the seepage cadence, and again unguarded just before the seepage plan.
 Only the later call site matters (its dirty is what the seepage plan consumes),
 so the early copy is gone and the wakes ride the cadence as intended.
+
+`wake_lake_bed_pores` further skips rain-film sky (`has_wet_air` only, sat
+below 160). It walks chunks with standing water or wet pores
+(`has_standing_air || has_wet_pores`) and refreshes the standing flag from
+the same scan so a film-only column does not keep soaking an empty bed.
 
 Use `tests/seepage_split_probe.rs` before tuning any of this. The profiler
 lumps five calls into one `seepage` bucket and the bucket cannot say which.
