@@ -600,3 +600,11 @@ Do not re-walk these:
   stalls (shaft top 36 vs sea 40). The leftover is equalized
   rock-cased shafts / connected ocean BFS below a higher standing
   row. Do not starve the wake; do not lower `CONFINED_HEAD_BFS_LIMIT`.
+
+  After FxHash + reused BFS buffers (this host, 40 warm + 200 measure,
+  0 plants): short wall **25.2**, tall **18.2**, confined **0.62 / 0.57**
+  (was **1.3 / 1.2**). Soak (256 plants, 8×400): wall **21.8 → 86.3**.
+  Confined **1.1 → 3.8** then **3.0** (was **2.2 → 8.2** then **6.3**).
+  Same cells, same rise — SipHash and per-call alloc were leftover on
+  the equalized walk. `clay` stays **23**. The remaining confined grower
+  is still that walk, just cheaper. Do not starve the wake.
