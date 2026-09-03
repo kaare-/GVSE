@@ -13,6 +13,7 @@ use crate::cell::{
     is_competent_rock, water_capacity_cell, water_capacity_with, Cell, Sat,
 };
 use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
@@ -59,6 +60,29 @@ const CONFINED_HEAD_WAKE_EVERY: u64 = 16;
 const CONFINED_HEAD_RATE: i32 = 32;
 /// Cap BFS size when walking a pressure-connected wet-Air body.
 const CONFINED_HEAD_BFS_LIMIT: usize = 8192;
+
+/// Reused queue / visited set for [`pressure_body_from_full`].
+/// SipHash + per-call alloc was leftover on equalized oceans.
+struct ConfinedBfsScratch {
+    queue: VecDeque<(i32, i32)>,
+    visited: FxHashSet<(i32, i32)>,
+}
+
+impl ConfinedBfsScratch {
+    fn new() -> Self {
+        let mut visited = FxHashSet::default();
+        visited.reserve(CONFINED_HEAD_BFS_LIMIT);
+        Self {
+            queue: VecDeque::with_capacity(256),
+            visited,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.queue.clear();
+        self.visited.clear();
+    }
+}
 
 /// Priority water flow restricted to a pre-planned active set.
 ///
@@ -457,7 +481,7 @@ fn climb_full_air_column(
     y_start: i32,
     cap: u8,
     queue: &mut VecDeque<(i32, i32)>,
-    visited: &mut HashSet<(i32, i32)>,
+    visited: &mut FxHashSet<(i32, i32)>,
     best_head: &mut f32,
     best_donor: &mut (i32, i32),
 ) {
@@ -514,7 +538,8 @@ fn pressure_body_from_full(
     world: &World,
     seed_x: i32,
     seed_y: i32,
-    cache: &mut HashMap<(i32, i32), PressureBody>,
+    cache: &mut FxHashMap<(i32, i32), PressureBody>,
+    scratch: &mut ConfinedBfsScratch,
 ) -> Option<PressureBody> {
     if let Some(&body) = cache.get(&(seed_x, seed_y)) {
         return Some(body);
@@ -530,9 +555,10 @@ fn pressure_body_from_full(
     // before early-out. The shaft's own rising film sits just above the
     // seed and must not stop the search before we reach the reservoir.
     let early_exit_head = (seed_y + 2) as f32;
-    let mut queue = VecDeque::new();
-    let mut visited: HashSet<(i32, i32)> = HashSet::new();
-    queue.push_back((seed_x, seed_y));
+    scratch.reset();
+    scratch.queue.push_back((seed_x, seed_y));
+    let queue = &mut scratch.queue;
+    let visited = &mut scratch.visited;
 
     let mut best_donor = (seed_x, seed_y);
     let mut best_head = hydraulic_head(seed_y, seed.sat, cap);
@@ -557,8 +583,8 @@ fn pressure_body_from_full(
             x,
             y,
             cap,
-            &mut queue,
-            &mut visited,
+            queue,
+            visited,
             &mut best_head,
             &mut best_donor,
         );
@@ -583,7 +609,7 @@ fn pressure_body_from_full(
         max_head: best_head,
         donor: best_donor,
     };
-    for key in &visited {
+    for key in visited.iter() {
         cache.insert(*key, body);
     }
     // Seed may equal best when the climb marked it; always cache seed.
@@ -600,7 +626,8 @@ fn accumulate_confined_upward_xfers(
     active: &[ActiveChunk],
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
-    let mut cache: HashMap<(i32, i32), PressureBody> = HashMap::new();
+    let mut cache: FxHashMap<(i32, i32), PressureBody> = FxHashMap::default();
+    let mut scratch = ConfinedBfsScratch::new();
     let cap = water_capacity_with(MaterialId::Air, &world.hydro);
     let head_eps = 1.0 / (cap as f32);
     let cw = CHUNK_CELLS_W as i32;
@@ -693,7 +720,7 @@ fn accumulate_confined_upward_xfers(
                     }
                 }
                 let Some(body) =
-                    pressure_body_from_full(world, gx, gy - 1, &mut cache)
+                    pressure_body_from_full(world, gx, gy - 1, &mut cache, &mut scratch)
                 else {
                     continue;
                 };
