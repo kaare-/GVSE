@@ -583,3 +583,8 @@ Do not re-walk these:
   **7.0** is still equalized-shaft BFS, not neighbour HashMap probes.
   `clay` stays **23**. Do not skip the lottery; do not starve the
   confined wake.
+
+  Next leftover: confined soak BFS with a flat stand count. Hypothesis
+  — plants and grains counted as well casing (`!= Air`), so vegetated
+  / sandy films paid the aquifer walk. Casing is now rock / bedrock
+  only; profile numbers after that cut go here.

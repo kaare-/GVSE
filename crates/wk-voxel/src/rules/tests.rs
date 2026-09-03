@@ -4445,6 +4445,109 @@ fn drizzle_film_on_wet_ground_does_not_confined_rise() {
 }
 
 #[test]
+fn plant_sided_film_on_wet_sand_does_not_confined_rise() {
+    // Organic on both sides of a film used to count as well casing
+    // (`!= Air`). Every vegetated shore then BFS-flooded the aquifer
+    // on the confined wake. Plants are not rock; this film stays put.
+    let mut w = World::new(82);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Sand);
+    for x in 0..40 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 4..=10 {
+        w.set_cell(19, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 1..=8 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 10..=30 {
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(cap);
+        w.set_cell(x, 1, sand);
+        w.set_cell(x, 2, sand);
+        w.set_cell(x, 3, sand);
+    }
+    let mut sand = Cell::solid(MaterialId::Sand);
+    sand.sat = Sat(cap);
+    w.set_cell(9, 1, sand);
+    let mut film = Cell::air();
+    film.sat = Sat(40);
+    w.set_cell(20, 4, film);
+    w.set_cell(19, 4, Cell::solid(MaterialId::Organic));
+    w.set_cell(21, 4, Cell::solid(MaterialId::Organic));
+
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+
+    for y in 6..=10 {
+        let sat = w.get_cell(20, y).unwrap().sat.0;
+        assert_eq!(
+            sat, 0,
+            "plant-sided film must not loft lake head to y={y} (sat={sat})"
+        );
+    }
+}
+
+#[test]
+fn sand_sided_film_on_wet_sand_does_not_confined_rise() {
+    // Loose grains beside a film are not well casing either. A puddle
+    // in wet sand used to look walled and pay the aquifer BFS.
+    let mut w = World::new(82);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Sand);
+    for x in 0..40 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 4..=10 {
+        w.set_cell(19, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 1..=8 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 10..=30 {
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(cap);
+        w.set_cell(x, 1, sand);
+        w.set_cell(x, 2, sand);
+        w.set_cell(x, 3, sand);
+    }
+    let mut sand = Cell::solid(MaterialId::Sand);
+    sand.sat = Sat(cap);
+    w.set_cell(9, 1, sand);
+    let mut film = Cell::air();
+    film.sat = Sat(40);
+    w.set_cell(20, 4, film);
+    w.set_cell(19, 4, Cell::solid(MaterialId::Sand));
+    w.set_cell(21, 4, Cell::solid(MaterialId::Sand));
+
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+
+    for y in 6..=10 {
+        let sat = w.get_cell(20, y).unwrap().sat.0;
+        assert_eq!(
+            sat, 0,
+            "sand-sided film must not loft lake head to y={y} (sat={sat})"
+        );
+    }
+}
+
+#[test]
 fn same_y_equalize_flattens_stepped_lake_surface() {
     // Free-surface terrace inside a closed basin (solid shores):
     //

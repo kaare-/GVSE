@@ -307,7 +307,8 @@ Two behaviours worth knowing, both correct:
 - An **uncased** hole does not rise past the confining layer. Confined rise is
   refused where water could spread sideways instead
   (`allows_confined_rise` / `open_air_both_sides`), so a bare hole in open ground
-  fills its sump and stops. A cased shaft climbs.
+  fills its sump and stops. A cased shaft climbs. Casing is rock / bedrock —
+  plants and loose grains beside a film are not a well.
 - A well **draws its aquifer down**. If recharge cannot keep the path fully
   saturated, the pressure chain breaks and the rise stops — which is what a real
   over-pumped well does. Sustained rise needs sustained intake.

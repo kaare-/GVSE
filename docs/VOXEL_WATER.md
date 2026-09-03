@@ -71,7 +71,7 @@ Per wet Air cell (compute-then-apply, mass-conserving):
    - Scan up to 12 standing cells for a cascade outlet; push toward it.
    - Pairwise head-equalise each `+x` standing edge (avoids checkerboard terraces on wide lakes).
 4. **Throughflow** — weep through a saturated porous stack (≤24 deep) at seepage rate into the **nearest opening**: a side Air face (cliff / spring) or Air below the stack.
-5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (`wake_confined_head` — not the dirty halo, so ocean evaporation cannot starve a quiet shaft). The wake visits chunks with solid **and** standing water (`has_solid && has_standing_air`), then only the standing-air y band plus one row for the rising film. Dry sky in shore chunks is leftover. Unset bands (old saves) still scan the full rect. Rain-film sky, mid-ocean water with no rock, and groundwater-only crust already reject per-cell. Uncased drizzle on wet ground skips before the free-surface / BFS probes — seepage owns that infiltration; a walled well still rises. Evap refreshes `has_standing_air` and tightens the y band so a drained lake drops out.
+5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (`wake_confined_head` — not the dirty halo, so ocean evaporation cannot starve a quiet shaft). The wake visits chunks with solid **and** standing water (`has_solid && has_standing_air`), then only the standing-air y band plus one row for the rising film. Dry sky in shore chunks is leftover. Unset bands (old saves) still scan the full rect. Rain-film sky, mid-ocean water with no rock, and groundwater-only crust already reject per-cell. Uncased drizzle on wet ground skips before the free-surface / BFS probes — seepage owns that infiltration; a walled well still rises. Casing is **rock / bedrock** (`is_competent_rock` or Bedrock). Plants, litter, ice, and loose grains do not case a well — a vegetated or sandy film is open ground and must not BFS the aquifer. Evap refreshes `has_standing_air` and tightens the y band so a drained lake drops out.
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 
@@ -303,6 +303,10 @@ Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
 - `confined_head_wake_scans_despite_unrelated_dirty`
 - `confined_head_equalizes_across_large_deep_ocean`
 - `closed_basin_lake_does_not_fountain_upward`
+- `drizzle_film_on_wet_ground_does_not_confined_rise`
+- `plant_sided_film_on_wet_sand_does_not_confined_rise`
+- `sand_sided_film_on_wet_sand_does_not_confined_rise`
+- `a_well_bottomed_in_a_confined_aquifer_rises`
 - `solid_staircase_film_drains_left_into_lower_pool`
 - `lake_bed_sand_wets_clay_and_stone_below_via_tick`
 - `deep_stone_stack_keeps_wetting_after_surface_quiesces`

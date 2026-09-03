@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
-use crate::cell::{water_capacity_cell, water_capacity_with, Cell, Sat};
+use crate::cell::{
+    is_competent_rock, water_capacity_cell, water_capacity_with, Cell, Sat,
+};
 use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
@@ -251,11 +253,18 @@ fn is_air_free_surface(world: &World, gx: i32, gy: i32) -> bool {
     }
 }
 
-/// True when both horizontal neighbours are non-Air (or world edge).
+/// Rock that can case a confined well. Plants, litter, ice, and loose
+/// grains are not casing — a film beside vegetation is open ground.
+#[inline]
+fn is_confined_casing(m: MaterialId) -> bool {
+    m == MaterialId::Bedrock || is_competent_rock(m)
+}
+
+/// True when both horizontal neighbours are rock casing (or world edge).
 fn is_walled_column(world: &World, gx: i32, gy: i32) -> bool {
     let wall = |x: i32| match world.get_cell(world.wrap_x(x), gy) {
         None => true,
-        Some(c) => c.material != MaterialId::Air,
+        Some(c) => is_confined_casing(c.material),
     };
     wall(gx - 1) && wall(gx + 1)
 }
@@ -308,7 +317,7 @@ fn is_walled_column_in(
 ) -> bool {
     let wall = |dx: i32| match horiz_material(world, chunk, base_gx, x, ly, gy, dx) {
         None => true,
-        Some(m) => m != MaterialId::Air,
+        Some(m) => is_confined_casing(m),
     };
     let _ = gx;
     wall(-1) && wall(1)
@@ -334,6 +343,8 @@ fn open_air_both_sides_in(
 }
 
 #[inline]
+/// Beach film is `land | film | lake | lake`. A 2-wide shaft is
+/// `wall | A | B | wall` — the open neighbour's far side is solid.
 fn opens_into_wide_water_in(
     world: &World,
     chunk: &Chunk,
@@ -610,7 +621,8 @@ fn accumulate_confined_upward_xfers(
                 // Uncased film on wet ground: sitting on saturated pore, not
                 // a flooded pipe. Seepage owns infiltration; skip before
                 // free-surface / BFS probes (rainy-shore leftover).
-                // A 1-wide well is walled and still rises.
+                // Casing is rock / bedrock — plants and grains do not
+                // case a well. A 1-wide rock shaft still rises.
                 let x_i = x as i32;
                 if below.material != MaterialId::Air {
                     if !is_walled_column_in(world, chunk, base_gx, x_i, ly, gx, gy) {
