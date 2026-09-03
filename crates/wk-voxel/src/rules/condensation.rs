@@ -296,6 +296,9 @@ pub fn apply_condensation_rain_phased(
     // Collect first, then apply the heaviest hits so a saturated sky
     // cannot walk every column every tick (~thousands → 7 FPS).
     let mut hits: Vec<(f32, i32, i32, f32)> = Vec::new(); // mass, hx, hy, take_mass
+    // Lowest wet tile per column — hint for the floor walk. Built for
+    // every key (cheap) so a high lottery winner cannot start 24 cells
+    // above the crest, miss the ground, and cache "no floor".
     let mut col_lo: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
     for &(hx, hy) in &tiles {
         col_lo
@@ -305,21 +308,20 @@ pub fn apply_condensation_rain_phased(
     }
     let mut film_floor: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
     for (hx, hy) in tiles {
-        // Mass gate before the column floor walk. As the atmosphere
-        // fills, leftover tiles under sat grow; those must not pay
-        // `first_free_air_hy` (or orographic surface walks once
-        // thermal sat has already refused them).
+        // Cheap sat / min-mass gate, then lottery, then the column floor
+        // walk. Floor does not change the roll, so losers must not pay
+        // `first_free_air_hy`. Under-sat tiles skip the below-tile dew
+        // read and orographic surface walks too.
         let mass = humidity.at_tile(hx, hy);
         let (mut prob_mult, mut mass_mult, mut min_mass) = (1.0, 1.0, cfg.min_mass_to_rain);
         let mut full_mass = cfg.full_mass;
         let mut leftover = 0.0f32;
         if let Some(th) = temp {
-            let (tp, tm, tmin, sat) = thermal_rain_factors(th, hx, hy, tile_cols);
-            // Thermal sat is the gate. Skip oro + floor when this tile
-            // cannot rain; oro only multiplies the lottery after.
-            if mass < tmin {
+            let sat = thermal_sat_mass(th, hx, hy);
+            if mass < sat {
                 continue;
             }
+            let (tp, tm, tmin, sat) = thermal_rain_factors(th, hx, hy, tile_cols);
             prob_mult *= tp;
             mass_mult *= tm;
             min_mass = tmin;
@@ -341,11 +343,6 @@ pub fn apply_condensation_rain_phased(
             if mass < min_mass {
                 continue;
             }
-        }
-        let hint = col_lo.get(&hx).copied().unwrap_or(hy);
-        let floor = first_free_air_hy(world, tile_cols, hx, hint, &mut film_floor);
-        if hy <= floor.saturating_add(SURFACE_FILM_SPARE_TILES) {
-            continue;
         }
         // Linear from 0 at min_mass to 1 at thermal/orographic full — and it
         // keeps climbing past that, up to [`SUPERSATURATION_HEADROOM`].
@@ -370,6 +367,11 @@ pub fn apply_condensation_rain_phased(
             cfg.seed_salt,
         );
         if roll >= effective_prob {
+            continue;
+        }
+        let hint = col_lo.get(&hx).copied().unwrap_or(hy);
+        let floor = first_free_air_hy(world, tile_cols, hx, hint, &mut film_floor);
+        if hy <= floor.saturating_add(SURFACE_FILM_SPARE_TILES) {
             continue;
         }
         let surplus = (mass - leftover).max(0.0);
@@ -552,6 +554,10 @@ fn orographic_factors(
 /// Uses the existing temperature tiles only (no extra world walk).
 /// Cold air holds less vapor, so the same mass is closer to rain;
 /// a colder tile below (ridge, lake, night skin) adds dew.
+fn thermal_sat_mass(temp: &crate::temperature::Temperature, hx: i32, hy: i32) -> f32 {
+    crate::humidity::Humidity::saturation_mass_at_temp(temp.at_tile(hx, hy)).max(1.0)
+}
+
 fn thermal_rain_factors(
     temp: &crate::temperature::Temperature,
     hx: i32,

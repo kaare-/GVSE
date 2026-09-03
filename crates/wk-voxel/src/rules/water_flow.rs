@@ -10,7 +10,7 @@ use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
 use crate::cell::{water_capacity_cell, water_capacity_with, Cell, Sat};
-use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
@@ -120,7 +120,7 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
     // instead of building a mound at the outlet.
     if !world.dissolved.is_empty() {
         for &(from, to, amt) in xfers.iter() {
-            if amt > 0 && to.1 > from.1 {
+            if amt > 0 && to.1 > from.1 && world.dissolved.contains_key(&(to.0, to.1)) {
                 crate::mineral::precipitate_artesian(world, to.0, to.1);
             }
         }
@@ -173,8 +173,16 @@ fn commit_air_sat_xfers(
         }
     }
     xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let track_mineral = !world.dissolved.is_empty();
-    let track_sediment = !world.suspended.is_empty();
+    let mut mineral_loaded: HashSet<(i32, i32)> = if world.dissolved.is_empty() {
+        HashSet::new()
+    } else {
+        world.dissolved.keys().copied().collect()
+    };
+    let mut sediment_loaded: HashSet<(i32, i32)> = if world.suspended.is_empty() {
+        HashSet::new()
+    } else {
+        world.suspended.keys().copied().collect()
+    };
     for (from, to, amt) in xfers.iter().copied() {
         if amt <= 0 {
             continue;
@@ -222,11 +230,13 @@ fn commit_air_sat_xfers(
         // the load at the point it left the ground. Skip the maps entirely
         // until something is actually in them — once karst starts they stay
         // non-empty, so also skip sources that are not carrying.
-        if track_mineral && crate::mineral::dissolved_at(world, from.0, from.1) > 0 {
+        if !mineral_loaded.is_empty() && mineral_loaded.contains(&(from.0, from.1)) {
             crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
+            mineral_loaded.insert((to.0, to.1));
         }
-        if track_sediment && crate::sediment::suspended_at(world, from.0, from.1) > 0 {
+        if !sediment_loaded.is_empty() && sediment_loaded.contains(&(from.0, from.1)) {
             crate::sediment::carry_with_water(world, from, to, amt as u8, src.sat.0);
+            sediment_loaded.insert((to.0, to.1));
         }
     }
 }
@@ -250,41 +260,105 @@ fn is_walled_column(world: &World, gx: i32, gy: i32) -> bool {
     wall(gx - 1) && wall(gx + 1)
 }
 
-/// True when an open side continues into a second Air cell.
-///
-/// A beach film is `land | film | lake | lake`. A 2-wide shaft is
-/// `wall | A | B | wall` — the open neighbour's far side is solid, so
-/// this stays false and the shaft can still rise.
-fn opens_into_wide_water(world: &World, gx: i32, gy: i32) -> bool {
+/// Same as [`is_air_free_surface`] using the in-chunk cell above when it fits.
+#[inline]
+fn is_air_free_surface_in(
+    world: &World,
+    chunk: &Chunk,
+    x: usize,
+    ly: usize,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    if ly + 1 < CHUNK_CELLS_H {
+        let a = chunk.get(x, ly + 1);
+        return a.material != MaterialId::Air || !a.sat.is_full();
+    }
+    is_air_free_surface(world, gx, gy)
+}
+
+#[inline]
+fn horiz_material(
+    world: &World,
+    chunk: &Chunk,
+    base_gx: i32,
+    x: i32,
+    ly: usize,
+    gy: i32,
+    dx: i32,
+) -> Option<MaterialId> {
+    let nx = x + dx;
+    if nx >= 0 && nx < CHUNK_CELLS_W as i32 {
+        return Some(chunk.get(nx as usize, ly).material);
+    }
+    world
+        .get_cell(world.wrap_x(base_gx + nx), gy)
+        .map(|c| c.material)
+}
+
+#[inline]
+fn is_walled_column_in(
+    world: &World,
+    chunk: &Chunk,
+    base_gx: i32,
+    x: i32,
+    ly: usize,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    let wall = |dx: i32| match horiz_material(world, chunk, base_gx, x, ly, gy, dx) {
+        None => true,
+        Some(m) => m != MaterialId::Air,
+    };
+    let _ = gx;
+    wall(-1) && wall(1)
+}
+
+#[inline]
+/// Open lake / ocean top: both sides Air. Shafts have a solid side.
+fn open_air_both_sides_in(
+    world: &World,
+    chunk: &Chunk,
+    base_gx: i32,
+    x: i32,
+    ly: usize,
+    gy: i32,
+) -> bool {
+    matches!(
+        horiz_material(world, chunk, base_gx, x, ly, gy, -1),
+        Some(MaterialId::Air)
+    ) && matches!(
+        horiz_material(world, chunk, base_gx, x, ly, gy, 1),
+        Some(MaterialId::Air)
+    )
+}
+
+#[inline]
+fn opens_into_wide_water_in(
+    world: &World,
+    chunk: &Chunk,
+    base_gx: i32,
+    x: i32,
+    ly: usize,
+    gx: i32,
+    gy: i32,
+) -> bool {
     for dx in [-1_i32, 1] {
-        let nx = world.wrap_x(gx + dx);
-        let Some(n) = world.get_cell(nx, gy) else {
-            continue;
-        };
-        if n.material != MaterialId::Air {
+        if !matches!(
+            horiz_material(world, chunk, base_gx, x, ly, gy, dx),
+            Some(MaterialId::Air)
+        ) {
             continue;
         }
-        let far = world.wrap_x(nx + dx);
         if matches!(
-            world.get_cell(far, gy),
-            Some(c) if c.material == MaterialId::Air
+            horiz_material(world, chunk, base_gx, x, ly, gy, dx * 2),
+            Some(MaterialId::Air)
         ) {
             return true;
         }
     }
+    let _ = gx;
     false
-}
-
-/// True when both horizontal neighbours are Air (open lake / ocean top).
-/// 1-wide and 2-wide shafts have at least one solid side and return false.
-fn open_air_both_sides(world: &World, gx: i32, gy: i32) -> bool {
-    let air = |x: i32| {
-        matches!(
-            world.get_cell(world.wrap_x(x), gy),
-            Some(c) if c.material == MaterialId::Air
-        )
-    };
-    air(gx - 1) && air(gx + 1)
 }
 
 /// Whether a rising cell may pull from a connected free-surface donor.
@@ -537,31 +611,39 @@ fn accumulate_confined_upward_xfers(
                 // a flooded pipe. Seepage owns infiltration; skip before
                 // free-surface / BFS probes (rainy-shore leftover).
                 // A 1-wide well is walled and still rises.
+                let x_i = x as i32;
                 if below.material != MaterialId::Air {
-                    if !is_walled_column(world, gx, gy) {
+                    if !is_walled_column_in(world, chunk, base_gx, x_i, ly, gx, gy) {
                         continue;
                     }
                 } else {
                     // Open ocean/lake tops: both lateral neighbours are Air.
                     // Confined same-Y is a no-op, but the BFS still climbed
                     // the body. Keep shafts (any solid side).
-                    let free_surface = is_air_free_surface(world, gx, gy);
-                    if free_surface && open_air_both_sides(world, gx, gy) {
+                    let free_surface = is_air_free_surface_in(world, chunk, x as usize, ly, gx, gy);
+                    if free_surface && open_air_both_sides_in(world, chunk, base_gx, x_i, ly, gy) {
                         continue;
                     }
-                    if !is_walled_column(world, gx, gy) {
-                        if free_surface && opens_into_wide_water(world, gx, gy) {
+                    if !is_walled_column_in(world, chunk, base_gx, x_i, ly, gx, gy) {
+                        if free_surface
+                            && opens_into_wide_water_in(world, chunk, base_gx, x_i, ly, gx, gy)
+                        {
                             continue;
                         }
-                        if !free_surface
-                            && matches!(
-                                world.get_cell(gx, gy + 1),
+                        if !free_surface {
+                            let above = if ly + 1 < CHUNK_CELLS_H {
+                                Some(chunk.get(x as usize, ly + 1))
+                            } else {
+                                world.get_cell(gx, gy + 1)
+                            };
+                            if matches!(
+                                above,
                                 Some(c)
                                     if matches!(c.material, MaterialId::Ice | MaterialId::Snow)
-                            )
-                        {
-                            // Frozen lake lid, not a cased pipe.
-                            continue;
+                            ) {
+                                // Frozen lake lid, not a cased pipe.
+                                continue;
+                            }
                         }
                     }
                 }

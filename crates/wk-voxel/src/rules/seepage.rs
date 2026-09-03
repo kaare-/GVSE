@@ -4,6 +4,8 @@
 //!
 //! Permeability-limited pore soak.
 
+use std::collections::HashSet;
+
 use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::ActiveChunk;
@@ -570,8 +572,13 @@ pub fn apply_seepage_regions_ex(
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_seepage_xfers_ex(world, active, &mut xfers, contact_only);
     // Nothing dissolved anywhere means load transport and precipitation have
-    // nothing to do; checked once rather than per transfer.
-    let track_load = !world.dissolved.is_empty();
+    // nothing to do. Snapshot keys once: after karst the map stays
+    // non-empty, and most seepage sources still carry nothing.
+    let mut loaded: HashSet<(i32, i32)> = if world.dissolved.is_empty() {
+        HashSet::new()
+    } else {
+        world.dissolved.keys().copied().collect()
+    };
 
     // Apply in a stable order. Each transfer re-reads live sat so a
     // source drained by an earlier xfer simply sends less — every
@@ -613,7 +620,7 @@ pub fn apply_seepage_regions_ex(
         // hot path, and the checks the loop already has in hand (is there any
         // load at all, is the receiver even soluble) skip the common case
         // without a map lookup or a cell re-read.
-        if track_load && crate::mineral::dissolved_at(world, from.0, from.1) > 0 {
+        if !loaded.is_empty() && loaded.contains(&(from.0, from.1)) {
             // Dissolved mineral travels with the water that carries it, so karst
             // load reaches an outlet instead of sitting where the rock dissolved.
             crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
@@ -621,11 +628,16 @@ pub fn apply_seepage_regions_ex(
             // back into the pore space. A conduit that keeps flowing stays open;
             // one that stalls or concentrates seals itself with flowstone.
             crate::mineral::precipitate_at(world, to.0, to.1);
+            // Later xfers in this apply must see the load that just arrived.
+            loaded.insert((to.0, to.1));
         }
         // Throughput widens the aperture it passed through. This is what turns
         // a preferential path into a conduit: more flow opens the rock, opener
-        // rock carries more flow.
-        if crate::mineral::is_soluble_rock(dst.material) {
+        // rock carries more flow. Below the yield threshold the call is a
+        // no-op — skip the cell re-read.
+        if amt as u8 > crate::mineral::APERTURE_MIN_THROUGHPUT
+            && crate::mineral::is_soluble_rock(dst.material)
+        {
             crate::mineral::widen_aperture(
                 world,
                 to.0,
