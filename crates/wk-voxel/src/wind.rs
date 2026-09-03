@@ -531,26 +531,12 @@ impl Wind {
         here
     }
 
-    fn pressure_at(
-        &self,
-        world: Option<&World>,
-        bounds: TileBounds,
-        p: &FxHashMap<(i32, i32), f32>,
-        hx: i32,
-        hy: i32,
-        dx: i32,
-        dy: i32,
-        here: f32,
-    ) -> f32 {
-        if self.face_blocked(world, bounds, hx, hy, dx, dy) {
-            return here;
-        }
-        let nhx = self.wrap_tile_hx(hx + dx, bounds);
-        let nhy = hy + dy;
-        p.get(&(nhx, nhy)).copied().unwrap_or(0.0)
-    }
-
     /// `∇²p = ∇·v` then `v -= ∇p` on the existing keys only.
+    ///
+    /// Pressure lives in parallel `Vec`s indexed by `keys`. HashMap
+    /// `p.clone()` + per-iter `insert` was leftover hasher on the
+    /// occupied set — same Jacobi, same slip. Do not cache solids
+    /// across rebuilds (tried; compose + project are the real cost).
     fn project_incompressible(
         &self,
         world: Option<&World>,
@@ -561,52 +547,76 @@ impl Wind {
             return;
         }
         let keys: Vec<(i32, i32)> = field.keys().copied().collect();
-        let mut divs: FxHashMap<(i32, i32), f32> = FxHashMap::default();
-        divs.reserve(keys.len());
-        for &(hx, hy) in &keys {
+        let n = keys.len();
+        let mut idx: FxHashMap<(i32, i32), usize> = FxHashMap::default();
+        idx.reserve(n);
+        for (i, &k) in keys.iter().enumerate() {
+            idx.insert(k, i);
+        }
+        let mut divs = vec![0.0f32; n];
+        for (i, &(hx, hy)) in keys.iter().enumerate() {
             let (vx, vy) = field[&(hx, hy)];
             let ue = self.face_velocity(world, bounds, field, hx, hy, 1, 0, vx, true);
             let uw = self.face_velocity(world, bounds, field, hx, hy, -1, 0, vx, true);
             let vn = self.face_velocity(world, bounds, field, hx, hy, 0, 1, vy, false);
             let vs = self.face_velocity(world, bounds, field, hx, hy, 0, -1, vy, false);
-            divs.insert((hx, hy), ue - uw + vn - vs);
+            divs[i] = ue - uw + vn - vs;
         }
-        let mut p: FxHashMap<(i32, i32), f32> = FxHashMap::default();
-        p.reserve(keys.len());
-        for &k in &keys {
-            p.insert(k, 0.0);
-        }
-        let mut next = p.clone();
+        let mut p = vec![0.0f32; n];
+        let mut next = vec![0.0f32; n];
+        let neighbour = |hx: i32, hy: i32, dx: i32, dy: i32| -> Option<usize> {
+            if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+                return None;
+            }
+            idx.get(&(self.wrap_tile_hx(hx + dx, bounds), hy + dy))
+                .copied()
+        };
         for _ in 0..AIR_PROJECT_ITERS {
-            for &(hx, hy) in &keys {
+            for (i, &(hx, hy)) in keys.iter().enumerate() {
                 let mut sum = 0.0;
-                let mut n = 0.0;
+                let mut count = 0.0;
                 for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    if self.face_blocked(world, bounds, hx, hy, dx, dy) {
-                        continue;
-                    }
-                    let nhx = self.wrap_tile_hx(hx + dx, bounds);
-                    let nhy = hy + dy;
-                    if let Some(&pn) = p.get(&(nhx, nhy)) {
-                        sum += pn;
-                        n += 1.0;
+                    if let Some(j) = neighbour(hx, hy, dx, dy) {
+                        sum += p[j];
+                        count += 1.0;
                     }
                 }
-                if n < 1.0 {
-                    next.insert((hx, hy), p[&(hx, hy)]);
-                    continue;
-                }
-                let d = divs[&(hx, hy)];
-                next.insert((hx, hy), (sum - d) / n);
+                next[i] = if count < 1.0 {
+                    p[i]
+                } else {
+                    (sum - divs[i]) / count
+                };
             }
             std::mem::swap(&mut p, &mut next);
         }
-        for &(hx, hy) in &keys {
-            let here = p[&(hx, hy)];
-            let pr = self.pressure_at(world, bounds, &p, hx, hy, 1, 0, here);
-            let pl = self.pressure_at(world, bounds, &p, hx, hy, -1, 0, here);
-            let pu = self.pressure_at(world, bounds, &p, hx, hy, 0, 1, here);
-            let pd = self.pressure_at(world, bounds, &p, hx, hy, 0, -1, here);
+        for (i, &(hx, hy)) in keys.iter().enumerate() {
+            let here = p[i];
+            let at = |dx: i32, dy: i32| -> f32 {
+                neighbour(hx, hy, dx, dy)
+                    .map(|j| p[j])
+                    .unwrap_or(0.0)
+            };
+            // Blocked face: Neumann (here). Missing neighbour is 0.
+            let pr = if self.face_blocked(world, bounds, hx, hy, 1, 0) {
+                here
+            } else {
+                at(1, 0)
+            };
+            let pl = if self.face_blocked(world, bounds, hx, hy, -1, 0) {
+                here
+            } else {
+                at(-1, 0)
+            };
+            let pu = if self.face_blocked(world, bounds, hx, hy, 0, 1) {
+                here
+            } else {
+                at(0, 1)
+            };
+            let pd = if self.face_blocked(world, bounds, hx, hy, 0, -1) {
+                here
+            } else {
+                at(0, -1)
+            };
             if let Some(v) = field.get_mut(&(hx, hy)) {
                 v.0 = (v.0 - 0.5 * (pr - pl)).clamp(-1.0, 1.0);
                 v.1 = (v.1 - 0.5 * (pu - pd)).clamp(-1.0, 1.0);
