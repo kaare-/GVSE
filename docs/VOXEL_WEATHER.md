@@ -571,3 +571,15 @@ Do not re-walk these:
   track litter, not a sticky-flag leak. Confined **2.6 → 9.1** then
   **6.8** with a flat stand count is leftover communicating-vessel
   work, not rain-wet land.
+
+  After lottery-before-floor, dissolved-key snapshots, and confined
+  chunk-local neighbour reads (this host, 40 warm + 200 measure, 0
+  plants): short wall **26.6**, tall 1064 wall **19.5**, condensation
+  **0.48**, seepage **3.6**, confined **1.5**, flow erosion **0.89**.
+  Fresh-stamp is unchanged — these skips are leftover on filled /
+  karst-aged worlds. Repeat soak (256 plants, 8×400): wall **22.9 →
+  88.7**. Condensation **0.67 → 5.1** still tracks `hum n` **13k →
+  55k** (over-sat tiles must lottery). Confined **2.7 → 8.3** then
+  **7.0** is still equalized-shaft BFS, not neighbour HashMap probes.
+  `clay` stays **23**. Do not skip the lottery; do not starve the
+  confined wake.
