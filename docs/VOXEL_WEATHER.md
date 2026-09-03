@@ -555,3 +555,19 @@ Do not re-walk these:
   seepage bucket stays **~3.6** (apply + weep + seam dominate). Tall
   1064 wall **20.7**, confined **1.4**, humidity.advect **1.3**,
   wind.rebuild **1.8**.
+
+  After soak-age occupancy (clay / soluble / standing-air gates, plus
+  condensation mass-before-floor): short wall **27.1**, tall 1064 wall
+  **19.4**, humidity.advect **1.3**, wind.rebuild **1.9**, seepage
+  **3.5**, confined **1.4**, condensation **0.48**, flow erosion
+  **1.0**, suspension **0.06**, karst **0.04**. Fresh-stamp leftover
+  is unchanged — these cuts bite as drizzle soaks land and humidity
+  fills. `soak_age_inventory` (256 plants, climatic rain off, 8×400):
+  wall **22.6 → 86.4**. `clay` stays **23**, `stand` stays **~28**
+  (gates hold). Growers that are real work, not occupancy leaks:
+  `hum n` **13k → 55k / 68k** (condensation **0.67 → 5.1**), dirty
+  halo **7k → 33k**, `diss` **1.1k → 10.5k**, plant `mods` **2.1k →
+  3.9k**, `susp` **6 → 286**. `loose` **34 → 74** and `buoy` **0 → 48**
+  track litter, not a sticky-flag leak. Confined **2.6 → 9.1** then
+  **6.8** with a flat stand count is leftover communicating-vessel
+  work, not rain-wet land.
