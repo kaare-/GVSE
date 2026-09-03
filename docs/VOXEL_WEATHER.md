@@ -640,3 +640,11 @@ Do not re-walk these:
   **0.52 → 2.26** — same leftover as before. Plants sit on rain-wet
   land, so the dry-inland skip does not move soak. `clay` stays
   **23**. Do not skip dry flow cells that own the +x equalise edge.
+
+  After solving wind Jacobi pressure in `Vec`s (this host, 40 warm +
+  200 measure, 0 plants): short wall **25.0**, tall **17.5**,
+  wind.rebuild **2.42 / 1.86** (same as **2.32 / 1.87**). Repeat soak
+  (256 plants, 8×400): wall **20.6 → 82.7**. Same six iterations,
+  same slip — HashMap clone + per-iter insert were leftover hasher,
+  not the compose / `face_blocked` cost. `clay` stays **23**. Do not
+  retry the Jacobi solid-cache.
