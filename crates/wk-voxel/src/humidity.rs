@@ -493,7 +493,7 @@ impl Humidity {
         }
         // Snapshot the current state so we don't chase deltas across
         // the pass.
-        let snap: HashMap<(i32, i32), f32> = self.cells.clone();
+        let snap: FxHashMap<(i32, i32), f32> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
 
         // Build the iteration set: every mapped tile *plus* each of
         // its four neighbours (so a lone spike still spreads to its
@@ -523,7 +523,7 @@ impl Humidity {
         sources.sort_unstable();
         sources.dedup();
 
-        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         for &(hx, hy) in &sources {
             let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
             // +x neighbour (possibly wrapped).
@@ -597,7 +597,7 @@ impl Humidity {
         // Row means come from [`Temperature::row_mean_at`] (rebuilt on the
         // period-20 thermal step). Scanning every hx of every wet hy here
         // was the other cliff: more lofted rows → width × rows lookups.
-        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         let mut heat_lifts: Vec<(i32, i32, f32)> = Vec::new();
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
         for (hx, hy) in keys {
@@ -750,11 +750,13 @@ impl Humidity {
         self.advect_rx = 0.0;
         self.advect_ry = 0.0;
 
-        let snap = self.cells.clone();
+        // Flux only iterates the snapshot — a Vec avoids rehashing the
+        // saved SipHash map every tick (leftover as humidity fills).
+        let snap: Vec<((i32, i32), f32)> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
         let vectors = surface.map(|(wind, world, _)| {
             let mut cache = FxHashMap::default();
             cache.reserve(snap.len());
-            for &(hx, hy) in snap.keys() {
+            for &((hx, hy), _) in &snap {
                 cache.insert((hx, hy), wind.vector_at(Some(world), hx, hy));
             }
             cache
@@ -789,7 +791,7 @@ impl Humidity {
     /// leaves toward the neighbour this tick (capped at 1).
     fn flux_axis(
         &mut self,
-        snap: &HashMap<(i32, i32), f32>,
+        snap: &[((i32, i32), f32)],
         climate_vx: f32,
         climate_vy: f32,
         surface: Option<(
@@ -802,7 +804,7 @@ impl Humidity {
     ) {
         let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         deltas.reserve(snap.len());
-        for (&(hx, hy), &mass) in snap {
+        for &((hx, hy), mass) in snap {
             if mass.abs() < 1e-9 {
                 continue;
             }

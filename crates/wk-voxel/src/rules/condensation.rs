@@ -299,14 +299,16 @@ pub fn apply_condensation_rain_phased(
     // Lowest wet tile per column — hint for the floor walk. Built for
     // every key (cheap) so a high lottery winner cannot start 24 cells
     // above the crest, miss the ground, and cache "no floor".
-    let mut col_lo: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+    let mut col_lo: crate::fasthash::FxHashMap<i32, i32> =
+        crate::fasthash::FxHashMap::default();
     for &(hx, hy) in &tiles {
         col_lo
             .entry(hx)
             .and_modify(|m| *m = (*m).min(hy))
             .or_insert(hy);
     }
-    let mut film_floor: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+    let mut film_floor: crate::fasthash::FxHashMap<i32, i32> =
+        crate::fasthash::FxHashMap::default();
     for (hx, hy) in tiles {
         // Cheap sat / min-mass gate, then lottery, then the column floor
         // walk. Floor does not change the roll, so losers must not pay
@@ -491,7 +493,7 @@ fn first_free_air_hy(
     tile_cols: i32,
     hx: i32,
     hint_hy: i32,
-    cache: &mut std::collections::HashMap<i32, i32>,
+    cache: &mut crate::fasthash::FxHashMap<i32, i32>,
 ) -> i32 {
     if let Some(&hy) = cache.get(&hx) {
         return hy;
