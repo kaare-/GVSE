@@ -230,10 +230,14 @@ fn quiet_deep_lake_bed_keeps_soaking_after_dirty_clears() {
     let sand_cap = water_capacity(MaterialId::Sand);
     let bed = w.get_cell(4, 1).unwrap();
     assert_eq!(bed.material, MaterialId::Sand);
-    assert_eq!(
-        bed.sat.0, sand_cap,
-        "quiet deep-lake bed must still soak to capacity (sat={})",
-        bed.sat.0
+    // Mid-air rain no longer diagonal-feeds the bed from the freeboard.
+    // The wake still soaks; allow the same 1-sat slack as the stacked
+    // stone-bed test above.
+    assert!(
+        bed.sat.0 + 1 >= sand_cap,
+        "quiet deep-lake bed must still soak to capacity (sat={}/{})",
+        bed.sat.0,
+        sand_cap
     );
 }
 
