@@ -71,7 +71,7 @@ Per wet Air cell (compute-then-apply, mass-conserving):
    - Scan up to 12 standing cells for a cascade outlet; push toward it.
    - Pairwise head-equalise each `+x` standing edge (avoids checkerboard terraces on wide lakes).
 4. **Throughflow** — weep through a saturated porous stack (≤24 deep) at seepage rate into the **nearest opening**: a side Air face (cliff / spring) or Air below the stack.
-5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (`wake_confined_head` — not the dirty halo, so ocean evaporation cannot starve a quiet shaft). The wake visits chunks with solid **and** standing water (`has_solid && has_standing_air`). Rain-film sky, mid-ocean water with no rock, and groundwater-only crust already reject per-cell; walking those 64×64s was the leftover period-16 cost. Evap / the wake refresh `has_standing_air` so a drained lake drops out.
+5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (`wake_confined_head` — not the dirty halo, so ocean evaporation cannot starve a quiet shaft). The wake visits chunks with solid **and** standing water (`has_solid && has_standing_air`). Rain-film sky, mid-ocean water with no rock, and groundwater-only crust already reject per-cell. Uncased drizzle on wet ground skips before the free-surface / BFS probes — seepage owns that infiltration; a walled well still rises. Evap refreshes `has_standing_air` so a drained lake drops out.
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 
@@ -237,6 +237,8 @@ water table. It walks chunks with standing water or an unsaturated pore
 front (`has_standing_air || has_unsaturated_pores`) and refreshes both
 flags from the same scan. Standing water still walks down into the bed
 in the chunk below, so a full table does not need its own 64×64.
+Mid-ocean / lake interiors (standing water on more water) peek
+chunk-local and skip the pore walk.
 
 `wake_pore_weep_into_air` on buried crust (`!has_open_air`) only checks
 the chunk perimeter — an interior pore cannot face Air. Neighbour reads

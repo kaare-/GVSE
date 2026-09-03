@@ -18,7 +18,7 @@ use super::head::{
     hydraulic_head, is_porous_cell, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
     seepage_rate_cell, seepage_uptake_rate_cell,
 };
-use super::plan::{refresh_chunk_water_flags, regions_confined_loaded, regions_for_standalone};
+use super::plan::{regions_confined_loaded, regions_for_standalone};
 
 /// Priority water flow.
 ///
@@ -140,9 +140,6 @@ pub fn wake_confined_head(world: &mut World) {
     // (~38 ms/call → 2.4 ms amortized on the tall box).
     let regions = regions_confined_loaded(world);
     apply_confined_upward_regions(world, &regions);
-    for ac in &regions {
-        refresh_chunk_water_flags(world, ac.coord);
-    }
 }
 
 fn commit_air_sat_xfers(
@@ -533,40 +530,36 @@ fn accumulate_confined_upward_xfers(
                 if !transmits_pressure(world, &below) {
                     continue;
                 }
-                // Open ocean/lake tops: both lateral neighbours are Air and
-                // the cell is already a free surface. Confined same-Y is a
-                // no-op (`allows_confined_rise`), but `pressure_body_from_full`
-                // still BFS-climbs the body — dominant cost on rainy shores.
-                // Keep shafts (any solid side) and buried/lid cells.
-                let free_surface = is_air_free_surface(world, gx, gy);
-                if free_surface && open_air_both_sides(world, gx, gy) {
-                    continue;
-                }
-                // Drizzle / hillside film on wet ground: free-surface Air
-                // sitting on saturated pore, not cased into a shaft.
-                // `pressure_body_from_full` would BFS the aquifer (and a
-                // connected lake) for a rise that seepage already handles.
-                // A 1-wide well is walled; a 2-wide shaft sits on flooded
-                // Air, not on rock. An uncased hole is open ground.
-                if !is_walled_column(world, gx, gy) {
-                    if free_surface {
-                        // Hillside drizzle film on wet ground (uncased hole).
-                        if below.material != MaterialId::Air {
-                            continue;
-                        }
-                        // Beach / puddle that opens into wider water. Same-Y
-                        // equalise handles these; the BFS was the rainy-shore cost.
-                        if opens_into_wide_water(world, gx, gy) {
-                            continue;
-                        }
-                    } else if matches!(
-                        world.get_cell(gx, gy + 1),
-                        Some(c)
-                            if matches!(c.material, MaterialId::Ice | MaterialId::Snow)
-                    ) {
-                        // Frozen lake lid, not a cased pipe. A walled shaft
-                        // with an ice plug still rises.
+                // Uncased film on wet ground: sitting on saturated pore, not
+                // a flooded pipe. Seepage owns infiltration; skip before
+                // free-surface / BFS probes (rainy-shore leftover).
+                // A 1-wide well is walled and still rises.
+                if below.material != MaterialId::Air {
+                    if !is_walled_column(world, gx, gy) {
                         continue;
+                    }
+                } else {
+                    // Open ocean/lake tops: both lateral neighbours are Air.
+                    // Confined same-Y is a no-op, but the BFS still climbed
+                    // the body. Keep shafts (any solid side).
+                    let free_surface = is_air_free_surface(world, gx, gy);
+                    if free_surface && open_air_both_sides(world, gx, gy) {
+                        continue;
+                    }
+                    if !is_walled_column(world, gx, gy) {
+                        if free_surface && opens_into_wide_water(world, gx, gy) {
+                            continue;
+                        }
+                        if !free_surface
+                            && matches!(
+                                world.get_cell(gx, gy + 1),
+                                Some(c)
+                                    if matches!(c.material, MaterialId::Ice | MaterialId::Snow)
+                            )
+                        {
+                            // Frozen lake lid, not a cased pipe.
+                            continue;
+                        }
                     }
                 }
                 let Some(body) =

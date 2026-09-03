@@ -48,8 +48,9 @@ impl Default for EvapConfig {
 ///   (so mid-air rain / falling droplets are not re-evaporated before
 ///   they can reach the ground).
 ///
-/// Compute-then-apply so evap is order-independent. Chunk scans use
-/// rayon when [`crate::parallel::parallel_enabled`] (frame-shell Phase 1).
+/// Rain-film sky chunks (`has_wet_air` only) are not scanned — airborne
+/// droplets already fail `rests`. Chunk scans use rayon when
+/// [`crate::parallel::parallel_enabled`] (frame-shell Phase 1).
 pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
     let period = cfg.period_ticks.max(1);
     if world.tick % period != 0 {
@@ -128,10 +129,24 @@ fn collect_evap_deltas(
         &crate::humidity::Humidity,
     )>,
 ) -> (HashMap<(i32, i32), i32>, Vec<(ChunkCoord, bool, bool)>) {
+    // Surface films only. Rain-film sky (`has_wet_air` without solid or
+    // standing water) cannot rest on a bed, so the per-cell `rests`
+    // check always fails — walking those 64×64s was the leftover evap
+    // cost on a tall box. Bootstrap (no flags yet) keeps wet-air.
+    let ready = world
+        .chunks
+        .values()
+        .any(|c| c.has_standing_air || (c.has_wet_air && c.has_solid));
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_air)
+        .filter(|(_, c)| {
+            if ready {
+                c.has_standing_air || (c.has_wet_air && c.has_solid)
+            } else {
+                c.has_wet_air
+            }
+        })
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));

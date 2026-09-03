@@ -112,27 +112,49 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 // groundwater "teleporting" under a dry gap.
                 if cell.material == MaterialId::Air && cell.sat.0 >= STANDING_AIR_SAT {
                     any_standing = true;
-                    let mut yy = gy - 1;
-                    for _ in 0..(CHUNK_CELLS_H * 2) {
-                        let Some(below) = world.get_cell(gx, yy) else {
-                            break;
-                        };
-                        if !is_porous_cell(below, &hydro) {
-                            break;
+                    // Mid-ocean / lake interior: below is more water, not a
+                    // bed. One chunk-local peek replaces a get_cell walk.
+                    let below = if ly > 0 {
+                        Some(chunk.get(lx, ly - 1))
+                    } else {
+                        world.get_cell(gx, gy - 1)
+                    };
+                    if let Some(below) = below {
+                        if is_porous_cell(below, &hydro) {
+                            let cap = water_capacity_cell(below, &hydro);
+                            if cap > 0 && below.sat.0 < cap {
+                                touches.push((gx, gy - 1));
+                            } else if cap > 0 {
+                                let mut yy = gy - 2;
+                                for _ in 0..(CHUNK_CELLS_H * 2) {
+                                    let Some(b) = world.get_cell(gx, yy) else {
+                                        break;
+                                    };
+                                    if !is_porous_cell(b, &hydro) {
+                                        break;
+                                    }
+                                    let cap = water_capacity_cell(b, &hydro);
+                                    if cap == 0 {
+                                        break;
+                                    }
+                                    if b.sat.0 < cap {
+                                        touches.push((gx, yy));
+                                        break;
+                                    }
+                                    yy -= 1;
+                                }
+                            }
                         }
-                        let cap = water_capacity_cell(below, &hydro);
-                        if cap == 0 {
-                            break;
-                        }
-                        if below.sat.0 < cap {
-                            touches.push((gx, yy));
-                            break;
-                        }
-                        yy -= 1;
                     }
                     for dx in [-1_i32, 1] {
+                        let nlx = lx as i32 + dx;
                         let nx = world.wrap_x(gx + dx);
-                        if let Some(n) = world.get_cell(nx, gy) {
+                        let n = if nlx >= 0 && nlx < CHUNK_CELLS_W as i32 {
+                            Some(chunk.get(nlx as usize, ly))
+                        } else {
+                            world.get_cell(nx, gy)
+                        };
+                        if let Some(n) = n {
                             if is_porous_cell(n, &hydro) {
                                 let cap = water_capacity_cell(n, &hydro);
                                 if cap > 0 && n.sat.0 < cap {
