@@ -232,10 +232,20 @@ under the seepage cadence, and again unguarded just before the seepage plan.
 Only the later call site matters (its dirty is what the seepage plan consumes),
 so the early copy is gone and the wakes ride the cadence as intended.
 
-`wake_lake_bed_pores` further skips rain-film sky (`has_wet_air` only, sat
-below 160). It walks chunks with standing water or wet pores
-(`has_standing_air || has_wet_pores`) and refreshes the standing flag from
-the same scan so a film-only column does not keep soaking an empty bed.
+`wake_lake_bed_pores` further skips rain-film sky and a quiet saturated
+water table. It walks chunks with standing water or an unsaturated pore
+front (`has_standing_air || has_unsaturated_pores`) and refreshes both
+flags from the same scan. Standing water still walks down into the bed
+in the chunk below, so a full table does not need its own 64×64.
+
+`wake_pore_weep_into_air` on buried crust (`!has_open_air`) only checks
+the chunk perimeter — an interior pore cannot face Air. Neighbour reads
+are chunk-local when they stay inside the 64×64. Digging a cavity writes
+Air and raises `has_open_air`, so the next weep is a full scan again.
+
+Deep / seam seepage skips pore↔pore faces that are **both at capacity**
+before the fire-odds roll and head math. Those cannot transfer; Air faces
+(infiltration / weep) still run.
 
 Use `tests/seepage_split_probe.rs` before tuning any of this. The profiler
 lumps five calls into one `seepage` bucket and the bucket cannot say which.

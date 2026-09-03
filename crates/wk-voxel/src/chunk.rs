@@ -163,6 +163,18 @@ pub struct Chunk {
     /// scan finds none left.
     #[serde(default)]
     pub has_solid: bool,
+    /// Sticky occupancy: at least one `Air` cell (wet or dry). Pore-weep
+    /// on buried crust only scans the chunk perimeter — interior cells
+    /// cannot face Air. Raised on any Air write; cleared when a scan
+    /// finds none left.
+    #[serde(default)]
+    pub has_open_air: bool,
+    /// Sticky occupancy: at least one porous solid below capacity.
+    /// Lake-bed skip of a quiet saturated water table. Raised on any
+    /// wet-solid write (capacity is not known at chunk level); cleared
+    /// when a scan finds every pore full.
+    #[serde(default)]
+    pub has_unsaturated_pores: bool,
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -200,6 +212,8 @@ impl Chunk {
             has_competent: false,
             has_standing_air: false,
             has_solid: false,
+            has_open_air: false,
+            has_unsaturated_pores: false,
         }
     }
 
@@ -247,6 +261,10 @@ impl Chunk {
         // over-wake a rare wet impermeable cell, but never misses water.
         if cell.material != MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_pores = true;
+            self.has_unsaturated_pores = true;
+        }
+        if cell.material == MaterialId::Air {
+            self.has_open_air = true;
         }
         if cell.material == MaterialId::Limestone {
             self.has_limestone = true;
@@ -347,21 +365,29 @@ mod tests {
         assert!(!c.has_competent);
         assert!(!c.has_standing_air);
         assert!(!c.has_solid);
+        assert!(!c.has_open_air);
+        assert!(!c.has_unsaturated_pores);
         let mut rain = Cell::air();
         rain.sat = Sat(33);
         c.set(0, 0, rain);
         assert!(c.has_wet_air);
+        assert!(c.has_open_air);
         assert!(!c.has_standing_air);
         assert!(!c.has_solid);
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
         assert!(c.has_standing_air);
+        assert!(c.has_open_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
         assert!(c.has_competent);
         assert!(c.has_solid);
         c.set(3, 3, Cell::solid(MaterialId::Sand));
         assert!(c.has_loose);
+        let mut wet_sand = Cell::solid(MaterialId::Sand);
+        wet_sand.sat = Sat(8);
+        c.set(6, 6, wet_sand);
+        assert!(c.has_unsaturated_pores);
         c.set(4, 4, Cell::solid(MaterialId::Snow));
         assert!(c.has_snow);
         c.set(5, 5, Cell::solid(MaterialId::Stone));

@@ -93,22 +93,24 @@ pub(crate) fn regions_confined_loaded(world: &World) -> Vec<ActiveChunk> {
         .collect()
 }
 
-/// Loaded chunks that may have a standing-water bed or a wet pore front.
+/// Loaded chunks that may have a standing-water bed or a wetting front.
 ///
-/// Rain-film sky (sat &lt; 160, no pores) is skipped. Bootstrap falls
-/// back to [`regions_wet_loaded`].
+/// A quiet saturated water table (`has_wet_pores` only) is skipped —
+/// standing water still walks down into the bed below, and an
+/// unsaturated front keeps its own chunk. Rain-film sky is skipped.
+/// Bootstrap (no flags set yet) falls back to [`regions_wet_loaded`].
 pub(crate) fn regions_lake_bed_loaded(world: &World) -> Vec<ActiveChunk> {
     let ready = world
         .chunks
         .values()
-        .any(|c| c.has_standing_air || c.has_wet_pores);
+        .any(|c| c.has_standing_air || c.has_unsaturated_pores);
     if !ready {
         return regions_wet_loaded(world);
     }
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_standing_air || c.has_wet_pores)
+        .filter(|(_, c)| c.has_standing_air || c.has_unsaturated_pores)
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
@@ -250,5 +252,30 @@ mod tests {
                 ChunkCoord::new(3, 0)
             ]
         );
+
+        // Quiet saturated table: after a lake-bed scan clears the unsat
+        // flag, the chunk must drop out. Standing water still walks down
+        // into a bed from the chunk above.
+        w.ensure_chunk(ChunkCoord::new(4, 0));
+        let cap = crate::cell::water_capacity(MaterialId::Stone);
+        w.set_cell(
+            258,
+            1,
+            Cell {
+                material: MaterialId::Stone,
+                sat: Sat(cap),
+                ..Cell::default()
+            },
+        );
+        crate::rules::wake_lake_bed_pores(&mut w);
+        let lake: Vec<_> = regions_lake_bed_loaded(&w)
+            .into_iter()
+            .map(|ac| ac.coord)
+            .collect();
+        assert!(
+            !lake.contains(&ChunkCoord::new(4, 0)),
+            "full water-table chunk must leave the lake-bed walk"
+        );
+        assert!(lake.contains(&ChunkCoord::new(1, 0)));
     }
 }
