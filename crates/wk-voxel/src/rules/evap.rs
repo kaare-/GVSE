@@ -128,7 +128,10 @@ fn collect_evap_deltas(
         f32,
         &crate::humidity::Humidity,
     )>,
-) -> (HashMap<(i32, i32), i32>, Vec<(ChunkCoord, bool, bool)>) {
+) -> (
+    HashMap<(i32, i32), i32>,
+    Vec<(ChunkCoord, bool, bool, u8, u8)>,
+) {
     // Surface films only. Rain-film sky (`has_wet_air` without solid or
     // standing water) cannot rest on a bed, so the per-cell `rests`
     // check always fails — walking those 64×64s was the leftover evap
@@ -153,7 +156,7 @@ fn collect_evap_deltas(
 
     let per_chunk = map_chunk_coords_parallel(&coords, |coord| {
         let Some(chunk) = world.chunks.get(&coord) else {
-            return (coord, false, false, Vec::new());
+            return (coord, false, false, 255, 0, Vec::new());
         };
         let above = world.chunks.get(&ChunkCoord::new(coord.cx, coord.cy + 1));
         let below = world.chunks.get(&ChunkCoord::new(coord.cx, coord.cy - 1));
@@ -162,6 +165,8 @@ fn collect_evap_deltas(
         let mut local: Vec<((i32, i32), i32)> = Vec::new();
         let mut still_wet = false;
         let mut still_standing = false;
+        let mut stand_lo = 255u8;
+        let mut stand_hi = 0u8;
         for y in 0..CHUNK_CELLS_H {
             let gy = base_gy + y as i32;
             for x in 0..CHUNK_CELLS_W {
@@ -173,6 +178,9 @@ fn collect_evap_deltas(
                 still_wet = true;
                 if cur.sat.0 >= STANDING_AIR_SAT {
                     still_standing = true;
+                    let yu = y as u8;
+                    stand_lo = stand_lo.min(yu);
+                    stand_hi = stand_hi.max(yu);
                 }
                 let sky_above = if y + 1 < CHUNK_CELLS_H {
                     let above_c = chunk.get(x, y + 1);
@@ -222,13 +230,13 @@ fn collect_evap_deltas(
                 local.push(((gx, gy), -rate));
             }
         }
-        (coord, still_wet, still_standing, local)
+        (coord, still_wet, still_standing, stand_lo, stand_hi, local)
     });
 
     let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
     let mut occupancy = Vec::new();
-    for (coord, still_wet, still_standing, local) in per_chunk {
-        occupancy.push((coord, still_wet, still_standing));
+    for (coord, still_wet, still_standing, stand_lo, stand_hi, local) in per_chunk {
+        occupancy.push((coord, still_wet, still_standing, stand_lo, stand_hi));
         for (key, delta) in local {
             *deltas.entry(key).or_insert(0) += delta;
         }
@@ -236,13 +244,22 @@ fn collect_evap_deltas(
     (deltas, occupancy)
 }
 
-fn apply_evap_occupancy_flags(world: &mut World, occupancy: &[(ChunkCoord, bool, bool)]) {
-    for &(coord, still_wet, still_standing) in occupancy {
+fn apply_evap_occupancy_flags(
+    world: &mut World,
+    occupancy: &[(ChunkCoord, bool, bool, u8, u8)],
+) {
+    for &(coord, still_wet, still_standing, stand_lo, stand_hi) in occupancy {
         if let Some(chunk) = world.chunks.get_mut(&coord) {
             if !still_wet {
                 chunk.has_wet_air = false;
             }
-            chunk.has_standing_air = still_standing;
+            if still_standing {
+                chunk.has_standing_air = true;
+                chunk.standing_air_y0 = stand_lo;
+                chunk.standing_air_y1 = stand_hi;
+            } else {
+                chunk.clear_standing_air();
+            }
         }
     }
 }

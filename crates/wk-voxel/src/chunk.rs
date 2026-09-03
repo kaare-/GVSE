@@ -175,6 +175,21 @@ pub struct Chunk {
     /// when a scan finds every pore full.
     #[serde(default)]
     pub has_unsaturated_pores: bool,
+    /// Inclusive local-y band of standing Air. `y0 > y1` is unset
+    /// (old saves / bootstrap) so confined still scans the full rect.
+    /// Raised on a standing write; tightened by the evap occupancy walk.
+    #[serde(default = "standing_band_unset_lo")]
+    pub standing_air_y0: u8,
+    #[serde(default = "standing_band_unset_hi")]
+    pub standing_air_y1: u8,
+}
+
+fn standing_band_unset_lo() -> u8 {
+    255
+}
+
+fn standing_band_unset_hi() -> u8 {
+    0
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -214,6 +229,8 @@ impl Chunk {
             has_solid: false,
             has_open_air: false,
             has_unsaturated_pores: false,
+            standing_air_y0: 255,
+            standing_air_y1: 0,
         }
     }
 
@@ -289,6 +306,7 @@ impl Chunk {
         }
         if cell.material == MaterialId::Air && cell.sat.0 >= STANDING_AIR_SAT {
             self.has_standing_air = true;
+            self.note_standing_air_y(yu);
         }
         if cell.material != MaterialId::Air {
             self.has_solid = true;
@@ -299,6 +317,41 @@ impl Chunk {
     /// once the previous pass has been fully consumed.
     pub fn clear_dirty(&mut self) {
         self.dirty = None;
+    }
+
+    /// Expand the standing-air y band to include `y`.
+    pub fn note_standing_air_y(&mut self, y: u8) {
+        if self.standing_air_y0 > self.standing_air_y1 {
+            self.standing_air_y0 = y;
+            self.standing_air_y1 = y;
+            return;
+        }
+        self.standing_air_y0 = self.standing_air_y0.min(y);
+        self.standing_air_y1 = self.standing_air_y1.max(y);
+    }
+
+    /// Clear standing occupancy and the y band (scan found none).
+    pub fn clear_standing_air(&mut self) {
+        self.has_standing_air = false;
+        self.standing_air_y0 = 255;
+        self.standing_air_y1 = 0;
+    }
+
+    /// Local y range to scan for confined rise, intersected with `rect`.
+    ///
+    /// The rising film sits on the standing column, so the band is
+    /// expanded by one row. Unset bands (`y0 > y1`) keep the full rect.
+    pub fn standing_scan_y(&self, rect: Rect) -> (u8, u8) {
+        if self.standing_air_y0 > self.standing_air_y1 {
+            return (rect.y0, rect.y1);
+        }
+        let lo = self.standing_air_y0.saturating_sub(1).max(rect.y0);
+        let hi = (self.standing_air_y1.saturating_add(1)).min(rect.y1);
+        if lo <= hi {
+            (lo, hi)
+        } else {
+            (rect.y0, rect.y1)
+        }
     }
 
     /// Mark a local cell dirty without changing its contents.
@@ -377,6 +430,8 @@ mod tests {
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
         assert!(c.has_standing_air);
+        assert_eq!(c.standing_air_y0, 1);
+        assert_eq!(c.standing_air_y1, 1);
         assert!(c.has_open_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
@@ -406,5 +461,17 @@ mod tests {
         c.clear_dirty();
         c.set(3, 4, Cell::water());
         assert!(c.dirty.is_none(), "identical rewrite must not wake physics");
+    }
+
+    #[test]
+    fn standing_scan_y_covers_the_rising_film() {
+        let mut c = Chunk::new(ChunkCoord::new(0, 0));
+        let full = Rect::full();
+        assert_eq!(c.standing_scan_y(full), (0, 63));
+        c.set(4, 10, Cell::water());
+        assert_eq!(c.standing_scan_y(full), (9, 11));
+        c.clear_standing_air();
+        assert!(!c.has_standing_air);
+        assert_eq!(c.standing_scan_y(full), (0, 63));
     }
 }

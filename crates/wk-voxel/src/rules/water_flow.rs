@@ -137,7 +137,9 @@ pub fn wake_confined_head(world: &mut World) {
     }
     // Standing water / pipe films next to solid only. Rain-film sky and
     // mid-ocean water with no rock were the leftover period-16 cost
-    // (~38 ms/call → 2.4 ms amortized on the tall box).
+    // (~38 ms/call → 2.4 ms amortized on the tall box). Each chunk then
+    // scans only its standing-air y band (+1 for the rising film) so
+    // dry sky in shore chunks is leftover.
     let regions = regions_confined_loaded(world);
     apply_confined_upward_regions(world, &regions);
 }
@@ -506,7 +508,8 @@ fn accumulate_confined_upward_xfers(
             .get(&ChunkCoord::new(ac.coord.cx, ac.coord.cy - 1));
         let base_gx = ac.coord.cx * cw;
         let base_gy = ac.coord.cy * ch;
-        for y in ac.rect.y0..=ac.rect.y1 {
+        let (scan_y0, scan_y1) = chunk.standing_scan_y(ac.rect);
+        for y in scan_y0..=scan_y1 {
             let gy = base_gy + y as i32;
             let ly = y as usize;
             for x in ac.rect.x0..=ac.rect.x1 {

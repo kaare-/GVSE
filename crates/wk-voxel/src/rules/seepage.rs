@@ -216,7 +216,13 @@ pub fn wake_lake_bed_pores(world: &mut World) {
     }
     for (coord, any_standing) in standing_updates {
         if let Some(chunk) = world.chunks.get_mut(&coord) {
-            chunk.has_standing_air = any_standing;
+            if any_standing {
+                chunk.has_standing_air = true;
+            } else {
+                // Partial-rect scan: do not shrink the y band. Only
+                // clear when this walk saw no standing water at all.
+                chunk.clear_standing_air();
+            }
         }
     }
     for (coord, any_unsat) in unsat_updates {
