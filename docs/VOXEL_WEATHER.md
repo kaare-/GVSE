@@ -584,7 +584,10 @@ Do not re-walk these:
   `clay` stays **23**. Do not skip the lottery; do not starve the
   confined wake.
 
-  Next leftover: confined soak BFS with a flat stand count. Hypothesis
-  — plants and grains counted as well casing (`!= Air`), so vegetated
-  / sandy films paid the aquifer walk. Casing is now rock / bedrock
-  only; profile numbers after that cut go here.
+  After rock-only confined casing (this host): fresh-stamp short wall
+  **26.7**, tall **19.1**, confined **1.3 / 1.2**. Soak (256 plants,
+  8×400): wall **23.2 → 90.2**. Confined **2.2 → 8.1** then **6.3**
+  — same leftover as before. Plants / grains as walls was correct
+  physics (films must not rise) but not the soak BFS. `clay` stays
+  **23**. Equalized uncased films at the standing surface still paid
+  the walk; that skip is next.

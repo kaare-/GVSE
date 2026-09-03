@@ -129,6 +129,28 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
     }
 }
 
+/// Highest standing-air row in the loaded world, or `None` when a
+/// standing chunk has no y band yet (old save / bootstrap — do not skip).
+///
+/// A film at or above this row cannot have a *higher-row* standing
+/// donor. Uncased films also cannot same-row finish, so their BFS is
+/// leftover. Walled wells at this row may still pull same-row sat.
+fn max_standing_air_gy(world: &World) -> Option<i32> {
+    let ch = CHUNK_CELLS_H as i32;
+    let mut max_gy: Option<i32> = None;
+    for (coord, chunk) in &world.chunks {
+        if !chunk.has_standing_air {
+            continue;
+        }
+        if chunk.standing_air_y0 > chunk.standing_air_y1 {
+            return None;
+        }
+        let top = coord.cy * ch + i32::from(chunk.standing_air_y1);
+        max_gy = Some(max_gy.map_or(top, |m| m.max(top)));
+    }
+    max_gy
+}
+
 /// Periodic full-chunk confined-head wake (communicating vessels).
 ///
 /// Must not use dirty-halo planning — ocean evaporation keeps surface
@@ -583,6 +605,7 @@ fn accumulate_confined_upward_xfers(
     let head_eps = 1.0 / (cap as f32);
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
+    let max_stand_gy = max_standing_air_gy(world);
 
     for ac in active {
         let Some(chunk) = world.chunks.get(&ac.coord) else {
@@ -624,19 +647,20 @@ fn accumulate_confined_upward_xfers(
                 // Casing is rock / bedrock — plants and grains do not
                 // case a well. A 1-wide rock shaft still rises.
                 let x_i = x as i32;
+                let walled = is_walled_column_in(world, chunk, base_gx, x_i, ly, gx, gy);
                 if below.material != MaterialId::Air {
-                    if !is_walled_column_in(world, chunk, base_gx, x_i, ly, gx, gy) {
+                    if !walled {
                         continue;
                     }
                 } else {
                     // Open ocean/lake tops: both lateral neighbours are Air.
                     // Confined same-Y is a no-op, but the BFS still climbed
-                    // the body. Keep shafts (any solid side).
+                    // the body. Keep rock-cased shafts.
                     let free_surface = is_air_free_surface_in(world, chunk, x as usize, ly, gx, gy);
                     if free_surface && open_air_both_sides_in(world, chunk, base_gx, x_i, ly, gy) {
                         continue;
                     }
-                    if !is_walled_column_in(world, chunk, base_gx, x_i, ly, gx, gy) {
+                    if !walled {
                         if free_surface
                             && opens_into_wide_water_in(world, chunk, base_gx, x_i, ly, gx, gy)
                         {
@@ -657,6 +681,15 @@ fn accumulate_confined_upward_xfers(
                                 continue;
                             }
                         }
+                    }
+                }
+                // No standing water above this row: a higher-row donor
+                // cannot exist. Uncased cannot same-row finish, so BFS
+                // cannot produce a rise. Walled wells at the standing
+                // surface may still pull same-row sat.
+                if let Some(max_stand) = max_stand_gy {
+                    if gy > max_stand || (gy >= max_stand && !walled) {
+                        continue;
                     }
                 }
                 let Some(body) =
