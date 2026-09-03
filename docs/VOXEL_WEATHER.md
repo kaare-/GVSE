@@ -528,3 +528,9 @@ Do not re-walk these:
   **22.2**, physics **11.1**, seepage **3.5**, confined wake **2.2**,
   bodies **3.3**. Split probe on demo: lake-bed 1.6, weep 1.6, deep
   1.7, seam couple 1.5 (was 2.0 / 2.4 / 3.3 / 3.4).
+
+  After mid-ocean lake-bed peek, rain-sky evap skip, and uncased
+  confined reject: short wall **30.6**. Tall 1064 wall **21.4**,
+  evap→humidity **1.6**, seepage **3.5**, confined wake **2.2**.
+  Lake-bed split 1.5 (was 1.6). Confined ~2.2 is still the ocean/lake
+  communicating-vessel walk.

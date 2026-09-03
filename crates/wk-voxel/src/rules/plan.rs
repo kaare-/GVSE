@@ -5,7 +5,7 @@
 //! Active-region planning helpers for standalone rule calls.
 
 use crate::active::{plan_active, ActiveChunk};
-use crate::chunk::{ChunkCoord, STANDING_AIR_SAT};
+use crate::chunk::ChunkCoord;
 use crate::grid::World;
 
 /// Resolve the scan plan for a standalone rule call. Uses current
@@ -121,29 +121,6 @@ pub(crate) fn regions_lake_bed_loaded(world: &World) -> Vec<ActiveChunk> {
             rect: crate::chunk::Rect::full(),
         })
         .collect()
-}
-
-/// Refresh sticky standing-air / solid flags after a full-chunk water scan.
-pub(crate) fn refresh_chunk_water_flags(world: &mut World, coord: ChunkCoord) {
-    let Some(chunk) = world.chunks.get(&coord) else {
-        return;
-    };
-    let mut standing = false;
-    let mut solid = false;
-    for cell in &chunk.cells {
-        if cell.material != wk_material::MaterialId::Air {
-            solid = true;
-        } else if cell.sat.0 >= STANDING_AIR_SAT {
-            standing = true;
-        }
-        if standing && solid {
-            break;
-        }
-    }
-    if let Some(chunk) = world.chunks.get_mut(&coord) {
-        chunk.has_standing_air = standing;
-        chunk.has_solid = solid;
-    }
 }
 
 pub(crate) fn regions_wet_air_loaded(world: &World) -> Vec<ActiveChunk> {
