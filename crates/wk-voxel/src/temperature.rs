@@ -39,6 +39,7 @@ use wk_material::{MaterialId, MaterialRegistry};
 
 use crate::cell::Cell;
 use crate::climate::{day_night_factor_cfg, ClimateConfig};
+use crate::fasthash::FxHashMap;
 use crate::grid::World;
 use crate::humidity::{Humidity, TileBounds};
 use crate::worldgen::{continental_surface_y, live_surface_at, live_surface_y, LIVE_SURFACE_SEARCH};
@@ -248,16 +249,16 @@ pub struct Temperature {
     /// Cached [`tile_thermal_props`] results — rebuilt every
     /// [`TEMP_PROPS_REFRESH_STEPS`] steps (not serialized).
     #[serde(skip)]
-    props_cache: HashMap<(i32, i32), TileThermal>,
+    props_cache: FxHashMap<(i32, i32), TileThermal>,
     #[serde(skip)]
     props_cache_age: u32,
     /// Per-row mean °C, rebuilt at the end of [`Self::step`]. Convection
     /// reads this instead of scanning the whole tile row every humidity tick.
     #[serde(skip)]
-    row_mean: HashMap<i32, f32>,
+    row_mean: FxHashMap<i32, f32>,
     /// Live skin y per humidity-tile column, rebuilt each [`Self::step`].
     #[serde(skip)]
-    surf_cache: HashMap<i32, i32>,
+    surf_cache: FxHashMap<i32, i32>,
 }
 
 impl Temperature {
@@ -283,10 +284,10 @@ impl Temperature {
             sea_level_y,
             config: TempConfig::default(),
             climate: ClimateConfig::default(),
-            props_cache: HashMap::new(),
+            props_cache: FxHashMap::default(),
             props_cache_age: TEMP_PROPS_REFRESH_STEPS,
-            row_mean: HashMap::new(),
-            surf_cache: HashMap::new(),
+            row_mean: FxHashMap::default(),
+            surf_cache: FxHashMap::default(),
         };
         t.fill_initial(0);
         t
@@ -308,7 +309,7 @@ impl Temperature {
         if self.cells.is_empty() {
             return;
         }
-        let mut acc: HashMap<i32, (f32, u32)> = HashMap::new();
+        let mut acc: FxHashMap<i32, (f32, u32)> = FxHashMap::default();
         for (&(_, hy), &v) in &self.cells {
             let e = acc.entry(hy).or_insert((0.0, 0));
             e.0 += v;
@@ -562,8 +563,8 @@ impl Temperature {
         self.props_cache_age = self.props_cache_age.saturating_add(1);
         // One live-surface walk per column per step — a tall sky used
         // to call this twice per air tile (couple + climate).
-        let mut surf_by_hx: HashMap<i32, i32> = HashMap::new();
-        let mut land_by_hx: HashMap<i32, f32> = HashMap::new();
+        let mut surf_by_hx: FxHashMap<i32, i32> = FxHashMap::default();
+        let mut land_by_hx: FxHashMap<i32, f32> = FxHashMap::default();
         for &(hx, _) in &keys {
             if surf_by_hx.contains_key(&hx) {
                 continue;
@@ -701,7 +702,7 @@ impl Temperature {
         if mix < 1e-4 || self.cells.is_empty() || wind.field.is_empty() {
             return;
         }
-        let mut snap: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut snap: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         snap.reserve(wind.field.len().saturating_mul(3));
         for &(hx, hy) in wind.field.keys() {
             snap.entry((hx, hy)).or_insert_with(|| self.at_tile(hx, hy));
@@ -795,11 +796,12 @@ impl Temperature {
         if alpha == 0.0 || self.cells.is_empty() {
             return;
         }
-        let snap = self.cells.clone();
-        let mut sources: Vec<(i32, i32)> = snap.keys().copied().collect();
-        sources.sort_unstable();
-        sources.dedup();
-        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        // Snapshot as FxHash — leftover SipHash clone. Keys are unique
+        // so sort+dedup was leftover; +x/+y visits keep pairs commutative.
+        let snap: FxHashMap<(i32, i32), f32> =
+            self.cells.iter().map(|(&k, &v)| (k, v)).collect();
+        let sources: Vec<(i32, i32)> = snap.keys().copied().collect();
+        let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         let base = self.config.base_temp_c;
         let free_sky = |hx: i32, hy: i32| -> bool {
             let surf = self

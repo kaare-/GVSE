@@ -771,12 +771,21 @@ fn accumulate_water_flow_xfers(
     let hydro = world.hydro;
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
+    // Surface flow only moves Air sat. Plant-dirty inland chunks with no
+    // wet Air in the Moore neighbourhood still walked the halo (leftover
+    // as plants grow). Dry dest cells *own* the +x equalise edge against
+    // a wet neighbour — skip only when this chunk *and* its neighbours
+    // have never held wet Air. Bootstrap (no flag yet) keeps every region.
+    let any_wet_air = world.chunks.values().any(|c| c.has_wet_air);
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         // Cache the source chunk once. Inner probes read chunk-local when
         // they stay inside the region's chunk; only edge probes fall back
         // to `world.get_cell` (wrap + HashMap). Measured 10× cheaper.
         let Some(chunk) = world.chunks.get(&ac.coord) else {
+            return local;
+        };
+        if any_wet_air && !chunk_or_moore_has_wet_air(world, ac.coord) {
             return local;
         };
         let base_gx = ac.coord.cx * cw;
@@ -1045,6 +1054,23 @@ fn accumulate_water_flow_xfers(
     for mut v in local {
         xfers.append(&mut v);
     }
+}
+
+/// Wet Air in this chunk or a Moore neighbour — dry dest cells still
+/// own the +x equalise edge against a wet neighbour chunk.
+fn chunk_or_moore_has_wet_air(world: &World, coord: ChunkCoord) -> bool {
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            if world
+                .chunks
+                .get(&ChunkCoord::new(coord.cx + dx, coord.cy + dy))
+                .is_some_and(|c| c.has_wet_air)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Throughflow-only scan (Priority 4) — once per tick from [`tick`].
