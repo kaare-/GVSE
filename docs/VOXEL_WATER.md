@@ -238,7 +238,9 @@ front (`has_standing_air || has_unsaturated_pores`) and refreshes both
 flags from the same scan. Standing water still walks down into the bed
 in the chunk below, so a full table does not need its own 64×64.
 Mid-ocean / lake interiors (standing water on more water) peek
-chunk-local and skip the pore walk.
+chunk-local and skip the pore walk. Standing-only chunks (no
+unsaturated front) then scan only the standing-air y band — dry sky
+in shore / mid-ocean surface chunks is leftover.
 
 `wake_pore_weep_into_air` on buried crust (`!has_open_air`) only checks
 the chunk perimeter — an interior pore cannot face Air. Neighbour reads

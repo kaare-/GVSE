@@ -549,3 +549,9 @@ Do not re-walk these:
   **1.3**, wind.rebuild **1.8**. Dry sky in shore chunks is skipped;
   wells / ocean equalise unchanged. Wind rebuild leftover is
   compose + project on occupied seats.
+
+  After lake-bed standing-only y-band (dry sky skipped; unsat fronts
+  keep the full rect): split probe lake-bed **1.3** (was 1.5). Sky-height
+  seepage bucket stays **~3.6** (apply + weep + seam dominate). Tall
+  1064 wall **20.7**, confined **1.4**, humidity.advect **1.3**,
+  wind.rebuild **1.8**.
