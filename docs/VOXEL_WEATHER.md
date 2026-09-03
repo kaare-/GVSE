@@ -521,3 +521,10 @@ Do not re-walk these:
   **23.1**, physics **12.6**, seepage **5.0**, confined wake **2.1**,
   bodies **3.3**. The leftover confined ~2.1 ms is the real ocean/lake
   communicating-vessel walk, not drizzle columns.
+
+  After the wet-crust seepage skip (perimeter-only weep on buried
+  crust, lake-bed skips a full water table, both-full pore faces skip
+  head math): short wall **31.0**, seepage **5.3**. Tall 1064 wall
+  **22.2**, physics **11.1**, seepage **3.5**, confined wake **2.2**,
+  bodies **3.3**. Split probe on demo: lake-bed 1.6, weep 1.6, deep
+  1.7, seam couple 1.5 (was 2.0 / 2.4 / 3.3 / 3.4).
