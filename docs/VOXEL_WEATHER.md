@@ -671,3 +671,11 @@ Do not re-walk these:
   1000-cell columns already on the lapse. Same couple / skip / pair
   stencil — tiles that did not move are not rewritten. Not view LOD;
   the ring still steps at full rate. Do not coarsen off-screen sim.
+
+  After packing that slab once per temperature step (couple writes
+  it; diffuse and row-means reuse it) and skipping far-sky / deep-crust
+  `live_surface_at` on the props refresh (one seed-rock walk per
+  column, same Air / Buried early-out): leftover world scans on a
+  1000-cell column already classified as Air. Surface-band tiles still
+  scan. Same couple / skip / pair stencil. `Temperature::cells` stays
+  `HashMap` for serde. Do not coarsen off-screen sim.

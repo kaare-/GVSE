@@ -42,7 +42,9 @@ use crate::climate::{day_night_factor_cfg, ClimateConfig};
 use crate::fasthash::FxHashMap;
 use crate::grid::World;
 use crate::humidity::{Humidity, TileBounds};
-use crate::worldgen::{continental_surface_y, live_surface_at, live_surface_y, LIVE_SURFACE_SEARCH};
+use crate::worldgen::{
+    continental_surface_y, live_surface_at, live_surface_y, LIVE_SURFACE_SEARCH,
+};
 
 /// Cadence for temperature steps — same period as humidity diffuse,
 /// phase 0 so the two don't always land on the same tick.
@@ -54,6 +56,11 @@ pub const TEMP_STEP_PHASE: u64 = 0;
 /// Was 4; 8 halves props world scans with little thermal lag (materials
 /// change slowly vs the field). Super-Server temp ~17 ms/call.
 pub const TEMP_PROPS_REFRESH_STEPS: u32 = 8;
+/// Far-sky / deep-crust margins used by [`tile_thermal_props`] and the
+/// column-anchor refresh. A painted pack or carved relief can sit this
+/// far above the seed rock; below this, only the surface band scans.
+const PROPS_AIR_MARGIN: i32 = 24;
+const PROPS_BURIED_MARGIN: i32 = 8;
 
 pub fn temperature_step_due(tick: u64) -> bool {
     tick % TEMP_STEP_PERIOD == TEMP_STEP_PHASE
@@ -259,6 +266,17 @@ pub struct Temperature {
     /// Live skin y per humidity-tile column, rebuilt each [`Self::step`].
     #[serde(skip)]
     surf_cache: FxHashMap<i32, i32>,
+    /// Dense °C slab for a filled sky box (serde-skip). Packed from
+    /// [`Self::cells`] at the start of each dense step so tests that
+    /// mutate the map stay correct. Couple writes here; diffuse reuses
+    /// it instead of walking the HashMap a second time.
+    #[serde(skip)]
+    slab: Vec<f32>,
+    #[serde(skip)]
+    slab_deltas: Vec<f32>,
+    /// Live skin y indexed by `hx - bounds.hx_min` when the box is dense.
+    #[serde(skip)]
+    surf_col: Vec<i32>,
 }
 
 impl Temperature {
@@ -288,6 +306,9 @@ impl Temperature {
             props_cache_age: TEMP_PROPS_REFRESH_STEPS,
             row_mean: FxHashMap::default(),
             surf_cache: FxHashMap::default(),
+            slab: Vec::new(),
+            slab_deltas: Vec::new(),
+            surf_col: Vec::new(),
         };
         t.fill_initial(0);
         t
@@ -319,6 +340,70 @@ impl Temperature {
             .into_iter()
             .map(|(hy, (sum, n))| (hy, sum / n.max(1) as f32))
             .collect();
+    }
+
+    fn is_dense_filled(&self) -> bool {
+        match self.bounds {
+            Some(b) => {
+                let cap = b.tile_capacity();
+                cap > 0 && self.cells.len().saturating_mul(2) >= cap
+            }
+            None => false,
+        }
+    }
+
+    fn slab_dims(b: TileBounds) -> (usize, usize) {
+        let w = (b.hx_max - b.hx_min + 1).max(0) as usize;
+        let h = (b.hy_max - b.hy_min + 1).max(0) as usize;
+        (w, h)
+    }
+
+    fn slab_index(b: TileBounds, w: usize, hx: i32, hy: i32) -> usize {
+        (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize
+    }
+
+    fn pack_slab(&mut self, b: TileBounds) {
+        let (w, h) = Self::slab_dims(b);
+        let n = w.saturating_mul(h);
+        let base = self.config.base_temp_c;
+        self.slab.clear();
+        self.slab.resize(n, base);
+        for (&(hx, hy), &v) in &self.cells {
+            if b.contains(hx, hy) {
+                self.slab[Self::slab_index(b, w, hx, hy)] = v;
+            }
+        }
+        if self.slab_deltas.len() != n {
+            self.slab_deltas.resize(n, 0.0);
+        }
+    }
+
+    fn rebuild_row_means_from_slab(&mut self, b: TileBounds) {
+        let (w, h) = Self::slab_dims(b);
+        if w == 0 || h == 0 || self.slab.len() != w * h {
+            self.rebuild_row_means();
+            return;
+        }
+        self.row_mean.clear();
+        for hy in b.hy_min..=b.hy_max {
+            let row = (hy - b.hy_min) as usize * w;
+            let mut sum = 0.0f32;
+            for dx in 0..w {
+                sum += self.slab[row + dx];
+            }
+            self.row_mean.insert(hy, sum / w.max(1) as f32);
+        }
+    }
+
+    fn column_rock_anchors(&self, world: &World, hx: i32) -> (i32, i32, i32) {
+        let tc = self.tile_cols.max(1);
+        let gx_mid = world.wrap_x(hx * tc + tc / 2);
+        let rock_mid = live_surface_at(world, self.seed, gx_mid, self.sea_level_y, self.width_cols);
+        (
+            rock_mid,
+            rock_mid.min(self.sea_level_y),
+            rock_mid.max(self.sea_level_y),
+        )
     }
 
     fn accepts(&self, hx: i32, hy: i32) -> bool {
@@ -375,12 +460,7 @@ impl Temperature {
 
     /// Overburden cells below the live skin. Seed crest is only a hint
     /// for the walk; a deleted hill must drop this depth.
-    pub fn geothermal_overburden_cells(
-        &self,
-        world: Option<&World>,
-        hx: i32,
-        y_cells: i32,
-    ) -> f32 {
+    pub fn geothermal_overburden_cells(&self, world: Option<&World>, hx: i32, y_cells: i32) -> f32 {
         match world {
             Some(_) => {
                 let surf = self.column_surface_y_estimate(world, hx);
@@ -437,8 +517,27 @@ impl Temperature {
     fn refresh_props_cache(&mut self, world: Option<&World>, keys: &[(i32, i32)]) {
         self.props_cache.clear();
         self.props_cache.reserve(keys.len());
+        let Some(world) = world else {
+            let air = air_thermal();
+            for &k in keys {
+                self.props_cache.insert(k, air);
+            }
+            self.props_cache_age = 0;
+            return;
+        };
+        // One seed-rock walk per column. Far-sky / deep-crust tiles
+        // share that anchor — calling `live_surface_at` per tall-sky
+        // tile was leftover world scan on 1000-cell columns.
+        let mut anchors: FxHashMap<i32, (i32, i32, i32)> = FxHashMap::default();
+        let tc = self.tile_cols.max(1);
         for &(hx, hy) in keys {
-            let props = tile_thermal_props(self, world, hx, hy);
+            let (rock_mid, alo, ahi) = *anchors
+                .entry(hx)
+                .or_insert_with(|| self.column_rock_anchors(world, hx));
+            let props = match props_early_from_anchor(hy, tc, rock_mid, alo, ahi) {
+                Some(p) => p,
+                None => tile_thermal_props(self, Some(world), hx, hy),
+            };
             self.props_cache.insert((hx, hy), props);
         }
         self.props_cache_age = 0;
@@ -550,13 +649,14 @@ impl Temperature {
             .map(|w| (w.climate_vx.abs() / 0.14).clamp(0.0, 1.5) * cfg.wind_mix.clamp(0.0, 1.0))
             .unwrap_or(0.0);
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
+        let dense = self.is_dense_filled();
+        let bounds = self.bounds;
         // Lowest world-y tile band (= deepest underground).
-        let mut deepest_hy = i32::MAX;
-        for &(_, hy) in &keys {
-            deepest_hy = deepest_hy.min(hy);
-        }
-        if self.props_cache_age >= TEMP_PROPS_REFRESH_STEPS
-            || self.props_cache.len() != keys.len()
+        let deepest_hy = match bounds {
+            Some(b) if dense && self.cells.len() == b.tile_capacity() => b.hy_min,
+            _ => keys.iter().map(|&(_, hy)| hy).min().unwrap_or(i32::MAX),
+        };
+        if self.props_cache_age >= TEMP_PROPS_REFRESH_STEPS || self.props_cache.len() != keys.len()
         {
             self.refresh_props_cache(world, &keys);
         }
@@ -565,30 +665,57 @@ impl Temperature {
         // to call this twice per air tile (couple + climate).
         let mut surf_by_hx: FxHashMap<i32, i32> = FxHashMap::default();
         let mut land_by_hx: FxHashMap<i32, f32> = FxHashMap::default();
-        for &(hx, _) in &keys {
-            if surf_by_hx.contains_key(&hx) {
-                continue;
+        if dense {
+            if let Some(b) = bounds {
+                let cols = (b.hx_max - b.hx_min + 1).max(0) as usize;
+                self.surf_col.clear();
+                self.surf_col.resize(cols, self.sea_level_y);
+                for hx in b.hx_min..=b.hx_max {
+                    let surf = self.column_surface_y_estimate(world, hx);
+                    surf_by_hx.insert(hx, surf);
+                    land_by_hx.insert(hx, Self::land_from_surface(surf, self.sea_level_y));
+                    self.surf_col[(hx - b.hx_min) as usize] = surf;
+                }
+                self.pack_slab(b);
             }
-            let surf = self.column_surface_y_estimate(world, hx);
-            surf_by_hx.insert(hx, surf);
-            land_by_hx.insert(hx, Self::land_from_surface(surf, self.sea_level_y));
+        } else {
+            for &(hx, _) in &keys {
+                if surf_by_hx.contains_key(&hx) {
+                    continue;
+                }
+                let surf = self.column_surface_y_estimate(world, hx);
+                surf_by_hx.insert(hx, surf);
+                land_by_hx.insert(hx, Self::land_from_surface(surf, self.sea_level_y));
+            }
         }
         self.surf_cache.clone_from(&surf_by_hx);
+        let slab_w = bounds.map(Self::slab_dims).map(|(w, _)| w).unwrap_or(0);
         for (hx, hy) in keys {
             let props = self
                 .props_cache
                 .get(&(hx, hy))
                 .copied()
                 .unwrap_or_else(|| tile_thermal_props(self, world, hx, hy));
-            let t = self.at_tile(hx, hy);
+            let t = if dense {
+                if let Some(b) = bounds {
+                    if b.contains(hx, hy) && self.slab.len() == b.tile_capacity() {
+                        self.slab[Self::slab_index(b, slab_w, hx, hy)]
+                    } else {
+                        self.at_tile(hx, hy)
+                    }
+                } else {
+                    self.at_tile(hx, hy)
+                }
+            } else {
+                self.at_tile(hx, hy)
+            };
             let surf = *surf_by_hx.get(&hx).unwrap_or(&self.sea_level_y);
             let land = *land_by_hx.get(&hx).unwrap_or(&1.0);
             let wind_k = || {
                 let (lvx, lvy) = wind
                     .map(|w| w.vector_at(world, hx, hy))
                     .unwrap_or((0.0, 0.0));
-                (lvx.abs().max(lvy.abs()) / 0.14).clamp(0.0, 1.5)
-                    * cfg.wind_mix.clamp(0.0, 1.0)
+                (lvx.abs().max(lvy.abs()) / 0.14).clamp(0.0, 1.5) * cfg.wind_mix.clamp(0.0, 1.0)
             };
             let next = match props.layer {
                 TileLayer::Air => {
@@ -611,9 +738,22 @@ impl Temperature {
                         let mut target = climate;
                         if height_above <= band && cfg.near_surface_couple > 0.0 {
                             let surf_hy = surf.div_euclid(tc);
-                            let surf_t = self.at_tile(hx, surf_hy);
-                            let falloff = 1.0
-                                - (height_above as f32 / band as f32).clamp(0.0, 1.0);
+                            let surf_t = if dense {
+                                if let Some(b) = bounds {
+                                    if b.contains(hx, surf_hy)
+                                        && self.slab.len() == b.tile_capacity()
+                                    {
+                                        self.slab[Self::slab_index(b, slab_w, hx, surf_hy)]
+                                    } else {
+                                        self.at_tile(hx, surf_hy)
+                                    }
+                                } else {
+                                    self.at_tile(hx, surf_hy)
+                                }
+                            } else {
+                                self.at_tile(hx, surf_hy)
+                            };
+                            let falloff = 1.0 - (height_above as f32 / band as f32).clamp(0.0, 1.0);
                             let couple = ((cfg.near_surface_couple + 0.25 * wind_k) * falloff)
                                 .clamp(0.0, 0.90);
                             target = climate * (1.0 - couple) + surf_t * couple;
@@ -684,14 +824,45 @@ impl Temperature {
             // every tile was leftover hasher on a tall box.
             if (next - t).abs() >= 1e-5 {
                 self.cells.insert((hx, hy), next);
+                if dense {
+                    if let Some(b) = bounds {
+                        if b.contains(hx, hy) && self.slab.len() == b.tile_capacity() {
+                            self.slab[Self::slab_index(b, slab_w, hx, hy)] = next;
+                        }
+                    }
+                }
             }
         }
         let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * climate_k)).clamp(0.0, 0.25);
-        self.diffuse(alpha);
+        if dense {
+            if let Some(b) = bounds {
+                if self.slab.len() == b.tile_capacity() {
+                    self.diffuse_slab(alpha, b);
+                } else {
+                    self.diffuse(alpha);
+                }
+            } else {
+                self.diffuse(alpha);
+            }
+        } else {
+            self.diffuse(alpha);
+        }
         if let Some(w) = wind {
             self.advect_air(world, w);
         }
-        self.rebuild_row_means();
+        if dense {
+            if let Some(b) = bounds {
+                if self.cells.len() == b.tile_capacity() && self.slab.len() == b.tile_capacity() {
+                    self.rebuild_row_means_from_slab(b);
+                } else {
+                    self.rebuild_row_means();
+                }
+            } else {
+                self.rebuild_row_means();
+            }
+        } else {
+            self.rebuild_row_means();
+        }
     }
 
     /// Upwind mix of **air** tiles along the local wind. Period-20 only.
@@ -710,8 +881,10 @@ impl Temperature {
         snap.reserve(wind.field.len().saturating_mul(3));
         for &(hx, hy) in wind.field.keys() {
             snap.entry((hx, hy)).or_insert_with(|| self.at_tile(hx, hy));
-            snap.entry((hx, hy + 1)).or_insert_with(|| self.at_tile(hx, hy + 1));
-            snap.entry((hx, hy - 1)).or_insert_with(|| self.at_tile(hx, hy - 1));
+            snap.entry((hx, hy + 1))
+                .or_insert_with(|| self.at_tile(hx, hy + 1));
+            snap.entry((hx, hy - 1))
+                .or_insert_with(|| self.at_tile(hx, hy - 1));
             if let Some(sx) = self.wrap_hx(hx + 1) {
                 snap.entry((sx, hy)).or_insert_with(|| self.at_tile(sx, hy));
             }
@@ -804,8 +977,7 @@ impl Temperature {
         // write back only deltas — HashMap snap + insert of every tile
         // was leftover on 1000-cell columns already on the lapse.
         if let Some(b) = self.bounds {
-            let cap = b.tile_capacity();
-            if cap > 0 && self.cells.len().saturating_mul(2) >= cap {
+            if self.is_dense_filled() {
                 self.diffuse_dense(alpha, b);
                 return;
             }
@@ -816,8 +988,7 @@ impl Temperature {
     fn diffuse_sparse(&mut self, alpha: f32) {
         // Snapshot as FxHash — leftover SipHash clone. Keys are unique
         // so sort+dedup was leftover; +x/+y visits keep pairs commutative.
-        let snap: FxHashMap<(i32, i32), f32> =
-            self.cells.iter().map(|(&k, &v)| (k, v)).collect();
+        let snap: FxHashMap<(i32, i32), f32> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
         let sources: Vec<(i32, i32)> = snap.keys().copied().collect();
         let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         let base = self.config.base_temp_c;
@@ -862,50 +1033,60 @@ impl Temperature {
     }
 
     fn tile_is_free_sky(&self, hx: i32, hy: i32) -> bool {
-        let surf = self
-            .surf_cache
-            .get(&hx)
-            .copied()
-            .unwrap_or(self.sea_level_y);
+        let surf = if let Some(b) = self.bounds {
+            let col = (hx - b.hx_min) as usize;
+            if col < self.surf_col.len() {
+                self.surf_col[col]
+            } else {
+                self.surf_cache
+                    .get(&hx)
+                    .copied()
+                    .unwrap_or(self.sea_level_y)
+            }
+        } else {
+            self.surf_cache
+                .get(&hx)
+                .copied()
+                .unwrap_or(self.sea_level_y)
+        };
         hy * self.tile_cols.max(1) + self.tile_cols.max(1) / 2 > surf + 16
     }
 
     fn diffuse_dense(&mut self, alpha: f32, b: TileBounds) {
-        let w = (b.hx_max - b.hx_min + 1).max(0) as usize;
-        let h = (b.hy_max - b.hy_min + 1).max(0) as usize;
-        if w == 0 || h == 0 {
+        self.pack_slab(b);
+        self.diffuse_slab(alpha, b);
+    }
+
+    /// Pair stencil on [`Self::slab`]. Caller packed (or couple already
+    /// wrote) the slab. Write back only deltas.
+    fn diffuse_slab(&mut self, alpha: f32, b: TileBounds) {
+        let (w, h) = Self::slab_dims(b);
+        let n = w.saturating_mul(h);
+        if w == 0 || h == 0 || self.slab.len() != n {
             return;
         }
-        let base = self.config.base_temp_c;
-        let mut grid = vec![base; w * h];
-        for (&(hx, hy), &v) in &self.cells {
-            if !b.contains(hx, hy) {
-                continue;
-            }
-            grid[(hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize] = v;
+        if self.slab_deltas.len() != n {
+            self.slab_deltas.resize(n, 0.0);
         }
-        let at = |grid: &[f32], hx: i32, hy: i32| -> f32 {
-            grid[(hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize]
-        };
-        let mut deltas = vec![0.0f32; w * h];
+        self.slab_deltas.fill(0.0);
+        let base = self.config.base_temp_c;
         let mut any = false;
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
-                let i = (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize;
-                let val = grid[i];
+                let i = Self::slab_index(b, w, hx, hy);
+                let val = self.slab[i];
                 let here_sky = self.tile_is_free_sky(hx, hy);
                 if let Some(nx) = self.wrap_hx(hx + 1) {
                     if b.contains(nx, hy) && nx != hx {
-                        let n_val = at(&grid, nx, hy);
+                        let ni = Self::slab_index(b, w, nx, hy);
+                        let n_val = self.slab[ni];
                         if here_sky && self.tile_is_free_sky(nx, hy) && (val - n_val).abs() < 0.35 {
                             // skip
                         } else {
                             let flow = (val - n_val) * alpha;
                             if flow.abs() >= 1e-9 {
-                                let ni =
-                                    (hy - b.hy_min) as usize * w + (nx - b.hx_min) as usize;
-                                deltas[i] -= flow;
-                                deltas[ni] += flow;
+                                self.slab_deltas[i] -= flow;
+                                self.slab_deltas[ni] += flow;
                                 any = true;
                             }
                         }
@@ -916,12 +1097,12 @@ impl Temperature {
                     if here_sky && self.tile_is_free_sky(hx, n_hy) {
                         continue;
                     }
-                    let n_val = at(&grid, hx, n_hy);
+                    let ni = Self::slab_index(b, w, hx, n_hy);
+                    let n_val = self.slab[ni];
                     let flow = (val - n_val) * alpha * 0.35;
                     if flow.abs() >= 1e-9 {
-                        let ni = (n_hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize;
-                        deltas[i] -= flow;
-                        deltas[ni] += flow;
+                        self.slab_deltas[i] -= flow;
+                        self.slab_deltas[ni] += flow;
                         any = true;
                     }
                 }
@@ -932,9 +1113,10 @@ impl Temperature {
         }
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
-                let i = (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize;
-                let d = deltas[i];
+                let i = Self::slab_index(b, w, hx, hy);
+                let d = self.slab_deltas[i];
                 if d.abs() >= 1e-9 {
+                    self.slab[i] += d;
                     *self.cells.entry((hx, hy)).or_insert(base) += d;
                 }
             }
@@ -946,13 +1128,7 @@ impl Temperature {
 ///
 /// Water vapor's specific heat is about 1.9× dry air. `scale` is the
 /// Tab knob; 1.0 reaches that ratio at saturation.
-fn humid_air_capacity_scale(
-    humidity: &Humidity,
-    hx: i32,
-    hy: i32,
-    temp_c: f32,
-    scale: f32,
-) -> f32 {
+fn humid_air_capacity_scale(humidity: &Humidity, hx: i32, hy: i32, temp_c: f32, scale: f32) -> f32 {
     if scale <= 1e-4 {
         return 1.0;
     }
@@ -980,47 +1156,57 @@ fn humidity_column_shade(humidity: &Humidity, hx: i32, hy: i32, cfg: &TempConfig
     (peak / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0)
 }
 
-fn tile_thermal_props(
-    temp: &Temperature,
-    world: Option<&World>,
-    hx: i32,
-    hy: i32,
-) -> TileThermal {
+fn air_thermal() -> TileThermal {
     let air = MaterialRegistry::props(MaterialId::Air);
+    TileThermal {
+        layer: TileLayer::Air,
+        capacity: air.heat_capacity,
+        albedo: air.albedo,
+    }
+}
+
+fn buried_thermal(depth_cells: f32) -> TileThermal {
+    let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
+    TileThermal {
+        layer: TileLayer::Buried { depth_cells },
+        capacity: bedrock.heat_capacity * 1.25,
+        albedo: 0.0,
+    }
+}
+
+/// Same early-out as [`tile_thermal_props`]: far-sky Air and deep
+/// crust Buried. `None` means the surface band still needs a scan.
+fn props_early_from_anchor(
+    hy: i32,
+    tile_cols: i32,
+    rock_mid: i32,
+    anchor_lo: i32,
+    anchor_hi: i32,
+) -> Option<TileThermal> {
+    let tc = tile_cols.max(1);
+    let tile_mid_y = hy * tc + tc / 2;
+    if tile_mid_y > anchor_hi + PROPS_AIR_MARGIN {
+        return Some(air_thermal());
+    }
+    if tile_mid_y + tc < anchor_lo - PROPS_BURIED_MARGIN {
+        let depth = (rock_mid - tile_mid_y).max(0) as f32;
+        return Some(buried_thermal(depth));
+    }
+    None
+}
+
+fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i32) -> TileThermal {
     let tc = temp.tile_cols.max(1);
     let tile_mid_y = hy * tc + tc / 2;
     let Some(world) = world else {
-        return TileThermal {
-            layer: TileLayer::Air,
-            capacity: air.heat_capacity,
-            albedo: air.albedo,
-        };
+        return air_thermal();
     };
     // Rock estimate at tile centre. Anchor the cheap band to both rock
     // and sea level so painted lakes/snow at sea still sit in-scan when
     // the live surface differs (unit fixtures + flat shelves).
-    let gx_mid = world.wrap_x(hx * tc + tc / 2);
-    let rock_mid = live_surface_at(world, temp.seed, gx_mid, temp.sea_level_y, temp.width_cols);
-    let anchor_lo = rock_mid.min(temp.sea_level_y);
-    let anchor_hi = rock_mid.max(temp.sea_level_y);
-    // Margin covers tall packs / carved relief above the free surface.
-    const AIR_MARGIN: i32 = 24;
-    const BURIED_MARGIN: i32 = 8;
-    if tile_mid_y > anchor_hi + AIR_MARGIN {
-        return TileThermal {
-            layer: TileLayer::Air,
-            capacity: air.heat_capacity,
-            albedo: air.albedo,
-        };
-    }
-    if tile_mid_y + tc < anchor_lo - BURIED_MARGIN {
-        let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
-        let depth = (rock_mid - tile_mid_y).max(0) as f32;
-        return TileThermal {
-            layer: TileLayer::Buried { depth_cells: depth },
-            capacity: bedrock.heat_capacity * 1.25,
-            albedo: 0.0,
-        };
+    let (rock_mid, anchor_lo, anchor_hi) = temp.column_rock_anchors(world, hx);
+    if let Some(early) = props_early_from_anchor(hy, tc, rock_mid, anchor_lo, anchor_hi) {
+        return early;
     }
     // Surface band only — not full sky↔bedrock (~320 cells/column before).
     let (bound_lo, bound_hi) = match temp.bounds {
@@ -1050,11 +1236,7 @@ fn tile_thermal_props(
         n += 1.0;
     }
     if n < 1.0 {
-        return TileThermal {
-            layer: TileLayer::Air,
-            capacity: air.heat_capacity,
-            albedo: air.albedo,
-        };
+        return air_thermal();
     }
     let surf_y = (surf_sum / n).round() as i32;
     let cap = cap_sum / n;
@@ -1062,20 +1244,11 @@ fn tile_thermal_props(
     let watery = water_cols / n >= 0.5;
 
     if tile_mid_y > surf_y + tc {
-        return TileThermal {
-            layer: TileLayer::Air,
-            capacity: air.heat_capacity,
-            albedo: air.albedo,
-        };
+        return air_thermal();
     }
     if tile_mid_y + tc < surf_y {
-        let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
         let depth = (surf_y - tile_mid_y).max(0) as f32;
-        return TileThermal {
-            layer: TileLayer::Buried { depth_cells: depth },
-            capacity: bedrock.heat_capacity * 1.25,
-            albedo: 0.0,
-        };
+        return buried_thermal(depth);
     }
     TileThermal {
         layer: TileLayer::Surface { watery },
@@ -1132,8 +1305,7 @@ fn column_surface_thermal(
         .max(0.0)
         .min(WATER_STACK_CAP_CELLS);
     let cap = props.heat_capacity + stack * cfg.water_stack_cap;
-    let watery = water_like > 0
-        || matches!(mat, MaterialId::Water | MaterialId::Ice);
+    let watery = water_like > 0 || matches!(mat, MaterialId::Water | MaterialId::Ice);
     (top_y, cap, props.albedo, watery)
 }
 
@@ -1158,13 +1330,8 @@ mod tests {
             p.sea_level_y,
             true,
         );
-        let mut h = Humidity::with_world_bounds(
-            4,
-            0,
-            p.bedrock_floor_y,
-            p.width_cols,
-            p.sky_ceiling_y,
-        );
+        let mut h =
+            Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, p.width_cols, p.sky_ceiling_y);
         h.wrap_x = true;
         (t, h)
     }
@@ -1485,7 +1652,13 @@ mod tests {
         assert!(temperature_step_due(20));
     }
 
-    fn fill_tile_surface(w: &mut World, tile_x0: i32, y_ground: i32, mat: MaterialId, water_h: i32) {
+    fn fill_tile_surface(
+        w: &mut World,
+        tile_x0: i32,
+        y_ground: i32,
+        mat: MaterialId,
+        water_h: i32,
+    ) {
         for x in tile_x0..tile_x0 + 4 {
             for y in (y_ground - 1)..=(y_ground + water_h + 1) {
                 w.ensure_chunk(ChunkCoord::new(
@@ -1545,13 +1718,7 @@ mod tests {
         }
         t.config.base_temp_c = -15.0;
         t.config.diffuse_alpha = 0.0;
-        let h = Humidity::with_world_bounds(
-            4,
-            0,
-            p.bedrock_floor_y,
-            p.width_cols,
-            p.sky_ceiling_y,
-        );
+        let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, p.width_cols, p.sky_ceiling_y);
         for i in 0..5 {
             t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
         }
@@ -1597,13 +1764,7 @@ mod tests {
             *v = 12.0;
         }
         t.rebuild_row_means();
-        let h = Humidity::with_world_bounds(
-            4,
-            0,
-            p.bedrock_floor_y,
-            p.width_cols,
-            p.sky_ceiling_y,
-        );
+        let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, p.width_cols, p.sky_ceiling_y);
         for i in 0..10 {
             t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
         }
@@ -1658,13 +1819,7 @@ mod tests {
         t.config.near_surface_couple = 0.0;
         t.config.sea_bias_c = 0.0;
         t.fill_initial(0);
-        let h = Humidity::with_world_bounds(
-            4,
-            0,
-            p.bedrock_floor_y,
-            p.width_cols,
-            p.sky_ceiling_y,
-        );
+        let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, p.width_cols, p.sky_ceiling_y);
         for i in 0..12 {
             t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
         }
@@ -1790,10 +1945,7 @@ mod tests {
             (dry_after - before).abs() < 0.05,
             "humid_heat_scale=0 must not mix heat on rise ({dry_after:.2})"
         );
-        assert!(
-            h.at_tile(2, 5) > 0.0,
-            "vapour still has to actually lift"
-        );
+        assert!(h.at_tile(2, 5) > 0.0, "vapour still has to actually lift");
     }
 
     #[test]
@@ -1821,12 +1973,7 @@ mod tests {
         let mut lo = i32::MAX;
         for hx in 0..(p.width_cols / tc) {
             let gx = hx * tc + tc / 2;
-            let s = crate::worldgen::continental_surface_y(
-                p.seed,
-                gx,
-                p.sea_level_y,
-                p.width_cols,
-            );
+            let s = crate::worldgen::continental_surface_y(p.seed, gx, p.sea_level_y, p.width_cols);
             if s > hi {
                 hi = s;
                 hi_hx = hx;
@@ -1988,10 +2135,26 @@ mod tests {
         fill_tile_surface(&mut rock_w, x0, sea, MaterialId::Stone, 0);
 
         let mut t_snow = Temperature::with_world_bounds(
-            4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y, 1, 32, sea, false,
+            4,
+            0,
+            p.bedrock_floor_y,
+            32,
+            p.sky_ceiling_y,
+            1,
+            32,
+            sea,
+            false,
         );
         let mut t_rock = Temperature::with_world_bounds(
-            4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y, 1, 32, sea, false,
+            4,
+            0,
+            p.bedrock_floor_y,
+            32,
+            p.sky_ceiling_y,
+            1,
+            32,
+            sea,
+            false,
         );
         for v in t_snow.cells.values_mut().chain(t_rock.cells.values_mut()) {
             *v = 0.0;
@@ -2068,5 +2231,37 @@ mod tests {
             );
         }
         assert_eq!(dense.cells.len(), sparse.cells.len());
+    }
+
+    #[test]
+    fn column_anchor_skips_match_per_tile_props_on_far_sky_and_deep_crust() {
+        // Same Air / Buried early-out; one seed-rock walk per column
+        // is leftover scan, not a new climate.
+        let (world, mut t, _h, sea) = grounded_scene();
+        let (rock, alo, ahi) = t.column_rock_anchors(&world, 0);
+        let tc = t.tile_cols.max(1);
+        // Compact scene ceiling is y=64 → hy_max=15. Mid of hy=12 is 50,
+        // which is above sea+AIR_MARGIN (40).
+        let far_hy = ((sea + PROPS_AIR_MARGIN + tc) / tc) + 2;
+        let deep_hy = 0;
+        assert!(
+            far_hy <= t.bounds.expect("bounds").hy_max,
+            "far_hy {far_hy} must sit in the compact box"
+        );
+        let far_early =
+            props_early_from_anchor(far_hy, tc, rock, alo, ahi).expect("far sky should early-out");
+        let far_full = tile_thermal_props(&t, Some(&world), 0, far_hy);
+        let deep_full = tile_thermal_props(&t, Some(&world), 0, deep_hy);
+        assert!(matches!(far_early.layer, TileLayer::Air));
+        assert_eq!(far_early.layer, far_full.layer);
+        t.refresh_props_cache(Some(&world), &[(0, far_hy), (0, deep_hy)]);
+        assert_eq!(
+            t.props_cache.get(&(0, far_hy)).map(|p| p.layer),
+            Some(far_full.layer)
+        );
+        assert_eq!(
+            t.props_cache.get(&(0, deep_hy)).map(|p| p.layer),
+            Some(deep_full.layer)
+        );
     }
 }
