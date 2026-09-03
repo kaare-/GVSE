@@ -682,7 +682,8 @@ impl Humidity {
     /// humidity-advect FPS cliff). Wind samples are cached once per
     /// seat before the two axis passes — `vector_at` misses walk the
     /// world, and calling that twice per tile was the leftover cost
-    /// after the field rebuild.
+    /// after the field rebuild. Mix / lift then read the live map
+    /// (no second and third clones) and skip columns with no ascent.
     pub fn advect_with_surface(
         &mut self,
         vx: f32,
@@ -799,7 +800,8 @@ impl Humidity {
         horizontal: bool,
         vectors: Option<&FxHashMap<(i32, i32), (f32, f32)>>,
     ) {
-        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        deltas.reserve(snap.len());
         for (&(hx, hy), &mass) in snap {
             if mass.abs() < 1e-9 {
                 continue;
@@ -868,7 +870,7 @@ impl Humidity {
                 *self.cells.entry(k).or_insert(0.0) += d;
             }
         }
-        self.cells.retain(|_, v| *v > 1e-6);
+        // Caller retains once after both axes.
     }
 
     /// High wind mixes the column so vapour does not translate as a slab.
@@ -886,13 +888,11 @@ impl Humidity {
             return;
         }
         let alpha = (0.04 + 0.14 * mix).clamp(0.0, 0.20);
-        let snap = self.cells.clone();
-        let mut keys: Vec<(i32, i32)> = snap.keys().copied().collect();
-        keys.sort_unstable();
-        keys.dedup();
-        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
-        for &(hx, hy) in &keys {
-            let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
+        // Read the live map; writes go to `deltas` so pairs stay
+        // commutative without a clone or a sort (keys are unique).
+        let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        deltas.reserve(self.cells.len());
+        for (&(hx, hy), &val) in &self.cells {
             let above = (hx, hy + 1);
             if !self.accepts(above.0, above.1) {
                 continue;
@@ -903,7 +903,7 @@ impl Humidity {
                     continue;
                 }
             }
-            let n_val = *snap.get(&above).unwrap_or(&0.0);
+            let n_val = *self.cells.get(&above).unwrap_or(&0.0);
             let flow = (val - n_val) * alpha;
             if flow.abs() < 1e-9 {
                 continue;
@@ -913,8 +913,7 @@ impl Humidity {
         }
         let sink = 0.03 * mix;
         if sink > 1e-5 {
-            for &(hx, hy) in &keys {
-                let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
+            for (&(hx, hy), &val) in &self.cells {
                 if val <= 1e-9 {
                     continue;
                 }
@@ -1031,16 +1030,26 @@ impl Humidity {
         if self.cells.is_empty() {
             return;
         }
-        let snap = self.cells.clone();
-        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
         let mut lift_by_hx: FxHashMap<i32, f32> = FxHashMap::default();
-        for (&(hx, hy), &mass) in &snap {
-            if mass <= 0.0 {
-                continue;
-            }
+        let mut any_lift = false;
+        for &(hx, _) in self.cells.keys() {
             let lift = *lift_by_hx
                 .entry(hx)
                 .or_insert_with(|| wind.orographic_lift(world, hx));
+            if lift > 1e-5 {
+                any_lift = true;
+            }
+        }
+        if !any_lift {
+            return;
+        }
+        let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        deltas.reserve(self.cells.len());
+        for (&(hx, hy), &mass) in &self.cells {
+            if mass <= 0.0 {
+                continue;
+            }
+            let lift = *lift_by_hx.get(&hx).unwrap_or(&0.0);
             if lift <= 1e-5 {
                 continue;
             }

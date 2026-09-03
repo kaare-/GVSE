@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::fasthash::FxHashMap;
+use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::humidity::TileBounds;
 use crate::temperature::Temperature;
@@ -301,6 +301,7 @@ impl Wind {
         let prev = std::mem::take(&mut self.field);
 
         let mut keys: FxHashMap<(i32, i32), ()> = FxHashMap::default();
+        let mut unique_hx: FxHashSet<i32> = FxHashSet::default();
         for &(hx, hy) in occupied {
             for dx in -1..=1 {
                 for dy in -1..=1 {
@@ -314,6 +315,7 @@ impl Wind {
                         continue;
                     }
                     keys.insert((nhx, hy + dy), ());
+                    unique_hx.insert(nhx);
                 }
             }
         }
@@ -328,6 +330,7 @@ impl Wind {
             for hy in (shy - 1)..=(shy + 2) {
                 if bounds.contains(hx, hy) {
                     keys.insert((hx, hy), ());
+                    unique_hx.insert(hx);
                 }
             }
             hx += 2;
@@ -335,10 +338,8 @@ impl Wind {
 
         // Fill surf_cache for every column the compose pass will touch
         // (tile centre ± one tile) so later `vector_at` / evap reads
-        // never walk the world.
-        let mut unique_hx: Vec<i32> = keys.keys().map(|&(hx, _)| hx).collect();
-        unique_hx.sort_unstable();
-        unique_hx.dedup();
+        // never walk the world. Collected while inserting keys —
+        // sort+dedup of the key list was leftover.
         for hx in unique_hx {
             let gx = hx * tc + tc / 2;
             self.cache_surface(world, gx);
@@ -404,7 +405,7 @@ impl Wind {
         }
         let hx_span = (bounds.hx_max - bounds.hx_min + 1).max(1);
         for _ in 0..passes {
-            let snap = field.clone();
+            let snap = field;
             let mut out = FxHashMap::default();
             out.reserve(snap.len());
             for (&(hx, hy), &(vx, vy)) in &snap {
@@ -575,8 +576,8 @@ impl Wind {
         for &k in &keys {
             p.insert(k, 0.0);
         }
+        let mut next = p.clone();
         for _ in 0..AIR_PROJECT_ITERS {
-            let snap = p.clone();
             for &(hx, hy) in &keys {
                 let mut sum = 0.0;
                 let mut n = 0.0;
@@ -586,17 +587,19 @@ impl Wind {
                     }
                     let nhx = self.wrap_tile_hx(hx + dx, bounds);
                     let nhy = hy + dy;
-                    if let Some(&pn) = snap.get(&(nhx, nhy)) {
+                    if let Some(&pn) = p.get(&(nhx, nhy)) {
                         sum += pn;
                         n += 1.0;
                     }
                 }
                 if n < 1.0 {
+                    next.insert((hx, hy), p[&(hx, hy)]);
                     continue;
                 }
                 let d = divs[&(hx, hy)];
-                p.insert((hx, hy), (sum - d) / n);
+                next.insert((hx, hy), (sum - d) / n);
             }
+            std::mem::swap(&mut p, &mut next);
         }
         for &(hx, hy) in &keys {
             let here = p[&(hx, hy)];
