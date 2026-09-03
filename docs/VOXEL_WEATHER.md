@@ -534,3 +534,11 @@ Do not re-walk these:
   evap→humidity **1.6**, seepage **3.5**, confined wake **2.2**.
   Lake-bed split 1.5 (was 1.6). Confined ~2.2 is still the ocean/lake
   communicating-vessel walk.
+
+  After the humidity mix/lift clone skip and wind Jacobi ping-pong
+  (this host, 40 warm + 200 measure, 0 plants): short wall **28.3**,
+  humidity.advect **1.8** (was 3.4), wind.rebuild **2.4**. Tall 1064
+  wall **20.1**, humidity.advect **1.3** (was 2.4), wind.rebuild
+  **1.8**, evap→humidity **1.4**, seepage **3.5**, confined wake
+  **2.1**. Flux / lift / mix math is unchanged. Confined leftover is
+  still the ocean/lake communicating-vessel walk.
