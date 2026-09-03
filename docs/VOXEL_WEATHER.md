@@ -542,3 +542,10 @@ Do not re-walk these:
   **1.8**, evap→humidity **1.4**, seepage **3.5**, confined wake
   **2.1**. Flux / lift / mix math is unchanged. Confined leftover is
   still the ocean/lake communicating-vessel walk.
+
+  After the confined standing-air y-band (plus one row for the rising
+  film): short wall **28.1**, confined wake **1.5** (was 2.2). Tall
+  1064 wall **20.0**, confined wake **1.4** (was 2.1), humidity.advect
+  **1.3**, wind.rebuild **1.8**. Dry sky in shore chunks is skipped;
+  wells / ocean equalise unchanged. Wind rebuild leftover is
+  compose + project on occupied seats.
