@@ -629,3 +629,14 @@ Do not re-walk these:
   mass — SipHash on load-index `contains` and a second humidity-map
   get were leftover as karst / sky fill. Lottery still walks every
   over-sat tile. Do not skip it.
+
+  After skipping leftover flow/gravity on dry inland chunks (Moore
+  neighbour still scanned so dry dest cells keep the +x equalise
+  edge) and hashing temperature scratch / diffuse with FxHash (this
+  host, 40 warm + 200 measure, 0 plants): short wall **24.4**, tall
+  **17.5**. Temperature.step **4.5 / 10.8 ms/call** (was **6.6 /
+  18.5** — leftover SipHash clone + sort). Repeat soak (256 plants,
+  8×400): wall **20.3 → 80.5**. Flow **0.67 → 2.67**, gravity
+  **0.52 → 2.26** — same leftover as before. Plants sit on rain-wet
+  land, so the dry-inland skip does not move soak. `clay` stays
+  **23**. Do not skip dry flow cells that own the +x equalise edge.
