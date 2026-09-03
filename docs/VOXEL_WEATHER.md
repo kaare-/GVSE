@@ -608,3 +608,12 @@ Do not re-walk these:
   Same cells, same rise — SipHash and per-call alloc were leftover on
   the equalized walk. `clay` stays **23**. The remaining confined grower
   is still that walk, just cheaper. Do not starve the wake.
+
+  After snapshotting humidity advect as a `Vec` (this host, 40 warm +
+  200 measure, 0 plants): short wall **25.7**, tall **18.2**,
+  humidity.advect **1.74 / 1.29** (same as the mix/lift skip). Repeat
+  soak (256 plants, 8×400): wall **21.7 → 85.2**. Condensation
+  **0.63 → 4.75** still tracks `hum n` **13k → 55k / 68k** (over-sat
+  tiles must lottery). Flux math is unchanged — the SipHash `clone`
+  was leftover on the snapshot, not the soak grower. `clay` stays
+  **23**. Do not skip the lottery.

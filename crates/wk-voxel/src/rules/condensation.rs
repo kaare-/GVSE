@@ -291,8 +291,10 @@ pub fn apply_condensation_rain_phased(
     let seed = world.seed.0;
     let tick_no = world.tick;
     let tile_cols = humidity.tile_cols;
-    // Snapshot tile keys so we can mutate humidity as we go.
-    let tiles: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
+    // Snapshot tiles so we can mutate humidity as we go. A Vec of
+    // (key, mass) avoids a second SipHash lookup per cell (leftover
+    // as the sky fills). Lottery still walks every over-sat tile.
+    let tiles: Vec<((i32, i32), f32)> = humidity.cells.iter().map(|(&k, &v)| (k, v)).collect();
     // Collect first, then apply the heaviest hits so a saturated sky
     // cannot walk every column every tick (~thousands → 7 FPS).
     let mut hits: Vec<(f32, i32, i32, f32)> = Vec::new(); // mass, hx, hy, take_mass
@@ -301,7 +303,7 @@ pub fn apply_condensation_rain_phased(
     // above the crest, miss the ground, and cache "no floor".
     let mut col_lo: crate::fasthash::FxHashMap<i32, i32> =
         crate::fasthash::FxHashMap::default();
-    for &(hx, hy) in &tiles {
+    for &((hx, hy), _) in &tiles {
         col_lo
             .entry(hx)
             .and_modify(|m| *m = (*m).min(hy))
@@ -309,12 +311,11 @@ pub fn apply_condensation_rain_phased(
     }
     let mut film_floor: crate::fasthash::FxHashMap<i32, i32> =
         crate::fasthash::FxHashMap::default();
-    for (hx, hy) in tiles {
+    for ((hx, hy), mass) in tiles {
         // Cheap sat / min-mass gate, then lottery, then the column floor
         // walk. Floor does not change the roll, so losers must not pay
         // `first_free_air_hy`. Under-sat tiles skip the below-tile dew
         // read and orographic surface walks too.
-        let mass = humidity.at_tile(hx, hy);
         let (mut prob_mult, mut mass_mult, mut min_mass) = (1.0, 1.0, cfg.min_mass_to_rain);
         let mut full_mass = cfg.full_mass;
         let mut leftover = 0.0f32;

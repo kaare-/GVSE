@@ -4,13 +4,12 @@
 //!
 //! Vertical gravity fall for free water.
 
-use std::collections::HashSet;
-
 use wk_material::MaterialId;
 
 use crate::active::{partition_checkerboard, ActiveChunk};
 use crate::cell::{water_capacity_cell, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::fasthash::FxHashSet;
 use crate::grid::World;
 use crate::parallel::for_each_region_parallel;
 
@@ -61,11 +60,12 @@ pub fn apply_gravity_fall(world: &mut World) {
 ///
 /// Gravity's hot loop cannot touch the sparse maps (raw chunk pointers),
 /// so callers snapshot this once and reuse it across checkerboard colours
-/// / flow substeps. Load that moves during the tick lags until the next
-/// snapshot — geology-OK; the stream mineral test runs 120 ticks.
-pub(crate) fn water_load_index(world: &World) -> HashSet<(i32, i32)> {
+/// / flow substeps. FxHash — leftover SipHash as karst ages (`diss`
+/// 1k → 10k). Same cells. Load that moves during the tick lags until
+/// the next snapshot — geology-OK; the stream mineral test runs 120 ticks.
+pub(crate) fn water_load_index(world: &World) -> FxHashSet<(i32, i32)> {
     if world.dissolved.is_empty() && world.suspended.is_empty() {
-        return HashSet::new();
+        return FxHashSet::default();
     }
     world
         .dissolved
@@ -98,7 +98,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
 pub(crate) fn apply_gravity_fall_regions_loaded(
     world: &mut World,
     active: &[ActiveChunk],
-    loaded: &HashSet<(i32, i32)>,
+    loaded: &FxHashSet<(i32, i32)>,
 ) {
     let hydro = world.hydro;
     // Dissolved / suspended load has to ride these transfers, but the hot

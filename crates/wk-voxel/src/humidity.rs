@@ -983,9 +983,9 @@ impl Humidity {
         world: &crate::grid::World,
         cache: &FxHashMap<i32, i32>,
     ) {
-        let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
+        let keys: Vec<((i32, i32), f32)> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
         let mut moves: Vec<((i32, i32), (i32, i32), f32)> = Vec::new();
-        for (hx, hy) in keys {
+        for ((hx, hy), mass) in keys {
             let air = self.free_air_cached(wind, world, hx, cache);
             if hy >= air {
                 continue;
@@ -1005,9 +1005,6 @@ impl Humidity {
             if hy >= valley {
                 continue;
             }
-            let Some(&mass) = self.cells.get(&(hx, hy)) else {
-                continue;
-            };
             if mass <= 1e-9 || !self.accepts(hx, air) {
                 continue;
             }

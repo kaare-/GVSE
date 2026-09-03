@@ -4,13 +4,12 @@
 //!
 //! Permeability-limited pore soak.
 
-use std::collections::HashSet;
-
 use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::ActiveChunk;
 use crate::cell::{permeability_cell, water_capacity_cell, Cell, Sat};
 use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W, STANDING_AIR_SAT};
+use crate::fasthash::FxHashSet;
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
@@ -572,10 +571,11 @@ pub fn apply_seepage_regions_ex(
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_seepage_xfers_ex(world, active, &mut xfers, contact_only);
     // Nothing dissolved anywhere means load transport and precipitation have
-    // nothing to do. Snapshot keys once: after karst the map stays
-    // non-empty, and most seepage sources still carry nothing.
-    let mut loaded: HashSet<(i32, i32)> = if world.dissolved.is_empty() {
-        HashSet::new()
+    // nothing to do. Snapshot keys once into FxHash: after karst the map
+    // stays non-empty, and most seepage sources still carry nothing.
+    // SipHash contains on every transfer was leftover as `diss` grows.
+    let mut loaded: FxHashSet<(i32, i32)> = if world.dissolved.is_empty() {
+        FxHashSet::default()
     } else {
         world.dissolved.keys().copied().collect()
     };

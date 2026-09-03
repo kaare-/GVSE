@@ -4,7 +4,7 @@
 //!
 //! Priority surface water flow (cascade, equalise, throughflow).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use wk_material::MaterialId;
 
@@ -199,7 +199,7 @@ fn commit_air_sat_xfers(
     if xfers.is_empty() {
         return;
     }
-    let mut by_source: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    let mut by_source: FxHashMap<(i32, i32), Vec<usize>> = FxHashMap::default();
     for (i, (from, _, _)) in xfers.iter().enumerate() {
         by_source.entry(*from).or_default().push(i);
     }
@@ -221,13 +221,13 @@ fn commit_air_sat_xfers(
         }
     }
     xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let mut mineral_loaded: HashSet<(i32, i32)> = if world.dissolved.is_empty() {
-        HashSet::new()
+    let mut mineral_loaded: FxHashSet<(i32, i32)> = if world.dissolved.is_empty() {
+        FxHashSet::default()
     } else {
         world.dissolved.keys().copied().collect()
     };
-    let mut sediment_loaded: HashSet<(i32, i32)> = if world.suspended.is_empty() {
-        HashSet::new()
+    let mut sediment_loaded: FxHashSet<(i32, i32)> = if world.suspended.is_empty() {
+        FxHashSet::default()
     } else {
         world.suspended.keys().copied().collect()
     };
@@ -277,7 +277,8 @@ fn commit_air_sat_xfers(
         // fed by a spring deposits where it finally dries rather than losing
         // the load at the point it left the ground. Skip the maps entirely
         // until something is actually in them — once karst starts they stay
-        // non-empty, so also skip sources that are not carrying.
+        // non-empty, so also skip sources that are not carrying. FxHash
+        // contains is leftover hasher; same cells, same mass.
         if !mineral_loaded.is_empty() && mineral_loaded.contains(&(from.0, from.1)) {
             crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
             mineral_loaded.insert((to.0, to.1));
