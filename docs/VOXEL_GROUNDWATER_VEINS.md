@@ -448,12 +448,13 @@ version. Two changes did it, and both are worth preserving:
 
 - **Scan for the fines, not for the water.** An ocean world is overwhelmingly
   water with nothing beneath it to lift, so iterating water cells does work
-  proportional to the sea rather than to the erodible bed. Chunks need both
-  `has_wet_air` and `has_loose`.
+  proportional to the sea rather than to the erodible bed.
+- **`has_wet_air && has_clay`**, not `has_loose`. Rain wets sand/soil/gravel
+  the same way it wets a clay bank; only clay-grade fines suspend. The loose
+  filter was the soak-age leftover: drizzle spread `has_wet_air` and every
+  wet bed paid a full-chunk clay hunt.
 - **Drive settling from the sparse load map**, not from a scan, so it costs what
   is actually in transit.
-
-A clay-specific chunk flag would cut the remaining scan further.
 
 ### Still open: abraded silicate
 

@@ -15,7 +15,7 @@ use crate::cell::{
     falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity_cell, Cell, CellFlags, Sat,
 };
-use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, STANDING_AIR_SAT, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
 use crate::grid::World;
 use crate::parallel::{
@@ -3082,12 +3082,21 @@ pub fn apply_flow_erosion_bound(
 
     let seed = world.seed.0;
     let tick_no = world.tick;
-    // Skip dry chunks — same sticky flag evaporation uses. Still pools
-    // without flow bias remain no-ops inside the scan.
+    // Default `min_flow_sat` is 180 — rain film (sat ~33) cannot scour.
+    // `has_wet_air` spreads with drizzle and is the soak-age leftover:
+    // every rain-wet sand/soil chunk paid a full 64×64 walk looking for
+    // standing water that was never there. Standing occupancy matches
+    // the sat gate; a lower custom `min_flow_sat` keeps the wet-air net.
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_air)
+        .filter(|(_, c)| {
+            if cfg.min_flow_sat >= STANDING_AIR_SAT {
+                c.has_standing_air
+            } else {
+                c.has_wet_air
+            }
+        })
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));

@@ -883,6 +883,8 @@ fn organism_cost_versus_soak_age() {
 /// grow. A rising `snow` / `buoy` chunk count with a quiet scene is the
 /// occupancy leak; rising `mods` with a flat atom count is plant growth;
 /// rising `hum n` toward tile capacity is a filled atmosphere, not a leak.
+/// `wet` / `loose` spreading while `clay` / `stand` stay flat is rain
+/// wetting land (suspension / bedload leftover, now occupancy-gated).
 ///
 /// ```text
 /// cargo test -p wk-voxel --release --test perf_profile -- --ignored --nocapture soak_age_inventory
@@ -901,9 +903,10 @@ fn soak_age_inventory() {
     }
 
     println!(
-        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5}",
+        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5}",
         "tick", "wall", "phys", "grav", "flow", "seep", "conf", "body", "org",
-        "cond", "halo", "diss", "hum n", "buoy", "orgc", "pores", "mods"
+        "cond", "halo", "diss", "hum n", "buoy", "orgc", "pores", "wet", "loose",
+        "clay", "stand", "susp", "mods"
     );
     for _ in 0..SEGS {
         let mut accum = PassAccum::zero();
@@ -916,6 +919,10 @@ fn soak_age_inventory() {
         let mut buoy_ch = 0usize;
         let mut org_ch = 0usize;
         let mut pore_ch = 0usize;
+        let mut wet_air_ch = 0usize;
+        let mut loose_ch = 0usize;
+        let mut clay_ch = 0usize;
+        let mut stand_ch = 0usize;
         for c in scene.world.chunks.values() {
             if c.has_buoyant {
                 buoy_ch += 1;
@@ -925,6 +932,18 @@ fn soak_age_inventory() {
             }
             if c.has_wet_pores {
                 pore_ch += 1;
+            }
+            if c.has_wet_air {
+                wet_air_ch += 1;
+            }
+            if c.has_loose {
+                loose_ch += 1;
+            }
+            if c.has_clay {
+                clay_ch += 1;
+            }
+            if c.has_standing_air {
+                stand_ch += 1;
             }
         }
         let halo = if phys.substeps_ran > 0 {
@@ -939,7 +958,7 @@ fn soak_age_inventory() {
             .map(|b| b.tile_capacity())
             .unwrap_or(0);
         println!(
-            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>6.0} {:>5} {:>5}/{:<4} {:>5} {:>5} {:>5} {:>6}",
+            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>6.0} {:>5} {:>5}/{:<4} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6}",
             scene.world.tick,
             wall.as_secs_f32() * 1000.0 / SEG as f32,
             accum.physics_tick.as_secs_f32() * 1000.0 / SEG as f32,
@@ -957,6 +976,11 @@ fn soak_age_inventory() {
             buoy_ch,
             org_ch,
             pore_ch,
+            wet_air_ch,
+            loose_ch,
+            clay_ch,
+            stand_ch,
+            scene.world.suspended.len(),
             mods,
         );
     }

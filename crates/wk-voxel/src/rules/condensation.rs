@@ -305,29 +305,46 @@ pub fn apply_condensation_rain_phased(
     }
     let mut film_floor: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
     for (hx, hy) in tiles {
-        let hint = col_lo.get(&hx).copied().unwrap_or(hy);
-        let floor = first_free_air_hy(world, tile_cols, hx, hint, &mut film_floor);
-        if hy <= floor.saturating_add(SURFACE_FILM_SPARE_TILES) {
-            continue;
-        }
+        // Mass gate before the column floor walk. As the atmosphere
+        // fills, leftover tiles under sat grow; those must not pay
+        // `first_free_air_hy` (or orographic surface walks once
+        // thermal sat has already refused them).
         let mass = humidity.at_tile(hx, hy);
-        let (mut prob_mult, mut mass_mult, mut min_mass) = match oro {
-            Some(o) => orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain),
-            None => (1.0, 1.0, cfg.min_mass_to_rain),
-        };
+        let (mut prob_mult, mut mass_mult, mut min_mass) = (1.0, 1.0, cfg.min_mass_to_rain);
         let mut full_mass = cfg.full_mass;
         let mut leftover = 0.0f32;
         if let Some(th) = temp {
             let (tp, tm, tmin, sat) = thermal_rain_factors(th, hx, hy, tile_cols);
+            // Thermal sat is the gate. Skip oro + floor when this tile
+            // cannot rain; oro only multiplies the lottery after.
+            if mass < tmin {
+                continue;
+            }
             prob_mult *= tp;
             mass_mult *= tm;
-            // The T-hold is the gate. Orographic lift may raise the
-            // lottery, not punch through sat so a hill rains at 30 mass.
             min_mass = tmin;
             full_mass = sat.max(min_mass + 1.0);
             leftover = (sat * CLOUD_REMNANT_SAT_FRAC).max(1.0);
+            if let Some(o) = oro {
+                let (op, om, _) = orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain);
+                prob_mult *= op;
+                mass_mult *= om;
+            }
+        } else {
+            if let Some(o) = oro {
+                let (op, om, omin) =
+                    orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain);
+                prob_mult = op;
+                mass_mult = om;
+                min_mass = omin;
+            }
+            if mass < min_mass {
+                continue;
+            }
         }
-        if mass < min_mass {
+        let hint = col_lo.get(&hx).copied().unwrap_or(hy);
+        let floor = first_free_air_hy(world, tile_cols, hx, hint, &mut film_floor);
+        if hy <= floor.saturating_add(SURFACE_FILM_SPARE_TILES) {
             continue;
         }
         // Linear from 0 at min_mass to 1 at thermal/orographic full — and it

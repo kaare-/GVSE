@@ -175,6 +175,20 @@ pub struct Chunk {
     /// when a scan finds every pore full.
     #[serde(default)]
     pub has_unsaturated_pores: bool,
+    /// Sticky occupancy: at least one `Clay` cell. Suspension scans skip
+    /// rain-wet sand / soil / gravel that can never entrain. Raised on a
+    /// Clay write; cleared by [`crate::sediment::apply_suspension`] when
+    /// a scan finds none left. `true` on old saves (missing field) so
+    /// they scan once, then the empty pass clears them.
+    #[serde(default = "serde_flag_true")]
+    pub has_clay: bool,
+    /// Sticky occupancy: at least one soluble rock (limestone, flowstone,
+    /// sandstone, conglomerate). Karst skips rain-soaked sand / soil that
+    /// has no carbonate to dissolve. Raised on a soluble write; cleared
+    /// when a karst scan finds none left. `true` on old saves so they
+    /// scan once, then the empty pass clears them.
+    #[serde(default = "serde_flag_true")]
+    pub has_soluble: bool,
     /// Inclusive local-y band of standing Air. `y0 > y1` is unset
     /// (old saves / bootstrap) so confined still scans the full rect.
     /// Raised on a standing write; tightened by the evap occupancy walk.
@@ -182,6 +196,10 @@ pub struct Chunk {
     pub standing_air_y0: u8,
     #[serde(default = "standing_band_unset_hi")]
     pub standing_air_y1: u8,
+}
+
+fn serde_flag_true() -> bool {
+    true
 }
 
 fn standing_band_unset_lo() -> u8 {
@@ -229,6 +247,8 @@ impl Chunk {
             has_solid: false,
             has_open_air: false,
             has_unsaturated_pores: false,
+            has_clay: false,
+            has_soluble: false,
             standing_air_y0: 255,
             standing_air_y1: 0,
         }
@@ -303,6 +323,12 @@ impl Chunk {
         }
         if crate::cell::is_competent_rock(cell.material) {
             self.has_competent = true;
+        }
+        if cell.material == MaterialId::Clay {
+            self.has_clay = true;
+        }
+        if wk_material::MaterialRegistry::base_props(cell.material).solubility > 0 {
+            self.has_soluble = true;
         }
         if cell.material == MaterialId::Air && cell.sat.0 >= STANDING_AIR_SAT {
             self.has_standing_air = true;
@@ -435,6 +461,8 @@ mod tests {
         assert!(!c.has_solid);
         assert!(!c.has_open_air);
         assert!(!c.has_unsaturated_pores);
+        assert!(!c.has_clay);
+        assert!(!c.has_soluble);
         let mut rain = Cell::air();
         rain.sat = Sat(33);
         c.set(0, 0, rain);
@@ -450,10 +478,14 @@ mod tests {
         assert!(c.has_open_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
+        assert!(c.has_soluble);
         assert!(c.has_competent);
         assert!(c.has_solid);
         c.set(3, 3, Cell::solid(MaterialId::Sand));
         assert!(c.has_loose);
+        assert!(!c.has_clay);
+        c.set(7, 7, Cell::solid(MaterialId::Clay));
+        assert!(c.has_clay);
         let mut wet_sand = Cell::solid(MaterialId::Sand);
         wet_sand.sat = Sat(8);
         c.set(6, 6, wet_sand);

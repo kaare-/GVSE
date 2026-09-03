@@ -50,9 +50,9 @@ fn cost_versus_soak_age() {
         let wall = Instant::now();
         for _ in 0..SEGMENT {
             tick_with_perf_profiled(&mut world, &perf, &mut phys);
-            // App-side passes the physics profile does not see. Suspension is a
-            // prime suspect: its chunk filter is `has_wet_air && has_loose`, and
-            // once the ground is uniformly wet that stops filtering anything.
+            // App-side passes the physics profile does not see. Suspension used
+            // to walk `has_wet_air && has_loose` (every rain-wet sand bed).
+            // The filter is now `has_wet_air && has_clay`.
             let t = Instant::now();
             wk_voxel::sediment::apply_suspension(&mut world);
             susp += t.elapsed();

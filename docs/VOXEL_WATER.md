@@ -106,6 +106,7 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 Opt-in (wired in `wk-voxel-app` after `tick`, Tab → Grain / sediment):
 
 - Only cells with **flow bias** (cascade lip or clear head drop to a neighbor). Still lakes do not scour.
+- Chunk filter is `has_standing_air` when `min_flow_sat >= STANDING_AIR_SAT` (the default 180). Rain-wet land (`has_wet_air` only) is leftover — drizzle cannot scour. A lower custom `min_flow_sat` keeps the wet-air net.
 - Targets dense [`is_flow_erodible`] grains: Sand / Gravel / Clay / **Soil** / LooseRock / LooseLimestone (`erosion_resistance < 150`). Not Ice / Stone / Snow.
 - **Organic** is contextual: grounded beach litter and waterlogged/sunk mats scour under flow (deposits stay `WATERLOGGED` so they remain bedload). Thick / mycelium-bound floating rafts stay wind-owned. Thin unbound floating film is current-owned: deterministic drift under `flow_bias`, cascade-lip wash, scour, and a post-drift [`shove_floating_organic_with_current`] so mats do not dam free surfaces into comb teeth. Same-Y cascade pull looks past soft floating Organic lids. **Standing water washes through Organic spans** into Air beyond (Organic is a sponge, not a masonry dam). Mycelium felt does not hold vertical cliffs when Organic is wash-wet next to standing water.
 - **Bed scour** under standing water → vacated cell becomes **empty Air** (gravity pulls the column down — no minted water); **bank undercut** → Air (pore sat released).
@@ -280,8 +281,11 @@ Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
   That leftover sat is usually below the surface threshold, so it
   feeds the underground path and lets conduits enlarge where water
   already is.
-- Chunks without `has_limestone` and without `has_wet_pores` are
-  skipped. Per-cell porosity/permeability ranges
+- Chunks without `has_soluble` are skipped. That flag is raised on
+  limestone / flowstone / sandstone / conglomerate writes and cleared
+  when a scan finds none left. Rain-soaked sand / soil used to enter
+  via `has_wet_pores` and pay a full-chunk walk with nothing to
+  dissolve. Per-cell porosity/permeability ranges
   ([`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md)) can later
   scale the same contact weight.
 

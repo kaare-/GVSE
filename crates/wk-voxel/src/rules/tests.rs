@@ -5828,6 +5828,7 @@ fn karst_skips_chunks_without_limestone_flag() {
     // Wet air only — no limestone. Flag stays false; pass is a no-op.
     w.set_cell(4, 2, Cell::water());
     assert!(!w.chunks[&ChunkCoord::new(0, 0)].has_limestone);
+    assert!(!w.chunks[&ChunkCoord::new(0, 0)].has_soluble);
     let cfg = KarstConfig {
         prob_per_wet_neighbour: 1.0,
         min_wet_neighbour_sat: 1,
@@ -5837,6 +5838,22 @@ fn karst_skips_chunks_without_limestone_flag() {
     };
     apply_karst_dissolution(&mut w, &cfg);
     assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);
+}
+
+#[test]
+fn karst_skips_rain_wet_sand_without_soluble_rock() {
+    // Soak-age leftover: rain raises `has_wet_pores` on sand/soil, and
+    // the old filter walked those chunks looking for carbonate that
+    // was never there. Sand stays sand; the soluble flag stays down.
+    let mut w = setup_column_world();
+    let mut wet_sand = Cell::solid(MaterialId::Sand);
+    wet_sand.sat = Sat(crate::cell::water_capacity(MaterialId::Sand));
+    w.set_cell(4, 1, wet_sand);
+    w.set_cell(4, 2, Cell::water());
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_wet_pores);
+    assert!(!w.chunks[&ChunkCoord::new(0, 0)].has_soluble);
+    apply_karst_dissolution(&mut w, &forced_pore_karst());
+    assert_eq!(w.get_cell(4, 1).unwrap().material, MaterialId::Sand);
 }
 
 #[test]
