@@ -349,13 +349,17 @@ impl Wind {
             }
         }
 
+        // Jacobi asks solid / wall on every face, every sweep. One
+        // 3×3 walk per key was leftover — the answers do not change.
+        let solid = fill_solid_cache(world, tc, self.wrap_x, bounds, &keys);
+
         let mut next = FxHashMap::default();
         next.reserve(keys.len());
         for &(hx, hy) in keys.keys() {
             // Tile-centre in rock is not a breeze. A capped live-surface
             // climb used to seat the near-surface band inside an F3 tower
             // (wind tunnel around y=250–260).
-            if tile_center_is_solid(world, tc, hx, hy) {
+            if tile_solid_at(&solid, world, tc, hx, hy) {
                 continue;
             }
             let (mut vx, mut vy) =
@@ -387,7 +391,7 @@ impl Wind {
         // up, the lee sucks. Then slip so the solve cannot re-introduce
         // an into-rock residual. Step 3 (water-head → near-surface wind)
         // is not wired yet.
-        self.project_incompressible(world, bounds, &mut blended);
+        self.project_incompressible(world, bounds, &mut blended, &solid);
         for (&(hx, hy), v) in blended.iter_mut() {
             *v = self.deflect_along_surface(world, hx, hy, v.0, v.1);
         }
@@ -470,6 +474,8 @@ impl Wind {
         hy: i32,
         dx: i32,
         dy: i32,
+        solid: &FxHashMap<(i32, i32), bool>,
+        walls: &FxHashMap<(i32, i32), (bool, bool)>,
     ) -> bool {
         if dy != 0 {
             let nhy = hy + dy;
@@ -486,11 +492,13 @@ impl Wind {
         let nhx = self.wrap_tile_hx(hx + dx, bounds);
         let nhy = hy + dy;
         let tc = self.tile_cols.max(1);
-        if tile_center_is_solid(world, tc, nhx, nhy) {
+        if tile_solid_at(solid, world, tc, nhx, nhy) {
             return true;
         }
         if dx != 0 {
-            let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+            let (wall_l, wall_r) = walls.get(&(hx, hy)).copied().unwrap_or_else(|| {
+                self.neighbour_walls(world, hx, hy)
+            });
             if dx > 0 && wall_r {
                 return true;
             }
@@ -518,8 +526,10 @@ impl Wind {
         dy: i32,
         here: f32,
         horiz: bool,
+        solid: &FxHashMap<(i32, i32), bool>,
+        walls: &FxHashMap<(i32, i32), (bool, bool)>,
     ) -> f32 {
-        if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+        if self.face_blocked(world, bounds, hx, hy, dx, dy, solid, walls) {
             return 0.0;
         }
         let nhx = self.wrap_tile_hx(hx + dx, bounds);
@@ -541,8 +551,10 @@ impl Wind {
         dx: i32,
         dy: i32,
         here: f32,
+        solid: &FxHashMap<(i32, i32), bool>,
+        walls: &FxHashMap<(i32, i32), (bool, bool)>,
     ) -> f32 {
-        if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+        if self.face_blocked(world, bounds, hx, hy, dx, dy, solid, walls) {
             return here;
         }
         let nhx = self.wrap_tile_hx(hx + dx, bounds);
@@ -556,19 +568,33 @@ impl Wind {
         world: Option<&World>,
         bounds: TileBounds,
         field: &mut FxHashMap<(i32, i32), (f32, f32)>,
+        solid: &FxHashMap<(i32, i32), bool>,
     ) {
         if field.len() < 4 {
             return;
         }
         let keys: Vec<(i32, i32)> = field.keys().copied().collect();
+        let mut walls: FxHashMap<(i32, i32), (bool, bool)> = FxHashMap::default();
+        walls.reserve(keys.len());
+        for &(hx, hy) in &keys {
+            walls.insert((hx, hy), self.neighbour_walls(world, hx, hy));
+        }
         let mut divs: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         divs.reserve(keys.len());
         for &(hx, hy) in &keys {
             let (vx, vy) = field[&(hx, hy)];
-            let ue = self.face_velocity(world, bounds, field, hx, hy, 1, 0, vx, true);
-            let uw = self.face_velocity(world, bounds, field, hx, hy, -1, 0, vx, true);
-            let vn = self.face_velocity(world, bounds, field, hx, hy, 0, 1, vy, false);
-            let vs = self.face_velocity(world, bounds, field, hx, hy, 0, -1, vy, false);
+            let ue = self.face_velocity(
+                world, bounds, field, hx, hy, 1, 0, vx, true, solid, &walls,
+            );
+            let uw = self.face_velocity(
+                world, bounds, field, hx, hy, -1, 0, vx, true, solid, &walls,
+            );
+            let vn = self.face_velocity(
+                world, bounds, field, hx, hy, 0, 1, vy, false, solid, &walls,
+            );
+            let vs = self.face_velocity(
+                world, bounds, field, hx, hy, 0, -1, vy, false, solid, &walls,
+            );
             divs.insert((hx, hy), ue - uw + vn - vs);
         }
         let mut p: FxHashMap<(i32, i32), f32> = FxHashMap::default();
@@ -582,7 +608,7 @@ impl Wind {
                 let mut sum = 0.0;
                 let mut n = 0.0;
                 for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+                    if self.face_blocked(world, bounds, hx, hy, dx, dy, solid, &walls) {
                         continue;
                     }
                     let nhx = self.wrap_tile_hx(hx + dx, bounds);
@@ -603,10 +629,10 @@ impl Wind {
         }
         for &(hx, hy) in &keys {
             let here = p[&(hx, hy)];
-            let pr = self.pressure_at(world, bounds, &p, hx, hy, 1, 0, here);
-            let pl = self.pressure_at(world, bounds, &p, hx, hy, -1, 0, here);
-            let pu = self.pressure_at(world, bounds, &p, hx, hy, 0, 1, here);
-            let pd = self.pressure_at(world, bounds, &p, hx, hy, 0, -1, here);
+            let pr = self.pressure_at(world, bounds, &p, hx, hy, 1, 0, here, solid, &walls);
+            let pl = self.pressure_at(world, bounds, &p, hx, hy, -1, 0, here, solid, &walls);
+            let pu = self.pressure_at(world, bounds, &p, hx, hy, 0, 1, here, solid, &walls);
+            let pd = self.pressure_at(world, bounds, &p, hx, hy, 0, -1, here, solid, &walls);
             if let Some(v) = field.get_mut(&(hx, hy)) {
                 v.0 = (v.0 - 0.5 * (pr - pl)).clamp(-1.0, 1.0);
                 v.1 = (v.1 - 0.5 * (pu - pd)).clamp(-1.0, 1.0);
@@ -940,6 +966,48 @@ fn tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> boo
     let gx = w.wrap_x(hx * tc + tc / 2);
     let gy = hy * tc + tc / 2;
     matches!(w.get_cell(gx, gy), Some(c) if c.material.is_solid())
+}
+
+fn tile_solid_at(
+    cache: &FxHashMap<(i32, i32), bool>,
+    world: Option<&World>,
+    tc: i32,
+    hx: i32,
+    hy: i32,
+) -> bool {
+    cache
+        .get(&(hx, hy))
+        .copied()
+        .unwrap_or_else(|| tile_center_is_solid(world, tc, hx, hy))
+}
+
+/// Tile-centre solid for every rebuild key and its Moore halo.
+/// Jacobi / compose reuse this instead of walking the world again.
+fn fill_solid_cache(
+    world: Option<&World>,
+    tc: i32,
+    wrap_x: bool,
+    bounds: TileBounds,
+    keys: &FxHashMap<(i32, i32), ()>,
+) -> FxHashMap<(i32, i32), bool> {
+    let mut solid = FxHashMap::default();
+    solid.reserve(keys.len().saturating_mul(2));
+    for &(hx, hy) in keys.keys() {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let nhx = if wrap_x {
+                    let w = (bounds.hx_max - bounds.hx_min + 1).max(1);
+                    bounds.hx_min + (hx + dx - bounds.hx_min).rem_euclid(w)
+                } else {
+                    hx + dx
+                };
+                solid
+                    .entry((nhx, hy + dy))
+                    .or_insert_with(|| tile_center_is_solid(world, tc, nhx, hy + dy));
+            }
+        }
+    }
+    solid
 }
 
 #[cfg(test)]
