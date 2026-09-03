@@ -65,7 +65,7 @@ Not permeability-limited — this is how a lake bed fills sand, then clay/stone 
 
 Per wet Air cell (compute-then-apply, mass-conserving):
 
-1. **Diagonal-down** into Air with room — dump.
+1. **Diagonal-down** into Air with room — dump. **Surface only** (solid or full water below). Mid-air rain / thawed snow is gravity's job; a 255 cell used to peel `drain_step_cap` (160) off and leave 95 beside it.
 2. **Cascade edge** — side Air whose below is Air with room — dump.
 3. **Same-Y surface equalise**
    - Scan up to 12 standing cells for a cascade outlet; push toward it.

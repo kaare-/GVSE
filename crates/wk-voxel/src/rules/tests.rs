@@ -4868,25 +4868,95 @@ fn lone_ridge_pixel_drains_via_throughflow_or_evap() {
 
 #[test]
 fn surface_flow_moves_single_sat_droplet_off_ridge() {
-    // Force-1 trickle: sat=1 with drier Air neighbours must move —
-    // the head equalizer's floor truncated 0.5 to zero and left
+    // Force-1 trickle on a ridge: sat=1 with drier Air neighbours must
+    // move — the head equalizer's floor truncated 0.5 to zero and left
     // droplets stuck. Prefer downhill; mass is preserved.
+    // Mid-air sat is gravity's job (see midair_full_rain_does_not_split).
     let mut w = World::new(3);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     for x in 0..8 {
         w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
+    w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
     let mut c = Cell::air();
     c.sat = Sat(1);
-    w.set_cell(4, 3, c);
+    w.set_cell(4, 2, c);
     apply_water_flow(&mut w);
-    let src = w.get_cell(4, 3).unwrap().sat.0 as i32;
+    let src = w.get_cell(4, 2).unwrap().sat.0 as i32;
     let mass: i32 = (0..8)
         .flat_map(|x| (1..=4).map(move |y| (x, y)))
         .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
         .sum();
     assert_eq!(src, 0, "lone droplet must leave the source cell");
     assert_eq!(mass, 1, "mass must be preserved (got {mass})");
+}
+
+#[test]
+fn midair_full_rain_does_not_diagonal_split() {
+    // Playtest: thawed snow is Air+255. The next flow pass used to
+    // peel drain_step_cap (160) diagonally and leave 95 — two drops.
+    let mut w = World::new(3);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..8 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(4, 20, Cell::water());
+    apply_water_flow(&mut w);
+    assert_eq!(
+        w.get_cell(4, 20).unwrap().sat.0,
+        255,
+        "mid-air rain must stay one cell (flow does not peel 160)"
+    );
+    for (x, y) in [(3, 19), (5, 19), (3, 20), (5, 20)] {
+        assert_eq!(
+            w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0),
+            0,
+            "no diagonal twin at ({x},{y})"
+        );
+    }
+}
+
+#[test]
+fn thawed_airborne_snow_falls_as_one_rain() {
+    // Playtest: flake → Air+255, next tick became 160 and 95.
+    let mut w = World::new(3);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..8 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(4, 20, Cell::solid(MaterialId::Snow));
+    let mut temp = Temperature::with_world_bounds(4, 0, 0, 16, 32, 1, 16, 8, false);
+    temp.config.base_temp_c = 8.0;
+    for v in temp.cells.values_mut() {
+        *v = 8.0;
+    }
+    let cfg = PhaseConfig {
+        period_ticks: 4,
+        ..PhaseConfig::default()
+    };
+    w.tick = 1;
+    crate::phase::apply_phase(&mut w, &temp, &cfg);
+    let melt = w.get_cell(4, 20).unwrap();
+    assert_eq!(melt.material, MaterialId::Air);
+    assert!(melt.sat.is_full(), "warm-air snow must become a rain cell");
+    tick(&mut w);
+    let drops: Vec<(i32, i32, u8)> = (0..8)
+        .flat_map(|x| (1..=20).map(move |y| (x, y)))
+        .filter_map(|(x, y)| {
+            let c = w.get_cell(x, y)?;
+            if c.material == MaterialId::Air && c.sat.0 > crate::GRAIN_REPOSE_HAZE_MAX {
+                Some((x, y, c.sat.0))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        drops.len(),
+        1,
+        "thawed flake must stay one rain, got {drops:?}"
+    );
+    assert_eq!(drops[0].2, 255, "rain must stay full, not 160+95");
 }
 
 // ------------ evaporation ------------

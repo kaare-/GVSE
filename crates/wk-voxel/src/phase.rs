@@ -923,6 +923,7 @@ fn above_is_frozen(world: &World, gx: i32, gy: i32) -> bool {
 /// full-sky walk stays cheap. Ceiling flakes never entered that band,
 /// so they crossed tens of warm cells before [`thaw_column`] saw them.
 /// This walk is the same `has_snow` scan as fall: one cell, `Air+FULL`.
+/// Surface flow must not peel that cell (mid-air rain is gravity-only).
 fn thaw_airborne_snow(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
     if !world.chunks.values().any(|c| c.has_snow) {
         return;

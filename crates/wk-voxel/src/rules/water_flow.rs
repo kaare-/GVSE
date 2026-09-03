@@ -29,6 +29,8 @@ use super::plan::{regions_confined_loaded, regions_for_standalone};
 /// order-independent), pick the best target in this order:
 ///
 /// 1. **Diagonal-down Air with room** — dump as much sat as fits.
+///    Surface only (solid / full water below). Mid-air rain falls
+///    with gravity; a 255 thaw used to peel 160 and leave 95.
 /// 2. **Immediate side is a cascade edge** — the side neighbour is Air
 ///    with an Air-with-room directly below it (the water we push there
 ///    will fall next tick). Dump all we can.
@@ -883,6 +885,13 @@ fn accumulate_water_flow_xfers(
                 let step = sheet_step_cap(depth);
                 let drain = drain_step_cap(depth);
 
+                // Mid-air rain / thawed snow is gravity's job. Diagonal
+                // dump used to peel `drain_step_cap` (160) off a 255
+                // cell and leave 95 beside it — two drops from one flake.
+                if !on_surface {
+                    continue;
+                }
+
                 // --- Priority 1: diagonal-down into Air with room ---
                 // Shelf edge: (dx, y-1) is Air, so water can fall there.
                 for dx in dirs {
@@ -906,7 +915,7 @@ fn accumulate_water_flow_xfers(
                     remaining -= move_amt;
                 }
 
-                if remaining > 0 && on_surface {
+                if remaining > 0 {
                     // --- Priority 2: immediate side is a cascade edge ---
                     // side is Air AND (side, y-1) is Air with room → water
                     // dumped there falls next tick. Move all we can.

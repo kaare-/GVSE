@@ -403,9 +403,11 @@ Gated on **airborne** snow only. Once a flake lands it is snowpack and behaves a
 any other loose material, which is what lets drifts build and repose.
 
 A flake that falls into air **above freeze** melts to `Air+FULL` rain the
-same tick (`thaw_airborne_snow`). The ordinary phase thaw only looks at a
-band above the ground and only on `period_ticks`, so a cold-lid shower
-used to ride the warm column as snow until it neared the surface.
+same tick (`thaw_airborne_snow`). Mid-air rain is gravity-only — surface
+flow used to peel `drain_step_cap` (160) off that 255 cell and leave 95
+beside it (two drops from one flake). The ordinary phase thaw only looks
+at a band above the ground and only on `period_ticks`, so a cold-lid
+shower used to ride the warm column as snow until it neared the surface.
 
 Ice is deliberately not gated and serves as the test control: if both slow down,
 the gate is catching the wrong material.
