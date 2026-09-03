@@ -1322,7 +1322,13 @@ async fn main() {
         // Temperature heatmap overlay (blue cold → red hot).
         if temp_overlay && overlay_k > 0.01 {
             let tile_px = scene.temperature.tile_cols as f32 * cell_px;
+            let tc = scene.temperature.tile_cols.max(1);
+            let hy0 = y_min_vis.div_euclid(tc) - 1;
+            let hy1 = y_max_vis.div_euclid(tc) + 1;
             for (&(hx, hy), &temp_c) in &scene.temperature.cells {
+                if hy < hy0 || hy > hy1 {
+                    continue;
+                }
                 let base_gx = hx * scene.temperature.tile_cols;
                 let base_gy = hy * scene.temperature.tile_cols;
                 for &x_copy in x_copies {

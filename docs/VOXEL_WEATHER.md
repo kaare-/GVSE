@@ -69,9 +69,13 @@ is unchanged. Default off. Humidity haze no longer uses a global
 
 ### Pinned: do not coarsen off-screen sim sky
 
-Terrain already frustum-culls. `H` / `V` now skip **paint** (resample,
-floor walks, drop-top scans) for tiles / chunk-x that cannot touch the
-viewport. That is leftover draw as `hum n` fills.
+Terrain already frustum-culls. `H` / `V` skip **paint** (resample,
+floor walks, drop-top scans) for tiles / chunks that cannot touch the
+viewport. Seat collection probes the camera tile box when it is
+smaller than the vapour map, so a soaked sky does not walk every
+humidity key to draw a shore strip. Drop-top scans also skip chunks
+whose 64-high band sits entirely below the camera (shafts only go
+down). That is leftover draw as `hum n` fills.
 
 Coarsening **advect / wind / condensation / temperature** off-camera
 would change weather: the world is a ring, vapour wraps, and panning

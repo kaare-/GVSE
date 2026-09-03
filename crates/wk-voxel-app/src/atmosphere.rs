@@ -265,22 +265,24 @@ fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
 
 /// Highest drop in each column. Haze below that cell is the open path.
 fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
-    collect_drop_tops_where(world, |_| true)
+    collect_drop_tops_where(world, |_, _| true)
 }
 
-/// [`collect_drop_tops`] restricted to chunks whose **x** band can
-/// touch the viewport. Off-screen rain still falls in the sim; it
-/// cannot carve an on-screen shaft. Full column height stays — a
-/// drop above the camera still opens the wash below it.
+/// [`collect_drop_tops`] restricted to chunks that can affect the
+/// viewport shaft. Off-screen rain still falls in the sim; it cannot
+/// carve an on-screen wash. Full column height stays — a drop above
+/// the camera still opens the path below it. Chunks whose entire
+/// 64-high band sits **below** the camera are leftover (shafts only
+/// go down).
 fn collect_drop_tops_where(
     world: &World,
-    mut keep_cx: impl FnMut(i32) -> bool,
+    mut keep_chunk: impl FnMut(i32, i32) -> bool,
 ) -> HashMap<i32, i32> {
     let mut tops: HashMap<i32, i32> = HashMap::new();
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     for chunk in world.chunks.values() {
-        if !keep_cx(chunk.coord.cx) {
+        if !keep_chunk(chunk.coord.cx, chunk.coord.cy) {
             continue;
         }
         if !chunk.has_wet_air && !chunk.has_snow && !chunk.has_buoyant {
@@ -364,6 +366,175 @@ fn chunk_x_touches_view(
         }
     }
     false
+}
+
+/// Inclusive tile box that can produce a haze / overlay pixel.
+///
+/// Built from the camera so paint can probe O(view) instead of walking
+/// every humidity key (55k+ after a soak). One-tile pad matches
+/// [`humidity_tile_touches_view`] so bilinear neighbours stay.
+#[derive(Clone, Debug)]
+struct ViewTileBox {
+    hy_lo: i32,
+    hy_hi: i32,
+    hx_ranges: [(i32, i32); 2],
+    n_hx: u8,
+}
+
+impl ViewTileBox {
+    fn contains(&self, hx: i32, hy: i32) -> bool {
+        hy >= self.hy_lo && hy <= self.hy_hi && self.contains_hx(hx)
+    }
+
+    fn contains_hx(&self, hx: i32) -> bool {
+        for i in 0..self.n_hx as usize {
+            let (a, b) = self.hx_ranges[i];
+            if hx >= a && hx <= b {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn tile_count(&self) -> usize {
+        let h = (self.hy_hi - self.hy_lo + 1).max(0) as usize;
+        let mut w = 0usize;
+        for i in 0..self.n_hx as usize {
+            let (a, b) = self.hx_ranges[i];
+            w += (b - a + 1).max(0) as usize;
+        }
+        h.saturating_mul(w)
+    }
+}
+
+/// World-x intervals (inclusive) visible in camera space, wrapped.
+fn wrap_world_x_ranges(gx_lo: i32, gx_hi: i32, width_cols: i32) -> ([(i32, i32); 2], u8) {
+    if width_cols <= 0 || gx_hi < gx_lo {
+        return ([(0, -1), (0, -1)], 0);
+    }
+    if gx_hi - gx_lo >= width_cols {
+        return ([(0, width_cols - 1), (0, -1)], 1);
+    }
+    let a = gx_lo.rem_euclid(width_cols);
+    let b = a + (gx_hi - gx_lo);
+    if b < width_cols {
+        ([(a, b), (0, -1)], 1)
+    } else {
+        ([(a, width_cols - 1), (0, b - width_cols)], 2)
+    }
+}
+
+fn view_tile_box(
+    tc: i32,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+) -> Option<ViewTileBox> {
+    if cell_px <= 0.0 || sw <= 0.0 || sh <= 0.0 {
+        return None;
+    }
+    let tc = tc.max(1);
+    let pad = tc as f32 * cell_px;
+    // Expand one tile so float rounding cannot drop a seat that
+    // [`humidity_tile_touches_view`] would keep.
+    let hy_hi =
+        ((bedrock_floor_y as f32 + (origin_y + pad) / cell_px) / tc as f32).floor() as i32 + 1;
+    let hy_lo = {
+        let raw =
+            (bedrock_floor_y as f32 - tc as f32 + (origin_y - sh - pad) / cell_px) / tc as f32;
+        raw.ceil() as i32 - 1
+    };
+    let gx_lo = ((-pad - origin_x) / cell_px).floor() as i32 - tc;
+    let gx_hi = ((sw + pad - origin_x) / cell_px).ceil() as i32;
+    let mut hx_ranges = [(0, -1), (0, -1)];
+    let n_hx;
+    if !wrap_x || width_cols <= 0 {
+        hx_ranges[0] = (gx_lo.div_euclid(tc), gx_hi.div_euclid(tc));
+        n_hx = 1;
+    } else {
+        let (wx, n) = wrap_world_x_ranges(gx_lo, gx_hi, width_cols);
+        n_hx = n;
+        for i in 0..n as usize {
+            let (a, b) = wx[i];
+            hx_ranges[i] = (a.div_euclid(tc), b.div_euclid(tc));
+        }
+    }
+    Some(ViewTileBox {
+        hy_lo,
+        hy_hi,
+        hx_ranges,
+        n_hx,
+    })
+}
+
+/// True unless this chunk's 64-high band sits entirely below the
+/// viewport. High sky stays — a drop above the camera still carves.
+fn chunk_not_below_view(
+    cy: i32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    sh: f32,
+) -> bool {
+    if cell_px <= 0.0 {
+        return true;
+    }
+    let oy = cy * CHUNK_CELLS_H as i32;
+    let top_sy = origin_y - (oy + CHUNK_CELLS_H as i32 - bedrock_floor_y) as f32 * cell_px;
+    top_sy <= sh + cell_px
+}
+
+/// On-screen tile is a seat when it holds mass or a cardinal neighbour
+/// does (off-screen mass still seeds bilinear).
+fn haze_view_seat_due(humidity: &Humidity, hx: i32, hy: i32) -> bool {
+    if humidity.at_tile(hx, hy) > 0.0 {
+        return true;
+    }
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let Some(nx) = humidity.wrap_tile_x(hx + dx) else {
+            continue;
+        };
+        let ny = hy + dy;
+        if let Some(b) = humidity.bounds {
+            if !b.contains(nx, ny) {
+                continue;
+            }
+        }
+        if humidity.at_tile(nx, ny) > 0.0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Occupied + neighbour seats that can touch `box` — probe the view
+/// when it is smaller than the vapour map, otherwise walk keys.
+fn haze_paint_seats_in_box(humidity: &Humidity, box_: &ViewTileBox) -> Vec<(i32, i32)> {
+    if box_.tile_count() >= humidity.cells.len().max(1) {
+        return haze_paint_seats_where(humidity, |hx, hy| box_.contains(hx, hy));
+    }
+    let mut seats = Vec::new();
+    for hy in box_.hy_lo..=box_.hy_hi {
+        for i in 0..box_.n_hx as usize {
+            let (hx0, hx1) = box_.hx_ranges[i];
+            for hx in hx0..=hx1 {
+                let Some(hx) = humidity.wrap_tile_x(hx) else {
+                    continue;
+                };
+                if haze_view_seat_due(humidity, hx, hy) {
+                    seats.push((hx, hy));
+                }
+            }
+        }
+    }
+    seats.sort_unstable();
+    seats.dedup();
+    seats
 }
 
 /// Inclusive bottom of the 4×4 column still painted. Everything at or
@@ -1081,26 +1252,41 @@ pub fn draw_haze_and_wind(
     let resample = look.haze_resample;
     let _ = sea_level_y;
     let tc = humidity.tile_cols.max(1);
-    let drop_tops = collect_drop_tops_where(world, |cx| {
+    let drop_tops = collect_drop_tops_where(world, |cx, cy| {
         chunk_x_touches_view(cx, origin_x, cell_px, wrap_x, width_cols, sw)
+            && chunk_not_below_view(cy, origin_y, cell_px, bedrock_floor_y, sh)
     });
     // No global y-cut. Per-column `cloud_floor_y` already clips buried cells.
-    // Off-screen seats skip resample + floor walks (leftover as hum n fills).
-    let seats = haze_paint_seats_where(humidity, |hx, hy| {
-        humidity_tile_touches_view(
-            hx,
-            hy,
-            tc,
-            origin_x,
-            origin_y,
-            cell_px,
-            bedrock_floor_y,
-            wrap_x,
-            width_cols,
-            sw,
-            sh,
-        )
-    });
+    // Probe the viewport tile box so a soaked sky does not walk 55k keys
+    // to paint a few thousand on-screen seats. Sim field unchanged.
+    let seats = match view_tile_box(
+        tc,
+        origin_x,
+        origin_y,
+        cell_px,
+        bedrock_floor_y,
+        wrap_x,
+        width_cols,
+        sw,
+        sh,
+    ) {
+        Some(box_) => haze_paint_seats_in_box(humidity, &box_),
+        None => haze_paint_seats_where(humidity, |hx, hy| {
+            humidity_tile_touches_view(
+                hx,
+                hy,
+                tc,
+                origin_x,
+                origin_y,
+                cell_px,
+                bedrock_floor_y,
+                wrap_x,
+                width_cols,
+                sw,
+                sh,
+            )
+        }),
+    };
     let mut floor_cache: HashMap<i32, i32> = HashMap::new();
 
     for (hx, hy) in seats {
@@ -1219,10 +1405,24 @@ pub fn draw_wind_streaks(
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
 
     let stride = wind_streak_stride(cell_px);
+    let view = view_tile_box(
+        tc,
+        origin_x,
+        origin_y,
+        cell_px,
+        bedrock_floor_y,
+        wrap_x,
+        width_cols,
+        sw,
+        sh,
+    );
     let mut samples: Vec<(i32, i32, f32, f32)> = Vec::new();
     if !wind.field.is_empty() {
         for (&(hx, hy), &(vx, vy)) in &wind.field {
             if !wind_streak_on_lattice(hx, hy, stride) {
+                continue;
+            }
+            if view.as_ref().is_some_and(|b| !b.contains(hx, hy)) {
                 continue;
             }
             if !humidity_tile_touches_view(
@@ -1896,9 +2096,10 @@ pub fn estimate_snow_bias(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_drop_tops, haze_cell_is_drop, haze_column_y0, haze_paint_seats,
-        haze_paint_seats_where, haze_resampled_cells, humidity_haze_alpha,
-        humidity_haze_alpha_gated, humidity_tile_touches_view,
+        chunk_not_below_view, collect_drop_tops, haze_cell_is_drop, haze_column_y0,
+        haze_paint_seats, haze_paint_seats_in_box, haze_paint_seats_where,
+        haze_resampled_cells, humidity_haze_alpha, humidity_haze_alpha_gated,
+        humidity_tile_touches_view, view_tile_box,
     };
     use std::collections::HashMap;
     use wk_voxel::Humidity;
@@ -2275,5 +2476,81 @@ mod tests {
         );
         assert!(!seats.contains(&(1, 0)));
         assert!(!seats.contains(&(20, 0)));
+    }
+
+    #[test]
+    fn view_tile_box_covers_every_tile_that_touches_the_camera() {
+        let origin_x = 12.0;
+        let origin_y = 80.0;
+        let cell = 3.0;
+        let tc = 4;
+        let bedrock = 0;
+        let wrap = true;
+        let width = 256;
+        let sw = 160.0;
+        let sh = 90.0;
+        let box_ = view_tile_box(
+            tc, origin_x, origin_y, cell, bedrock, wrap, width, sw, sh,
+        )
+        .expect("box");
+        for hx in -4..70 {
+            for hy in -4..40 {
+                if humidity_tile_touches_view(
+                    hx, hy, tc, origin_x, origin_y, cell, bedrock, wrap, width, sw, sh,
+                ) {
+                    assert!(
+                        box_.contains(hx, hy),
+                        "view box dropped a tile the pixel test keeps ({hx},{hy})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn haze_view_box_keeps_the_same_on_screen_seats() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 256, 128);
+        h.wrap_x = true;
+        h.cells.insert((2, 1), 180.0);
+        h.cells.insert((40, 1), 180.0);
+        h.cells.insert((2, 20), 180.0);
+        let origin_x = 0.0;
+        let origin_y = 64.0;
+        let cell = 4.0;
+        let keep = |hx: i32, hy: i32| {
+            humidity_tile_touches_view(hx, hy, 4, origin_x, origin_y, cell, 0, true, 256, 128.0, 64.0)
+        };
+        let old: std::collections::HashSet<_> = haze_paint_seats_where(&h, keep).into_iter().collect();
+        let box_ = view_tile_box(4, origin_x, origin_y, cell, 0, true, 256, 128.0, 64.0)
+            .expect("box");
+        let new: std::collections::HashSet<_> =
+            haze_paint_seats_in_box(&h, &box_).into_iter().collect();
+        for seat in &old {
+            assert!(
+                new.contains(seat),
+                "viewport probe dropped seat {seat:?} the key walk kept"
+            );
+        }
+        assert!(new.contains(&(2, 1)));
+        assert!(!old.contains(&(40, 1)));
+        assert!(!old.contains(&(2, 20)));
+    }
+
+    #[test]
+    fn drop_top_chunks_below_the_camera_are_leftover() {
+        // origin_y=64, cell=4, sh=64 → world y 0 sits at the bottom.
+        // cy=-1 is world y [-64, -1], entirely below that window.
+        assert!(
+            !chunk_not_below_view(-1, 64.0, 4.0, 0, 64.0),
+            "chunk under the HUD must not scan for shafts"
+        );
+        assert!(
+            chunk_not_below_view(0, 64.0, 4.0, 0, 64.0),
+            "the camera chunk stays"
+        );
+        assert!(
+            chunk_not_below_view(3, 64.0, 4.0, 0, 64.0),
+            "high sky above the camera still carves"
+        );
     }
 }
