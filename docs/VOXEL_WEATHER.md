@@ -617,3 +617,15 @@ Do not re-walk these:
   tiles must lottery). Flux math is unchanged — the SipHash `clone`
   was leftover on the snapshot, not the soak grower. `clay` stays
   **23**. Do not skip the lottery.
+
+  After FxHash dissolved-load indexes and condensation `(key, mass)`
+  snapshots (this host, 40 warm + 200 measure, 0 plants): short wall
+  **25.4**, tall **18.1**, condensation **0.30 / 0.26** (was **0.49 /
+  0.44** — leftover SipHash `at_tile` on the lottery walk). Repeat
+  soak (256 plants, 8×400): wall **21.2 → 80.7** (was **21.7 →
+  85.2**). Condensation **0.33 → 3.21** (was **0.63 → 4.75**). Flow
+  **0.66 → 2.78** (was **0.74 → 3.82**). `hum n` still **13k → 55k**,
+  `diss` still **1.1k → 10.3k**, `clay` stays **23**. Same cells, same
+  mass — SipHash on load-index `contains` and a second humidity-map
+  get were leftover as karst / sky fill. Lottery still walks every
+  over-sat tile. Do not skip it.
