@@ -665,3 +665,9 @@ Do not re-walk these:
   same slip — HashMap clone + per-iter insert were leftover hasher,
   not the compose / `face_blocked` cost. `clay` stays **23**. Do not
   retry the Jacobi solid-cache.
+
+  After skipping unchanged far-sky temperature writes and running
+  diffuse on a dense slab when the box is full: leftover hasher on
+  1000-cell columns already on the lapse. Same couple / skip / pair
+  stencil — tiles that did not move are not rewritten. Not view LOD;
+  the ring still steps at full rate. Do not coarsen off-screen sim.

@@ -680,7 +680,11 @@ impl Temperature {
                     n
                 }
             };
-            self.cells.insert((hx, hy), next);
+            // Far sky already on the lapse keeps `next == t`. Rewriting
+            // every tile was leftover hasher on a tall box.
+            if (next - t).abs() >= 1e-5 {
+                self.cells.insert((hx, hy), next);
+            }
         }
         let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * climate_k)).clamp(0.0, 0.25);
         self.diffuse(alpha);
@@ -796,6 +800,20 @@ impl Temperature {
         if alpha == 0.0 || self.cells.is_empty() {
             return;
         }
+        // A filled sky box is a dense rectangle. Pair walks on a slab,
+        // write back only deltas — HashMap snap + insert of every tile
+        // was leftover on 1000-cell columns already on the lapse.
+        if let Some(b) = self.bounds {
+            let cap = b.tile_capacity();
+            if cap > 0 && self.cells.len().saturating_mul(2) >= cap {
+                self.diffuse_dense(alpha, b);
+                return;
+            }
+        }
+        self.diffuse_sparse(alpha);
+    }
+
+    fn diffuse_sparse(&mut self, alpha: f32) {
         // Snapshot as FxHash — leftover SipHash clone. Keys are unique
         // so sort+dedup was leftover; +x/+y visits keep pairs commutative.
         let snap: FxHashMap<(i32, i32), f32> =
@@ -803,14 +821,7 @@ impl Temperature {
         let sources: Vec<(i32, i32)> = snap.keys().copied().collect();
         let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         let base = self.config.base_temp_c;
-        let free_sky = |hx: i32, hy: i32| -> bool {
-            let surf = self
-                .surf_cache
-                .get(&hx)
-                .copied()
-                .unwrap_or(self.sea_level_y);
-            hy * self.tile_cols.max(1) + self.tile_cols.max(1) / 2 > surf + 16
-        };
+        let free_sky = |hx: i32, hy: i32| -> bool { self.tile_is_free_sky(hx, hy) };
         for &(hx, hy) in &sources {
             let val = *snap.get(&(hx, hy)).unwrap_or(&base);
             let here_sky = free_sky(hx, hy);
@@ -846,6 +857,86 @@ impl Temperature {
         for (k, d) in deltas {
             if self.accepts(k.0, k.1) {
                 *self.cells.entry(k).or_insert(base) += d;
+            }
+        }
+    }
+
+    fn tile_is_free_sky(&self, hx: i32, hy: i32) -> bool {
+        let surf = self
+            .surf_cache
+            .get(&hx)
+            .copied()
+            .unwrap_or(self.sea_level_y);
+        hy * self.tile_cols.max(1) + self.tile_cols.max(1) / 2 > surf + 16
+    }
+
+    fn diffuse_dense(&mut self, alpha: f32, b: TileBounds) {
+        let w = (b.hx_max - b.hx_min + 1).max(0) as usize;
+        let h = (b.hy_max - b.hy_min + 1).max(0) as usize;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let base = self.config.base_temp_c;
+        let mut grid = vec![base; w * h];
+        for (&(hx, hy), &v) in &self.cells {
+            if !b.contains(hx, hy) {
+                continue;
+            }
+            grid[(hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize] = v;
+        }
+        let at = |grid: &[f32], hx: i32, hy: i32| -> f32 {
+            grid[(hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize]
+        };
+        let mut deltas = vec![0.0f32; w * h];
+        let mut any = false;
+        for hy in b.hy_min..=b.hy_max {
+            for hx in b.hx_min..=b.hx_max {
+                let i = (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize;
+                let val = grid[i];
+                let here_sky = self.tile_is_free_sky(hx, hy);
+                if let Some(nx) = self.wrap_hx(hx + 1) {
+                    if b.contains(nx, hy) && nx != hx {
+                        let n_val = at(&grid, nx, hy);
+                        if here_sky && self.tile_is_free_sky(nx, hy) && (val - n_val).abs() < 0.35 {
+                            // skip
+                        } else {
+                            let flow = (val - n_val) * alpha;
+                            if flow.abs() >= 1e-9 {
+                                let ni =
+                                    (hy - b.hy_min) as usize * w + (nx - b.hx_min) as usize;
+                                deltas[i] -= flow;
+                                deltas[ni] += flow;
+                                any = true;
+                            }
+                        }
+                    }
+                }
+                let n_hy = hy + 1;
+                if b.contains(hx, n_hy) {
+                    if here_sky && self.tile_is_free_sky(hx, n_hy) {
+                        continue;
+                    }
+                    let n_val = at(&grid, hx, n_hy);
+                    let flow = (val - n_val) * alpha * 0.35;
+                    if flow.abs() >= 1e-9 {
+                        let ni = (n_hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize;
+                        deltas[i] -= flow;
+                        deltas[ni] += flow;
+                        any = true;
+                    }
+                }
+            }
+        }
+        if !any {
+            return;
+        }
+        for hy in b.hy_min..=b.hy_max {
+            for hx in b.hx_min..=b.hx_max {
+                let i = (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize;
+                let d = deltas[i];
+                if d.abs() >= 1e-9 {
+                    *self.cells.entry((hx, hy)).or_insert(base) += d;
+                }
             }
         }
     }
@@ -1957,5 +2048,25 @@ mod tests {
             above > linear_lid + 8.0,
             "tall sky must not keep the old linear drop (above={above:.1} linear={linear_lid:.1})"
         );
+    }
+
+    #[test]
+    fn dense_diffuse_matches_sparse_on_a_filled_box() {
+        // Same pair stencil; the slab is leftover hasher, not new physics.
+        let mut dense = Temperature::with_world_bounds(4, 0, 0, 16, 32, 1, 16, 8, false);
+        dense.fill_initial(0);
+        dense.cells.insert((1, 3), 40.0);
+        dense.surf_cache.insert(1, 8);
+        let mut sparse = dense.clone();
+        dense.diffuse_dense(0.1, dense.bounds.expect("bounds"));
+        sparse.diffuse_sparse(0.1);
+        for (k, &a) in &dense.cells {
+            let b = sparse.cells.get(k).copied().unwrap_or(f32::NAN);
+            assert!(
+                (a - b).abs() < 1e-5,
+                "dense/sparse mismatch at {k:?}: {a} vs {b}"
+            );
+        }
+        assert_eq!(dense.cells.len(), sparse.cells.len());
     }
 }
