@@ -34,6 +34,8 @@ Humidity **is** the weather store, now with temperature/wind:
 evap(T, wind) → thermal rise → drizzle when vapor meets colder air /
 ground. There is no `N` bank layer and no derived cloud deck. Shade
 (`cloud_sky_transmit`) reads the same tiles. CPU stays on 4×4 tiles.
+`H` / `V` skip paint for tiles that cannot touch the viewport; the
+sim field still runs at full rate off-screen (ring + pan).
 
 ## Signal → visual map
 

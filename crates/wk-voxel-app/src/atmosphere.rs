@@ -265,10 +265,24 @@ fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
 
 /// Highest drop in each column. Haze below that cell is the open path.
 fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
+    collect_drop_tops_where(world, |_| true)
+}
+
+/// [`collect_drop_tops`] restricted to chunks whose **x** band can
+/// touch the viewport. Off-screen rain still falls in the sim; it
+/// cannot carve an on-screen shaft. Full column height stays — a
+/// drop above the camera still opens the wash below it.
+fn collect_drop_tops_where(
+    world: &World,
+    mut keep_cx: impl FnMut(i32) -> bool,
+) -> HashMap<i32, i32> {
     let mut tops: HashMap<i32, i32> = HashMap::new();
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     for chunk in world.chunks.values() {
+        if !keep_cx(chunk.coord.cx) {
+            continue;
+        }
         if !chunk.has_wet_air && !chunk.has_snow && !chunk.has_buoyant {
             continue;
         }
@@ -286,6 +300,70 @@ fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
         }
     }
     tops
+}
+
+/// True when a humidity tile's 4×4 can produce a pixel in the viewport
+/// (including ring `x` copies). Pad one tile so panning does not pop.
+fn humidity_tile_touches_view(
+    hx: i32,
+    hy: i32,
+    tc: i32,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+) -> bool {
+    if cell_px <= 0.0 {
+        return false;
+    }
+    let tc = tc.max(1);
+    let pad = tc as f32 * cell_px;
+    let gx0 = hx * tc;
+    let gy0 = hy * tc;
+    let tile_px = tc as f32 * cell_px;
+    // Same `top_sy` as [`draw_haze_and_wind`]: top of cell `gy` is
+    // `origin_y - (gy + 1 - bedrock) * cell_px`.
+    let top_sy = origin_y - (gy0 + tc - bedrock_floor_y) as f32 * cell_px;
+    let bot_sy = origin_y - (gy0 - bedrock_floor_y) as f32 * cell_px;
+    if bot_sy < -pad || top_sy > sh + pad {
+        return false;
+    }
+    let copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    for &copy in copies {
+        let sx = origin_x + (gx0 + copy * width_cols) as f32 * cell_px;
+        if sx + tile_px >= -pad && sx <= sw + pad {
+            return true;
+        }
+    }
+    false
+}
+
+/// Chunk `cx` whose 64-wide x band can touch the viewport (ring copies).
+fn chunk_x_touches_view(
+    cx: i32,
+    origin_x: f32,
+    cell_px: f32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+) -> bool {
+    if cell_px <= 0.0 {
+        return false;
+    }
+    let pad = CHUNK_CELLS_W as f32 * cell_px;
+    let gx0 = cx * CHUNK_CELLS_W as i32;
+    let copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    for &copy in copies {
+        let sx = origin_x + (gx0 + copy * width_cols) as f32 * cell_px;
+        if sx + pad >= 0.0 && sx <= sw {
+            return true;
+        }
+    }
+    false
 }
 
 /// Inclusive bottom of the 4×4 column still painted. Everything at or
@@ -309,12 +387,25 @@ fn haze_column_y0(y0: i32, y1: i32, drop_y: Option<i32>) -> Option<i32> {
 /// keys go through [`Humidity::wrap_tile_x`] — raw `hx-1` was the ring
 /// seam.
 fn haze_paint_seats(humidity: &Humidity) -> Vec<(i32, i32)> {
+    haze_paint_seats_where(humidity, |_, _| true)
+}
+
+/// Occupied tiles plus cardinal neighbours, then drop seats that cannot
+/// touch the viewport. Off-screen mass still seeds an on-screen neighbour
+/// (bilinear). The sim field is unchanged — coarsening off-screen
+/// advect / lottery would change weather on a ring world.
+fn haze_paint_seats_where(
+    humidity: &Humidity,
+    mut keep: impl FnMut(i32, i32) -> bool,
+) -> Vec<(i32, i32)> {
     let mut seats = std::collections::HashSet::new();
     for (&(hx, hy), &mass) in &humidity.cells {
         if mass <= 0.0 {
             continue;
         }
-        seats.insert((hx, hy));
+        if keep(hx, hy) {
+            seats.insert((hx, hy));
+        }
         for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
             let Some(nx) = humidity.wrap_tile_x(hx + dx) else {
                 continue;
@@ -325,7 +416,9 @@ fn haze_paint_seats(humidity: &Humidity) -> Vec<(i32, i32)> {
                     continue;
                 }
             }
-            seats.insert((nx, ny));
+            if keep(nx, ny) {
+                seats.insert((nx, ny));
+            }
         }
     }
     let mut out: Vec<_> = seats.into_iter().collect();
@@ -987,9 +1080,27 @@ pub fn draw_haze_and_wind(
     let min_mass = look.haze_min_mass.max(0.0);
     let resample = look.haze_resample;
     let _ = sea_level_y;
-    let drop_tops = collect_drop_tops(world);
+    let tc = humidity.tile_cols.max(1);
+    let drop_tops = collect_drop_tops_where(world, |cx| {
+        chunk_x_touches_view(cx, origin_x, cell_px, wrap_x, width_cols, sw)
+    });
     // No global y-cut. Per-column `cloud_floor_y` already clips buried cells.
-    let seats = haze_paint_seats(humidity);
+    // Off-screen seats skip resample + floor walks (leftover as hum n fills).
+    let seats = haze_paint_seats_where(humidity, |hx, hy| {
+        humidity_tile_touches_view(
+            hx,
+            hy,
+            tc,
+            origin_x,
+            origin_y,
+            cell_px,
+            bedrock_floor_y,
+            wrap_x,
+            width_cols,
+            sw,
+            sh,
+        )
+    });
     let mut floor_cache: HashMap<i32, i32> = HashMap::new();
 
     for (hx, hy) in seats {
@@ -1112,6 +1223,21 @@ pub fn draw_wind_streaks(
     if !wind.field.is_empty() {
         for (&(hx, hy), &(vx, vy)) in &wind.field {
             if !wind_streak_on_lattice(hx, hy, stride) {
+                continue;
+            }
+            if !humidity_tile_touches_view(
+                hx,
+                hy,
+                tc,
+                origin_x,
+                origin_y,
+                cell_px,
+                bedrock_floor_y,
+                wrap_x,
+                width_cols,
+                sw,
+                sh,
+            ) {
                 continue;
             }
             if wind_tile_center_is_solid(world, tc, hx, hy) {
@@ -1771,7 +1897,8 @@ pub fn estimate_snow_bias(
 mod tests {
     use super::{
         collect_drop_tops, haze_cell_is_drop, haze_column_y0, haze_paint_seats,
-        haze_resampled_cells, humidity_haze_alpha, humidity_haze_alpha_gated,
+        haze_paint_seats_where, haze_resampled_cells, humidity_haze_alpha,
+        humidity_haze_alpha_gated, humidity_tile_touches_view,
     };
     use std::collections::HashMap;
     use wk_voxel::Humidity;
@@ -2106,5 +2233,47 @@ mod tests {
             !seats.iter().any(|&(hx, _)| hx < 0 || hx > 3),
             "raw hx-1 at the ring was the bright seam"
         );
+    }
+
+    #[test]
+    fn humidity_tile_view_cull_keeps_the_camera_tile() {
+        // origin_y such that world y=0 sits at the bottom of a 64px window.
+        let origin_x = 0.0;
+        let origin_y = 64.0;
+        let cell = 4.0;
+        assert!(humidity_tile_touches_view(
+            0, 0, 4, origin_x, origin_y, cell, 0, false, 64, 128.0, 64.0
+        ));
+        assert!(
+            !humidity_tile_touches_view(
+                0, 40, 4, origin_x, origin_y, cell, 0, false, 64, 128.0, 64.0
+            ),
+            "hy=40 is world y 160 — far above a 64px window"
+        );
+        assert!(
+            !humidity_tile_touches_view(
+                30, 0, 4, origin_x, origin_y, cell, 0, false, 256, 128.0, 64.0
+            ),
+            "hx=30 is world x 120 — past a 128px window"
+        );
+    }
+
+    #[test]
+    fn haze_view_keeps_on_screen_neighbour_of_off_screen_mass() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 128);
+        h.cells.insert((20, 0), 180.0);
+        let seats = haze_paint_seats_where(&h, |hx, hy| hx == 0 && hy == 0);
+        assert!(
+            seats.is_empty(),
+            "far mass must not invent an on-screen seat without a neighbour"
+        );
+        h.cells.insert((1, 0), 180.0);
+        let seats = haze_paint_seats_where(&h, |hx, hy| hx == 0 && hy == 0);
+        assert!(
+            seats.contains(&(0, 0)),
+            "on-screen neighbour of visible mass stays a bilinear seat"
+        );
+        assert!(!seats.contains(&(1, 0)));
+        assert!(!seats.contains(&(20, 0)));
     }
 }

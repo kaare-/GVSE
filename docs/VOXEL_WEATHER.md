@@ -67,6 +67,17 @@ unit-length; length/alpha encode speed with a floor so the Tab default
 is unchanged. Default off. Humidity haze no longer uses a global
 `sea_level + 4` cut — the per-column live floor clips buried cells.
 
+### Pinned: do not coarsen off-screen sim sky
+
+Terrain already frustum-culls. `H` / `V` now skip **paint** (resample,
+floor walks, drop-top scans) for tiles / chunk-x that cannot touch the
+viewport. That is leftover draw as `hum n` fills.
+
+Coarsening **advect / wind / condensation / temperature** off-camera
+would change weather: the world is a ring, vapour wraps, and panning
+must find the same mass that ran at full rate while it was off-screen.
+Parked. Draw leftover only.
+
 ### Pinned: droplets fall too fast
 
 *Deliberately parked* — playtested and judged acceptable for now. Kept here
