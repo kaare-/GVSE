@@ -589,5 +589,14 @@ Do not re-walk these:
   8×400): wall **23.2 → 90.2**. Confined **2.2 → 8.1** then **6.3**
   — same leftover as before. Plants / grains as walls was correct
   physics (films must not rise) but not the soak BFS. `clay` stays
-  **23**. Equalized uncased films at the standing surface still paid
-  the walk; that skip is next.
+  **23**.
+
+  After skipping uncased BFS at the world’s highest standing-air row
+  (this host, 40 warm + 200 measure, 0 plants): short wall **26.3**,
+  tall **19.1**, confined **1.3 / 1.2**. Repeat soak: wall **23.2 →
+  88.3**. Confined **2.2 → 8.2** then **6.3**. A high tarn keeps
+  `max_stand` above the ocean, so coastal films still walk. Do not
+  skip uncased higher-row rise — `confined_head_equalizes_across_large_deep_ocean`
+  stalls (shaft top 36 vs sea 40). The leftover is equalized
+  rock-cased shafts / connected ocean BFS below a higher standing
+  row. Do not starve the wake; do not lower `CONFINED_HEAD_BFS_LIMIT`.
