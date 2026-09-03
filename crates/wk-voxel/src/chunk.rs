@@ -354,6 +354,21 @@ impl Chunk {
         }
     }
 
+    /// Inclusive standing-air rows only (no rising-film pad).
+    /// `None` when the band is unset — caller keeps the full rect.
+    pub fn standing_band_y(&self, rect: Rect) -> Option<(u8, u8)> {
+        if self.standing_air_y0 > self.standing_air_y1 {
+            return None;
+        }
+        let lo = self.standing_air_y0.max(rect.y0);
+        let hi = self.standing_air_y1.min(rect.y1);
+        if lo <= hi {
+            Some((lo, hi))
+        } else {
+            None
+        }
+    }
+
     /// Mark a local cell dirty without changing its contents.
     /// Used to re-wake stranded slope films that went quiescent.
     pub fn touch_dirty(&mut self, x: usize, y: usize) {
@@ -470,7 +485,9 @@ mod tests {
         assert_eq!(c.standing_scan_y(full), (0, 63));
         c.set(4, 10, Cell::water());
         assert_eq!(c.standing_scan_y(full), (9, 11));
+        assert_eq!(c.standing_band_y(full), Some((10, 10)));
         c.clear_standing_air();
+        assert_eq!(c.standing_band_y(full), None);
         assert!(!c.has_standing_air);
         assert_eq!(c.standing_scan_y(full), (0, 63));
     }

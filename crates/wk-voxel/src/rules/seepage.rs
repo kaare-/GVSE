@@ -77,7 +77,9 @@ fn touch_downward_pore_front(
 /// wetter-pore neighbour so seepage / gravity keep infiltrating.
 ///
 /// Runs every tick: cost is only the wet-chunk scan, and once beds are
-/// saturated the touch set is empty (steady lakes stay quiet).
+/// saturated the touch set is empty (steady lakes stay quiet). Standing
+/// water without an unsaturated front uses the standing-air y band so
+/// dry sky in shore / mid-ocean surface chunks is leftover.
 ///
 /// Also walks **down from standing wet Air** so beds that live in the
 /// chunk below (y=63 under water at y=64) are woken — `has_wet_air` alone
@@ -96,7 +98,20 @@ pub fn wake_lake_bed_pores(world: &mut World) {
         let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
         let mut any_standing = false;
         let mut any_unsat = false;
-        for y in ac.rect.y0..=ac.rect.y1 {
+        // Quiet standing-only chunks: dry sky / buried rock is leftover.
+        // Unsaturated pores can sit anywhere, so those chunks keep the
+        // full rect. The downward walk from standing still reaches the
+        // bed in the chunk below.
+        let (scan_y0, scan_y1, standing_only) =
+            if !chunk.has_unsaturated_pores {
+                match chunk.standing_band_y(ac.rect) {
+                    Some((lo, hi)) => (lo, hi, true),
+                    None => (ac.rect.y0, ac.rect.y1, false),
+                }
+            } else {
+                (ac.rect.y0, ac.rect.y1, false)
+            };
+        for y in scan_y0..=scan_y1 {
             let ly = y as usize;
             let gy = base_gy + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
@@ -212,7 +227,9 @@ pub fn wake_lake_bed_pores(world: &mut World) {
             }
         }
         standing_updates.push((ac.coord, any_standing));
-        unsat_updates.push((ac.coord, any_unsat));
+        if !standing_only {
+            unsat_updates.push((ac.coord, any_unsat));
+        }
     }
     for (coord, any_standing) in standing_updates {
         if let Some(chunk) = world.chunks.get_mut(&coord) {
