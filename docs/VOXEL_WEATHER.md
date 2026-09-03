@@ -675,7 +675,12 @@ Do not re-walk these:
   After packing that slab once per temperature step (couple writes
   it; diffuse and row-means reuse it) and skipping far-sky / deep-crust
   `live_surface_at` on the props refresh (one seed-rock walk per
-  column, same Air / Buried early-out): leftover world scans on a
-  1000-cell column already classified as Air. Surface-band tiles still
-  scan. Same couple / skip / pair stencil. `Temperature::cells` stays
+  column, same Air / Buried early-out; this host, 40 warm + 200
+  measure, 0 plants): short wall **25.0**, tall **16.9**.
+  Temperature.step **3.46 / 6.74 ms/call** (was **4.5 / 10.8** —
+  leftover per-tile rock walk on Air already classified, plus a second
+  HashMap pack for diffuse). Same couple / skip / pair stencil.
+  Surface-band tiles still scan. Repeat soak (256 plants, 8×400):
+  wall **20.1 → 80.7** — same leftover as before. Temperature is a
+  period-20 hitch, not the soak grower. `Temperature::cells` stays
   `HashMap` for serde. Do not coarsen off-screen sim.
