@@ -2493,14 +2493,16 @@ mod tests {
             tc, origin_x, origin_y, cell, bedrock, wrap, width, sw, sh,
         )
         .expect("box");
+        let hx_span = width / tc;
         for hx in -4..70 {
             for hy in -4..40 {
                 if humidity_tile_touches_view(
                     hx, hy, tc, origin_x, origin_y, cell, bedrock, wrap, width, sw, sh,
                 ) {
+                    let whx = hx.rem_euclid(hx_span);
                     assert!(
-                        box_.contains(hx, hy),
-                        "view box dropped a tile the pixel test keeps ({hx},{hy})"
+                        box_.contains(whx, hy),
+                        "view box dropped a tile the pixel test keeps ({hx},{hy} → {whx})"
                     );
                 }
             }
@@ -2539,10 +2541,15 @@ mod tests {
     #[test]
     fn drop_top_chunks_below_the_camera_are_leftover() {
         // origin_y=64, cell=4, sh=64 → world y 0 sits at the bottom.
-        // cy=-1 is world y [-64, -1], entirely below that window.
+        // cy=-1 tops out on the HUD line (keep). cy=-2 is world y
+        // [-128, -65], entirely below that window.
         assert!(
-            !chunk_not_below_view(-1, 64.0, 4.0, 0, 64.0),
+            !chunk_not_below_view(-2, 64.0, 4.0, 0, 64.0),
             "chunk under the HUD must not scan for shafts"
+        );
+        assert!(
+            chunk_not_below_view(-1, 64.0, 4.0, 0, 64.0),
+            "the HUD-line chunk can still sliver into view"
         );
         assert!(
             chunk_not_below_view(0, 64.0, 4.0, 0, 64.0),
