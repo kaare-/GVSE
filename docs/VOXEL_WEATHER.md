@@ -721,3 +721,14 @@ Do not re-walk these:
   32.5** (was **10.7 → 33.3**). Wall **20.8 → 83.9** — same leftover
   growers. Legacy saves with a rect and empty bits keep the old
   inflate. Do not drop the +1 x / +2 y halo.
+
+  After iterating flow / throughflow / seepage / confined on set bits
+  (`for_each_cell` / `for_each_cell_in_y`, same tzcnt walk gravity
+  already used; repeat soak, 256 plants, 8×400): flow **0.53 → 1.58**
+  (was **0.98 → 3.25**). Seepage **2.03 → 3.95** (was **2.35 → 4.45**).
+  Gravity **0.35 → 0.98** (unchanged). Physics **9.1 → 28.8** (was
+  **10.0 → 32.5**). Wall **18.8 → 77.2** (was **20.8 → 83.9**). Confined
+  **1.08 → 3.30** still walks the standing band / period-16 wake.
+  Dry Air still owns the +x equalise edge. Flow early-out stays on
+  the AABB, not the bit count. Do not skip the contact dry-pore
+  check on the deep seepage pass.
