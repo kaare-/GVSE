@@ -787,3 +787,11 @@ Do not re-walk these:
   (unchanged — still tracks `hum n`). Temperature **0.35 → 0.45**.
   Same compose stencil and slip. Do not cache solids across
   rebuilds. Do not coarsen off-screen wind.
+
+  After walking filled-sky humidity flux on a dense slab, sampling
+  wind into a Vec parallel to the snapshot, and caching free-air /
+  orographic lift per occupied column (repeat soak, 256 plants,
+  8×400): humidity advect **1.63 → 9.30** (was **1.85 → 13.38**).
+  Wall **16.9 → 60.9** (was **17.2 → 62.3**). Wind **1.10 → 7.42**
+  (unchanged). Same fractional flux and wrap. Do not coarsen
+  off-screen advect. Lottery still visits every over-sat tile.
