@@ -281,7 +281,7 @@ fn page_lines(page: Page) -> &'static [(&'static str, LineKind)] {
 
 const KEYS: &[(&str, LineKind)] = &[
     ("Shortcuts", LineKind::Head),
-    ("Space    pause / resume physics", LineKind::Body),
+    ("Space    pause / resume physics (Tab does not pause)", LineKind::Body),
     ("Arrows   pan camera (ring worlds wrap left/right)", LineKind::Body),
     ("Click    inspect the cell / creature under the cursor", LineKind::Body),
     ("R        regenerate world (new seed, same size)", LineKind::Body),
@@ -306,6 +306,7 @@ const KEYS: &[(&str, LineKind)] = &[
     ("", LineKind::Blank),
     ("Panels", LineKind::Head),
     ("Tab      live settings (World / Climate / Physics / Life)", LineKind::Body),
+    ("         does not freeze the world; an over-budget step skips a frame", LineKind::Dim),
     ("F1       HUD chrome + inspector", LineKind::Body),
     ("F2       creature editor (spawn plants / fungi / atoms; W = seaweed)", LineKind::Body),
     ("F3       terrain editor (paint / erase rock and water)", LineKind::Body),
@@ -431,6 +432,9 @@ const HUD: &[(&str, LineKind)] = &[
     ("dead      lingering corpses", LineKind::Body),
     ("", LineKind::Blank),
     ("If lakes fill, look at drizzle=on — that is C, not a sky faucet.", LineKind::Body),
+    ("[paused]   Space / F2 paint / F3 / quit — world is frozen", LineKind::Body),
+    ("[sim skip] last step blew the Tab → Performance budget; this", LineKind::Body),
+    ("           frame only presented so the mouse can move", LineKind::Dim),
     ("If hum explodes and FPS dies, the sky is over-full. C still", LineKind::Body),
     ("lotteries every over-sat tile. Start a new world after a remint.", LineKind::Dim),
 ];

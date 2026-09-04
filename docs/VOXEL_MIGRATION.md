@@ -299,7 +299,10 @@ slot in without an ABI change.
 The **product** world step is [`step_world`](../crates/wk-voxel/src/world_step.rs)
 (`wk-voxel-app` and `perf_profile` share it). `tick_with_life` is the
 water/grain subroutine inside that owner. Order and cadence comments
-live on the function; do not add climate from `main`.
+live on the function; do not add climate from `main`. The play app
+wraps the step in [`SimClock`](../crates/wk-voxel/src/sim_clock.rs)
+(max one step per present; leftover dropped). Tab no longer
+hard-pauses the world.
 
 The CA rule pass inside `tick_with_life` looks like this:
 
