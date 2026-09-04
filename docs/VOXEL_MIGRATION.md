@@ -296,7 +296,12 @@ slot in without an ABI change.
 
 ## 7. Update order sketch
 
-The full rule pass will look like this (deferred implementation):
+The **product** world step is [`step_world`](../crates/wk-voxel/src/world_step.rs)
+(`wk-voxel-app` and `perf_profile` share it). `tick_with_life` is the
+water/grain subroutine inside that owner. Order and cadence comments
+live on the function; do not add climate from `main`.
+
+The CA rule pass inside `tick_with_life` looks like this:
 
 1. **Determine active chunks.** Any chunk whose dirty rectangle is
    non-empty *or* whose neighbour's dirty rectangle abuts its
