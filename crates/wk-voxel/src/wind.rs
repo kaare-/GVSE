@@ -386,6 +386,24 @@ impl Wind {
             }
         }
 
+        if Self::use_dense_field(bounds, keys.len()) {
+            self.rebuild_field_slab(
+                world,
+                temp,
+                tick,
+                evx,
+                evy,
+                &cfg,
+                smooth,
+                &prev,
+                bounds,
+                &keys,
+                &col_oro,
+                drag,
+            );
+            return;
+        }
+
         let mut next = FxHashMap::default();
         next.reserve(keys.len());
         for &(hx, hy) in keys.keys() {
@@ -496,6 +514,363 @@ impl Wind {
         }
         let w = (bounds.hx_max - bounds.hx_min + 1).max(1);
         bounds.hx_min + (hx - bounds.hx_min).rem_euclid(w)
+    }
+
+    /// Sequential compose / blend / project when the occupied+halo set
+    /// is at least half the sky box. Same seats as the HashMap path —
+    /// not view LOD. Solids are packed for **this rebuild only**.
+    fn use_dense_field(bounds: TileBounds, key_count: usize) -> bool {
+        let cap = bounds.tile_capacity();
+        cap > 0 && (cap <= 256 || key_count.saturating_mul(2) >= cap)
+    }
+
+    fn slab_dims(b: TileBounds) -> (usize, usize) {
+        let w = (b.hx_max - b.hx_min + 1).max(0) as usize;
+        let h = (b.hy_max - b.hy_min + 1).max(0) as usize;
+        (w, h)
+    }
+
+    fn slab_index(b: TileBounds, w: usize, hx: i32, hy: i32) -> usize {
+        (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize
+    }
+
+    fn rebuild_field_slab(
+        &mut self,
+        world: Option<&World>,
+        temp: Option<&Temperature>,
+        tick: u64,
+        evx: f32,
+        evy: f32,
+        cfg: &WindConfig,
+        smooth: f32,
+        prev: &FxHashMap<(i32, i32), (f32, f32)>,
+        bounds: TileBounds,
+        keys: &FxHashMap<(i32, i32), ()>,
+        col_oro: &FxHashMap<i32, ColOro>,
+        drag: Option<&FxHashMap<(i32, i32), f32>>,
+    ) {
+        let (w, h) = Self::slab_dims(bounds);
+        let n = w.saturating_mul(h);
+        if n == 0 || w == 0 {
+            self.field.clear();
+            return;
+        }
+        let tc = self.tile_cols.max(1);
+        let mut seated = vec![false; n];
+        for &(hx, hy) in keys.keys() {
+            if bounds.contains(hx, hy) {
+                seated[Self::slab_index(bounds, w, hx, hy)] = true;
+            }
+        }
+        // This rebuild only. Do not keep this across rebuilds — a
+        // cave-in must see the new walls on the next compose / Jacobi.
+        let mut solid = vec![false; n];
+        if world.is_some() {
+            for iy in 0..h {
+                for ix in 0..w {
+                    let hx = bounds.hx_min + ix as i32;
+                    let hy = bounds.hy_min + iy as i32;
+                    solid[iy * w + ix] = tile_center_is_solid(world, tc, hx, hy);
+                }
+            }
+        }
+        let mut vel = vec![(0.0f32, 0.0f32); n];
+        let mut live = vec![false; n];
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !seated[i] || solid[i] {
+                    continue;
+                }
+                let hx = bounds.hx_min + ix as i32;
+                let hy = bounds.hy_min + iy as i32;
+                let (mut vx, mut vy) =
+                    self.compose_drivers(world, temp, hx, hy, tick, evx, evy, cfg, col_oro);
+                vx = vx.clamp(-1.0, 1.0);
+                vy = vy.clamp(-1.0, 1.0);
+                if smooth > 1e-4 {
+                    if let Some(&(px, py)) = prev.get(&(hx, hy)) {
+                        vx = px * smooth + vx * (1.0 - smooth);
+                        vy = py * smooth + vy * (1.0 - smooth);
+                    }
+                }
+                vel[i] = (vx, vy);
+                live[i] = true;
+            }
+        }
+        Self::spatial_blend_slab(&mut vel, &live, bounds, w, h, self.wrap_x);
+        if let Some(map) = drag {
+            let damp = cfg.canopy_dampen.clamp(0.0, 1.0);
+            if damp > 1e-4 {
+                for (&(hx, hy), &d) in map.iter() {
+                    if !bounds.contains(hx, hy) {
+                        continue;
+                    }
+                    let i = Self::slab_index(bounds, w, hx, hy);
+                    if !live[i] {
+                        continue;
+                    }
+                    let keep = 1.0 - damp * d.clamp(0.0, 1.0);
+                    vel[i].0 *= keep;
+                    vel[i].1 *= keep;
+                }
+            }
+        }
+        self.project_incompressible_slab(world, bounds, w, &mut vel, &live, &solid);
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !live[i] {
+                    continue;
+                }
+                let hx = bounds.hx_min + ix as i32;
+                let hy = bounds.hy_min + iy as i32;
+                vel[i] = self.deflect_along_surface(world, hx, hy, vel[i].0, vel[i].1);
+            }
+        }
+        let mut next = FxHashMap::default();
+        next.reserve(keys.len());
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !live[i] {
+                    continue;
+                }
+                next.insert(
+                    (bounds.hx_min + ix as i32, bounds.hy_min + iy as i32),
+                    vel[i],
+                );
+            }
+        }
+        self.field = next;
+    }
+
+    fn spatial_blend_slab(
+        vel: &mut [(f32, f32)],
+        live: &[bool],
+        bounds: TileBounds,
+        w: usize,
+        h: usize,
+        wrap_x: bool,
+    ) {
+        let n = vel.len();
+        if n == 0 || w == 0 {
+            return;
+        }
+        let snap = vel.to_vec();
+        let hx_span = (bounds.hx_max - bounds.hx_min + 1).max(1);
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !live[i] {
+                    continue;
+                }
+                let (vx, vy) = snap[i];
+                let mut sx = vx * 2.0;
+                let mut sy = vy * 2.0;
+                let mut wt = 2.0;
+                let hx = bounds.hx_min + ix as i32;
+                let hy = bounds.hy_min + iy as i32;
+                for dx in [-1, 1] {
+                    let nhx = if wrap_x {
+                        let mut x = hx + dx;
+                        if x < bounds.hx_min {
+                            x += hx_span;
+                        } else if x > bounds.hx_max {
+                            x -= hx_span;
+                        }
+                        x
+                    } else if hx + dx < bounds.hx_min || hx + dx > bounds.hx_max {
+                        continue;
+                    } else {
+                        hx + dx
+                    };
+                    if !bounds.contains(nhx, hy) {
+                        continue;
+                    }
+                    let ni = Self::slab_index(bounds, w, nhx, hy);
+                    if live[ni] {
+                        let (nvx, nvy) = snap[ni];
+                        sx += nvx * 2.0;
+                        sy += nvy * 2.0;
+                        wt += 2.0;
+                    }
+                }
+                for dy in [-1, 1] {
+                    let nhy = hy + dy;
+                    if nhy < bounds.hy_min || nhy > bounds.hy_max {
+                        continue;
+                    }
+                    let ni = Self::slab_index(bounds, w, hx, nhy);
+                    if live[ni] {
+                        let (nvx, nvy) = snap[ni];
+                        sx += nvx;
+                        sy += nvy;
+                        wt += 1.0;
+                    }
+                }
+                vel[i] = ((sx / wt).clamp(-1.0, 1.0), (sy / wt).clamp(-1.0, 1.0));
+            }
+        }
+    }
+
+    fn project_incompressible_slab(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        w: usize,
+        vel_slab: &mut [(f32, f32)],
+        live: &[bool],
+        solid: &[bool],
+    ) {
+        let mut keys: Vec<usize> = Vec::new();
+        for (i, &on) in live.iter().enumerate() {
+            if on {
+                keys.push(i);
+            }
+        }
+        let n = keys.len();
+        if n < 4 || w == 0 {
+            return;
+        }
+        let mut inv = vec![usize::MAX; live.len()];
+        for (pi, &i) in keys.iter().enumerate() {
+            inv[i] = pi;
+        }
+        let mut vel = vec![(0.0f32, 0.0f32); n];
+        for (pi, &i) in keys.iter().enumerate() {
+            vel[pi] = vel_slab[i];
+        }
+        const DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+        let mut blocked = vec![0u8; n];
+        let mut neigh = vec![[usize::MAX; 4]; n];
+        for (pi, &i) in keys.iter().enumerate() {
+            let hy = bounds.hy_min + (i / w) as i32;
+            let hx = bounds.hx_min + (i % w) as i32;
+            for (d, &(dx, dy)) in DIRS.iter().enumerate() {
+                if self.face_blocked_slab(world, bounds, hx, hy, dx, dy, w, solid) {
+                    blocked[pi] |= 1 << d;
+                    continue;
+                }
+                let nhx = self.wrap_tile_hx(hx + dx, bounds);
+                let nhy = hy + dy;
+                if !bounds.contains(nhx, nhy) {
+                    continue;
+                }
+                let j = Self::slab_index(bounds, w, nhx, nhy);
+                if j < inv.len() && inv[j] != usize::MAX {
+                    neigh[pi][d] = inv[j];
+                }
+            }
+        }
+        let face = |blocked: u8, neigh: [usize; 4], d: usize, here: f32, horiz: bool| -> f32 {
+            if blocked & (1 << d) != 0 {
+                return 0.0;
+            }
+            let j = neigh[d];
+            if j == usize::MAX {
+                return here;
+            }
+            let nv = if horiz { vel[j].0 } else { vel[j].1 };
+            0.5 * (here + nv)
+        };
+        let mut divs = vec![0.0f32; n];
+        for i in 0..n {
+            let (vx, vy) = vel[i];
+            let ue = face(blocked[i], neigh[i], 0, vx, true);
+            let uw = face(blocked[i], neigh[i], 1, vx, true);
+            let vn = face(blocked[i], neigh[i], 2, vy, false);
+            let vs = face(blocked[i], neigh[i], 3, vy, false);
+            divs[i] = ue - uw + vn - vs;
+        }
+        let mut p = vec![0.0f32; n];
+        let mut next = vec![0.0f32; n];
+        for _ in 0..AIR_PROJECT_ITERS {
+            for i in 0..n {
+                let mut sum = 0.0;
+                let mut count = 0.0;
+                for d in 0..4 {
+                    let j = neigh[i][d];
+                    if j != usize::MAX {
+                        sum += p[j];
+                        count += 1.0;
+                    }
+                }
+                next[i] = if count < 1.0 {
+                    p[i]
+                } else {
+                    (sum - divs[i]) / count
+                };
+            }
+            std::mem::swap(&mut p, &mut next);
+        }
+        for (pi, &i) in keys.iter().enumerate() {
+            let here = p[pi];
+            let at = |d: usize| -> f32 {
+                let j = neigh[pi][d];
+                if j == usize::MAX {
+                    0.0
+                } else {
+                    p[j]
+                }
+            };
+            let pr = if blocked[pi] & 1 != 0 { here } else { at(0) };
+            let pl = if blocked[pi] & 2 != 0 { here } else { at(1) };
+            let pu = if blocked[pi] & 4 != 0 { here } else { at(2) };
+            let pd = if blocked[pi] & 8 != 0 { here } else { at(3) };
+            vel_slab[i].0 = (vel_slab[i].0 - 0.5 * (pr - pl)).clamp(-1.0, 1.0);
+            vel_slab[i].1 = (vel_slab[i].1 - 0.5 * (pu - pd)).clamp(-1.0, 1.0);
+        }
+    }
+
+    fn face_blocked_slab(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        hx: i32,
+        hy: i32,
+        dx: i32,
+        dy: i32,
+        w: usize,
+        solid: &[bool],
+    ) -> bool {
+        if dy != 0 {
+            let nhy = hy + dy;
+            if nhy < bounds.hy_min || nhy > bounds.hy_max {
+                return true;
+            }
+        }
+        if dx != 0 && !self.wrap_x {
+            let nx = hx + dx;
+            if nx < bounds.hx_min || nx > bounds.hx_max {
+                return true;
+            }
+        }
+        let nhx = self.wrap_tile_hx(hx + dx, bounds);
+        let nhy = hy + dy;
+        if bounds.contains(nhx, nhy) {
+            if solid[Self::slab_index(bounds, w, nhx, nhy)] {
+                return true;
+            }
+        } else if tile_center_is_solid(world, self.tile_cols.max(1), nhx, nhy) {
+            return true;
+        }
+        if dx != 0 {
+            let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+            if dx > 0 && wall_r {
+                return true;
+            }
+            if dx < 0 && wall_l {
+                return true;
+            }
+        }
+        if dy < 0 {
+            let surf = self.surface_tile_hy(world, hx);
+            if hy <= surf {
+                return true;
+            }
+        }
+        false
     }
 
     /// Solid neighbour, world edge, or a live-skin wall on this face.
@@ -868,12 +1243,12 @@ impl Wind {
     }
 
     fn thermal_delta(&self, temp: &Temperature, hx: i32, hy: i32) -> (f32, f32) {
-        let t0 = temp.at_tile(hx, hy);
-        let tx = (temp.at_tile(hx + 1, hy) - temp.at_tile(hx - 1, hy)) * 0.5;
-        let ty = (temp.at_tile(hx, hy + 1) - temp.at_tile(hx, hy - 1)) * 0.5;
+        let t0 = temp.at_tile_packed(hx, hy);
+        let tx = (temp.at_tile_packed(hx + 1, hy) - temp.at_tile_packed(hx - 1, hy)) * 0.5;
+        let ty = (temp.at_tile_packed(hx, hy + 1) - temp.at_tile_packed(hx, hy - 1)) * 0.5;
         let mut vx = tx * 0.055;
         let mut vy = ty * 0.012;
-        let flank = (temp.at_tile(hx - 1, hy) + temp.at_tile(hx + 1, hy)) * 0.5;
+        let flank = (temp.at_tile_packed(hx - 1, hy) + temp.at_tile_packed(hx + 1, hy)) * 0.5;
         vy += ((t0 - flank) / 18.0).clamp(-0.10, 0.10);
         let surf = self.surface_tile_hy(None, hx);
         let above = (hy - surf).max(0) as f32;

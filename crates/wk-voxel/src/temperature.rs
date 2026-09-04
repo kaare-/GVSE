@@ -441,6 +441,20 @@ impl Temperature {
             .unwrap_or(&self.config.base_temp_c)
     }
 
+    /// Packed-slab read when the last dense step filled the box.
+    /// Tests that mutate [`Self::cells`] without stepping still go
+    /// through [`Self::at_tile`].
+    pub(crate) fn at_tile_packed(&self, hx: i32, hy: i32) -> f32 {
+        if let Some(b) = self.bounds {
+            let cap = b.tile_capacity();
+            if cap > 0 && self.slab.len() == cap && b.contains(hx, hy) {
+                let (w, _) = Self::slab_dims(b);
+                return self.slab[Self::slab_index(b, w, hx, hy)];
+            }
+        }
+        self.at_tile(hx, hy)
+    }
+
     pub fn at_cell(&self, gx: i32, gy: i32) -> f32 {
         let (hx, hy) = self.tile_of(gx, gy);
         self.at_tile(hx, hy)
