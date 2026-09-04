@@ -770,5 +770,11 @@ Do not re-walk these:
 
   After walking filled-sky humidity diffusion on a dense slab (same
   +x/+y stencil; HashMap+sort stays until the box is half full or
-  tiny; repeat soak, 256 plants, 8×400): numbers pending. Not view
-  LOD — every tile still steps. Do not coarsen off-screen advect.
+  tiny; repeat soak, 256 plants, 8×400): wall **18.8 → 76.9** (was
+  **18.8 → 77.2**). Diffuse is period-20 — the slab does not move
+  soak wall. The new columns name the gap: humidity advect
+  **1.84 → 13.45**, wind rebuild **2.67 → 19.73**, temperature
+  **0.34 → 0.45** (T slab already holds). Those two growers track
+  `hum n` **13k → 55k / 68k**. Not view LOD — every tile still
+  steps. Do not coarsen off-screen advect. Do not retry the wind
+  Jacobi solid-cache.
