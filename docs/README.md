@@ -17,6 +17,7 @@ notes intended to survive re-reads of the codebase.
 | [`WORLDGEN.md`](WORLDGEN.md) | World topology (ring vs infinite), elevation, streaming, hydro init, wrap rules. |
 | [`STRATA.md`](STRATA.md) | Artistic stratigraphic model: facies belts, 8-layer recipes, pinch-outs. |
 | [`organism/`](organism/) | Organism Kernel freeze docs (petri = `wk-voxel-app`). |
+| [`VOICE_SESSION.md`](VOICE_SESSION.md) | Voice building-block studio brief (singer shoot list + PDF). |
 | [`AGENTS.md`](AGENTS.md) | **Archive** — column scripted grazer (`crates/legacy/wk-agents`). |
 | [`ECOLOGY.md`](ECOLOGY.md) | **Archive** — column `Ecology` bucket (`crates/legacy/wk-world`). |
 | [`BURROWS.md`](BURROWS.md) | **Archive** — column dig / void API. |
