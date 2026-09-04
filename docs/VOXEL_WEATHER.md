@@ -795,3 +795,12 @@ Do not re-walk these:
   Wall **16.9 → 60.9** (was **17.2 → 62.3**). Wind **1.10 → 7.42**
   (unchanged). Same fractional flux and wrap. Do not coarsen
   off-screen advect. Lottery still visits every over-sat tile.
+
+  After packing flux, buried-lift, wind-mix, and oro onto that same
+  slab (write-back only tiles that moved; HashMap path stays until
+  the box is half full; repeat soak, 256 plants, 8×400): humidity
+  advect **1.63 → 3.71** (was **1.63 → 9.30**). Wall **17.2 → 53.9**
+  (was **16.9 → 60.9**). Wind **1.09 → 7.29** (unchanged). Early
+  soak stays sparse (`hum n` **13k / 68k**). Same stencil and
+  valley test. Do not coarsen off-screen advect. Lottery still
+  visits every over-sat tile.

@@ -776,8 +776,10 @@ impl Humidity {
     /// humidity-advect FPS cliff). Wind samples are cached once per
     /// seat before the two axis passes — `vector_at` misses walk the
     /// world, and calling that twice per tile was the leftover cost
-    /// after the field rebuild. Mix / lift then read the live map
-    /// (no second and third clones) and skip columns with no ascent.
+    /// after the field rebuild. When the bound box is at least half
+    /// full, flux / lift / mix / oro share one packed slab and only
+    /// tiles that moved are written back. Sparse maps keep the
+    /// HashMap walk (demo soak early). Not view LOD.
     pub fn advect_with_surface(
         &mut self,
         vx: f32,
