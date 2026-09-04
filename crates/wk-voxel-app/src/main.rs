@@ -14,8 +14,7 @@
 //! Hotkeys:
 //! - `Space` — pause / resume physics ticks
 //! - `R` — regenerate the world with a new seed
-//! - `W` — toggle climatic faucet (extra rain from the sky; default off)
-//! - `C` — toggle condensation rain (feedback from humidity heatmap)
+//! - `C` — toggle condensation rain (humidity → falling water / snow)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
@@ -58,7 +57,7 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased,
     apply_evaporation_into_humidity_climate, precipitate_thermal_surplus,
-    apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    apply_flow_erosion_bound, apply_karst_dissolution, apply_phase,
     apply_weather_rgb, apply_competent_fall_regions, apply_landscape_fall, celestial_local_cfg,
     celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
@@ -454,9 +453,6 @@ async fn main() {
                 settings.on_world_reseed(&scene.params);
                 inspect = None;
             }
-            if is_key_pressed(KeyCode::W) {
-                settings.climatic_rain_on = !settings.climatic_rain_on;
-            }
             if is_key_pressed(KeyCode::C) {
                 settings.cond_rain_on = !settings.cond_rain_on;
             }
@@ -564,15 +560,6 @@ async fn main() {
             // rayon. CA physics stays on the Tab toggle (demo dirty plans
             // are too narrow for parallel to win).
             set_parallel_enabled(true);
-            if settings.climatic_rain_on {
-                apply_rain_with_temp(
-                    &mut scene.world,
-                    &settings.rain,
-                    Some(&scene.temperature),
-                    Some(&settings.phase),
-                    Some(&mut scene.humidity),
-                );
-            }
             if settings.evap_on {
                 let evap_wind = scene.wind.near_surface_abs(Some(&scene.world));
                 apply_evaporation_into_humidity_climate(
@@ -609,8 +596,8 @@ async fn main() {
                 &scene.temperature,
                 Some(&settings.phase),
             );
-            // Leftover vapor: liquid drizzle when warm, thin ice frost
-            // when cold. Packed snow still comes from the W faucet.
+            // Leftover vapor: liquid drizzle when warm; below freeze
+            // the lottery gathers a flake (never liquid rain).
             if settings.cond_rain_on {
                 apply_condensation_rain_phased(
                     &mut scene.world,
@@ -1775,20 +1762,12 @@ async fn main() {
             } else {
                 "night"
             };
-            let rain_tag = if !settings.climatic_rain_on {
-                "off"
-            } else if settings.rain.closed_loop {
-                "on/closed"
-            } else {
-                "on/MINT"
-            };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C drizzle={} evap={} phase={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
                 scene.temperature.mean(),
-                rain_tag,
                 if settings.cond_rain_on { "on" } else { "off" },
                 if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
@@ -1809,7 +1788,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
+                "Tab|Space|R|C/E/K/O|I|T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

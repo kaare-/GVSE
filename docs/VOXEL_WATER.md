@@ -347,24 +347,28 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   `apply_grain_fall` (float on full water; drop through empty/haze Air).
   Phase break does **not** melt packs over empty or haze — fall owns those
   seats (melting haze used to fight freeze and pump flakes at the surface).
-- **Snow precip:** climatic rain and condensation call
-  `deposit_precip_on_surface`. **Air temp at precip origin** (`start_y` /
-  cloud height) chooses flake vs drop. Snow that hits **warm ground**
-  melts to liquid; cold air + cold ground → solid `Snow` pack (never
-  pore-soaks). Warm air always rains (ponds may freeze later via phase).
-  Solid seats cost a **full cell** (`min_budget_to_snow` default 255) —
-  thaw always yields `Air+FULL`, so a 64-sat droplet must not mint a
-  Snow cell. Short budget / full blanket → hold mass (`0`).
-- **Condensation drizzle (`C`):** warm → liquid film; cold air on cold
-  ground → thin `Ice` frost / rime (≤ `frost_coat_depth`, default 1;
-  lateral `frost_spread_radius`, default 3), also paid as a full cell
-  from the humidity tile. Never places `Snow` packs or ice towers —
-  climatic rain (`W`) owns packed snow. Tab exposes both frost knobs.
-- **Climatic rain (`W`):** **closed-loop by default** — deposits only what
+- **Snow precip:** condensation (`C`) and the library injector
+  `apply_rain` both call `deposit_precip_on_surface`. **Air temp at
+  precip origin** (`start_y` / tile height) chooses flake vs drop.
+  Snow that hits **warm ground** melts to liquid; cold air + cold
+  ground → solid `Snow` pack (never pore-soaks). Warm air always rains
+  (ponds may freeze later via phase). Solid seats cost a **full cell**
+  (`min_budget_to_snow` default 255) — thaw always yields `Air+FULL`,
+  so a 64-sat droplet must not mint a Snow cell. Short budget / full
+  blanket → hold mass (`0`).
+- **Condensation drizzle (`C`):** the play-app weather. Warm leftover
+  vapour rains a falling drop (`deposit_water_in_air`). Below freeze
+  the lottery gathers a **full-cell snowflake** — never liquid rain.
+  Surface frost / rime on cold ground is a thin `Ice` coat
+  (≤ `frost_coat_depth`, default 1; lateral `frost_spread_radius`,
+  default 3), also paid as a full cell from the humidity tile. Tab
+  exposes both frost knobs. There is no `W` climatic faucet in the
+  play app.
+- **`apply_rain` (library / tests only):** closed-loop column injector
+  kept for scenarios and `RainConfig` serde. Deposits only what
   humidity can pay, and refuses columns already flooded above
-  `sea_level + max_flood_above_sea`. Tab can reopen the legacy open
-  faucet (`closed_loop` off) for experiments; prefer condensation (`C`)
-  for weather. Atmosphere also has a soft per-tile cap
+  `sea_level + max_flood_above_sea`. The play app does not call it.
+  Atmosphere also has a soft per-tile cap
   (`Humidity::MAX_MASS_PER_TILE`). There is no cartoon cloud store.
   `CloudStore` only returns leftover save-file parcel mass to humidity.
   Evap also refuses a near-saturated vapor column
@@ -399,7 +403,8 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   in place so this cannot refill the 7 FPS soak.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
-  the blanket. Climatic rain uses a wider footprint when snowing.
+  the blanket. The library `apply_rain` injector uses a wider footprint
+  when snowing; play-app `C` snow is a full-cell flake in the source tile.
 - **Snow pack:** solid lid, no pore soak. Falls through empty Air; cold
   avalanche can spill onto lake ice (see Grain / cold avalanche sections).
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
@@ -407,7 +412,7 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 - Rate limits: freeze / thaw / slush / break per column per tick.
 - **Max Ice+Snow cells / column** — excess culled to empty Air (not melted).
 
-Cold snap: Tab → Base temp below 0°C (with rain/clouds on). Warm snap: raise
+Cold snap: Tab → Base temp below 0°C (keep `C` drizzle on). Warm snap: raise
 base temp above freeze point.
 
 ## Organisms (brief)

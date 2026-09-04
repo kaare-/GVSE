@@ -101,13 +101,13 @@ impl PlantGeneSettings {
 #[derive(Debug, Clone)]
 pub struct SimSettings {
     pub open: bool,
+    /// Closed-loop column injector kept for [`SimPreset`] serde.
+    /// The play app no longer calls [`wk_voxel::apply_rain`]; weather is C / E.
     pub rain: RainConfig,
     pub evap: EvapConfig,
     pub cond: CondensationConfig,
     /// `C` — condensation / dew (the real rain). Default on.
     pub cond_rain_on: bool,
-    /// `W` — extra climatic faucet. Default off.
-    pub climatic_rain_on: bool,
     /// `E` — surface water → humidity. Default on.
     pub evap_on: bool,
     /// `K` — limestone + groundwater dissolve. Default on.
@@ -242,7 +242,6 @@ impl SimSettings {
             },
             cond,
             cond_rain_on: true,
-            climatic_rain_on: false,
             evap_on: true,
             karst_on: true,
             oro: OrographicConfig {
@@ -476,7 +475,6 @@ impl SimSettings {
         let mut evap_rate = self.evap.rate_per_tick as f32;
         let mut evap_period = self.evap.period_ticks as f32;
         let mut dry_above = self.evap.dry_above_max as f32;
-        let mut droplet = self.rain.droplet_sat as f32;
         let mut day_ticks = self.climate.day_ticks as f32;
         let mut night_ticks = self.climate.night_ticks as f32;
         let mut tall_above = self.oro.tall_above_sea as f32;
@@ -778,7 +776,7 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Cloud shade (visual)",
+                        "Humidity shade (visual)",
                         0.0..1.0,
                         &mut self.atmosphere.cloud_shade_strength,
                     );
@@ -1337,10 +1335,10 @@ impl SimSettings {
                 });
                 ui.separator();
 
-                ui.tree_node(hash!(), "Weather (C drizzle / E evap / W faucet)", |ui| {
+                ui.tree_node(hash!(), "Weather (C drizzle / E evap)", |ui| {
                     ui.label(
                         None,
-                        "C is the rain (humidity → ground). W is an extra faucet, off by default.",
+                        "C is the rain: humidity becomes falling water, or a snowflake below freeze.",
                     );
                     ui.checkbox(hash!(), "C drizzle / dew (hotkey C)", &mut self.cond_rain_on);
                     ui.checkbox(hash!(), "E evap into humidity (hotkey E)", &mut self.evap_on);
@@ -1408,31 +1406,6 @@ impl SimSettings {
                         1.0..4.0,
                         &mut self.oro.mass_mult,
                     );
-                    ui.separator();
-                    ui.label(None, "W climatic faucet — optional; keep closed-loop to avoid minting.");
-                    ui.checkbox(hash!(), "W climatic rain (hotkey W)", &mut self.climatic_rain_on);
-                    ui.checkbox(
-                        hash!(),
-                        "W closed-loop (drain humidity; no mint)",
-                        &mut self.rain.closed_loop,
-                    );
-                    let mut flood = self.rain.max_flood_above_sea as f32;
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "W flood guard (cells above sea; 0=off)",
-                        0.0..48.0,
-                        &mut flood,
-                    );
-                    self.rain.max_flood_above_sea = flood.round().clamp(0.0, 64.0) as i32;
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "W rain prob / column",
-                        0.0..0.2,
-                        &mut self.rain.prob_per_col_per_tick,
-                    );
-                    labeled_slider(ui, hash!(), "W droplet sat", 1.0..255.0, &mut droplet);
                 });
                 } // Climate (wind/clouds/rain)
                 if self.page == SettingsPage::World {
@@ -1870,7 +1843,6 @@ impl SimSettings {
         self.evap.rate_per_tick = evap_rate.round().clamp(0.0, 32.0) as u8;
         self.evap.period_ticks = evap_period.round().clamp(1.0, 120.0) as u64;
         self.evap.dry_above_max = dry_above.round().clamp(0.0, 255.0) as u8;
-        self.rain.droplet_sat = droplet.round().clamp(1.0, 255.0) as u8;
         self.climate.day_ticks = day_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.climate.night_ticks = night_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.oro.tall_above_sea = tall_above.round().clamp(2.0, 100.0) as i32;

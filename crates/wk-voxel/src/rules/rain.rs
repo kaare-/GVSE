@@ -55,13 +55,13 @@ impl Default for RainConfig {
 }
 
 
-/// Inject climatic rain that **lands on the ground / ocean surface**
-/// under each column (cosmetic sky streaks are drawn separately).
+/// Scenario / test injector: drop water on the ground / ocean surface
+/// under each column. The play app does **not** call this — weather
+/// there is condensation (`C`) plus evaporation (`E`).
 ///
 /// Closed-loop by default ([`RainConfig::closed_loop`]): deposits only
-/// what humidity can pay, so overnight `W` cannot mint a flood. Pass
-/// `humidity = None` with `closed_loop = false` for the legacy open
-/// faucet (unit tests).
+/// what humidity can pay. Pass `humidity = None` with
+/// `closed_loop = false` for the legacy open faucet (unit tests).
 ///
 /// Determinism: same world.seed + same tick + same config = same
 /// droplet placements.

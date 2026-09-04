@@ -122,8 +122,8 @@ struct Scene {
     phase: PhaseConfig,
     climate: ClimateConfig,
     perf: PerfConfig,
-    /// Match the app's W toggle. Nightly soak leaves climatic rain off
-    /// and lets drizzle / evap cycle the water.
+    /// Scenario injector (`apply_rain`). The play app retired that
+    /// faucet; nightly soak leaves it off and lets C / E cycle water.
     climatic_rain: bool,
 }
 

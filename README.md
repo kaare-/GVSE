@@ -48,12 +48,12 @@ Toolchain is pinned in `rust-toolchain.toml` (1.83). License: `LICENSE-MIT`.
 - **Tab** — settings (geotech, climate, materials, life, …)
 - **Space** — pause
 - **R** — regenerate world
-- **W / C / E / K** — wind / condensation / evaporation / karst overlays
-- **H / T / N** — humidity / temperature / clouds
-- **M** — mycelium strain overlay · **G** — geotech (shear → σᵥ → wet → off)
-- **I** — phase-change master (freeze / thaw / snow)
-- **F1** — HUD chrome · **F2** creature editor · **F3** terrain editor · **F4** creature list
-- **F5 / F9** — save / load
+- **C / E / K** — condensation (rain / snow) / evaporation / karst
+- **H / V / T** — humidity / wind / temperature overlays
+- **U** — ground saturation · **M** mycelium · **G** geotech (shear → σᵥ → wet → off)
+- **I** — phase-change master (freeze / thaw / snow) · **O** — step creatures
+- **F1** — HUD chrome · **F2** creature editor (`W` = seaweed) · **F3** terrain · **F4** list
+- **F5 / F9** — save / load · **F6** — glossary
 - **Click** — block inspector · arrows — pan
 
 ## Scale

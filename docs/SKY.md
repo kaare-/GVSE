@@ -27,7 +27,7 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 | Key | What |
 |-----|------|
 | **H** | Humidity **tile raster** — the vapour look. Tab → Climate → Wind + humidity: resample button (bilinear vs 4×4 tiles) and min-mass slider. |
-| **V** | Wind streak overlay (placeholder; default off) |
+| **V** | Wind lattice — coarse local-field arrows (default off) |
 | **F6** | Glossary — keys, water/sky words, HUD tags |
 
 Humidity **is** the weather store, now with temperature/wind:
@@ -46,7 +46,7 @@ runs at full rate off-screen (ring + pan). Not a quadtree.
 | Humidity tiles | Vapour wash (`H`) — bilinear on 4×4 seats; a drop opens that column from itself downward |
 | Wet columns | Canopy / column shade via `cloud_sky_transmit` (humidity, not parcels) |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
-| Wind | `V` placeholder streaks (needs work) |
+| Wind | `V` overlay — coarse local-field arrows (default off) |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
 | Cast / celestial key | See prior plant/terrain lighting notes |
 
