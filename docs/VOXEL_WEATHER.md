@@ -86,6 +86,41 @@ must find the same mass that ran at full rate while it was off-screen.
 A quadtree over the sky would coarsen those same fields. Parked.
 Draw leftover only.
 
+### Pinned: time-coarsen quiet CA, not off-screen weather
+
+A bigger world cannot tick every cell every frame. Minecraft solves
+that by freezing far chunks. That breaks mass: water, vapour, and
+head stop at an invisible wall, then jump when the chunk wakes.
+
+The honest version is a **second clock**, not a coarser sky:
+
+1. **Exact skip** (any Δt). Equilibrium is a no-op: a full pore table
+   with no head gradient, an equalized confined body, dry rock. Dirty
+   bits and occupancy flags already name these. A larger world just
+   needs more of the map to qualify.
+2. **Conservation-form integrators** (Δt = 1k–10k). Pore seepage and
+   humidity/T diffusion can take an implicit step with a flux limiter
+   so `sat` stays in `[0, cap]` and tile mass is a discrete divergence.
+   The feel loses tick-by-tick sparkle; the budget matches.
+3. **Persistent bodies** (the confined solver). Label a communicating
+   vessel once, store donor + max head, apply `rate × Δt` capped by
+   donor sat and dest free. Period-16 BFS becomes a lookup. Ocean
+   evap updates the body so a far well still rises — that is why the
+   wake must not be the dirty halo.
+4. **Kinematic surface dump** for far hills. Do not replay 10k CA
+   hops. Move mobile Air sat along the D8 slope, deposit where it
+   dies. Mass is conserved; terrace/jelly will not match the CA.
+   Wake back to fine CA when the player is close or the chunk is
+   dirty.
+5. **Seam ledger.** A Δt=10k chunk next to a Δt=1 chunk must queue
+   face flux. Without it, mass vanishes at the cadence boundary.
+
+Stay fine: mid-air rain hops, an on-screen cascade, a phase front,
+anything whose 10k-tick path can fork. Do **not** implement this by
+skipping off-screen humidity/wind/T (the ring pin above). Do not
+skip the condensation lottery. Do not shrink the confined wake or
+lower the BFS limit — persist the body instead.
+
 ### Pinned: droplets fall too fast
 
 *Deliberately parked* — playtested and judged acceptable for now. Kept here
@@ -732,3 +767,8 @@ Do not re-walk these:
   Dry Air still owns the +x equalise edge. Flow early-out stays on
   the AABB, not the bit count. Do not skip the contact dry-pore
   check on the deep seepage pass.
+
+  After walking filled-sky humidity diffusion on a dense slab (same
+  +x/+y stencil; HashMap+sort stays until the box is half full or
+  tiny; repeat soak, 256 plants, 8×400): numbers pending. Not view
+  LOD — every tile still steps. Do not coarsen off-screen advect.

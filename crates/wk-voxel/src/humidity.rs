@@ -139,6 +139,37 @@ impl Humidity {
         self.bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
     }
 
+    /// Sequential +x/+y walk when the sky box is small (tests) or at
+    /// least half full. Same stencil as the sparse path — not view LOD.
+    fn use_dense_slab(&self, b: TileBounds) -> bool {
+        let cap = b.tile_capacity();
+        if cap == 0 {
+            return false;
+        }
+        cap <= 256 || self.cells.len().saturating_mul(2) >= cap
+    }
+
+    fn slab_dims(b: TileBounds) -> (usize, usize) {
+        let w = (b.hx_max - b.hx_min + 1).max(0) as usize;
+        let h = (b.hy_max - b.hy_min + 1).max(0) as usize;
+        (w, h)
+    }
+
+    fn slab_index(b: TileBounds, w: usize, hx: i32, hy: i32) -> usize {
+        (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize
+    }
+
+    fn pack_slab(&self, b: TileBounds) -> Vec<f32> {
+        let (w, h) = Self::slab_dims(b);
+        let mut slab = vec![0.0f32; w.saturating_mul(h)];
+        for (&(hx, hy), &v) in &self.cells {
+            if b.contains(hx, hy) {
+                slab[Self::slab_index(b, w, hx, hy)] = v;
+            }
+        }
+        slab
+    }
+
     /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.
     pub fn wrap_tile_x(&self, hx: i32) -> Option<i32> {
         self.wrap_hx(hx)
@@ -491,6 +522,12 @@ impl Humidity {
         if alpha == 0.0 || self.cells.is_empty() {
             return;
         }
+        if let Some(b) = self.bounds {
+            if self.use_dense_slab(b) {
+                self.diffuse_slab(alpha, b);
+                return;
+            }
+        }
         // Snapshot the current state so we don't chase deltas across
         // the pass.
         let snap: FxHashMap<(i32, i32), f32> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
@@ -557,6 +594,63 @@ impl Humidity {
         let bounds = self.bounds;
         self.cells.retain(|&(hx, hy), v| {
             v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+        });
+    }
+
+    /// Same +x/+y pairwise stencil as [`Self::diffuse`], walking the
+    /// bound box instead of cloning the SipHash map and sorting a 5×
+    /// neighbour set. Implicit zeros are empty tiles (neighbour expand).
+    fn diffuse_slab(&mut self, alpha: f32, b: TileBounds) {
+        let (w, h) = Self::slab_dims(b);
+        let n = w.saturating_mul(h);
+        if n == 0 {
+            return;
+        }
+        let snap = self.pack_slab(b);
+        let mut deltas = vec![0.0f32; n];
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                let hx = b.hx_min + ix as i32;
+                let hy = b.hy_min + iy as i32;
+                let val = snap[i];
+                if let Some(nx) = self.wrap_hx(hx + 1) {
+                    if self.accepts(nx, hy) && nx != hx {
+                        let ni = Self::slab_index(b, w, nx, hy);
+                        let flow = (val - snap[ni]) * alpha;
+                        if flow.abs() >= 1e-9 {
+                            deltas[i] -= flow;
+                            deltas[ni] += flow;
+                        }
+                    }
+                }
+                let n_key = (hx, hy + 1);
+                if self.accepts(n_key.0, n_key.1) {
+                    let ni = Self::slab_index(b, w, n_key.0, n_key.1);
+                    let flow = (val - snap[ni]) * alpha;
+                    if flow.abs() >= 1e-9 {
+                        deltas[i] -= flow;
+                        deltas[ni] += flow;
+                    }
+                }
+            }
+        }
+        for iy in 0..h {
+            for ix in 0..w {
+                let d = deltas[iy * w + ix];
+                if d.abs() < 1e-9 {
+                    continue;
+                }
+                let hx = b.hx_min + ix as i32;
+                let hy = b.hy_min + iy as i32;
+                if !self.accepts(hx, hy) {
+                    continue;
+                }
+                *self.cells.entry((hx, hy)).or_insert(0.0) += d;
+            }
+        }
+        self.cells.retain(|&(hx, hy), v| {
+            v.abs() > 1e-6 && b.contains(hx, hy)
         });
     }
 
@@ -1739,6 +1833,39 @@ mod tests {
             h.at_tile(0, 0) > 0.0,
             "mass should wrap from hx=3 to hx=0"
         );
+    }
+
+    #[test]
+    fn dense_slab_matches_sparse_diffuse() {
+        // 32×16 = 512 tiles (>256) with a few spikes stays on the
+        // HashMap path; the sibling is forced through the slab.
+        let mut sparse = Humidity::with_world_bounds(1, 0, 0, 32, 16);
+        sparse.wrap_x = true;
+        sparse.add(2, 3, 80.0);
+        sparse.add(20, 8, 40.0);
+        sparse.add(31, 0, 25.0);
+        let mut dense = sparse.clone();
+        assert!(
+            !sparse.use_dense_slab(sparse.bounds.unwrap()),
+            "few keys must keep the sparse walk"
+        );
+        sparse.diffuse(0.2);
+        dense.diffuse_slab(0.2, dense.bounds.unwrap());
+        assert!(
+            (sparse.total_mass() - dense.total_mass()).abs() < 1e-4,
+            "slab must conserve like sparse: {} vs {}",
+            sparse.total_mass(),
+            dense.total_mass()
+        );
+        for key in sparse.cells.keys().chain(dense.cells.keys()) {
+            let a = sparse.at_tile(key.0, key.1);
+            let b = dense.at_tile(key.0, key.1);
+            assert!(
+                (a - b).abs() < 1e-4,
+                "tile {:?} sparse={a} slab={b}",
+                key
+            );
+        }
     }
 }
 
