@@ -785,10 +785,410 @@ impl Humidity {
         wind: &crate::wind::Wind,
         world: &crate::grid::World,
     ) {
+        if let Some(b) = self.bounds {
+            if self.use_dense_slab(b) {
+                self.advect_with_surface_slab(vx, vy, wind, world, b);
+                return;
+            }
+        }
         let free_air = self.build_free_air_cache(wind, world);
         self.advect_inner(vx, vy, Some((wind, world, &free_air)));
         self.wind_mix(wind.mix_strength(vx, vy), Some((wind, world, &free_air)));
         self.apply_orographic_lift(wind, Some(world));
+    }
+
+    /// One pack of the bound box, then flux / buried-lift / mix / oro
+    /// on the slab. Write back only tiles that moved. Same stencil as
+    /// the HashMap path — not view LOD.
+    fn advect_with_surface_slab(
+        &mut self,
+        vx: f32,
+        vy: f32,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+        b: TileBounds,
+    ) {
+        let free_air = self.build_free_air_cache(wind, world);
+        let (w, h) = Self::slab_dims(b);
+        let n = w.saturating_mul(h);
+        if n == 0 {
+            return;
+        }
+        let snap = self.pack_slab(b);
+        let mut work = snap.clone();
+        let surface = Some((wind, world, &free_air));
+        // One sample per occupied seat — same leftover the sparse
+        // path already cut. Both axes donate from `snap`.
+        let mut vectors = vec![(0.0f32, 0.0f32); n];
+        for i in 0..n {
+            if snap[i].abs() < 1e-9 {
+                continue;
+            }
+            let (hx, hy) = Self::coords_of(b, w, i);
+            vectors[i] = wind.vector_at(Some(world), hx, hy);
+        }
+        self.flux_axis_into(&snap, &mut work, vx, vy, surface, true, b, w, &vectors);
+        self.flux_axis_into(&snap, &mut work, vx, vy, surface, false, b, w, &vectors);
+        self.lift_buried_into(&mut work, wind, world, &free_air, b, w, h);
+        self.wind_mix_into(
+            &mut work,
+            wind.mix_strength(vx, vy),
+            surface,
+            b,
+            w,
+            h,
+        );
+        self.oro_into(&mut work, wind, Some(world), b, w, h);
+        self.sync_slab_changes(b, &snap, &work);
+    }
+
+    /// Donor-cell flux into `work`. Masses come from the pre-advect
+    /// `snap` so both axes commute the same way as [`Self::flux_axis`].
+    fn flux_axis_into(
+        &self,
+        snap: &[f32],
+        work: &mut [f32],
+        climate_vx: f32,
+        climate_vy: f32,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &FxHashMap<i32, i32>,
+        )>,
+        horizontal: bool,
+        b: TileBounds,
+        w: usize,
+        vectors: &[(f32, f32)],
+    ) {
+        let n = snap.len().min(work.len());
+        if n == 0 || w == 0 {
+            return;
+        }
+        let h = n / w;
+        let mut deltas = vec![0.0f32; n];
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                let mass = snap[i];
+                if mass.abs() < 1e-9 {
+                    continue;
+                }
+                let hx = b.hx_min + ix as i32;
+                let hy = b.hy_min + iy as i32;
+                let (vx, vy) = match surface {
+                    Some(_) => vectors
+                        .get(i)
+                        .copied()
+                        .unwrap_or((climate_vx, climate_vy)),
+                    None => (climate_vx, climate_vy),
+                };
+                let v = if horizontal {
+                    vx
+                } else {
+                    vy.clamp(-HUMIDITY_VY_ADV_CAP, HUMIDITY_VY_ADV_CAP)
+                };
+                let step = v.clamp(-1.0, 1.0);
+                if step.abs() < 1e-9 {
+                    continue;
+                }
+                let leave = mass * step.abs();
+                if leave < 1e-12 {
+                    continue;
+                }
+                let (tx, ty) = if horizontal {
+                    let dir = if step > 0.0 { 1 } else { -1 };
+                    let nhx = match self.wrap_hx(hx + dir) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                    if !self.accepts(nhx, hy) {
+                        continue;
+                    }
+                    (nhx, hy)
+                } else {
+                    let dir = if step > 0.0 { 1 } else { -1 };
+                    let nhy = hy + dir;
+                    let mut dest_hy = nhy;
+                    if let Some((wnd, wrld, cache)) = surface {
+                        dest_hy = self.free_air_cached(wnd, wrld, hx, cache).max(nhy);
+                    }
+                    if !self.accepts(hx, dest_hy) {
+                        continue;
+                    }
+                    (hx, dest_hy)
+                };
+                deltas[i] -= leave;
+                if b.contains(tx, ty) {
+                    deltas[Self::slab_index(b, w, tx, ty)] += leave;
+                }
+            }
+        }
+        for i in 0..n {
+            let d = deltas[i];
+            if d.abs() < 1e-12 {
+                continue;
+            }
+            if d < 0.0 {
+                work[i] = (work[i] + d).max(0.0);
+            } else {
+                let (hx, hy) = Self::coords_of(b, w, i);
+                if self.accepts(hx, hy) {
+                    work[i] += d;
+                }
+            }
+        }
+    }
+
+    /// Same valley test as [`Self::lift_buried_to_free_air`]. Masses
+    /// are snapshotted so a hoist cannot feed another hoist this tick.
+    fn lift_buried_into(
+        &self,
+        work: &mut [f32],
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+        cache: &FxHashMap<i32, i32>,
+        b: TileBounds,
+        w: usize,
+        h: usize,
+    ) {
+        let n = work.len();
+        if n == 0 || w == 0 {
+            return;
+        }
+        let mut moves: Vec<(usize, usize, f32)> = Vec::new();
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                let mass = work[i];
+                if mass <= 1e-9 {
+                    continue;
+                }
+                let hx = b.hx_min + ix as i32;
+                let hy = b.hy_min + iy as i32;
+                let air = self.free_air_cached(wind, world, hx, cache);
+                if hy >= air {
+                    continue;
+                }
+                let mut valley = air;
+                if let Some(l) = self.wrap_hx(hx - 1) {
+                    valley = valley.min(self.free_air_cached(wind, world, l, cache));
+                }
+                if let Some(r) = self.wrap_hx(hx + 1) {
+                    valley = valley.min(self.free_air_cached(wind, world, r, cache));
+                }
+                if hy >= valley {
+                    continue;
+                }
+                if !self.accepts(hx, air) {
+                    continue;
+                }
+                let dest = Self::slab_index(b, w, hx, air);
+                if dest >= n {
+                    continue;
+                }
+                moves.push((i, dest, mass));
+            }
+        }
+        for (from, to, mass) in moves {
+            work[from] -= mass;
+            work[to] += mass;
+        }
+    }
+
+    /// Vertical mix + sink on the slab. Reads `work`, writes
+    /// commutative deltas — same pairs as [`Self::wind_mix`]. Empty
+    /// tiles stay empty so a zero does not pull mass from above.
+    fn wind_mix_into(
+        &self,
+        work: &mut [f32],
+        mix: f32,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &FxHashMap<i32, i32>,
+        )>,
+        b: TileBounds,
+        w: usize,
+        h: usize,
+    ) {
+        let mix = mix.clamp(0.0, 1.0);
+        let n = work.len();
+        if mix < 1e-4 || n == 0 || w == 0 {
+            return;
+        }
+        let alpha = (0.04 + 0.14 * mix).clamp(0.0, 0.20);
+        let mut deltas = vec![0.0f32; n];
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                let val = work[i];
+                // Sparse mix runs after retain(|v| > 1e-6).
+                if val.abs() <= 1e-6 {
+                    continue;
+                }
+                let hx = b.hx_min + ix as i32;
+                let hy = b.hy_min + iy as i32;
+                let above_hy = hy + 1;
+                if !self.accepts(hx, above_hy) {
+                    continue;
+                }
+                if let Some((wnd, wrld, cache)) = surface {
+                    let air = self.free_air_cached(wnd, wrld, hx, cache);
+                    if hy < air || above_hy < air {
+                        continue;
+                    }
+                }
+                let n_val = if b.contains(hx, above_hy) {
+                    work[Self::slab_index(b, w, hx, above_hy)]
+                } else {
+                    0.0
+                };
+                let flow = (val - n_val) * alpha;
+                if flow.abs() < 1e-9 {
+                    continue;
+                }
+                deltas[i] -= flow;
+                if b.contains(hx, above_hy) {
+                    deltas[Self::slab_index(b, w, hx, above_hy)] += flow;
+                }
+            }
+        }
+        let sink = 0.03 * mix;
+        if sink > 1e-5 {
+            for iy in 0..h {
+                for ix in 0..w {
+                    let i = iy * w + ix;
+                    let val = work[i];
+                    if val <= 1e-9 {
+                        continue;
+                    }
+                    let hx = b.hx_min + ix as i32;
+                    let hy = b.hy_min + iy as i32;
+                    let below = hy - 1;
+                    if !self.accepts(hx, below) {
+                        continue;
+                    }
+                    if let Some((wnd, wrld, cache)) = surface {
+                        if below < self.free_air_cached(wnd, wrld, hx, cache) {
+                            continue;
+                        }
+                    }
+                    let take = val * sink;
+                    deltas[i] -= take;
+                    if b.contains(hx, below) {
+                        deltas[Self::slab_index(b, w, hx, below)] += take;
+                    }
+                }
+            }
+        }
+        for i in 0..n {
+            let d = deltas[i];
+            if d.abs() < 1e-12 {
+                continue;
+            }
+            if d < 0.0 {
+                work[i] = (work[i] + d).max(0.0);
+            } else {
+                let (hx, hy) = Self::coords_of(b, w, i);
+                if self.accepts(hx, hy) {
+                    work[i] += d;
+                }
+            }
+        }
+    }
+
+    /// Per-column orographic lift on the slab. Negative apply is `+=`
+    /// without `max(0)` — same as [`Self::apply_orographic_lift`].
+    fn oro_into(
+        &self,
+        work: &mut [f32],
+        wind: &crate::wind::Wind,
+        world: Option<&crate::grid::World>,
+        b: TileBounds,
+        w: usize,
+        h: usize,
+    ) {
+        let n = work.len();
+        if n == 0 || w == 0 {
+            return;
+        }
+        let mut lift_col = vec![0.0f32; w];
+        let mut any_lift = false;
+        for ix in 0..w {
+            let hx = b.hx_min + ix as i32;
+            let lift = wind.orographic_lift(world, hx);
+            if lift > 1e-5 {
+                any_lift = true;
+                lift_col[ix] = lift;
+            }
+        }
+        if !any_lift {
+            return;
+        }
+        let mut deltas = vec![0.0f32; n];
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                let mass = work[i];
+                if mass <= 1e-6 {
+                    continue;
+                }
+                let lift = lift_col[ix];
+                if lift <= 1e-5 {
+                    continue;
+                }
+                let hx = b.hx_min + ix as i32;
+                let hy = b.hy_min + iy as i32;
+                let dest = hy + 1;
+                if !self.accepts(hx, dest) {
+                    continue;
+                }
+                let take = mass * lift;
+                if take <= 1e-9 {
+                    continue;
+                }
+                deltas[i] -= take;
+                if b.contains(hx, dest) {
+                    deltas[Self::slab_index(b, w, hx, dest)] += take;
+                }
+            }
+        }
+        for i in 0..n {
+            let d = deltas[i];
+            if d.abs() < 1e-12 {
+                continue;
+            }
+            if d < 0.0 {
+                work[i] += d;
+            } else {
+                let (hx, hy) = Self::coords_of(b, w, i);
+                if self.accepts(hx, hy) {
+                    work[i] += d;
+                }
+            }
+        }
+    }
+
+    fn coords_of(b: TileBounds, w: usize, i: usize) -> (i32, i32) {
+        let hy = b.hy_min + (i / w) as i32;
+        let hx = b.hx_min + (i % w) as i32;
+        (hx, hy)
+    }
+
+    fn sync_slab_changes(&mut self, b: TileBounds, before: &[f32], after: &[f32]) {
+        let (w, _) = Self::slab_dims(b);
+        let n = before.len().min(after.len());
+        for i in 0..n {
+            if (after[i] - before[i]).abs() < 1e-12 {
+                continue;
+            }
+            let (hx, hy) = Self::coords_of(b, w, i);
+            if after[i] > 1e-6 {
+                self.cells.insert((hx, hy), after[i]);
+            } else {
+                self.cells.remove(&(hx, hy));
+            }
+        }
     }
 
     /// Occupied tile columns. A filled sky walks the bound `hx` range
@@ -1484,6 +1884,118 @@ mod tests {
             left > right,
             "local −x field should send more mass left than climate +x (L={left} R={right})"
         );
+    }
+
+    #[test]
+    fn dense_surface_slab_conserves_and_caps_vy() {
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.20,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.field_smooth = 0.0;
+        let world = World::new(p.seed);
+        // 8×8 tiles (64 ≤ 256) forces the unified slab. Sit in free
+        // air so lift-buried does not hoist the fixture.
+        let y0 = p.sea_level_y + 16;
+        let mut h = Humidity::with_world_bounds(4, 0, y0, 32, y0 + 32);
+        h.wrap_x = true;
+        let gy = y0 + 8;
+        h.add(8, gy, 100.0);
+        let (hx, hy) = h.tile_of(8, gy);
+        wind.field.insert((hx, hy), (0.0, 0.80));
+        let before = h.total_mass();
+        assert!(h.use_dense_slab(h.bounds.unwrap()));
+        h.advect_with_surface(0.0, 0.0, &wind, &world);
+        assert!(
+            (h.total_mass() - before).abs() < 0.5,
+            "dense slab must conserve (before={before} after={})",
+            h.total_mass()
+        );
+        let left = h.at_tile(hx, hy);
+        assert!(
+            left >= 70.0,
+            "dense-slab vy=0.80 must not vacuum the tile, left={left}"
+        );
+    }
+
+    #[test]
+    fn dense_surface_slab_matches_sparse() {
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.20,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.field_smooth = 0.0;
+        let world = World::new(p.seed);
+        let mut sparse = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        sparse.wrap_x = true;
+        let gy = p.sea_level_y + 24;
+        sparse.add(8, gy, 100.0);
+        sparse.add(40, gy + 4, 60.0);
+        sparse.add(80, gy - 4, 30.0);
+        let (hx, hy) = sparse.tile_of(8, gy);
+        wind.field.insert((hx, hy), (-0.40, 0.20));
+        let mut dense = sparse.clone();
+        assert!(
+            !sparse.use_dense_slab(sparse.bounds.unwrap()),
+            "few keys must keep the HashMap surface walk"
+        );
+        sparse.advect_with_surface(0.15, 0.0, &wind, &world);
+        dense.advect_with_surface_slab(
+            0.15,
+            0.0,
+            &wind,
+            &world,
+            dense.bounds.unwrap(),
+        );
+        assert!(
+            (sparse.total_mass() - dense.total_mass()).abs() < 1e-3,
+            "surface slab must conserve like sparse: {} vs {}",
+            sparse.total_mass(),
+            dense.total_mass()
+        );
+        for key in sparse.cells.keys().chain(dense.cells.keys()) {
+            let a = sparse.at_tile(key.0, key.1);
+            let b = dense.at_tile(key.0, key.1);
+            assert!(
+                (a - b).abs() < 1e-3,
+                "tile {:?} sparse={a} slab={b}",
+                key
+            );
+        }
     }
 
     #[test]
