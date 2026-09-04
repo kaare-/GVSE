@@ -137,6 +137,10 @@ pub struct SimSettings {
     pub page: SettingsPage,
     /// Physics trade-offs (Tab → Performance). Defaults preserve water feel.
     pub perf: PerfConfig,
+    /// Frame budget around `step_world` (ms). `0` = never skip a step.
+    /// Default 12 — quiet ticks stay every frame; a soaked leftover
+    /// yields one present so Tab / the mouse can move.
+    pub sim_budget_ms: f32,
     /// Geotech failure (Tab → Geotech). Roof collapse on by default.
     pub failure: FailureConfig,
     /// Competent rock rigid-body knobs (Tab → Geotech).
@@ -278,6 +282,7 @@ impl SimSettings {
             },
             page: SettingsPage::World,
             perf: PerfConfig::default(),
+            sim_budget_ms: 12.0,
             failure: FailureConfig::default(),
             competent_fall: CompetentFallConfig::default(),
             max_roof_events: FailureConfig::default().max_roof_events as f32,
@@ -1100,6 +1105,18 @@ impl SimSettings {
                         None,
                         "  Off by default — demo ~6 dirty regions; rayon was slower on 32 cores.",
                     );
+                    ui.label(
+                        None,
+                        "Step budget: skip the next frame after a step longer than this so the UI can draw. 0 = never skip. Max 1 step/frame (no catch-up).",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sim budget (ms, 0=off)",
+                        0.0..32.0,
+                        &mut self.sim_budget_ms,
+                    );
+                    self.sim_budget_ms = self.sim_budget_ms.clamp(0.0, 32.0);
                 });
                 ui.separator();
 

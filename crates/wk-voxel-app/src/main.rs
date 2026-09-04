@@ -12,7 +12,7 @@
 //! rises so raindrops shade from blue-white to lake blue.
 //!
 //! Hotkeys:
-//! - `Space` — pause / resume physics ticks
+//! - `Space` — pause / resume physics ticks (Tab does not pause)
 //! - `R` — regenerate the world with a new seed
 //! - `C` — toggle condensation rain (humidity → falling water / snow)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
@@ -53,13 +53,15 @@ mod settings;
 mod spore_fx;
 mod terrain;
 
+use std::time::Instant;
+
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_competent_fall_regions, apply_landscape_fall, apply_weather_rgb, celestial_local_cfg,
     celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg, day_night_factor_cfg,
     is_daytime_cfg, plan_active, pore_wetness_with, step_world, wake_competent_bodies_all,
-    wake_unsupported_grains, wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldStep,
-    WorldStepConfig, WorldgenParams,
+    wake_unsupported_grains, wake_unstable_slopes, GeotechOverlayMode, SimClock, SimSnapshot,
+    WorldStep, WorldStepConfig, WorldgenParams,
 };
 
 use crate::atmosphere::{
@@ -204,6 +206,7 @@ async fn main() {
     let params = WorldgenParams::default();
     let mut scene = Scene::new(params);
     let mut settings = SimSettings::new(&scene.params);
+    let mut sim_clock = SimClock::default();
     settings.apply_material_overrides(&mut scene.world);
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
@@ -528,15 +531,17 @@ async fn main() {
             }
         }
 
-        // Physics (frozen while paint editors / Tab settings / quit are open).
-        // Tab must pause too — a busy tick (raft drift, settle) otherwise
-        // starves the frame loop and the settings UI feels dead.
-        let sim_paused = paused
-            || settings.open
+        // Space / F2 paint / F3 / quit freeze the CA so a brush cannot
+        // race a tick. Tab does not — a cheap world keeps moving; an
+        // over-budget step yields the next present so sliders stay live.
+        let hard_pause = paused
             || (editor.open && !editor.spawn_picker)
             || terrain.open
             || quit_dialog.open;
-        if !sim_paused {
+        sim_clock.set_budget_ms(settings.sim_budget_ms);
+        let mut sim_skipped = false;
+        if !hard_pause && sim_clock.allow_steps() > 0 {
+            let t0 = Instant::now();
             let outcome = step_world(
                 WorldStep {
                     world: &mut scene.world,
@@ -574,9 +579,12 @@ async fn main() {
                 },
                 None,
             );
+            sim_clock.record(t0.elapsed());
             if let Some(org) = outcome.organisms {
                 spore_fx.burst_all(&org.spores, outcome.wind_vx);
             }
+        } else if !hard_pause {
+            sim_skipped = true;
         }
 
         // Spore puffs keep drifting while paused so the wind trail stays readable.
@@ -1588,7 +1596,13 @@ async fn main() {
                     format!("p={p} f={f} a={a}")
                 },
                 scene.organisms.corpse_count(),
-                if sim_paused { "[paused]" } else { "" }
+                if hard_pause {
+                    "[paused]"
+                } else if sim_skipped {
+                    "[sim skip]"
+                } else {
+                    ""
+                }
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(

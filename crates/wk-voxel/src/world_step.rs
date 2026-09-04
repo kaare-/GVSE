@@ -6,7 +6,10 @@
 //! This is **not** a tick budget and not a client protocol. It is the
 //! existing play-app order, lifted out of `main.rs` so the CA, climate,
 //! and life cannot drift. `tick_with_life` stays the water/grain
-//! subroutine; atmosphere stays outside its mass checkpoints.
+//! subroutine; atmosphere stays outside its mass checkpoints. The play
+//! app wraps this in [`crate::SimClock`] (max one step per present;
+//! leftover dropped). The budget is **not** inside `step_world` — CA
+//! tests stay 1:1.
 //!
 //! Order (cadence comments are load-bearing):
 //!
