@@ -692,9 +692,10 @@ Do not re-walk these:
   After caching orographic `live_surface_at` per column (same factors
   for every over-sat tile in the column), sharing the lottery sat
   `at_tile` with the dew read, and draining winners from the snapshot
-  mass: leftover world walks / hasher on the condensation lottery as
-  `hum n` fills. Lottery still visits every over-sat tile. `col_lo`
-  still built for every key. Draw leftover: `T` / `U` / `M` / `G`
-  now use the camera box (headless soak does not draw). Do not skip
-  the lottery. Do not coarsen off-screen sim. Do not add a sky
+  mass (repeat soak, 256 plants, 8×400): condensation **0.35 → 2.80**
+  (was **0.35 → 3.18**). Wall **20.7 → 83.3** — same leftover growers
+  (halo, seep, confined). Lottery still visits every over-sat tile;
+  `col_lo` still built for every key. Draw leftover: `T` / `U` / `M` /
+  `G` now use the camera box (headless soak does not draw). Do not
+  skip the lottery. Do not coarsen off-screen sim. Do not add a sky
   quadtree.
