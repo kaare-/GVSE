@@ -512,6 +512,11 @@ fn cells_to_set(cells: &[(i32, i32, Cell)]) -> HashSet<(i32, i32)> {
   cells.iter().map(|(x, y, _)| (*x, *y)).collect()
 }
 
+/// True when **every** bottom-face cell has passable space under it.
+///
+/// This used to return on the first face cell `HashSet` yielded, so a seated
+/// cliff with one overhang voxel was randomly judged "floating" and the
+/// hang-peel then diced the whole hill. Leftover tiles hung in the sky.
 fn cell_set_floating(world: &World, set: &HashSet<(i32, i32)>) -> bool {
   let mut face = false;
   for &(x, y) in set {
@@ -520,8 +525,8 @@ fn cell_set_floating(world: &World, set: &HashSet<(i32, i32)>) -> bool {
     }
     face = true;
     match world.get_cell(x, y - 1) {
-      None => return true,
-      Some(c) if body_passable_at(world, x, y - 1, &c) => return true,
+      None => {}
+      Some(c) if body_passable_at(world, x, y - 1, &c) => {}
       _ => return false,
     }
   }
@@ -800,6 +805,12 @@ fn peel_floating_grid(
   out
 }
 
+/// Square tile for oversize hang-peel. 16×16 = 256, always under
+/// [`MAX_DYNAMIC_BODY_CELLS`]. Growing the tile to cut piece-count used to
+/// overshoot that cap; `peel_floating_grid` then dropped the tile and the
+/// rock stayed in the sky.
+const FLOAT_PEEL_TILE: i32 = 16;
+
 fn peel_oversize_floating(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cell)>> {
   if cells.is_empty() {
     return Vec::new();
@@ -810,25 +821,9 @@ fn peel_oversize_floating(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Ce
   let by_pos: HashMap<(i32, i32), Cell> =
     cells.iter().map(|(x, y, c)| ((*x, *y), *c)).collect();
   let set = cells_to_set(&cells);
-  let n = set.len();
-  let min_x = set.iter().map(|p| p.0).min().unwrap();
-  let max_x = set.iter().map(|p| p.0).max().unwrap();
-  let min_y = set.iter().map(|p| p.1).min().unwrap();
-  let max_y = set.iter().map(|p| p.1).max().unwrap();
-  let w = max_x - min_x + 1;
-  let h = max_y - min_y + 1;
-  let pieces_needed = (n + MAX_DYNAMIC_BODY_CELLS - 1) / MAX_DYNAMIC_BODY_CELLS;
-  let mut tile = 16_i32;
-  while tile <= 32 {
-    let tiles_x = (w + tile - 1) / tile;
-    let tiles_y = (h + tile - 1) / tile;
-    let count = (tiles_x * tiles_y) as usize;
-    if count <= pieces_needed.max(2) + 2 && (tile * tile) as usize <= MAX_DYNAMIC_BODY_CELLS {
-      break;
-    }
-    tile += 4;
-  }
-  peel_floating_grid(&set, &by_pos, tile, 4)
+  // Cover every cell. min_cells=1 so edge crumbs become bodies too — they
+  // were the small mid-air shards left after a big tile was discarded.
+  peel_floating_grid(&set, &by_pos, FLOAT_PEEL_TILE, 1)
 }
 
 fn extract_hanging_pieces(
@@ -921,6 +916,23 @@ fn push_component_pieces(
     for &(x, y, _) in piece {
       settle.push((x, y));
     }
+  };
+  // Oversize hanging leftovers must peel, not vanish. The previous `continue`
+  // left those cells in the grid with no body — the screenshot sky islands.
+  let pieces = if hanging {
+    let mut flat = Vec::new();
+    for piece in pieces {
+      if piece.len() <= MAX_DYNAMIC_BODY_CELLS {
+        if !piece.is_empty() {
+          flat.push(piece);
+        }
+      } else {
+        flat.extend(peel_oversize_floating(piece));
+      }
+    }
+    flat
+  } else {
+    pieces
   };
   for piece in pieces {
     if piece.is_empty() {
@@ -2459,23 +2471,41 @@ fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
 
 /// Re-dirty dynamic competent bodies that can still fall or tip.
 pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
+  let regions: Vec<ActiveChunk> = coords
+    .iter()
+    .map(|&coord| ActiveChunk::new(coord, Rect::full()))
+    .collect();
+  wake_competent_bodies_regions(world, &regions);
+}
+
+/// Like [`wake_competent_bodies`], but only the supplied dirty rects.
+///
+/// Passing whole-chunk coords after a water splash re-scanned 64×64 of
+/// hillside for every wet chunk and then unioned those seeds back to
+/// chunk-sized apply rects. The floating wake already owns air-below
+/// rock outside the halo.
+pub fn wake_competent_bodies_regions(world: &mut World, regions: &[ActiveChunk]) {
   let cw = CHUNK_CELLS_W as i32;
   let ch = CHUNK_CELLS_H as i32;
+  let any_competent = world.chunks.values().any(|c| c.has_competent);
   let mut touches: Vec<(i32, i32)> = Vec::new();
-  for &coord in coords {
-    let Some(chunk) = world.chunks.get(&coord) else {
+  for ac in regions {
+    let Some(chunk) = world.chunks.get(&ac.coord) else {
       continue;
     };
-    let base_gx = coord.cx * cw;
-    let base_gy = coord.cy * ch;
-    for ly in 0..CHUNK_CELLS_H {
-      for lx in 0..CHUNK_CELLS_W {
-        let cell = chunk.get(lx, ly);
+    if any_competent && !chunk.has_competent {
+      continue;
+    }
+    let base_gx = ac.coord.cx * cw;
+    let base_gy = ac.coord.cy * ch;
+    for y in ac.rect.y0..=ac.rect.y1 {
+      for x in ac.rect.x0..=ac.rect.x1 {
+        let cell = chunk.get(x as usize, y as usize);
         if !is_competent_rock(cell.material) {
           continue;
         }
-        let gx = world.wrap_x(base_gx + lx as i32);
-        let gy = base_gy + ly as i32;
+        let gx = world.wrap_x(base_gx + x as i32);
+        let gy = base_gy + y as i32;
         // Same gate `build_components` seeds with — waking cells the body pass
         // will immediately reject just re-dirties the whole ridge every cadence
         // (that alone cost ~40 ms/tick on a settled demo world). Also avoids
@@ -2496,6 +2526,72 @@ pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
   }
 }
 
+/// Flood a settled air-below seed. If the connected mass never sits on
+/// foreign solid, it is a sky island that was slept by a bad peel — wake it.
+/// A real overhang floods into seated hill rock and returns `None`.
+fn unsupported_settled_floater_cluster(
+  world: &World,
+  gx: i32,
+  gy: i32,
+  scanned: &mut HashSet<(i32, i32)>,
+) -> Option<Vec<(i32, i32)>> {
+  if scanned.contains(&(gx, gy)) {
+    return None;
+  }
+  let Some(seed) = world.get_cell(gx, gy) else {
+    return None;
+  };
+  if !is_competent_rock(seed.material) {
+    return None;
+  }
+  let material = seed.material;
+  let seed_tag = seed.rock_body_tag();
+  let mut cluster = Vec::new();
+  let mut q = VecDeque::new();
+  q.push_back((gx, gy));
+  scanned.insert((gx, gy));
+  let mut seated = false;
+  while let Some((cx, cy)) = q.pop_front() {
+    cluster.push((cx, cy));
+    if !seated {
+      match world.get_cell(cx, cy - 1) {
+        Some(b) if !body_passable_at(world, cx, cy - 1, &b) => {
+          if !(is_competent_rock(b.material) && flood_compatible(seed_tag, &b, material)) {
+            seated = true;
+          }
+        }
+        _ => {}
+      }
+    }
+    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+      let nx = world.wrap_x(cx + dx);
+      let ny = cy + dy;
+      if !scanned.insert((nx, ny)) {
+        continue;
+      }
+      match world.get_cell(nx, ny) {
+        Some(n) if flood_compatible(seed_tag, &n, material) => q.push_back((nx, ny)),
+        _ => {
+          scanned.remove(&(nx, ny));
+        }
+      }
+    }
+    if cluster.len() >= FLOOD_GATHER_CAP {
+      break;
+    }
+  }
+  while let Some((cx, cy)) = q.pop_front() {
+    cluster.push((cx, cy));
+    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+      scanned.insert((world.wrap_x(cx + dx), cy + dy));
+    }
+  }
+  if seated {
+    return None;
+  }
+  Some(cluster)
+}
+
 /// Cheap floating-only wake across loaded chunks. Air-below competent rock is
 /// always dynamic — without this, F1 defers to competent fall and quiet chunks
 /// never dirty, so sky-painted boulders hang forever.
@@ -2504,38 +2600,76 @@ pub fn wake_floating_competent(world: &mut World) {
   let ch = CHUNK_CELLS_H as i32;
   let coords: Vec<_> = world.chunks.keys().copied().collect();
   let mut touches: Vec<(i32, i32)> = Vec::new();
+  let mut settled_scanned = HashSet::default();
+  let mut clear_competent: Vec<ChunkCoord> = Vec::new();
+  let mut stamp_competent: Vec<ChunkCoord> = Vec::new();
+  // Bootstrap (no flags set yet) walks every loaded chunk so a legacy
+  // save still finds sky-painted boulders. After the first scan, empty
+  // sky / bedrock drop out — that was the leftover bodies cost on a
+  // 1000-cell troposphere (most chunks have never held rock).
+  let any_competent = world.chunks.values().any(|c| c.has_competent);
   for coord in coords {
     let Some(chunk) = world.chunks.get(&coord) else {
       continue;
     };
+    if any_competent && !chunk.has_competent {
+      continue;
+    }
     let base_gx = coord.cx * cw;
     let base_gy = coord.cy * ch;
+    let mut saw_competent = false;
     for ly in 0..CHUNK_CELLS_H {
       for lx in 0..CHUNK_CELLS_W {
         let cell = chunk.get(lx, ly);
         if !is_competent_rock(cell.material) {
           continue;
         }
+        saw_competent = true;
         let gx = world.wrap_x(base_gx + lx as i32);
         let gy = base_gy + ly as i32;
-        // Sleeping rock has already been evaluated as immobile and nothing near
-        // it has changed; re-dirtying it here would cancel its sleep flag and
-        // make the whole overhang set churn every cadence.
-        if world.competent_is_settled(gx, gy) {
+        let air_below = match world.get_cell(gx, gy - 1) {
+          None => true,
+          Some(b) => body_passable_at(world, gx, gy - 1, &b),
+        };
+        if !air_below {
           continue;
         }
-        match world.get_cell(gx, gy - 1) {
-          None => touches.push((gx, gy)),
-          Some(b) if body_passable_at(world, gx, gy - 1, &b) => touches.push((gx, gy)),
-          _ => {}
+        // Sleeping *overhangs* stay asleep — they are welded to seated hill
+        // rock, and re-dirtying them every cadence was the quiet-world churn.
+        // A slept *sky island* has no seat anywhere; those must wake or they
+        // hang forever after a peel leftover was stamped settled.
+        if world.competent_is_settled(gx, gy) {
+          if let Some(cluster) =
+            unsupported_settled_floater_cluster(world, gx, gy, &mut settled_scanned)
+          {
+            touches.extend(cluster);
+          }
+          continue;
         }
+        touches.push((gx, gy));
       }
+    }
+    if saw_competent {
+      stamp_competent.push(coord);
+    } else {
+      clear_competent.push(coord);
     }
   }
   probe::add(&probe::wake_from_cadence_float, touches.len() as u64);
   for (gx, gy) in touches {
+    world.competent_wake_rect(gx, gy, gx, gy);
     world.touch_dirty(gx, gy);
     world.competent_wake_push(gx, gy);
+  }
+  for coord in stamp_competent {
+    if let Some(chunk) = world.chunks.get_mut(&coord) {
+      chunk.has_competent = true;
+    }
+  }
+  for coord in clear_competent {
+    if let Some(chunk) = world.chunks.get_mut(&coord) {
+      chunk.has_competent = false;
+    }
   }
 }
 
@@ -2622,7 +2756,7 @@ fn expand_competent_regions_ex(
       y1: ry1,
     };
     if !union_per_chunk {
-      loose.push(ActiveChunk { coord, rect });
+      loose.push(ActiveChunk::new(coord, rect));
       return;
     }
     map.entry(coord)
@@ -2693,7 +2827,7 @@ fn expand_competent_regions_ex(
   }
   let mut out: Vec<ActiveChunk> = map
     .into_iter()
-    .map(|(coord, rect)| ActiveChunk { coord, rect })
+    .map(|(coord, rect)| ActiveChunk::new(coord, rect))
     .collect();
   out.extend(loose);
   out.sort_by(|a, b| {
@@ -2770,12 +2904,12 @@ fn expand_regions_to_cells(
         .or_insert(rect);
       continue;
     }
-    seeds.push(ActiveChunk { coord, rect });
+    seeds.push(ActiveChunk::new(coord, rect));
   }
   seeds.extend(
     unioned
       .into_iter()
-      .map(|(coord, rect)| ActiveChunk { coord, rect }),
+      .map(|(coord, rect)| ActiveChunk::new(coord, rect)),
   );
   seeds.sort_by(|a, b| {
     a.coord
@@ -2833,10 +2967,7 @@ fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: 
       .chunks
       .keys()
       .copied()
-      .map(|coord| ActiveChunk {
-        coord,
-        rect: Rect::full(),
-      })
+      .map(|coord| ActiveChunk::new(coord, Rect::full()))
       .collect()
   } else {
     active
@@ -3108,6 +3239,31 @@ pub fn apply_competent_fall_regions(
   cfg: &CompetentFallConfig,
   fps_path: bool,
 ) -> CompetentFallStats {
+  apply_competent_fall_inner(world, active, cfg, fps_path, false)
+}
+
+/// Like [`apply_competent_fall_regions`] when `active` is already the
+/// padded wake-tile scan from [`competent_wake_regions`].
+///
+/// Re-running [`competent_active_regions`] unions those tiles per chunk
+/// and pads them again — the leftover that turned ~180 wake cells into
+/// thousands of seed candidates on a quiet demo.
+pub fn apply_competent_fall_wake(
+  world: &mut World,
+  active: &[ActiveChunk],
+  cfg: &CompetentFallConfig,
+  fps_path: bool,
+) -> CompetentFallStats {
+  apply_competent_fall_inner(world, active, cfg, fps_path, true)
+}
+
+fn apply_competent_fall_inner(
+  world: &mut World,
+  active: &[ActiveChunk],
+  cfg: &CompetentFallConfig,
+  fps_path: bool,
+  wake_ready: bool,
+) -> CompetentFallStats {
   #[cfg(test)]
   crate::parallel::set_parallel_enabled(false);
   if !cfg.enable {
@@ -3118,7 +3274,15 @@ pub fn apply_competent_fall_regions(
   } else {
     cfg.max_passes.max(COMPETENT_FALL_PASSES_FPS)
   } as i32;
-  let mut regions = competent_active_regions(world, active, max_drop);
+  let mut regions = if wake_ready {
+    active
+      .iter()
+      .copied()
+      .filter(|ac| world.chunks.contains_key(&ac.coord))
+      .collect()
+  } else {
+    competent_active_regions(world, active, max_drop)
+  };
   if regions.is_empty() {
     return CompetentFallStats::default();
   }
@@ -4357,6 +4521,274 @@ mod tests {
       "peeled island must fall and seat on sand (min_y={min_y}, max_y={max_y}, n={})",
       stone_ys.len()
     );
+  }
+
+  #[test]
+  fn wide_sky_slab_peel_covers_every_cell() {
+    // 50×20 = 1000 cells. The old tile-growth search landed on a 36-cell
+    // tile (1296 > 384) and discarded the whole slab — the playtest sky
+    // island that never fell.
+    let mut w = World::new(64);
+    for cx in 0..4 {
+      w.ensure_chunk(ChunkCoord::new(cx, 0));
+      w.ensure_chunk(ChunkCoord::new(cx, 1));
+    }
+    for x in 0..64 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 4..54 {
+      for y in 40..60 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cells: Vec<_> = (4..54)
+      .flat_map(|x| (40..60).map(move |y| (x, y)))
+      .filter_map(|(x, y)| w.get_cell(x, y).map(|c| (x, y, c)))
+      .collect();
+    assert_eq!(cells.len(), 1000, "precondition");
+    let hang = extract_hanging_pieces(&w, &cells);
+    let hang_cells: usize = hang.iter().map(|p| p.len()).sum();
+    assert_eq!(
+      hang_cells, 1000,
+      "peel must keep every hanging cell (got {hang_cells} in {} pieces)",
+      hang.len()
+    );
+    assert!(
+      hang.iter().all(|p| p.len() <= MAX_DYNAMIC_BODY_CELLS),
+      "every peel piece must be a dynamic body"
+    );
+  }
+
+  #[test]
+  fn wide_sky_slab_falls_instead_of_hanging() {
+    let mut w = World::new(64);
+    for cx in 0..4 {
+      w.ensure_chunk(ChunkCoord::new(cx, 0));
+      w.ensure_chunk(ChunkCoord::new(cx, 1));
+    }
+    for x in 0..64 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=3 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    for x in 4..54 {
+      for y in 40..60 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    // Thin limestone shard beside the slab — the small leftover in the shot.
+    for y in 48..56 {
+      w.set_cell(58, y, Cell::solid(MaterialId::Limestone));
+    }
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..48 {
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let high_stone = (0..64)
+      .flat_map(|x| (30..70).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .count();
+    let high_lime = (0..64)
+      .flat_map(|x| (30..70).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Limestone))
+      .count();
+    assert_eq!(
+      high_stone, 0,
+      "wide sky slab must fall (remaining={high_stone})"
+    );
+    assert_eq!(
+      high_lime, 0,
+      "thin limestone shard must fall (remaining={high_lime})"
+    );
+  }
+
+  #[test]
+  fn cliff_overhang_is_not_judged_a_floating_island() {
+    // HashSet-order `cell_set_floating` used to return true as soon as it
+    // saw the overhang's air, then hang-peel diced the seated cliff and
+    // left a rectangular chunk floating beside it.
+    let mut w = World::new(40);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 20..40 {
+      for y in 1..=30 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    for x in 8..20 {
+      for y in 22..=30 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cells: Vec<_> = (8..40)
+      .flat_map(|x| (1..=30).map(move |y| (x, y)))
+      .filter_map(|(x, y)| {
+        w.get_cell(x, y)
+          .filter(|c| c.material == MaterialId::Stone)
+          .map(|c| (x, y, c))
+      })
+      .collect();
+    let hang = extract_hanging_pieces(&w, &cells);
+    let hang_set: HashSet<(i32, i32)> = hang
+      .iter()
+      .flat_map(|p| p.iter().map(|(x, y, _)| (*x, *y)))
+      .collect();
+    assert!(
+      !hang_set.contains(&(30, 8)),
+      "seated cliff core must not be hang-peeled as a sky island"
+    );
+    assert!(
+      hang_set.iter().any(|(x, _)| *x < 20),
+      "the actual overhang must still peel"
+    );
+  }
+
+  #[test]
+  fn slept_sky_island_wakes_and_falls() {
+    let mut w = World::new(24);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..24 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 6..18 {
+      for y in 40..48 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    // Stamp sleep after the writes — each `set_cell` would otherwise wake
+    // its neighbours and clear the flag we just set.
+    for x in 6..18 {
+      for y in 40..48 {
+        w.competent_set_settled(x, y);
+      }
+    }
+    assert!(
+      w.competent_is_settled(10, 44),
+      "precondition: island starts asleep"
+    );
+    wake_floating_competent(&mut w);
+    assert!(
+      !w.competent_is_settled(10, 44),
+      "wake must clear sleep on a seatless sky island"
+    );
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..24 {
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let high = (0..24)
+      .flat_map(|x| (20..60).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .count();
+    assert_eq!(high, 0, "slept sky island must fall after wake (remaining={high})");
+  }
+
+  #[test]
+  fn floating_wake_bootstraps_and_clears_the_competent_flag() {
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(3, CHUNK_CELLS_H as i32 + 4, Cell::solid(MaterialId::Stone));
+    for chunk in w.chunks.values_mut() {
+      chunk.has_competent = false;
+    }
+    wake_floating_competent(&mut w);
+    assert!(
+      w.chunks[&ChunkCoord::new(0, 1)].has_competent,
+      "bootstrap must stamp rock so later ticks skip empty sky"
+    );
+    assert!(
+      !w.chunks[&ChunkCoord::new(0, 0)].has_competent,
+      "bedrock-only chunks are not competent"
+    );
+    w.set_cell(3, CHUNK_CELLS_H as i32 + 4, Cell::air());
+    assert!(
+      w.chunks[&ChunkCoord::new(0, 1)].has_competent,
+      "writes do not clear sticky occupancy"
+    );
+    wake_floating_competent(&mut w);
+    assert!(
+      !w.chunks[&ChunkCoord::new(0, 1)].has_competent,
+      "an empty scan must drop the sky chunk from later floating wakes"
+    );
+  }
+
+  #[test]
+  fn slope_wake_stays_inside_the_dirty_rect() {
+    let mut w = World::new(13);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..CHUNK_CELLS_W as i32 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(4, 8, Cell::solid(MaterialId::Stone));
+    w.set_cell(50, 8, Cell::solid(MaterialId::Stone));
+    w.competent_wake.clear();
+    let ac = ActiveChunk::new(
+      ChunkCoord::new(0, 0),
+      Rect {
+        x0: 2,
+        y0: 6,
+        x1: 6,
+        y1: 10,
+      },
+    );
+    wake_competent_bodies_regions(&mut w, &[ac]);
+    assert!(
+      w.competent_wake.iter().any(|&(x, y)| x == 4 && y == 8),
+      "stone inside the rect must wake"
+    );
+    assert!(
+      !w.competent_wake.iter().any(|&(x, _)| x == 50),
+      "stone outside the rect must stay off the wake"
+    );
+  }
+
+  #[test]
+  fn wake_apply_drops_a_floater_from_a_tight_rect() {
+    let mut w = World::new(15);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    stamp_blob(&mut w, 6, 28, 2, 2);
+    let start = (0..16)
+      .flat_map(|x| (1..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(_, y)| y)
+      .min()
+      .unwrap_or(99);
+    w.competent_wake.clear();
+    w.competent_wake_push(6, 28);
+    let body_active = competent_wake_regions(&mut w, SEED_PAD_Y);
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      ..CompetentFallConfig::default()
+    };
+    apply_competent_fall_wake(&mut w, &body_active, &cfg, true);
+    let end = (0..16)
+      .flat_map(|x| (1..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(_, y)| y)
+      .min()
+      .unwrap_or(99);
+    assert!(end < start, "tight wake rect must still drop the floater ({start} → {end})");
   }
 
   #[test]

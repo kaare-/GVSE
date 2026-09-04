@@ -9,7 +9,6 @@ use wk_material::MaterialId;
 
 use crate::carbon::AMBIENT_ATM_C;
 use crate::climate::sky_rgb_at_height;
-use crate::clouds::CloudStore;
 use crate::grid::World;
 use crate::humidity::Humidity;
 
@@ -25,7 +24,7 @@ pub const SUN_TRANSMIT_FLOOR: f32 = 0.38;
 /// Viewport / global weather knobs for sky colour (render + tests).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SkyWeatherParams {
-    /// 0 = clear, 1 = view fully under raining / thick parcels.
+    /// 0 = clear, 1 = wet humidity columns (vapour cover).
     pub precip_cover: f32,
     /// 0..1 mean humidity mass / tile cap in the sky band.
     pub humidity_mean: f32,
@@ -37,31 +36,9 @@ pub struct SkyWeatherParams {
     pub snow_bias: f32,
 }
 
-/// 1 = clear column, lower under overlapping cloud parcels.
-pub fn cloud_sky_transmit(
-    clouds: &CloudStore,
-    gx: i32,
-    wrap_width: Option<i32>,
-    downpour_mass: f32,
-) -> f32 {
-    let mut cover = 0.0f32;
-    let x = gx as f32;
-    for p in &clouds.parcels {
-        let dx = wrapped_dx(x, p.fx, wrap_width);
-        let r = p.radius().max(1.0);
-        if dx.abs() > r {
-            continue;
-        }
-        let edge = 1.0 - dx.abs() / r;
-        let wet = p.wetness_with(downpour_mass);
-        // Soft bank, not a hard eclipse — humidity/vapour does the heavy mood work.
-        let mut strength = (0.12 + 0.28 * wet) * edge;
-        if p.raining {
-            strength *= 1.15;
-        }
-        cover = cover.max(strength.min(CLOUD_COVER_MAX));
-    }
-    (1.0 - cover).clamp(CLOUD_TRANSMIT_FLOOR, 1.0)
+/// 1 = clear column, lower under wet humidity in this column.
+pub fn cloud_sky_transmit(humidity: &Humidity, gx: i32, gy: i32) -> f32 {
+    cloud_sky_transmit_from_wet(humidity_norm_at(humidity, gx, gy))
 }
 
 /// Cheap sun-angle occlusion: short diagonal probes toward the sun.
@@ -165,17 +142,19 @@ pub fn sky_transmit(day_factor: f32, cloud_transmit: f32, humidity_norm: f32) ->
 }
 
 /// Convenience: transmit at world column `gx` (sample humidity at `gy`).
+///
+/// `clouds` / `downpour_mass` are unused leftovers (N banks are gone).
 pub fn sky_transmit_at(
     day_factor: f32,
-    clouds: Option<&CloudStore>,
+    _clouds: Option<&crate::clouds::CloudStore>,
     humidity: Option<&Humidity>,
     gx: i32,
     gy: i32,
-    wrap_width: Option<i32>,
-    downpour_mass: f32,
+    _wrap_width: Option<i32>,
+    _downpour_mass: f32,
 ) -> f32 {
-    let cloud = match clouds {
-        Some(c) => cloud_sky_transmit(c, gx, wrap_width, downpour_mass),
+    let cloud = match humidity {
+        Some(h) => cloud_sky_transmit(h, gx, gy),
         None => 1.0,
     };
     let hum = match humidity {
@@ -185,21 +164,30 @@ pub fn sky_transmit_at(
     sky_transmit(day_factor, cloud, hum)
 }
 
-/// Fraction of `[x0, x1)` columns under meaningful cloud cover.
-pub fn precip_cover_fraction(
-    clouds: &CloudStore,
-    x0: i32,
-    x1: i32,
-    wrap_width: Option<i32>,
-    downpour_mass: f32,
-) -> f32 {
+/// Fraction of `[x0, x1)` columns under meaningful vapour cover.
+pub fn precip_cover_fraction(humidity: &Humidity, x0: i32, x1: i32) -> f32 {
     let width = (x1 - x0).max(1);
+    let tc = humidity.tile_cols.max(1);
+    let mut peak = vec![0.0f32; width as usize];
+    for (&(hx, _), &mass) in &humidity.cells {
+        let gx = hx * tc + tc / 2;
+        if gx >= x0 && gx < x1 {
+            let i = (gx - x0) as usize;
+            peak[i] = peak[i].max(mass);
+        }
+    }
     let mut sum = 0.0f32;
-    for gx in x0..x1 {
-        let t = cloud_sky_transmit(clouds, gx, wrap_width, downpour_mass);
+    for p in peak {
+        let wet = (p / Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);
+        let t = cloud_sky_transmit_from_wet(wet);
         sum += (1.0 - t) / (1.0 - CLOUD_TRANSMIT_FLOOR).max(1e-3);
     }
     (sum / width as f32).clamp(0.0, 1.0)
+}
+
+fn cloud_sky_transmit_from_wet(wet: f32) -> f32 {
+    let strength = (0.12 + 0.43 * wet.clamp(0.0, 1.0)).min(CLOUD_COVER_MAX);
+    (1.0 - strength).clamp(CLOUD_TRANSMIT_FLOOR, 1.0)
 }
 
 /// Mean humidity norm in tiles with `hy >= sky_hy_min`.
@@ -338,7 +326,7 @@ pub fn lit_sky_at(
     gx: i32,
     gy: i32,
     day_factor: f32,
-    clouds: Option<&CloudStore>,
+    clouds: Option<&crate::clouds::CloudStore>,
     humidity: Option<&Humidity>,
     wrap_width: Option<i32>,
     downpour_mass: f32,
@@ -359,35 +347,10 @@ pub fn lit_sky_at(
     (column_sky * weather * sun).clamp(0.0, 1.0)
 }
 
-fn wrapped_dx(a: f32, b: f32, wrap_width: Option<i32>) -> f32 {
-    let mut d = a - b;
-    if let Some(w) = wrap_width {
-        let w = w as f32;
-        if w > 0.0 {
-            d = (d + w * 0.5).rem_euclid(w) - w * 0.5;
-        }
-    }
-    d
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clouds::{CloudParcel, CloudStore, DOWNPOUR_MASS};
-
-    fn raining_parcel(fx: f32, mass: f32) -> CloudParcel {
-        CloudParcel {
-            fx,
-            fy: 100.0,
-            mass,
-            raining: true,
-            on_ridge: false,
-            shape_seed: 1,
-            cruise_fy: 100.0,
-            vis_mass: mass,
-            deform: 0.0,
-        }
-    }
+    use crate::clouds::DOWNPOUR_MASS;
 
     #[test]
     fn sky_transmit_clear_noon_is_near_one() {
@@ -396,10 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn sky_transmit_drops_under_wet_parcel_and_humidity() {
-        let mut clouds = CloudStore::new();
-        clouds.parcels.push(raining_parcel(10.0, DOWNPOUR_MASS * 1.4));
-        let cloud_t = cloud_sky_transmit(&clouds, 10, None, DOWNPOUR_MASS);
+    fn sky_transmit_drops_under_wet_humidity() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 256);
+        h.add(10, 80, Humidity::MAX_MASS_PER_TILE);
+        let cloud_t = cloud_sky_transmit(&h, 10, 80);
         assert!(cloud_t < 0.95, "cloud transmit should drop, got {cloud_t}");
         assert!(cloud_t > CLOUD_TRANSMIT_FLOOR - 0.01);
         let t = sky_transmit(1.0, cloud_t, 0.8);
@@ -407,19 +370,21 @@ mod tests {
     }
 
     #[test]
-    fn precip_cover_high_when_parcel_spans_view() {
-        let mut clouds = CloudStore::new();
-        clouds.parcels.push(raining_parcel(16.0, DOWNPOUR_MASS * 1.5));
-        let cover = precip_cover_fraction(&clouds, 0, 32, None, DOWNPOUR_MASS);
+    fn precip_cover_high_when_vapour_spans_view() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 256);
+        for x in 0..32 {
+            h.add(x, 80, Humidity::MAX_MASS_PER_TILE);
+        }
+        let cover = precip_cover_fraction(&h, 0, 32);
         assert!(cover > 0.15, "cover={cover}");
     }
 
     #[test]
-    fn sky_transmit_at_clear_vs_storm_column() {
-        let mut clouds = CloudStore::new();
-        let clear = sky_transmit_at(1.0, Some(&clouds), None, 10, 80, None, DOWNPOUR_MASS);
-        clouds.parcels.push(raining_parcel(10.0, DOWNPOUR_MASS * 1.5));
-        let storm = sky_transmit_at(1.0, Some(&clouds), None, 10, 80, None, DOWNPOUR_MASS);
+    fn sky_transmit_at_clear_vs_wet_column() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 256);
+        let clear = sky_transmit_at(1.0, None, None, 10, 80, None, DOWNPOUR_MASS);
+        h.add(10, 80, Humidity::MAX_MASS_PER_TILE);
+        let storm = sky_transmit_at(1.0, None, Some(&h), 10, 80, None, DOWNPOUR_MASS);
         assert!(clear > 0.98);
         assert!(storm < clear, "clear={clear} storm={storm}");
     }

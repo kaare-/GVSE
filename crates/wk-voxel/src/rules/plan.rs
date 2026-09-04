@@ -29,10 +29,7 @@ pub(crate) fn regions_all_loaded(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 
@@ -54,20 +51,66 @@ pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 
-/// Loaded chunks that currently hold wet Air.
+/// Loaded chunks that can host a confined rise.
 ///
-/// Confined-head insurance only needs standing water / pipe films.
-/// Groundwater-only chunks (`has_wet_pores` without wet Air) cannot
-/// host a rising column, and after a drizzle soak they are most of
-/// the map. Bootstrap (no flag ever set) falls back to
-/// [`regions_wet_loaded`].
+/// Needs standing water next to rock. Rain-film sky, mid-ocean water with
+/// no solid, and groundwater-only crust (wet pores, no free surface) are
+/// skipped — those cells already reject per-cell, and walking them was
+/// the leftover period-16 cost. Bootstrap (no flags set yet) falls back
+/// to [`regions_wet_air_loaded`]. Once any flag is live, an empty match
+/// means "no shaft this tick", not "scan every wet-air chunk".
+pub(crate) fn regions_confined_loaded(world: &World) -> Vec<ActiveChunk> {
+    let ready = world
+        .chunks
+        .values()
+        .any(|c| c.has_solid || c.has_standing_air);
+    if !ready {
+        return regions_wet_air_loaded(world);
+    }
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_solid && c.has_standing_air)
+        .map(|(&coord, _)| coord)
+        .collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+        .into_iter()
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
+        .collect()
+}
+
+/// Loaded chunks that may have a standing-water bed or a wetting front.
+///
+/// A quiet saturated water table (`has_wet_pores` only) is skipped —
+/// standing water still walks down into the bed below, and an
+/// unsaturated front keeps its own chunk. Rain-film sky is skipped.
+/// Bootstrap (no flags set yet) falls back to [`regions_wet_loaded`].
+pub(crate) fn regions_lake_bed_loaded(world: &World) -> Vec<ActiveChunk> {
+    let ready = world
+        .chunks
+        .values()
+        .any(|c| c.has_standing_air || c.has_unsaturated_pores);
+    if !ready {
+        return regions_wet_loaded(world);
+    }
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_standing_air || c.has_unsaturated_pores)
+        .map(|(&coord, _)| coord)
+        .collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+        .into_iter()
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
+        .collect()
+}
+
 pub(crate) fn regions_wet_air_loaded(world: &World) -> Vec<ActiveChunk> {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
@@ -81,10 +124,7 @@ pub(crate) fn regions_wet_air_loaded(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 
@@ -117,9 +157,84 @@ pub(crate) fn regions_loose_moore(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cell::{Cell, Sat};
+    use crate::grid::World;
+    use wk_material::MaterialId;
+
+    fn rain_film() -> Cell {
+        let mut c = Cell::air();
+        c.sat = Sat(33);
+        c
+    }
+
+    #[test]
+    fn confined_and_lake_bed_skip_rain_film_sky() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        w.ensure_chunk(ChunkCoord::new(2, 0));
+        // cx=0: drizzle only — must not enter either insurance walk.
+        w.set_cell(2, 2, rain_film());
+        // cx=1: standing water next to rock — confined + lake-bed.
+        w.set_cell(65, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(66, 2, Cell::water());
+        // cx=2: mid-ocean water, no solid — lake-bed only.
+        w.set_cell(130, 2, Cell::water());
+        // cx=3: groundwater-only crust — lake-bed soak, not a confined shaft.
+        w.ensure_chunk(ChunkCoord::new(3, 0));
+        let mut pore = Cell::solid(MaterialId::Sand);
+        pore.sat = Sat(20);
+        w.set_cell(194, 1, pore);
+
+        let confined: Vec<_> = regions_confined_loaded(&w)
+            .into_iter()
+            .map(|ac| ac.coord)
+            .collect();
+        assert_eq!(confined, vec![ChunkCoord::new(1, 0)]);
+
+        let lake: Vec<_> = regions_lake_bed_loaded(&w)
+            .into_iter()
+            .map(|ac| ac.coord)
+            .collect();
+        assert_eq!(
+            lake,
+            vec![
+                ChunkCoord::new(1, 0),
+                ChunkCoord::new(2, 0),
+                ChunkCoord::new(3, 0)
+            ]
+        );
+
+        // Quiet saturated table: after a lake-bed scan clears the unsat
+        // flag, the chunk must drop out. Standing water still walks down
+        // into a bed from the chunk above.
+        w.ensure_chunk(ChunkCoord::new(4, 0));
+        let cap = crate::cell::water_capacity(MaterialId::Stone);
+        w.set_cell(
+            258,
+            1,
+            Cell {
+                material: MaterialId::Stone,
+                sat: Sat(cap),
+                ..Cell::default()
+            },
+        );
+        crate::rules::wake_lake_bed_pores(&mut w);
+        let lake: Vec<_> = regions_lake_bed_loaded(&w)
+            .into_iter()
+            .map(|ac| ac.coord)
+            .collect();
+        assert!(
+            !lake.contains(&ChunkCoord::new(4, 0)),
+            "full water-table chunk must leave the lake-bed walk"
+        );
+        assert!(lake.contains(&ChunkCoord::new(1, 0)));
+    }
 }

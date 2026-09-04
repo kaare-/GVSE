@@ -15,7 +15,7 @@ use crate::cell::{
     falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity_cell, Cell, CellFlags, Sat,
 };
-use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, STANDING_AIR_SAT, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
 use crate::grid::World;
 use crate::parallel::{
@@ -93,6 +93,12 @@ pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bo
         for y in ac.rect.y0..=ac.rect.y1 {
             for x in ac.rect.x0..=ac.rect.x1 {
                 let cell = chunk.get(x as usize, y as usize);
+                // Airborne snow has its own once-per-tick step. Counting
+                // it here forced the ×64 deep settle every flake and
+                // pinned FPS to single digits.
+                if cell.material == MaterialId::Snow {
+                    continue;
+                }
                 let loose = is_grain(cell.material) || falls_through_empty_air(cell.material);
                 if !loose {
                     continue;
@@ -195,9 +201,9 @@ pub fn apply_grain_fall(world: &mut World) {
 /// one cell downwind.
 ///
 /// `wind_vx` is tiles/tick (same units as [`crate::wind::Wind::climate_vx`]).
-/// `tile_cols` converts that to cells. Fall fires on about 15% of ticks
-/// (`SNOWFALL_STEP_ODDS`); default climate drift is 0.05, so the path is
-/// about **three down for each sideways**. The tile-scaled wind is
+/// `tile_cols` converts that to cells. Fall fires on about 38% of
+/// settle / tick rolls (`SNOWFALL_STEP_ODDS`); default climate drift is
+/// 0.05, so the path is still several down for each sideways. The tile-scaled wind is
 /// multiplied by [`SNOWDRIFT_WIND_SCALE`] (0.05 × 4 × 0.25 = 0.05).
 ///
 /// Ice is the control: it falls, it does not drift. Landed snowpack is
@@ -338,6 +344,83 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
     moved
 }
 
+/// Once-per-tick downward step for airborne snow.
+///
+/// Grain settle no longer treats a flake as "unsupported freefall"
+/// (that forced the ×64 deep path and killed FPS). This walk is the
+/// same `has_snow` scan as drift: one roll, one cell, no repose.
+pub fn apply_airborne_snow_fall(world: &mut World) -> u32 {
+    let any_snow = world.chunks.values().any(|c| c.has_snow);
+    if !any_snow {
+        return 0;
+    }
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_snow)
+        .map(|(&coord, _)| coord)
+        .collect();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if cell.material != MaterialId::Snow {
+                    continue;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                if snowflake_is_airborne(world, gx, gy) {
+                    candidates.push((gx, gy));
+                }
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return 0;
+    }
+    // Bottom-first so a stack can step without two flakes claiming
+    // the same air cell.
+    candidates.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    let mut claimed: std::collections::HashSet<(i32, i32)> =
+        std::collections::HashSet::new();
+    let mut moved = 0u32;
+    for (gx, gy) in candidates {
+        if snowflake_holds_position(seed, tick_no, 0, gx, gy) {
+            continue;
+        }
+        let dest_y = gy - 1;
+        if claimed.contains(&(gx, dest_y)) {
+            continue;
+        }
+        let Some(flake) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        let Some(dest) = world.get_cell(gx, dest_y) else {
+            continue;
+        };
+        if flake.material != MaterialId::Snow || dest.material != MaterialId::Air {
+            continue;
+        }
+        // Float on a grounded lake; drop through empty / haze air.
+        if dest.sat.is_full() {
+            continue;
+        }
+        claimed.insert((gx, dest_y));
+        world.set_cell(gx, dest_y, flake);
+        world.set_cell(gx, gy, dest);
+        moved += 1;
+    }
+    moved
+}
+
 fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
     let Some(below) = world.get_cell(gx, gy - 1) else {
         return false;
@@ -355,9 +438,10 @@ fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
 const SNOWDRIFT_SALT: u64 = 0x51DE_5417;
 /// How hard climate wind translates into a sideways step.
 ///
-/// Fall is gated at [`SNOWFALL_STEP_ODDS`] (0.15 per tick). Playtest at
-/// the old `1.0` scale read as "blowing too well"; `0.25` on 4-cell tiles
-/// plus this fall rate makes default wind (~0.05) a 3:1 down:across stair.
+/// Fall is gated at [`SNOWFALL_STEP_ODDS`] (0.38 per settle / tick pass).
+/// Playtest at the old `1.0` scale read as "blowing too well"; `0.25` on
+/// 4-cell tiles plus this fall rate makes default wind (~0.05) several
+/// down for each sideways.
 const SNOWDRIFT_WIND_SCALE: f32 = 0.25;
 
 /// Drop unsupported grains / litter through Air until seated or the
@@ -922,7 +1006,7 @@ pub fn settle_loose_grains_regions_ex(
     allow_buoyancy: bool,
 ) {
     let mut cur: Vec<ActiveChunk> = initial.to_vec();
-    for _ in 0..max_passes {
+    for settle_i in 0..max_passes {
         if cur.is_empty() {
             break;
         }
@@ -933,7 +1017,7 @@ pub fn settle_loose_grains_regions_ex(
         // is outside this colour's ptr map.
         for pass in &partition_checkerboard(&cur) {
             if !pass.is_empty() {
-                moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy);
+                moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy, settle_i);
             }
         }
         // Re-plan is global dirty, which on a wet world is dominated by pore
@@ -972,31 +1056,41 @@ pub fn settle_loose_grains_regions_ex(
 /// enough to read as snow rather than as a falling block.
 ///
 /// Deterministic per cell and pass, so replays match.
-fn snowflake_holds_position(seed: u64, tick: u64, gx: i32, gy: i32) -> bool {
+fn snowflake_holds_position(seed: u64, tick: u64, pass: u32, gx: i32, gy: i32) -> bool {
     let roll = super::hash_prob(
         seed,
-        gx.wrapping_mul(73_856_093).wrapping_add(gy),
+        gx.wrapping_mul(73_856_093)
+            .wrapping_add(gy)
+            .wrapping_add(pass as i32 * 1_039_541),
         tick,
         SNOWFALL_SALT,
     );
     roll >= SNOWFALL_STEP_ODDS
 }
 
-/// Chance a flake takes its step on any one pass. Low, because "gentle" is the
-/// whole point — a flake should be visible falling, not glimpsed. 0.15 with
-/// default climate drift (0.05) is three down for each sideways.
-const SNOWFALL_STEP_ODDS: f32 = 0.15;
+/// Chance a flake takes its step on any one pass. Low enough to read as
+/// snow, high enough that a shower leaves the sky. 0.38 with the
+/// once-per-tick [`apply_airborne_snow_fall`] is a bit under one cell
+/// every other tick; default climate drift (0.05) is still several down
+/// per sideways.
+const SNOWFALL_STEP_ODDS: f32 = 0.38;
 const SNOWFALL_SALT: u64 = 0x5F04_FA11;
 
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
-    apply_grain_fall_regions_ex(world, active, true)
+    apply_grain_fall_regions_ex(world, active, true, 0)
 }
 
 /// [`apply_grain_fall_regions`] with optional buoyancy pull.
+///
+/// `fall_pass` is mixed into the snow hold roll so a deep settle
+/// (dozens of passes, same tick) can actually descend flakes. Hashing
+/// only on tick left a flake that held sitting through all 64 FPS
+/// passes — the sky filled and grain settle never went quiet.
 pub fn apply_grain_fall_regions_ex(
     world: &mut World,
     active: &[ActiveChunk],
     allow_buoyancy: bool,
+    fall_pass: u32,
 ) -> u32 {
     let moves = std::sync::atomic::AtomicU32::new(0);
     // Parallel cell writes can't touch `World::mycelium_strains`; replay
@@ -1036,7 +1130,7 @@ pub fn apply_grain_fall_regions_ex(
                     // Only while airborne: once it lands it is snowpack and behaves
                     // as any other loose material, which is what lets drifts build.
                     if above.material == MaterialId::Snow
-                        && snowflake_holds_position(seed, tick_no, gx, gy)
+                        && snowflake_holds_position(seed, tick_no, fall_pass, gx, gy)
                     {
                         continue;
                     }
@@ -2988,12 +3082,21 @@ pub fn apply_flow_erosion_bound(
 
     let seed = world.seed.0;
     let tick_no = world.tick;
-    // Skip dry chunks — same sticky flag evaporation uses. Still pools
-    // without flow bias remain no-ops inside the scan.
+    // Default `min_flow_sat` is 180 — rain film (sat ~33) cannot scour.
+    // `has_wet_air` spreads with drizzle and is the soak-age leftover:
+    // every rain-wet sand/soil chunk paid a full 64×64 walk looking for
+    // standing water that was never there. Standing occupancy matches
+    // the sat gate; a lower custom `min_flow_sat` keeps the wet-air net.
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_air)
+        .filter(|(_, c)| {
+            if cfg.min_flow_sat >= STANDING_AIR_SAT {
+                c.has_standing_air
+            } else {
+                c.has_wet_air
+            }
+        })
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));

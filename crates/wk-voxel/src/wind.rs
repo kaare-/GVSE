@@ -2,21 +2,116 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Coarse wind field for cloud / humidity advection and raft drift.
+//! Coarse **horizontal** wind for humidity advection, raft drift, and
+//! convection-driven breezes.
 //!
-//! Climate wind is a horizontal prevailing mean; **natural variance**
-//! modulates instantaneous force and direction over gust / breeze /
-//! weather timescales so the push is not constant. Orographic lift still
-//! adds a small upward component where terrain rises downwind.
+//! Layers:
+//! 1. Climate mean + natural variance → tick force / heading
+//! 2. Optional per-tile `(vx, vy)` heatmap from terrain, thermal ∇T,
+//!    swirl, canopy drag — rebuilt on a cadence, **occupied tiles only**
+//!    (FPS: do not fill the whole sky every frame)
+//! 3. [`Self::vector_at`] reads the heatmap, else climate + surface slip
+//!
+//! Near the live skin, vectors slide along the slope (no component
+//! into rock; a descent hits the ground and turns left/right). Next
+//! to a face, a breeze that would stab into the hill turns up or
+//! down the rock. After the heatmap blend, a coarse Jacobi projection
+//! kills divergence into rock so a valley turns before the next peak.
+//! Slip is last so the solve cannot stab the ground. No cell-scale
+//! gas solver; water-head is not coupled into wind yet.
 
 use serde::{Deserialize, Serialize};
 
+use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::humidity::TileBounds;
+use crate::temperature::Temperature;
 use crate::worldgen::{continental_surface_y, live_surface_y, LIVE_SURFACE_SEARCH};
 
 fn default_variance() -> f32 {
     0.55
+}
+
+fn default_terrain_drive() -> f32 {
+    1.0
+}
+
+fn default_thermal_drive() -> f32 {
+    0.70
+}
+
+fn default_swirl() -> f32 {
+    0.45
+}
+
+fn default_canopy_dampen() -> f32 {
+    0.55
+}
+
+fn default_field_smooth() -> f32 {
+    0.35
+}
+
+/// Rebuild the local wind heatmap this often. Full-sky every frame was
+/// the climate-stack FPS cliff; occupied + halo + a thin surface band
+/// every 4 ticks is enough for humidity flux / evap / thermal mix.
+pub const WIND_FIELD_PERIOD: u64 = 4;
+
+/// Jacobi sweeps on the existing heatmap only. Enough for a 2–3 tile
+/// valley to feel the next wall; not a sky-wide Poisson.
+const AIR_PROJECT_ITERS: u32 = 6;
+
+/// Per-column orographic numbers for one [`Wind::rebuild_field`].
+/// Compose used to recompute these on every tile of a tall sky.
+#[derive(Clone, Copy)]
+struct ColOro {
+    speed: f32,
+    lift: f32,
+    descent: f32,
+    surf_hy: i32,
+}
+
+impl ColOro {
+    fn height_shear(self, hy: i32) -> f32 {
+        let above = (hy - self.surf_hy).max(0) as f32;
+        (0.20 + 0.80 * (above / 5.0).clamp(0.0, 1.0)).clamp(0.15, 1.15)
+    }
+
+    fn lee_sink(self, hy: i32) -> f32 {
+        if self.descent <= 1.0 {
+            return 0.0;
+        }
+        let shear = self.height_shear(hy);
+        let wake = (1.0 - (shear - 0.45).abs() * 1.4).clamp(0.25, 1.0);
+        (self.descent / 55.0).clamp(0.0, 0.14) * wake
+    }
+}
+
+/// Tab → Climate wind drivers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WindConfig {
+    #[serde(default = "default_terrain_drive")]
+    pub terrain_drive: f32,
+    #[serde(default = "default_thermal_drive")]
+    pub thermal_drive: f32,
+    #[serde(default = "default_swirl")]
+    pub swirl: f32,
+    #[serde(default = "default_canopy_dampen")]
+    pub canopy_dampen: f32,
+    #[serde(default = "default_field_smooth")]
+    pub field_smooth: f32,
+}
+
+impl Default for WindConfig {
+    fn default() -> Self {
+        Self {
+            terrain_drive: default_terrain_drive(),
+            thermal_drive: default_thermal_drive(),
+            swirl: default_swirl(),
+            canopy_dampen: default_canopy_dampen(),
+            field_smooth: default_field_smooth(),
+        }
+    }
 }
 
 /// Tile-scale wind used to advect atmospheric water and shove rafts.
@@ -32,9 +127,17 @@ pub struct Wind {
     /// swing heading. Near `1` the wind can lull, gust, and reverse.
     #[serde(default = "default_variance")]
     pub variance: f32,
+    #[serde(default)]
+    pub config: WindConfig,
     /// Fractional advection residual (shared; climate is uniform).
     pub residual_x: f32,
     pub residual_y: f32,
+    /// Rebuilt `(vx, vy)` on occupied / near-surface tiles. Runtime only.
+    #[serde(skip)]
+    pub field: FxHashMap<(i32, i32), (f32, f32)>,
+    /// Column surface y, filled during [`Self::rebuild_field`].
+    #[serde(skip)]
+    surf_cache: FxHashMap<i32, i32>,
     /// Optional tile bounds (same as humidity) for orographic sampling.
     pub tile_cols: i32,
     pub bounds: Option<TileBounds>,
@@ -60,8 +163,11 @@ impl Wind {
             climate_vx,
             climate_vy: 0.0,
             variance: default_variance(),
+            config: WindConfig::default(),
             residual_x: 0.0,
             residual_y: 0.0,
+            field: FxHashMap::default(),
+            surf_cache: FxHashMap::default(),
             tile_cols: tile_cols.max(1),
             bounds: Some(TileBounds::from_world_cells(
                 tile_cols.max(1),
@@ -173,12 +279,1098 @@ impl Wind {
     }
 
     fn surface_at(&self, world: Option<&World>, gx: i32) -> i32 {
+        if let Some(&y) = self.surf_cache.get(&gx) {
+            return y;
+        }
         let hint = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
         match world {
             Some(w) => live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH),
             None => hint,
         }
     }
+
+    fn cache_surface(&mut self, world: Option<&World>, gx: i32) -> i32 {
+        if let Some(&y) = self.surf_cache.get(&gx) {
+            return y;
+        }
+        let y = {
+            let hint = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
+            match world {
+                Some(w) => live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH),
+                None => hint,
+            }
+        };
+        self.surf_cache.insert(gx, y);
+        y
+    }
+
+    /// Rebuild local vectors for `occupied` humidity seats + a 1-tile halo
+    /// and a thin near-surface band. Skips empty sky (the old full-grid
+    /// rebuild was a multi-ms FPS cliff). When the seated set is at
+    /// least half the box, compose / blend / project walk a packed
+    /// slab. Solids are packed for this rebuild only.
+    pub fn rebuild_field(
+        &mut self,
+        world: Option<&World>,
+        temp: Option<&Temperature>,
+        tick: u64,
+        occupied: &[(i32, i32)],
+        drag: Option<&FxHashMap<(i32, i32), f32>>,
+    ) {
+        let Some(bounds) = self.bounds else {
+            self.field.clear();
+            return;
+        };
+        self.surf_cache.clear();
+        let evx = self.effective_vx(tick);
+        let evy = self.effective_vy(tick);
+        let cfg = self.config;
+        let smooth = cfg.field_smooth.clamp(0.0, 0.95);
+        let prev = std::mem::take(&mut self.field);
+
+        let mut keys: FxHashMap<(i32, i32), ()> = FxHashMap::default();
+        let mut unique_hx: FxHashSet<i32> = FxHashSet::default();
+        for &(hx, hy) in occupied {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let nhx = if self.wrap_x {
+                        let w = (bounds.hx_max - bounds.hx_min + 1).max(1);
+                        bounds.hx_min + (hx + dx - bounds.hx_min).rem_euclid(w)
+                    } else {
+                        hx + dx
+                    };
+                    if !bounds.contains(nhx, hy + dy) {
+                        continue;
+                    }
+                    keys.insert((nhx, hy + dy), ());
+                    unique_hx.insert(nhx);
+                }
+            }
+        }
+        // Near-surface band so evap / T coupling have a breeze even
+        // where humidity has not arrived yet. Sample every 2nd column.
+        let tc = self.tile_cols.max(1);
+        let mut hx = bounds.hx_min;
+        while hx <= bounds.hx_max {
+            let gx = hx * tc + tc / 2;
+            let sy = self.cache_surface(world, gx);
+            let shy = sy.div_euclid(tc);
+            for hy in (shy - 1)..=(shy + 2) {
+                if bounds.contains(hx, hy) {
+                    keys.insert((hx, hy), ());
+                    unique_hx.insert(hx);
+                }
+            }
+            hx += 2;
+        }
+
+        // Fill surf_cache for every column the compose pass will touch
+        // (tile centre ± one tile) so later `vector_at` / evap reads
+        // never walk the world. Collected while inserting keys —
+        // sort+dedup of the key list was leftover.
+        for &hx in &unique_hx {
+            let gx = hx * tc + tc / 2;
+            self.cache_surface(world, gx);
+            for step in 1..=3 {
+                self.cache_surface(world, gx + step * tc);
+                self.cache_surface(world, gx - step * tc);
+            }
+        }
+        // Same column math compose used to recompute per tile. hx±1 is
+        // unwrapped so the ring-edge sample matches the old walk.
+        let mut col_oro: FxHashMap<i32, ColOro> = FxHashMap::default();
+        col_oro.reserve(unique_hx.len().saturating_mul(3));
+        for &hx in &unique_hx {
+            for dx in -1..=1 {
+                col_oro
+                    .entry(hx + dx)
+                    .or_insert_with(|| self.pack_col_oro(world, hx + dx));
+            }
+        }
+
+        if bounds.prefer_dense_walk(keys.len()) {
+            self.rebuild_field_slab(
+                world,
+                temp,
+                tick,
+                evx,
+                evy,
+                &cfg,
+                smooth,
+                &prev,
+                bounds,
+                &keys,
+                &col_oro,
+                drag,
+            );
+            return;
+        }
+
+        let mut next = FxHashMap::default();
+        next.reserve(keys.len());
+        for &(hx, hy) in keys.keys() {
+            // Tile-centre in rock is not a breeze. A capped live-surface
+            // climb used to seat the near-surface band inside an F3 tower
+            // (wind tunnel around y=250–260).
+            if tile_center_is_solid(world, tc, hx, hy) {
+                continue;
+            }
+            let (mut vx, mut vy) =
+                self.compose_drivers(world, temp, hx, hy, tick, evx, evy, &cfg, &col_oro);
+            vx = vx.clamp(-1.0, 1.0);
+            vy = vy.clamp(-1.0, 1.0);
+            if smooth > 1e-4 {
+                if let Some(&(px, py)) = prev.get(&(hx, hy)) {
+                    vx = px * smooth + vx * (1.0 - smooth);
+                    vy = py * smooth + vy * (1.0 - smooth);
+                }
+            }
+            next.insert((hx, hy), (vx, vy));
+        }
+        let mut blended = Self::spatial_blend_field(next, bounds, self.wrap_x, 1);
+        if let Some(map) = drag {
+            let damp = cfg.canopy_dampen.clamp(0.0, 1.0);
+            if damp > 1e-4 {
+                for (&(hx, hy), &d) in map.iter() {
+                    if let Some(e) = blended.get_mut(&(hx, hy)) {
+                        let keep = 1.0 - damp * d.clamp(0.0, 1.0);
+                        e.0 *= keep;
+                        e.1 *= keep;
+                    }
+                }
+            }
+        }
+        // Coarse pressure on this key set only: flow into a face piles
+        // up, the lee sucks. Then slip so the solve cannot re-introduce
+        // an into-rock residual. Step 3 (water-head → near-surface wind)
+        // is not wired yet.
+        self.project_incompressible(world, bounds, &mut blended);
+        for (&(hx, hy), v) in blended.iter_mut() {
+            *v = self.deflect_along_surface(world, hx, hy, v.0, v.1);
+        }
+        self.field = blended;
+    }
+
+    fn spatial_blend_field(
+        mut field: FxHashMap<(i32, i32), (f32, f32)>,
+        bounds: TileBounds,
+        wrap_x: bool,
+        passes: u32,
+    ) -> FxHashMap<(i32, i32), (f32, f32)> {
+        if field.is_empty() || passes == 0 {
+            return field;
+        }
+        let hx_span = (bounds.hx_max - bounds.hx_min + 1).max(1);
+        for _ in 0..passes {
+            let snap = field;
+            let mut out = FxHashMap::default();
+            out.reserve(snap.len());
+            for (&(hx, hy), &(vx, vy)) in &snap {
+                let mut sx = vx * 2.0;
+                let mut sy = vy * 2.0;
+                let mut w = 2.0;
+                for dx in [-1, 1] {
+                    let nhx = if wrap_x {
+                        let mut x = hx + dx;
+                        if x < bounds.hx_min {
+                            x += hx_span;
+                        } else if x > bounds.hx_max {
+                            x -= hx_span;
+                        }
+                        x
+                    } else if hx + dx < bounds.hx_min || hx + dx > bounds.hx_max {
+                        continue;
+                    } else {
+                        hx + dx
+                    };
+                    if let Some(&(nvx, nvy)) = snap.get(&(nhx, hy)) {
+                        sx += nvx * 2.0;
+                        sy += nvy * 2.0;
+                        w += 2.0;
+                    }
+                }
+                for dy in [-1, 1] {
+                    let nhy = hy + dy;
+                    if nhy < bounds.hy_min || nhy > bounds.hy_max {
+                        continue;
+                    }
+                    if let Some(&(nvx, nvy)) = snap.get(&(hx, nhy)) {
+                        sx += nvx;
+                        sy += nvy;
+                        w += 1.0;
+                    }
+                }
+                out.insert(
+                    (hx, hy),
+                    ((sx / w).clamp(-1.0, 1.0), (sy / w).clamp(-1.0, 1.0)),
+                );
+            }
+            field = out;
+        }
+        field
+    }
+
+    fn wrap_tile_hx(&self, hx: i32, bounds: TileBounds) -> i32 {
+        if !self.wrap_x {
+            return hx;
+        }
+        let w = (bounds.hx_max - bounds.hx_min + 1).max(1);
+        bounds.hx_min + (hx - bounds.hx_min).rem_euclid(w)
+    }
+
+    /// Compose / blend / project on a packed box. Solids are packed for
+    /// **this rebuild only**. Same seats as the HashMap path — not view LOD.
+    fn rebuild_field_slab(
+        &mut self,
+        world: Option<&World>,
+        temp: Option<&Temperature>,
+        tick: u64,
+        evx: f32,
+        evy: f32,
+        cfg: &WindConfig,
+        smooth: f32,
+        prev: &FxHashMap<(i32, i32), (f32, f32)>,
+        bounds: TileBounds,
+        keys: &FxHashMap<(i32, i32), ()>,
+        col_oro: &FxHashMap<i32, ColOro>,
+        drag: Option<&FxHashMap<(i32, i32), f32>>,
+    ) {
+        let (w, h) = bounds.dims();
+        let n = w.saturating_mul(h);
+        if n == 0 || w == 0 {
+            self.field.clear();
+            return;
+        }
+        let tc = self.tile_cols.max(1);
+        let mut seated = vec![false; n];
+        for &(hx, hy) in keys.keys() {
+            if bounds.contains(hx, hy) {
+                seated[bounds.index(w, hx, hy)] = true;
+            }
+        }
+        // This rebuild only. Do not keep this across rebuilds — a
+        // cave-in must see the new walls on the next compose / Jacobi.
+        let mut solid = vec![false; n];
+        if world.is_some() {
+            for iy in 0..h {
+                for ix in 0..w {
+                    let hx = bounds.hx_min + ix as i32;
+                    let hy = bounds.hy_min + iy as i32;
+                    solid[iy * w + ix] = tile_center_is_solid(world, tc, hx, hy);
+                }
+            }
+        }
+        let mut vel = vec![(0.0f32, 0.0f32); n];
+        let mut live = vec![false; n];
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !seated[i] || solid[i] {
+                    continue;
+                }
+                let hx = bounds.hx_min + ix as i32;
+                let hy = bounds.hy_min + iy as i32;
+                let (mut vx, mut vy) =
+                    self.compose_drivers(world, temp, hx, hy, tick, evx, evy, cfg, col_oro);
+                vx = vx.clamp(-1.0, 1.0);
+                vy = vy.clamp(-1.0, 1.0);
+                if smooth > 1e-4 {
+                    if let Some(&(px, py)) = prev.get(&(hx, hy)) {
+                        vx = px * smooth + vx * (1.0 - smooth);
+                        vy = py * smooth + vy * (1.0 - smooth);
+                    }
+                }
+                vel[i] = (vx, vy);
+                live[i] = true;
+            }
+        }
+        Self::spatial_blend_slab(&mut vel, &live, bounds, w, h, self.wrap_x);
+        if let Some(map) = drag {
+            let damp = cfg.canopy_dampen.clamp(0.0, 1.0);
+            if damp > 1e-4 {
+                for (&(hx, hy), &d) in map.iter() {
+                    if !bounds.contains(hx, hy) {
+                        continue;
+                    }
+                    let i = bounds.index(w, hx, hy);
+                    if !live[i] {
+                        continue;
+                    }
+                    let keep = 1.0 - damp * d.clamp(0.0, 1.0);
+                    vel[i].0 *= keep;
+                    vel[i].1 *= keep;
+                }
+            }
+        }
+        self.project_incompressible_slab(world, bounds, w, &mut vel, &live, &solid);
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !live[i] {
+                    continue;
+                }
+                let hx = bounds.hx_min + ix as i32;
+                let hy = bounds.hy_min + iy as i32;
+                vel[i] = self.deflect_along_surface(world, hx, hy, vel[i].0, vel[i].1);
+            }
+        }
+        let mut next = FxHashMap::default();
+        next.reserve(keys.len());
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !live[i] {
+                    continue;
+                }
+                next.insert(
+                    (bounds.hx_min + ix as i32, bounds.hy_min + iy as i32),
+                    vel[i],
+                );
+            }
+        }
+        self.field = next;
+    }
+
+    fn spatial_blend_slab(
+        vel: &mut [(f32, f32)],
+        live: &[bool],
+        bounds: TileBounds,
+        w: usize,
+        h: usize,
+        wrap_x: bool,
+    ) {
+        let n = vel.len();
+        if n == 0 || w == 0 {
+            return;
+        }
+        let snap = vel.to_vec();
+        let hx_span = (bounds.hx_max - bounds.hx_min + 1).max(1);
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !live[i] {
+                    continue;
+                }
+                let (vx, vy) = snap[i];
+                let mut sx = vx * 2.0;
+                let mut sy = vy * 2.0;
+                let mut wt = 2.0;
+                let hx = bounds.hx_min + ix as i32;
+                let hy = bounds.hy_min + iy as i32;
+                for dx in [-1, 1] {
+                    let nhx = if wrap_x {
+                        let mut x = hx + dx;
+                        if x < bounds.hx_min {
+                            x += hx_span;
+                        } else if x > bounds.hx_max {
+                            x -= hx_span;
+                        }
+                        x
+                    } else if hx + dx < bounds.hx_min || hx + dx > bounds.hx_max {
+                        continue;
+                    } else {
+                        hx + dx
+                    };
+                    if !bounds.contains(nhx, hy) {
+                        continue;
+                    }
+                    let ni = bounds.index(w, nhx, hy);
+                    if live[ni] {
+                        let (nvx, nvy) = snap[ni];
+                        sx += nvx * 2.0;
+                        sy += nvy * 2.0;
+                        wt += 2.0;
+                    }
+                }
+                for dy in [-1, 1] {
+                    let nhy = hy + dy;
+                    if nhy < bounds.hy_min || nhy > bounds.hy_max {
+                        continue;
+                    }
+                    let ni = bounds.index(w, hx, nhy);
+                    if live[ni] {
+                        let (nvx, nvy) = snap[ni];
+                        sx += nvx;
+                        sy += nvy;
+                        wt += 1.0;
+                    }
+                }
+                vel[i] = ((sx / wt).clamp(-1.0, 1.0), (sy / wt).clamp(-1.0, 1.0));
+            }
+        }
+    }
+
+    fn project_incompressible_slab(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        w: usize,
+        vel_slab: &mut [(f32, f32)],
+        live: &[bool],
+        solid: &[bool],
+    ) {
+        let mut keys: Vec<usize> = Vec::new();
+        for (i, &on) in live.iter().enumerate() {
+            if on {
+                keys.push(i);
+            }
+        }
+        let n = keys.len();
+        if n < 4 || w == 0 {
+            return;
+        }
+        let mut inv = vec![usize::MAX; live.len()];
+        for (pi, &i) in keys.iter().enumerate() {
+            inv[i] = pi;
+        }
+        let mut vel = vec![(0.0f32, 0.0f32); n];
+        for (pi, &i) in keys.iter().enumerate() {
+            vel[pi] = vel_slab[i];
+        }
+        const DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+        let mut blocked = vec![0u8; n];
+        let mut neigh = vec![[usize::MAX; 4]; n];
+        for (pi, &i) in keys.iter().enumerate() {
+            let hy = bounds.hy_min + (i / w) as i32;
+            let hx = bounds.hx_min + (i % w) as i32;
+            for (d, &(dx, dy)) in DIRS.iter().enumerate() {
+                if self.face_blocked_slab(world, bounds, hx, hy, dx, dy, w, solid) {
+                    blocked[pi] |= 1 << d;
+                    continue;
+                }
+                let nhx = self.wrap_tile_hx(hx + dx, bounds);
+                let nhy = hy + dy;
+                if !bounds.contains(nhx, nhy) {
+                    continue;
+                }
+                let j = bounds.index(w, nhx, nhy);
+                if j < inv.len() && inv[j] != usize::MAX {
+                    neigh[pi][d] = inv[j];
+                }
+            }
+        }
+        let face = |blocked: u8, neigh: [usize; 4], d: usize, here: f32, horiz: bool| -> f32 {
+            if blocked & (1 << d) != 0 {
+                return 0.0;
+            }
+            let j = neigh[d];
+            if j == usize::MAX {
+                return here;
+            }
+            let nv = if horiz { vel[j].0 } else { vel[j].1 };
+            0.5 * (here + nv)
+        };
+        let mut divs = vec![0.0f32; n];
+        for i in 0..n {
+            let (vx, vy) = vel[i];
+            let ue = face(blocked[i], neigh[i], 0, vx, true);
+            let uw = face(blocked[i], neigh[i], 1, vx, true);
+            let vn = face(blocked[i], neigh[i], 2, vy, false);
+            let vs = face(blocked[i], neigh[i], 3, vy, false);
+            divs[i] = ue - uw + vn - vs;
+        }
+        let mut p = vec![0.0f32; n];
+        let mut next = vec![0.0f32; n];
+        for _ in 0..AIR_PROJECT_ITERS {
+            for i in 0..n {
+                let mut sum = 0.0;
+                let mut count = 0.0;
+                for d in 0..4 {
+                    let j = neigh[i][d];
+                    if j != usize::MAX {
+                        sum += p[j];
+                        count += 1.0;
+                    }
+                }
+                next[i] = if count < 1.0 {
+                    p[i]
+                } else {
+                    (sum - divs[i]) / count
+                };
+            }
+            std::mem::swap(&mut p, &mut next);
+        }
+        for (pi, &i) in keys.iter().enumerate() {
+            let here = p[pi];
+            let at = |d: usize| -> f32 {
+                let j = neigh[pi][d];
+                if j == usize::MAX {
+                    0.0
+                } else {
+                    p[j]
+                }
+            };
+            let pr = if blocked[pi] & 1 != 0 { here } else { at(0) };
+            let pl = if blocked[pi] & 2 != 0 { here } else { at(1) };
+            let pu = if blocked[pi] & 4 != 0 { here } else { at(2) };
+            let pd = if blocked[pi] & 8 != 0 { here } else { at(3) };
+            vel_slab[i].0 = (vel_slab[i].0 - 0.5 * (pr - pl)).clamp(-1.0, 1.0);
+            vel_slab[i].1 = (vel_slab[i].1 - 0.5 * (pu - pd)).clamp(-1.0, 1.0);
+        }
+    }
+
+    fn face_blocked_slab(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        hx: i32,
+        hy: i32,
+        dx: i32,
+        dy: i32,
+        w: usize,
+        solid: &[bool],
+    ) -> bool {
+        if dy != 0 {
+            let nhy = hy + dy;
+            if nhy < bounds.hy_min || nhy > bounds.hy_max {
+                return true;
+            }
+        }
+        if dx != 0 && !self.wrap_x {
+            let nx = hx + dx;
+            if nx < bounds.hx_min || nx > bounds.hx_max {
+                return true;
+            }
+        }
+        let nhx = self.wrap_tile_hx(hx + dx, bounds);
+        let nhy = hy + dy;
+        if bounds.contains(nhx, nhy) {
+            if solid[bounds.index(w, nhx, nhy)] {
+                return true;
+            }
+        } else if tile_center_is_solid(world, self.tile_cols.max(1), nhx, nhy) {
+            return true;
+        }
+        if dx != 0 {
+            let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+            if dx > 0 && wall_r {
+                return true;
+            }
+            if dx < 0 && wall_l {
+                return true;
+            }
+        }
+        if dy < 0 {
+            let surf = self.surface_tile_hy(world, hx);
+            if hy <= surf {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Solid neighbour, world edge, or a live-skin wall on this face.
+    fn face_blocked(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        hx: i32,
+        hy: i32,
+        dx: i32,
+        dy: i32,
+    ) -> bool {
+        if dy != 0 {
+            let nhy = hy + dy;
+            if nhy < bounds.hy_min || nhy > bounds.hy_max {
+                return true;
+            }
+        }
+        if dx != 0 && !self.wrap_x {
+            let nx = hx + dx;
+            if nx < bounds.hx_min || nx > bounds.hx_max {
+                return true;
+            }
+        }
+        let nhx = self.wrap_tile_hx(hx + dx, bounds);
+        let nhy = hy + dy;
+        let tc = self.tile_cols.max(1);
+        if tile_center_is_solid(world, tc, nhx, nhy) {
+            return true;
+        }
+        if dx != 0 {
+            let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+            if dx > 0 && wall_r {
+                return true;
+            }
+            if dx < 0 && wall_l {
+                return true;
+            }
+        }
+        if dy < 0 {
+            let surf = self.surface_tile_hy(world, hx);
+            if hy <= surf {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `∇²p = ∇·v` then `v -= ∇p` on the existing keys only.
+    ///
+    /// Pressure lives in parallel `Vec`s indexed by `keys`. HashMap
+    /// `p.clone()` + per-iter `insert` was leftover hasher on the
+    /// occupied set — same Jacobi, same slip. Face-blocked and
+    /// neighbour indices are packed **for this rebuild only**. Do not
+    /// cache solids across rebuilds (tried; compose + project are the
+    /// real cost; stale walls after a cave-in).
+    fn project_incompressible(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        field: &mut FxHashMap<(i32, i32), (f32, f32)>,
+    ) {
+        if field.len() < 4 {
+            return;
+        }
+        let keys: Vec<(i32, i32)> = field.keys().copied().collect();
+        let n = keys.len();
+        let mut idx: FxHashMap<(i32, i32), usize> = FxHashMap::default();
+        idx.reserve(n);
+        for (i, &k) in keys.iter().enumerate() {
+            idx.insert(k, i);
+        }
+        let mut vel = vec![(0.0f32, 0.0f32); n];
+        for (i, &k) in keys.iter().enumerate() {
+            vel[i] = field[&k];
+        }
+        // bit 0=+x, 1=-x, 2=+y, 3=-y. `neigh` is usize::MAX when the
+        // face is blocked *or* the neighbour is not in this key set.
+        const DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+        let mut blocked = vec![0u8; n];
+        let mut neigh = vec![[usize::MAX; 4]; n];
+        for (i, &(hx, hy)) in keys.iter().enumerate() {
+            for (d, &(dx, dy)) in DIRS.iter().enumerate() {
+                if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+                    blocked[i] |= 1 << d;
+                    continue;
+                }
+                if let Some(&j) = idx.get(&(self.wrap_tile_hx(hx + dx, bounds), hy + dy)) {
+                    neigh[i][d] = j;
+                }
+            }
+        }
+        let face = |blocked: u8, neigh: [usize; 4], d: usize, here: f32, horiz: bool| -> f32 {
+            if blocked & (1 << d) != 0 {
+                return 0.0;
+            }
+            let j = neigh[d];
+            if j == usize::MAX {
+                return here;
+            }
+            let n = if horiz { vel[j].0 } else { vel[j].1 };
+            0.5 * (here + n)
+        };
+        let mut divs = vec![0.0f32; n];
+        for i in 0..n {
+            let (vx, vy) = vel[i];
+            let ue = face(blocked[i], neigh[i], 0, vx, true);
+            let uw = face(blocked[i], neigh[i], 1, vx, true);
+            let vn = face(blocked[i], neigh[i], 2, vy, false);
+            let vs = face(blocked[i], neigh[i], 3, vy, false);
+            divs[i] = ue - uw + vn - vs;
+        }
+        let mut p = vec![0.0f32; n];
+        let mut next = vec![0.0f32; n];
+        for _ in 0..AIR_PROJECT_ITERS {
+            for i in 0..n {
+                let mut sum = 0.0;
+                let mut count = 0.0;
+                for d in 0..4 {
+                    let j = neigh[i][d];
+                    if j != usize::MAX {
+                        sum += p[j];
+                        count += 1.0;
+                    }
+                }
+                next[i] = if count < 1.0 {
+                    p[i]
+                } else {
+                    (sum - divs[i]) / count
+                };
+            }
+            std::mem::swap(&mut p, &mut next);
+        }
+        for (i, &k) in keys.iter().enumerate() {
+            let here = p[i];
+            let at = |d: usize| -> f32 {
+                let j = neigh[i][d];
+                if j == usize::MAX {
+                    0.0
+                } else {
+                    p[j]
+                }
+            };
+            // Blocked face: Neumann (here). Missing neighbour is 0.
+            let pr = if blocked[i] & 1 != 0 { here } else { at(0) };
+            let pl = if blocked[i] & 2 != 0 { here } else { at(1) };
+            let pu = if blocked[i] & 4 != 0 { here } else { at(2) };
+            let pd = if blocked[i] & 8 != 0 { here } else { at(3) };
+            if let Some(v) = field.get_mut(&k) {
+                v.0 = (v.0 - 0.5 * (pr - pl)).clamp(-1.0, 1.0);
+                v.1 = (v.1 - 0.5 * (pu - pd)).clamp(-1.0, 1.0);
+            }
+        }
+    }
+
+    fn pack_col_oro(&self, world: Option<&World>, hx: i32) -> ColOro {
+        ColOro {
+            speed: self.orographic_speed_factor(world, hx),
+            lift: self.orographic_lift(world, hx),
+            descent: self.descent_cells(world, hx),
+            surf_hy: self.surface_tile_hy(world, hx),
+        }
+    }
+
+    fn col_oro_at(
+        &self,
+        world: Option<&World>,
+        cols: &FxHashMap<i32, ColOro>,
+        hx: i32,
+    ) -> ColOro {
+        cols.get(&hx)
+            .copied()
+            .unwrap_or_else(|| self.pack_col_oro(world, hx))
+    }
+
+    fn compose_drivers(
+        &self,
+        world: Option<&World>,
+        temp: Option<&Temperature>,
+        hx: i32,
+        hy: i32,
+        tick: u64,
+        evx: f32,
+        evy: f32,
+        cfg: &WindConfig,
+        cols: &FxHashMap<i32, ColOro>,
+    ) -> (f32, f32) {
+        let here = self.col_oro_at(world, cols, hx);
+        let shear = here.height_shear(hy);
+        let mut vx = evx * shear;
+        let mut vy = evy * 0.35;
+        let td = cfg.terrain_drive.clamp(0.0, 2.0);
+        if td > 1e-4 {
+            let (speed, lift, sink) = self.orographic_soft_cached(world, cols, hx, hy);
+            let sped = 1.0 + (speed - 1.0) * td.min(1.0);
+            vx = (evx * shear * sped).clamp(-1.0, 1.0);
+            let height_fade = (1.0 - (shear - 0.2) * 0.7).clamp(0.2, 1.0);
+            vy += (lift - sink) * td.min(1.0) * height_fade * 0.45;
+            vx *= 1.0 - (lift * td.min(1.0) * height_fade * 0.35).clamp(0.0, 0.25);
+        }
+        let th = cfg.thermal_drive.clamp(0.0, 2.0);
+        if th > 1e-4 {
+            if let Some(t) = temp {
+                let (dvx, dvy) = self.thermal_delta(t, hx, hy);
+                vx += dvx * th;
+                vy += dvy * th * 0.35;
+            }
+        }
+        let sw = cfg.swirl.clamp(0.0, 2.0);
+        if sw > 1e-4 {
+            let (sx, sy) = self.swirl_at(hx, hy, tick);
+            vx += sx * sw;
+            vy += sy * sw * 0.4;
+        }
+        // Aloft only. Near the skin, `deflect_along_surface` needs a
+        // real vy so a face can turn the breeze up or along the ground.
+        let surf_hy = here.surf_hy;
+        let above = (hy - surf_hy).max(0);
+        if above >= 3 {
+            let v_cap = (vx.abs() * 0.45 + 0.04).min(0.35);
+            vy = vy.clamp(-v_cap, v_cap);
+        }
+        // After the aloft cap: a wall 2–3 tiles downwind must still
+        // start a climb (the Jacobi step then spreads that).
+        let block = self.downwind_blockage(world, hx, hy, evx);
+        if block > 1e-4 {
+            vy += block;
+            vx *= 1.0 - (block * 0.4).min(0.35);
+        }
+        (vx.clamp(-1.0, 1.0), vy.clamp(-1.0, 1.0))
+    }
+
+    /// How much of this sample is closed by land 1–3 tiles downwind.
+    /// 0 on open flats; up to ~0.22 against a real face.
+    fn downwind_blockage(&self, world: Option<&World>, hx: i32, hy: i32, evx: f32) -> f32 {
+        if evx.abs() < 1e-4 {
+            return 0.0;
+        }
+        let tc = self.tile_cols.max(1);
+        let y_mid = hy * tc + tc / 2;
+        let gx = hx * tc + tc / 2;
+        let sign = if evx >= 0.0 { 1 } else { -1 };
+        let mut ahead = i32::MIN;
+        for step in 1..=3 {
+            ahead = ahead.max(self.surface_at(world, gx + sign * step * tc));
+        }
+        let rise = (ahead - y_mid) as f32;
+        if rise <= tc as f32 {
+            return 0.0;
+        }
+        (rise / (8.0 * tc as f32)).clamp(0.0, 0.22)
+    }
+
+    /// Rise/run of the live skin across one tile on each side.
+    fn surface_slope(&self, world: Option<&World>, hx: i32) -> f32 {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        let s0 = self.surface_at(world, gx - tc);
+        let s1 = self.surface_at(world, gx + tc);
+        ((s1 - s0) as f32 / (2.0 * tc as f32)).clamp(-8.0, 8.0)
+    }
+
+    /// Neighbour land that sticks up past this sample — a cliff / hill
+    /// face this arrow is about to fly into.
+    fn neighbour_walls(&self, world: Option<&World>, hx: i32, hy: i32) -> (bool, bool) {
+        let tc = self.tile_cols.max(1);
+        let y_mid = hy * tc + tc / 2;
+        let gx = hx * tc + tc / 2;
+        let sl = self.surface_at(world, gx - tc);
+        let sr = self.surface_at(world, gx + tc);
+        let rise = tc.max(1);
+        (sl > y_mid + rise, sr > y_mid + rise)
+    }
+
+    /// Slip along the ground and along a nearby face: no component into
+    /// rock. A descent hits the skin and turns along it; a breeze that
+    /// would stab into a hill turns up or down the face.
+    fn deflect_along_surface(
+        &self,
+        world: Option<&World>,
+        hx: i32,
+        hy: i32,
+        vx: f32,
+        vy: f32,
+    ) -> (f32, f32) {
+        let surf_hy = self.surface_tile_hy(world, hx);
+        let above = (hy - surf_hy) as f32;
+        let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+        if above > 4.0 && !wall_l && !wall_r {
+            return (vx, vy);
+        }
+        let m = self.surface_slope(world, hx);
+        let h = (1.0 + m * m).sqrt();
+        if h < 1e-6 {
+            return (vx, vy);
+        }
+        // Outward (into-air) normal of the local skin / face.
+        let nx = -m / h;
+        let ny = 1.0 / h;
+        let speed = vx.hypot(vy);
+        let mut vx = vx;
+        let mut vy = vy;
+        let into = vx * nx + vy * ny;
+        if into < 0.0 {
+            vx -= into * nx;
+            vy -= into * ny;
+        }
+        // Own floor: follow fades out over a few tiles. A wall one
+        // tile away keeps follow high so mid-face arrows go up/down
+        // instead of remaining a flattened stub into the rock.
+        // Use the incoming speed so slip-off-the-face does not leave
+        // a 0.02 stub after removing the into-rock component.
+        let ground_follow = (1.0 - above.max(0.0) / 3.0).clamp(0.0, 1.0);
+        let wall_follow = if wall_l || wall_r { 0.88 } else { 0.0 };
+        let follow = ground_follow.max(wall_follow);
+        if follow > 1e-4 {
+            let tsign = if vx > 1e-5 {
+                1.0
+            } else if vx < -1e-5 {
+                -1.0
+            } else if m.abs() > 0.05 {
+                // Stalled on a face: go up the slope (over the hill).
+                if m >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            } else {
+                0.0
+            };
+            if tsign != 0.0 && speed > 1e-5 {
+                let tx = tsign / h;
+                let ty = tsign * m / h;
+                vx = vx * (1.0 - follow) + tx * speed * follow;
+                vy = vy * (1.0 - follow) + ty * speed * follow;
+            }
+        }
+        (vx.clamp(-1.0, 1.0), vy.clamp(-1.0, 1.0))
+    }
+
+    fn orographic_soft(
+        &self,
+        world: Option<&World>,
+        hx: i32,
+        hy: i32,
+    ) -> (f32, f32, f32) {
+        let empty = FxHashMap::default();
+        self.orographic_soft_cached(world, &empty, hx, hy)
+    }
+
+    fn orographic_soft_cached(
+        &self,
+        world: Option<&World>,
+        cols: &FxHashMap<i32, ColOro>,
+        hx: i32,
+        hy: i32,
+    ) -> (f32, f32, f32) {
+        let mut speed = 0.0;
+        let mut lift = 0.0;
+        let mut sink = 0.0;
+        let mut w = 0.0;
+        for (dx, wt) in [(-1, 0.25f32), (0, 0.50), (1, 0.25)] {
+            let col = self.col_oro_at(world, cols, hx + dx);
+            speed += col.speed * wt;
+            lift += col.lift * wt;
+            sink += col.lee_sink(hy) * wt;
+            w += wt;
+        }
+        (speed / w, lift / w, sink / w)
+    }
+
+    fn thermal_delta(&self, temp: &Temperature, hx: i32, hy: i32) -> (f32, f32) {
+        let t0 = temp.at_tile_packed(hx, hy);
+        let tx = (temp.at_tile_packed(hx + 1, hy) - temp.at_tile_packed(hx - 1, hy)) * 0.5;
+        let ty = (temp.at_tile_packed(hx, hy + 1) - temp.at_tile_packed(hx, hy - 1)) * 0.5;
+        let mut vx = tx * 0.055;
+        let mut vy = ty * 0.012;
+        let flank = (temp.at_tile_packed(hx - 1, hy) + temp.at_tile_packed(hx + 1, hy)) * 0.5;
+        vy += ((t0 - flank) / 18.0).clamp(-0.10, 0.10);
+        let surf = self.surface_tile_hy(None, hx);
+        let above = (hy - surf).max(0) as f32;
+        let near = (1.0 - above / 6.0).clamp(0.25, 1.0);
+        vx *= near;
+        vy *= near * 0.6;
+        if hy + 1 < surf {
+            vx *= 0.15;
+            vy *= 0.15;
+        }
+        (vx, vy)
+    }
+
+    fn swirl_at(&self, hx: i32, hy: i32, tick: u64) -> (f32, f32) {
+        let t = tick as f32;
+        let phase = (self.seed as f32) * 1.0e-9;
+        let ax = hx as f32 * 0.31 + t * 0.017 + phase;
+        let ay = hy as f32 * 0.27 + t * 0.013 + phase * 1.7;
+        let mut sx = ax.sin() * (-ay.sin()) * 0.27 * 0.055;
+        let mut sy = -(ax.cos() * ay.cos() * 0.31 * 0.055);
+        let bx = hx as f32 * 0.71 + t * 0.041 + phase * 2.1;
+        let by = hy as f32 * 0.63 - t * 0.029 + phase * 0.4;
+        sx += bx.sin() * (-by.sin()) * 0.63 * 0.028;
+        sy += -(bx.cos() * by.cos() * 0.71 * 0.028);
+        (sx, sy)
+    }
+
+    pub fn vector_at(&self, world: Option<&World>, hx: i32, hy: i32) -> (f32, f32) {
+        if let Some(&v) = self.field.get(&(hx, hy)) {
+            return v;
+        }
+        // Miss: climate mean + the same downwind climb / slip as the field.
+        // Humidity caches this per seat before the two flux axes so a miss
+        // walks the world once, not twice. Evap after rebuild is the usual
+        // source of new keys.
+        let block = self.downwind_blockage(world, hx, hy, self.climate_vx);
+        let vx = self.climate_vx * (1.0 - (block * 0.4).min(0.35));
+        let vy = self.climate_vy + block;
+        self.deflect_along_surface(world, hx, hy, vx, vy)
+    }
+
+    pub fn flow_at(
+        &self,
+        world: Option<&World>,
+        hx: i32,
+        hy: i32,
+        climate_vx: f32,
+        climate_vy: f32,
+    ) -> (f32, f32) {
+        let shear = self.height_shear(world, hx, hy);
+        let speed = self.orographic_speed_factor(world, hx);
+        let vx = (climate_vx * shear * speed).clamp(-1.0, 1.0);
+        let lift = self.orographic_lift(world, hx);
+        let sink = self.lee_sink(world, hx, hy);
+        let vy = (climate_vy + lift - sink).clamp(-1.0, 1.0);
+        (vx, vy)
+    }
+
+    pub fn height_shear(&self, world: Option<&World>, hx: i32, hy: i32) -> f32 {
+        let surf_hy = self.surface_tile_hy(world, hx);
+        let above = (hy - surf_hy).max(0) as f32;
+        (0.20 + 0.80 * (above / 5.0).clamp(0.0, 1.0)).clamp(0.15, 1.15)
+    }
+
+    pub fn orographic_speed_factor(&self, world: Option<&World>, hx: i32) -> f32 {
+        let ascent = self.ascent_cells(world, hx);
+        let descent = self.descent_cells(world, hx);
+        if ascent > descent && ascent > 1.5 {
+            (1.0 + (ascent / 48.0).clamp(0.0, 0.28)).clamp(0.5, 1.35)
+        } else if descent > 1.5 {
+            (0.52 + 0.35 * (1.0 - (descent / 40.0).clamp(0.0, 1.0))).clamp(0.4, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    pub fn lee_sink(&self, world: Option<&World>, hx: i32, hy: i32) -> f32 {
+        let descent = self.descent_cells(world, hx);
+        if descent <= 1.0 {
+            return 0.0;
+        }
+        let shear = self.height_shear(world, hx, hy);
+        let wake = (1.0 - (shear - 0.45).abs() * 1.4).clamp(0.25, 1.0);
+        (descent / 55.0).clamp(0.0, 0.14) * wake
+    }
+
+    pub fn mix_strength(&self, climate_vx: f32, climate_vy: f32) -> f32 {
+        let speed = climate_vx.abs().max(climate_vy.abs());
+        (speed / 0.22).clamp(0.0, 1.0)
+    }
+
+    pub fn descent_cells(&self, world: Option<&World>, hx: i32) -> f32 {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        let sign = if self.climate_vx >= 0.0 { 1 } else { -1 };
+        let gx_dn = gx + sign * tc;
+        let s0 = self.surface_at(world, gx);
+        let s1 = self.surface_at(world, gx_dn);
+        ((s0 - s1) as f32).max(0.0)
+    }
+
+    pub fn surface_tile_hy(&self, world: Option<&World>, hx: i32) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        self.surface_at(world, gx).div_euclid(tc)
+    }
+
+    /// Mean |vx| on near-surface field tiles (evap / thermal mix).
+    pub fn near_surface_abs(&self, world: Option<&World>) -> f32 {
+        if self.field.is_empty() {
+            return self.climate_vx.abs().max(self.climate_vy.abs());
+        }
+        let mut sum = 0.0f32;
+        let mut n = 0u32;
+        for (&(hx, hy), &(vx, _)) in &self.field {
+            let surf = self.surface_tile_hy(world, hx);
+            if hy >= surf && hy <= surf + 2 {
+                sum += vx.abs();
+                n += 1;
+            }
+        }
+        if n == 0 {
+            self.climate_vx.abs()
+        } else {
+            sum / n as f32
+        }
+    }
+}
+
+fn tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
+    let Some(w) = world else {
+        return false;
+    };
+    let gx = w.wrap_x(hx * tc + tc / 2);
+    let gy = hy * tc + tc / 2;
+    matches!(w.get_cell(gx, gy), Some(c) if c.material.is_solid())
 }
 
 #[cfg(test)]
@@ -324,6 +1516,309 @@ mod tests {
         assert!(
             samples.iter().any(|&v| v.abs() > 0.12),
             "gusts should exceed the mean |vx|"
+        );
+    }
+
+    #[test]
+    fn column_oro_cache_matches_live_soft() {
+        let p = WorldgenParams::default();
+        let wind = Wind::climate(
+            4,
+            0.12,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        let mut cols = FxHashMap::default();
+        for hx in 0..24 {
+            for dx in -1..=1 {
+                cols.entry(hx + dx)
+                    .or_insert_with(|| wind.pack_col_oro(None, hx + dx));
+            }
+        }
+        for hx in 0..24 {
+            for hy in [8, 20, 40] {
+                let a = wind.orographic_soft(None, hx, hy);
+                let b = wind.orographic_soft_cached(None, &cols, hx, hy);
+                assert!(
+                    (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6 && (a.2 - b.2).abs() < 1e-6,
+                    "hx={hx} hy={hy} live={a:?} cached={b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rebuild_field_varies_spatially_with_swirl() {
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.08,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.swirl = 1.2;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        let occupied: Vec<(i32, i32)> = (0..16).map(|hx| (hx, 20)).collect();
+        wind.rebuild_field(None, None, 40, &occupied, None);
+        assert!(!wind.field.is_empty());
+        let vals: Vec<f32> = wind.field.values().map(|&(vx, _)| vx).collect();
+        let lo = vals.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            hi - lo > 0.02,
+            "swirl should vary local vx (range={})",
+            hi - lo
+        );
+    }
+
+    #[test]
+    fn rebuild_field_does_not_seat_inside_a_tall_stone_tower() {
+        use crate::cell::Cell;
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H};
+        use wk_material::MaterialId;
+
+        let sea: i32 = 80;
+        let hint: i32 = 120;
+        let crest: i32 = 260;
+        let mut w = crate::grid::World::new(3);
+        for y in [0, hint, crest] {
+            w.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        for y in 0..=crest {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 64, sea, 0, 320, false);
+        wind.config.field_smooth = 0.0;
+        let occupied = vec![(0, crest.div_euclid(4))];
+        wind.rebuild_field(Some(&w), None, 40, &occupied, None);
+        let tunnel_hy = 256 / 4; // y=256–259, the screenshot band
+        assert!(
+            !wind.field.contains_key(&(0, tunnel_hy)),
+            "wind must not sit inside the tower at tile hy={tunnel_hy}"
+        );
+        let surf = crate::worldgen::live_surface_y(&w, 2, hint, crate::worldgen::LIVE_SURFACE_SEARCH);
+        assert_eq!(surf, crest, "live surface must reach the F3 crest");
+    }
+
+    fn load_sky_so_live_surface_can_walk(w: &mut crate::grid::World, x1: i32, y_hi: i32) {
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        let cw = CHUNK_CELLS_W as i32;
+        let ch = CHUNK_CELLS_H as i32;
+        for cx in 0..=x1.div_euclid(cw) {
+            for cy in 0..=y_hi.div_euclid(ch) {
+                w.ensure_chunk(ChunkCoord::new(cx, cy));
+            }
+        }
+    }
+
+    #[test]
+    fn descending_wind_turns_along_flat_ground() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let sea: i32 = 16;
+        let mut w = crate::grid::World::new(3);
+        // Seed hints sit on the mountain band (~y=100+). Without those
+        // chunks loaded, live_surface keeps the hint and invents a cliff.
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
+        for x in 0..32 {
+            for y in 0..=sea {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, sea, 0, 64, false);
+        wind.climate_vy = -0.10;
+        wind.field.clear();
+        let hy = (sea + 2).div_euclid(4);
+        let (vx, vy) = wind.vector_at(Some(&w), 2, hy);
+        assert!(vx > 0.05, "must keep a along-ground breeze (vx={vx:.3})");
+        assert!(
+            vy > -0.03,
+            "a descent onto flat ground must not keep stabbing down (vy={vy:.3})"
+        );
+    }
+
+    #[test]
+    fn wind_on_a_ramp_turns_upslope_not_into_the_rock() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
+        // Rise 2 cells per world-x so a 4-wide tile sees m ≈ 2.
+        for x in 0..32 {
+            let crest = 8 + x * 2;
+            for y in 0..=crest {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, 8, 0, 80, false);
+        wind.variance = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        let occupied: Vec<(i32, i32)> = (1i32..7).flat_map(|hx| {
+            let gx = hx * 4 + 2;
+            let shy = (8 + gx * 2).div_euclid(4);
+            [shy, shy + 1].into_iter().map(move |hy| (hx, hy))
+        }).collect();
+        wind.rebuild_field(Some(&w), None, 10, &occupied, None);
+        let mut best_up = 0.0f32;
+        for (&(hx, hy), &(vx, vy)) in &wind.field {
+            if hx < 1 || hx > 6 {
+                continue;
+            }
+            let gx = hx * 4 + 2;
+            let surf = crate::worldgen::live_surface_y(&w, gx, 8 + gx * 2, 64);
+            if (hy * 4 + 2) > surf + 12 {
+                continue;
+            }
+            best_up = best_up.max(vy);
+            assert!(
+                vx >= -0.02,
+                "upslope should not reverse the climate breeze (hx={hx} vx={vx:.3})"
+            );
+        }
+        assert!(
+            best_up > 0.016,
+            "a +x breeze on a rising ramp must pick up a climb (best vy={best_up:.3})"
+        );
+    }
+
+    #[test]
+    fn wind_beside_a_cliff_turns_up_not_into_the_rock() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let floor: i32 = 16;
+        let crest: i32 = 56;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
+        for x in 0..32 {
+            let top = if (20..24).contains(&x) { crest } else { floor };
+            for y in 0..=top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, floor, 0, 80, false);
+        wind.variance = 0.0;
+        wind.climate_vy = 0.0;
+        wind.field.clear();
+        // Mid-face, one tile left of the tower (hx=4 is x=16–19).
+        let hy = ((floor + crest) / 2).div_euclid(4);
+        let (vx, vy) = wind.vector_at(Some(&w), 4, hy);
+        assert!(
+            vy > vx.abs() + 0.02,
+            "next to a cliff the arrow must go up the face, not into it (vx={vx:.3} vy={vy:.3})"
+        );
+        assert!(vx > -0.02, "must not reverse into the valley (vx={vx:.3})");
+    }
+
+    #[test]
+    fn projection_leaves_a_flat_breeze_horizontal() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let sea: i32 = 16;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
+        for x in 0..32 {
+            for y in 0..=sea {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, sea, 0, 80, false);
+        wind.variance = 0.0;
+        wind.climate_vy = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        let occupied: Vec<(i32, i32)> = (1..7)
+            .flat_map(|hx| (6..10).map(move |hy| (hx, hy)))
+            .collect();
+        wind.rebuild_field(Some(&w), None, 8, &occupied, None);
+        let mut worst_tilt = 0.0f32;
+        for (&(hx, hy), &(_, vy)) in &wind.field {
+            if !(1..=6).contains(&hx) || !(6..=9).contains(&hy) {
+                continue;
+            }
+            worst_tilt = worst_tilt.max(vy.abs());
+        }
+        assert!(
+            worst_tilt < 0.04,
+            "open flat must not invent a climb (max |vy|={worst_tilt:.3})"
+        );
+    }
+
+    #[test]
+    fn projection_turns_a_valley_before_the_next_peak() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let floor: i32 = 16;
+        let crest: i32 = 64;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 40, 256);
+        for x in 0..40 {
+            let top = if (4..8).contains(&x) || (28..32).contains(&x) {
+                crest
+            } else {
+                floor
+            };
+            for y in 0..=top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 40, floor, 0, 80, false);
+        wind.variance = 0.0;
+        wind.climate_vy = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        // Dense seats in the gap so Jacobi can walk from mid-bowl to the wall.
+        let occupied: Vec<(i32, i32)> = (2..8)
+            .flat_map(|hx| (6..14).map(move |hy| (hx, hy)))
+            .collect();
+        wind.rebuild_field(Some(&w), None, 8, &occupied, None);
+        // hx=4 is the bowl centre (x=16–19), two tiles left of the right peak.
+        let mut mid_up = 0.0f32;
+        let mut mid_vx = 0.0f32;
+        let mut n = 0u32;
+        for (&(hx, hy), &(vx, vy)) in &wind.field {
+            if hx != 4 || hy < 7 || hy > 11 {
+                continue;
+            }
+            mid_up += vy;
+            mid_vx += vx;
+            n += 1;
+        }
+        assert!(n > 0, "expected field seats in the mid-valley");
+        let mid_up = mid_up / n as f32;
+        let mid_vx = mid_vx / n as f32;
+        assert!(
+            mid_up > 0.012,
+            "a +x breeze in a two-peak bowl must start climbing \
+             before the next face (mean vy={mid_up:.3})"
+        );
+        assert!(
+            mid_vx > 0.02,
+            "through-flow should remain, not reverse (mean vx={mid_vx:.3})"
         );
     }
 }

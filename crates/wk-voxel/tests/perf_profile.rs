@@ -27,7 +27,7 @@ use wk_voxel::{
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
     KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig,
     PhysicsTimings, RainConfig, Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H,
-    CHUNK_CELLS_W, FLOW_SUBSTEPS,
+    CHUNK_CELLS_W, FLOW_SUBSTEPS, WIND_FIELD_PERIOD,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -42,6 +42,7 @@ const CREATURE_SWEEP: &[usize] = &[0, 48, 128, 256];
 struct PassAccum {
     rain: Duration,
     evap: Duration,
+    wind_rebuild: Duration,
     humidity_advect: Duration,
     clouds: Duration,
     condensation: Duration,
@@ -64,6 +65,7 @@ impl PassAccum {
         Self {
             rain: Duration::ZERO,
             evap: Duration::ZERO,
+            wind_rebuild: Duration::ZERO,
             humidity_advect: Duration::ZERO,
             clouds: Duration::ZERO,
             condensation: Duration::ZERO,
@@ -85,6 +87,7 @@ impl PassAccum {
     fn total(&self) -> Duration {
         self.rain
             + self.evap
+            + self.wind_rebuild
             + self.humidity_advect
             + self.clouds
             + self.condensation
@@ -119,8 +122,8 @@ struct Scene {
     phase: PhaseConfig,
     climate: ClimateConfig,
     perf: PerfConfig,
-    /// Match the app's W toggle. Nightly soak leaves climatic rain off
-    /// and lets drizzle / evap cycle the water.
+    /// Scenario injector (`apply_rain`). The play app retired that
+    /// faucet; nightly soak leaves it off and lets C / E cycle water.
     climatic_rain: bool,
 }
 
@@ -131,7 +134,15 @@ fn demo_params() -> WorldgenParams {
 fn stress_params() -> WorldgenParams {
     WorldgenParams {
         width_cols: (CHUNK_CELLS_W as i32) * 32,
-        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 6,
+        sky_ceiling_y: wk_voxel::TROPOSPHERE_TOP_Y + wk_voxel::STRATOSPHERE_CELLS,
+        ..WorldgenParams::default()
+    }
+}
+
+/// Pre-tropopause box — same width as demo, old 320-cell sky.
+fn short_sky_params() -> WorldgenParams {
+    WorldgenParams {
+        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 5,
         ..WorldgenParams::default()
     }
 }
@@ -268,6 +279,19 @@ fn profile_label(label: &str, params: &WorldgenParams, chunks: usize) {
     );
 }
 
+fn rebuild_wind_if_due(scene: &mut Scene) {
+    if scene.world.tick % WIND_FIELD_PERIOD == 0 || scene.wind.field.is_empty() {
+        let occupied: Vec<(i32, i32)> = scene.humidity.cells.keys().copied().collect();
+        scene.wind.rebuild_field(
+            Some(&scene.world),
+            Some(&scene.temperature),
+            scene.world.tick,
+            &occupied,
+            None,
+        );
+    }
+}
+
 fn one_stack_tick(
     scene: &mut Scene,
     accum: Option<&mut PassAccum>,
@@ -278,6 +302,7 @@ fn one_stack_tick(
         None => {
             // Match app: shell scans always parallel; CA follows PerfConfig.
             set_parallel_enabled(true);
+            rebuild_wind_if_due(scene);
             if scene.climatic_rain {
                 apply_rain_with_temp(
                     &mut scene.world,
@@ -304,7 +329,7 @@ fn one_stack_tick(
                 scene.params.sky_ceiling_y,
                 tick_no,
                 &scene.cloud,
-                Some(&scene.temperature),
+                Some(&mut scene.temperature),
                 Some(&scene.phase),
             );
             apply_condensation_rain_phased(
@@ -334,7 +359,7 @@ fn one_stack_tick(
                 let t = scene.world.tick;
                 scene
                     .temperature
-                    .step(Some(&scene.world), &scene.humidity, t);
+                    .step(Some(&scene.world), &scene.humidity, t, None);
             }
             if scene.phase.enabled
                 && scene.phase.enable_cold_avalanche
@@ -359,6 +384,10 @@ fn one_stack_tick(
         }
         Some(a) => {
             set_parallel_enabled(true);
+            let t0 = Instant::now();
+            rebuild_wind_if_due(scene);
+            a.wind_rebuild += t0.elapsed();
+
             let t0 = Instant::now();
             if scene.climatic_rain {
                 apply_rain_with_temp(
@@ -395,7 +424,7 @@ fn one_stack_tick(
                 scene.params.sky_ceiling_y,
                 tick_no,
                 &scene.cloud,
-                Some(&scene.temperature),
+                Some(&mut scene.temperature),
                 Some(&scene.phase),
             );
             a.clouds += t0.elapsed();
@@ -449,7 +478,7 @@ fn one_stack_tick(
                 let t = scene.world.tick;
                 scene
                     .temperature
-                    .step(Some(&scene.world), &scene.humidity, t);
+                    .step(Some(&scene.world), &scene.humidity, t, None);
                 a.temperature += t0.elapsed();
                 a.temperature_calls += 1;
             }
@@ -497,6 +526,10 @@ fn print_pass_table(accum: &PassAccum, n: u64, wall: Duration) {
     eprintln!("  ------------------------------------------------------------");
     eprintln!("  rain                 {:>8.3} ms/tick", ms_per(accum.rain, n));
     eprintln!("  evap→humidity        {:>8.3} ms/tick", ms_per(accum.evap, n));
+    eprintln!(
+        "  wind.rebuild         {:>8.3} ms/tick",
+        ms_per(accum.wind_rebuild, n)
+    );
     eprintln!(
         "  humidity.advect      {:>8.3} ms/tick",
         ms_per(accum.humidity_advect, n)
@@ -759,6 +792,7 @@ fn run_perf_knob_ab(params: WorldgenParams) {
 fn perf_profile_demo_and_stress() {
     set_parallel_enabled(true);
     run_creature_count_sweep(demo_params());
+    run_profile("short sky 320 (0 plants)", short_sky_params(), 0);
     run_profile("demo (0 plants)", demo_params(), 0);
     run_profile(
         &format!("demo + {PLANT_COUNT} plants"),
@@ -771,12 +805,21 @@ fn perf_profile_demo_and_stress() {
         wk_voxel::MAX_ATOMS,
     );
     run_perf_knob_ab(demo_params());
-    run_profile("stress (32×6 chunks, 0 plants)", stress_params(), 0);
+    run_profile("stress (32-wide × 1064, 0 plants)", stress_params(), 0);
     run_profile(
         &format!("stress + {} plants", wk_voxel::MAX_ATOMS),
         stress_params(),
         wk_voxel::MAX_ATOMS,
     );
+}
+
+/// 320-cell box vs the 1064-cell tropopause default. No plants.
+#[test]
+#[ignore]
+fn perf_profile_sky_height() {
+    set_parallel_enabled(true);
+    run_profile("short sky 320 (0 plants)", short_sky_params(), 0);
+    run_profile("tall sky 1064 (0 plants)", demo_params(), 0);
 }
 
 /// Does organism cost grow with soak age at a *constant* population?
@@ -840,6 +883,8 @@ fn organism_cost_versus_soak_age() {
 /// grow. A rising `snow` / `buoy` chunk count with a quiet scene is the
 /// occupancy leak; rising `mods` with a flat atom count is plant growth;
 /// rising `hum n` toward tile capacity is a filled atmosphere, not a leak.
+/// `wet` / `loose` spreading while `clay` / `stand` stay flat is rain
+/// wetting land (suspension / bedload leftover, now occupancy-gated).
 ///
 /// ```text
 /// cargo test -p wk-voxel --release --test perf_profile -- --ignored --nocapture soak_age_inventory
@@ -858,9 +903,10 @@ fn soak_age_inventory() {
     }
 
     println!(
-        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5}",
+        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5}",
         "tick", "wall", "phys", "grav", "flow", "seep", "conf", "body", "org",
-        "cond", "halo", "diss", "hum n", "buoy", "orgc", "pores", "mods"
+        "cond", "hadv", "wind", "tmp", "halo", "aabb", "diss", "hum n", "buoy", "orgc", "pores", "wet", "loose",
+        "clay", "stand", "susp", "mods"
     );
     for _ in 0..SEGS {
         let mut accum = PassAccum::zero();
@@ -873,6 +919,10 @@ fn soak_age_inventory() {
         let mut buoy_ch = 0usize;
         let mut org_ch = 0usize;
         let mut pore_ch = 0usize;
+        let mut wet_air_ch = 0usize;
+        let mut loose_ch = 0usize;
+        let mut clay_ch = 0usize;
+        let mut stand_ch = 0usize;
         for c in scene.world.chunks.values() {
             if c.has_buoyant {
                 buoy_ch += 1;
@@ -883,9 +933,26 @@ fn soak_age_inventory() {
             if c.has_wet_pores {
                 pore_ch += 1;
             }
+            if c.has_wet_air {
+                wet_air_ch += 1;
+            }
+            if c.has_loose {
+                loose_ch += 1;
+            }
+            if c.has_clay {
+                clay_ch += 1;
+            }
+            if c.has_standing_air {
+                stand_ch += 1;
+            }
         }
         let halo = if phys.substeps_ran > 0 {
             phys.active_area as f32 / phys.substeps_ran as f32
+        } else {
+            0.0
+        };
+        let aabb = if phys.substeps_ran > 0 {
+            phys.active_aabb as f32 / phys.substeps_ran as f32
         } else {
             0.0
         };
@@ -896,7 +963,7 @@ fn soak_age_inventory() {
             .map(|b| b.tile_capacity())
             .unwrap_or(0);
         println!(
-            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>6.0} {:>5} {:>5}/{:<4} {:>5} {:>5} {:>5} {:>6}",
+            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>6.0} {:>6.0} {:>5} {:>5}/{:<4} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6}",
             scene.world.tick,
             wall.as_secs_f32() * 1000.0 / SEG as f32,
             accum.physics_tick.as_secs_f32() * 1000.0 / SEG as f32,
@@ -907,13 +974,22 @@ fn soak_age_inventory() {
             phys.bodies.as_secs_f32() * 1000.0 / SEG as f32,
             accum.organisms.as_secs_f32() * 1000.0 / SEG as f32,
             accum.condensation.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.humidity_advect.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.wind_rebuild.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.temperature.as_secs_f32() * 1000.0 / SEG as f32,
             halo,
+            aabb,
             scene.world.dissolved.len(),
             scene.humidity.cells.len(),
             hum_cap,
             buoy_ch,
             org_ch,
             pore_ch,
+            wet_air_ch,
+            loose_ch,
+            clay_ch,
+            stand_ch,
+            scene.world.suspended.len(),
             mods,
         );
     }

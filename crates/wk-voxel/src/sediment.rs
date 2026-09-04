@@ -281,13 +281,15 @@ pub fn apply_suspension(world: &mut World) {
     if world.tick % 2 != 0 {
         return;
     }
-    // Needs both free water *and* loose material to have anything to do, which
-    // rules out open-water chunks and dry rock alike — only beds and banks
-    // qualify.
+    // Needs free water *and* clay. Rain wets sand/soil/gravel the same
+    // way it wets a clay bank (`has_wet_air && has_loose`), but only
+    // clay-grade fines suspend. Scanning those leftover beds every other
+    // tick is the soak-age leak: the wet-air flag spreads with drizzle
+    // while clay stays rare.
     let mut coords: Vec<crate::chunk::ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_air && c.has_loose)
+        .filter(|(_, c)| c.has_wet_air && c.has_clay)
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
@@ -302,19 +304,30 @@ pub fn apply_suspension(world: &mut World) {
     // an ocean world, and each one has at most three faces to check, so the work
     // tracks how much erodible bed there is rather than how much sea.
     let mut exposed: Vec<(i32, i32)> = Vec::new();
+    let mut clear_clay: Vec<crate::chunk::ChunkCoord> = Vec::new();
     for coord in coords {
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
         let base_gx = coord.cx * cw;
         let base_gy = coord.cy * ch;
+        let mut saw_clay = false;
         for ly in 0..ch {
             for lx in 0..cw {
                 if !is_suspendable(chunk.get(lx as usize, ly as usize).material) {
                     continue;
                 }
+                saw_clay = true;
                 exposed.push((world.wrap_x(base_gx + lx), base_gy + ly));
             }
+        }
+        if !saw_clay {
+            clear_clay.push(coord);
+        }
+    }
+    for coord in clear_clay {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_clay = false;
         }
     }
     for (gx, gy) in exposed {
@@ -510,6 +523,38 @@ mod tests {
         assert!(
             peak_load > 0,
             "water running off a clay lip should suspend something"
+        );
+    }
+
+    #[test]
+    fn wet_sand_without_clay_is_not_scanned() {
+        // Rain-wet sand used to enter via `has_wet_air && has_loose` and
+        // pay a full-chunk clay hunt. The occupancy flag must stay down
+        // and the pass must not invent load.
+        let mut w = pool(7);
+        w.set_cell(4, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 2, Cell::water());
+        assert!(!w.chunks[&ChunkCoord::new(0, 0)].has_clay);
+        apply_suspension(&mut w);
+        assert!(w.suspended.is_empty());
+        assert!(!w.chunks[&ChunkCoord::new(0, 0)].has_clay);
+    }
+
+    #[test]
+    fn clay_flag_clears_when_the_scan_finds_none() {
+        let mut w = pool(8);
+        w.set_cell(4, 1, Cell::solid(MaterialId::Clay));
+        w.set_cell(4, 2, Cell::water());
+        assert!(w.chunks[&ChunkCoord::new(0, 0)].has_clay);
+        w.set_cell(4, 1, Cell::solid(MaterialId::Sand));
+        assert!(
+            w.chunks[&ChunkCoord::new(0, 0)].has_clay,
+            "sticky until the scan that looks for absence"
+        );
+        apply_suspension(&mut w);
+        assert!(
+            !w.chunks[&ChunkCoord::new(0, 0)].has_clay,
+            "an empty clay hunt must drop the chunk out of later passes"
         );
     }
 }

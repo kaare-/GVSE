@@ -216,6 +216,34 @@ impl GeotechMap {
         self.last_was_incremental = true;
     }
 
+    /// F3 / live-surface edit: rebuild σᵥ + faces for columns around `gx`.
+    /// The period-20 smart path would keep the deleted-hill stamp until
+    /// the next due tick.
+    pub fn refresh_around(&mut self, world: &World, gx: i32, radius: i32) {
+        let r = radius.max(0);
+        let mut y_lo = i32::MAX;
+        let mut y_hi = i32::MIN;
+        for coord in world.chunks.keys() {
+            let cy0 = coord.cy * CHUNK_CELLS_H as i32;
+            let cy1 = cy0 + CHUNK_CELLS_H as i32 - 1;
+            y_lo = y_lo.min(cy0);
+            y_hi = y_hi.max(cy1);
+        }
+        if y_lo == i32::MAX {
+            return;
+        }
+        y_lo = y_lo.max(0);
+        for dx in -r..=r {
+            let x = world.wrap_x(gx + dx);
+            self.overburden.retain(|&(ox, _), _| ox != x);
+            self.faces.retain(|&(ox, _), _| ox != x);
+            rebuild_overburden_column(world, x, &mut self.overburden);
+            rescan_faces_column(world, x, y_lo, y_hi, &self.overburden, &mut self.faces);
+        }
+        self.last_rebuild_tick = world.tick;
+        self.last_was_incremental = true;
+    }
+
     /// Rebuild when the period/phase gate says so (smart path).
     pub fn rebuild_if_due(&mut self, world: &World) -> bool {
         if !geotech_map_due(world.tick) {
@@ -587,6 +615,38 @@ mod tests {
         assert!(deep > mid && mid > top, "deep={deep} mid={mid} top={top}");
         let face = map.at_cell(2, 1).expect("face");
         assert!((face.overburden - deep).abs() < 1e-4);
+    }
+
+    #[test]
+    fn refresh_around_drops_overburden_after_a_hill_wipe() {
+        let mut w = World::new(1);
+        for cy in 0..=2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        bed(&mut w, 0, 4);
+        for y in 1..=80 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+        }
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        let under_hill = map.overburden_at(2, 8);
+        assert!(
+            under_hill > 5.0,
+            "intact stack must load the buried cell (sv={under_hill})"
+        );
+        for y in 21..=80 {
+            w.set_cell(2, y, Cell::air());
+        }
+        map.refresh_around(&w, 2, 0);
+        let after = map.overburden_at(2, 8);
+        assert!(
+            after + 2.0 < under_hill,
+            "live overburden must follow the wiped surface ({under_hill} → {after})"
+        );
+        assert!(
+            map.overburden.get(&(2, 50)).is_none(),
+            "erased cells must leave the overburden stamp"
+        );
     }
 
     #[test]

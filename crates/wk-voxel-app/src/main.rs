@@ -14,14 +14,12 @@
 //! Hotkeys:
 //! - `Space` — pause / resume physics ticks
 //! - `R` — regenerate the world with a new seed
-//! - `W` — toggle background rain (climatic, always-on cloud row)
-//! - `C` — toggle condensation rain (feedback from humidity heatmap)
+//! - `C` — toggle condensation rain (humidity → falling water / snow)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity tile diagnostic (default on)
-//! - `V` — toggle wind streak overlay (default off; placeholder visual)
-//! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
+//! - `H` — toggle humidity vapour wash (default on)
+//! - `V` — toggle wind streak overlay (local field arrows; default off)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
@@ -33,14 +31,14 @@
 //! - `F4` — creature list (living / dead roster; click row to inspect)
 //! - `F5` / `F9` — save / load simulation (`saves/*.gvsesim`)
 //! - `F6` — glossary / how-it-works (keys, water, sky, HUD words)
-//! - `Tab` — live settings (world size, materials, wind, clouds, …)
+//! - `Tab` — live settings (world size, materials, wind, humidity, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — close overlays, or quit confirm (save / discard / cancel)
 //!
 //! Sky follows the shared climate clock (pixel sun by day, pixel moon by night).
-//! Temperature tiles warm with sun, cool at night, and shade under pixel clouds.
+//! Temperature tiles warm with sun, cool at night, and shade under wet humidity.
 //! Atmosphere stack: `docs/SKY.md` / [`atmosphere`].
 
 mod atmosphere;
@@ -58,14 +56,15 @@ mod terrain;
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased,
-    apply_evaporation_into_humidity_climate,
-    apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    apply_evaporation_into_humidity_climate, precipitate_thermal_surplus,
+    apply_flow_erosion_bound, apply_karst_dissolution, apply_phase,
     apply_weather_rgb, apply_competent_fall_regions, apply_landscape_fall, celestial_local_cfg,
     celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, plan_active,
-    pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
+    pore_wetness_with, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
+    WIND_FIELD_PERIOD,
     wake_competent_bodies_all, wake_unsupported_grains,
     wake_unstable_slopes, GeotechOverlayMode,
     SimSnapshot, WorldgenParams,
@@ -73,11 +72,11 @@ use wk_voxel::{
 
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
-    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, draw_wind_streaks,
-    CloudDepthLayer,
-    draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
-    organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
-    toward_light_celestial, RidgeSilhouette,
+    draw_celestials, draw_haze_and_wind, draw_wind_streaks,
+    draw_ridge_silhouettes, draw_sky, estimate_snow_bias, gx_in_ranges,
+    is_organism_aboveground, organism_celestial_rim, sky_weather_for_scene,
+    terrain_celestial_key_strength, toward_light_celestial, view_cell_x_ranges,
+    view_tile_box, RidgeSilhouette,
 };
 use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
@@ -145,31 +144,37 @@ fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
-fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
-    let u = ((temp_c - t_min) / (t_max - t_min).max(0.5)).clamp(0.0, 1.0);
-    let (r, g, b) = if u < 0.33 {
-        let t = u / 0.33;
-        (
-            (20.0 + t * 40.0) as u8,
-            (80.0 + t * 120.0) as u8,
-            (200.0 - t * 40.0) as u8,
-        )
-    } else if u < 0.66 {
-        let t = (u - 0.33) / 0.33;
-        (
-            (60.0 + t * 180.0) as u8,
-            (200.0 - t * 40.0) as u8,
-            (160.0 - t * 140.0) as u8,
-        )
+/// Fixed °C stops so freezing and below stay readable.
+///
+/// −40 ice-white · −20 indigo · 0 cyan · 12 green · 18 yellow-green ·
+/// 28 orange · 36 red. Mild 18 °C is not buried in blue.
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
+}
+
+fn temp_overlay_color(temp_c: f32) -> Color {
+    const STOPS: &[(f32, u8, u8, u8)] = &[
+        (-40.0, 230, 240, 255),
+        (-20.0, 70, 90, 200),
+        (0.0, 40, 190, 230),
+        (12.0, 70, 200, 120),
+        (18.0, 210, 215, 70),
+        (28.0, 235, 140, 35),
+        (36.0, 220, 40, 30),
+    ];
+    let t = temp_c.clamp(STOPS[0].0, STOPS[STOPS.len() - 1].0);
+    let mut i = 0;
+    while i + 1 < STOPS.len() && t > STOPS[i + 1].0 {
+        i += 1;
+    }
+    let (t0, r0, g0, b0) = STOPS[i];
+    let (t1, r1, g1, b1) = STOPS[(i + 1).min(STOPS.len() - 1)];
+    let u = if (t1 - t0).abs() < 1e-3 {
+        0.0
     } else {
-        let t = (u - 0.66) / 0.34;
-        (
-            (240.0 - t * 20.0) as u8,
-            (160.0 - t * 140.0) as u8,
-            (20.0 + t * 20.0) as u8,
-        )
+        ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
     };
-    Color::from_rgba(r, g, b, 120)
+    Color::from_rgba(lerp_u8(r0, r1, u), lerp_u8(g0, g1, u), lerp_u8(b0, b1, u), 135)
 }
 
 /// Dry tan → wet deep blue for ground pore / free-water saturation.
@@ -211,10 +216,9 @@ async fn main() {
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
     let mut organisms_on = true;
-    // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
+    // Humidity diagnostic default on (`H`).
     let mut humidity_overlay = true;
     let mut wind_streaks_overlay = false;
-    let mut clouds_on = true;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
     let mut mycelium_overlay = false;
@@ -449,9 +453,6 @@ async fn main() {
                 settings.on_world_reseed(&scene.params);
                 inspect = None;
             }
-            if is_key_pressed(KeyCode::W) {
-                settings.climatic_rain_on = !settings.climatic_rain_on;
-            }
             if is_key_pressed(KeyCode::C) {
                 settings.cond_rain_on = !settings.cond_rain_on;
             }
@@ -466,9 +467,6 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::V) {
                 wind_streaks_overlay = !wind_streaks_overlay;
-            }
-            if is_key_pressed(KeyCode::N) {
-                clouds_on = !clouds_on;
             }
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
@@ -515,8 +513,19 @@ async fn main() {
         // Sync live settings into scene subsystems.
         scene.wind.climate_vx = settings.wind_vx;
         scene.wind.variance = settings.wind_variance;
+        scene.wind.config = settings.wind;
         let wind_vx = scene.wind.effective_vx(scene.world.tick);
         let wind_vy = scene.wind.effective_vy(scene.world.tick);
+        if scene.world.tick % WIND_FIELD_PERIOD == 0 || scene.wind.field.is_empty() {
+            let occupied: Vec<(i32, i32)> = scene.humidity.cells.keys().copied().collect();
+            scene.wind.rebuild_field(
+                Some(&scene.world),
+                Some(&scene.temperature),
+                scene.world.tick,
+                &occupied,
+                None,
+            );
+        }
         scene.temperature.config = settings.temp;
         scene.temperature.climate = settings.climate;
         settings.apply_pop_caps(&mut scene.organisms);
@@ -551,22 +560,14 @@ async fn main() {
             // rayon. CA physics stays on the Tab toggle (demo dirty plans
             // are too narrow for parallel to win).
             set_parallel_enabled(true);
-            if settings.climatic_rain_on {
-                apply_rain_with_temp(
-                    &mut scene.world,
-                    &settings.rain,
-                    Some(&scene.temperature),
-                    Some(&settings.phase),
-                    Some(&mut scene.humidity),
-                );
-            }
             if settings.evap_on {
+                let evap_wind = scene.wind.near_surface_abs(Some(&scene.world));
                 apply_evaporation_into_humidity_climate(
                     &mut scene.world,
                     &mut scene.humidity,
                     &settings.evap,
                     Some(&scene.temperature),
-                    wind_vx.abs().max(wind_vy.abs()),
+                    evap_wind,
                 );
             }
             // Vapor drifts with the wind, then warm air rises and
@@ -583,11 +584,20 @@ async fn main() {
                 scene.params.sky_ceiling_y,
                 tick_no,
                 &settings.cloud,
-                Some(&scene.temperature),
+                Some(&mut scene.temperature),
                 Some(&settings.phase),
             );
-            // Leftover vapor: liquid drizzle when warm, thin ice frost
-            // when cold. Packed snow still comes from the W faucet.
+            // Surplus the local air cannot hold becomes water here.
+            // The drizzle lottery below is a different gate — a missed
+            // roll must not be how we "solve" a cold snap.
+            precipitate_thermal_surplus(
+                &mut scene.world,
+                &mut scene.humidity,
+                &scene.temperature,
+                Some(&settings.phase),
+            );
+            // Leftover vapor: liquid drizzle when warm; below freeze
+            // the lottery gathers a flake (never liquid rain).
             if settings.cond_rain_on {
                 apply_condensation_rain_phased(
                     &mut scene.world,
@@ -709,7 +719,20 @@ async fn main() {
                 let tick_no = scene.world.tick;
                 scene
                     .temperature
-                    .step(Some(&scene.world), &scene.humidity, tick_no);
+                    .step(
+                        Some(&scene.world),
+                        &scene.humidity,
+                        tick_no,
+                        Some(&scene.wind),
+                    );
+                // Hold just shrank. Dump the surplus now, not next
+                // tick's drizzle lottery.
+                precipitate_thermal_surplus(
+                    &mut scene.world,
+                    &mut scene.humidity,
+                    &scene.temperature,
+                    Some(&settings.phase),
+                );
             }
             // Cold wet-sand / snow / hillside ice spill onto lake ice
             // after the thermal step, then phase may break thin lids.
@@ -828,6 +851,15 @@ async fn main() {
                     }
                     terrain.apply_at(&mut scene.world, gx, gy);
                     terrain.tool = prev_tool;
+                    // Seed crest must not linger in the ridge plates after a
+                    // hill wipe — `ensure` only resamples every 30 ticks.
+                    ridges.invalidate();
+                    scene.temperature.invalidate_props();
+                    scene.geotech.refresh_around(
+                        &scene.world,
+                        gx,
+                        terrain.radius,
+                    );
                     inspect = Some((gx, gy));
                 }
             }
@@ -956,22 +988,18 @@ async fn main() {
         // Atmosphere: sky → far clouds → ridges → mid clouds → active clouds → terrain.
         let phase = &settings.phase;
         let temp = &scene.temperature;
-        let snow_bias = estimate_snow_bias(&scene.clouds, |fx, fy| {
-            let gx = scene.world.wrap_x(fx.round() as i32);
-            let air_y = fy.round() as i32;
-            precip_forms_snow_at_air(temp, gx, air_y, phase)
-        });
+        let snow_bias = estimate_snow_bias(
+            &scene.humidity,
+            temp,
+            phase.freeze_point_c,
+        );
         let sky_weather = sky_weather_for_scene(
             scene.world.tick,
             &settings.climate,
-            &scene.clouds,
             &scene.humidity,
             &scene.temperature,
             &scene.carbon,
             scene.params.width_cols,
-            scene.params.wrap_x,
-            scene.params.sea_level_y,
-            settings.cloud.downpour_mass,
             snow_bias,
         );
         draw_sky(
@@ -1030,31 +1058,6 @@ async fn main() {
             scene.params.width_cols,
         );
 
-        // Soft clouds (N): far echoes → ridges → mid echoes → active parcels + precip.
-        if clouds_on {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Far,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-            );
-        }
-
         // Ridges behind terrain. Skip whenever a sat/temp/myc/geotech
         // heatmap is on — mid/far fills stamp hard horizontal shelves
         // through even a moderate landscape blend (playtest y≈36 line).
@@ -1079,56 +1082,6 @@ async fn main() {
                 scene.params.width_cols,
                 sw,
                 sh,
-            );
-        }
-
-        if clouds_on {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Mid,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-            );
-            draw_clouds(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.world,
-                &scene.wind,
-                scene.world.tick,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.sea_level_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-                settings.cloud.downpour_mass,
-                &settings.atmosphere,
-                scene.params.seed,
-                |fx, fy| {
-                    let gx = scene.world.wrap_x(fx.round() as i32);
-                    let air_y = fy.round() as i32;
-                    precip_forms_snow_at_air(temp, gx, air_y, phase)
-                },
             );
         }
 
@@ -1170,11 +1123,6 @@ async fn main() {
         // demo-sized world. Merging is visually identical (it also removes the
         // sub-pixel seams between stacked cells).
         let bedrock_y = scene.params.bedrock_floor_y;
-        // Porous cells get a single dark pixel — a pore, not a hole. Collected
-        // during the terrain pass (the cell is already in hand) and drawn after,
-        // so the merged runs below are untouched. The fracture tail makes high
-        // pore values rare, so this stays a small list.
-        let mut stipples: Vec<(f32, f32, Color)> = Vec::new();
         let draw_run = |sx: f32, y0: i32, y1: i32, rgb: [u8; 3]| {
             let top = origin_y - (y1 - bedrock_y) as f32 * cell_px - cell_px;
             let h = (y1 - y0 + 1) as f32 * cell_px;
@@ -1244,32 +1192,6 @@ async fn main() {
                                 g = lit[1];
                                 b = lit[2];
                             }
-                            if settings.pore_stipple > 0.0
-                                && crate::palette::shows_pore_stipple(cell, &scene.world.hydro)
-                            {
-                                // Deterministic sub-cell position so a lens reads
-                                // as scattered grain, not a regular grid.
-                                let h = (x as u32)
-                                    .wrapping_mul(0x9E37_79B9)
-                                    .wrapping_add((y as u32).wrapping_mul(0x85EB_CA6B))
-                                    >> 11;
-                                let step = (cell_px / 3.0).max(1.0);
-                                let ox = (h % 3) as f32 * step;
-                                let oy = ((h / 3) % 3) as f32 * step;
-                                let k = settings.pore_stipple
-                                    * crate::palette::pore_bucket(cell) as f32
-                                    / (crate::palette::TINT_LEVELS - 1) as f32;
-                                stipples.push((
-                                    sx + ox,
-                                    sy - cell_px + oy,
-                                    Color::from_rgba(
-                                        (r as f32 * (1.0 - k)) as u8,
-                                        (g as f32 * (1.0 - k)) as u8,
-                                        (b as f32 * (1.0 - k)) as u8,
-                                        terrain_alpha,
-                                    ),
-                                ));
-                            }
                             Some([r, g, b])
                         })
                     };
@@ -1299,11 +1221,6 @@ async fn main() {
                 }
             }
         }
-        // Pore stipple on top of the merged runs.
-        let dot = (cell_px / 3.0).max(1.0);
-        for (px, py, c) in stipples.drain(..) {
-            draw_rectangle(px, py, dot, dot, c);
-        }
 
         // Detached landscape bodies (in-flight rigid pieces).
         for body in &scene.landscape.bodies {
@@ -1329,20 +1246,19 @@ async fn main() {
             }
         }
 
-        // Day sun cast / under-canopy / cloud dim — after terrain, before front vapour.
+        // Day sun cast / under-canopy / vapour dim — after terrain.
         // Night moon cast is drawn after organisms so lee covers bodies.
         if organisms_on && sun_day {
             draw_canopy_air_dim(
                 &scene.world,
                 &scene.organisms,
-                &scene.clouds,
+                &scene.humidity,
                 scene.world.tick,
                 draw_wind_vx,
                 sun_local,
                 celestial_sx,
                 celestial_sy,
                 true,
-                settings.cloud.downpour_mass,
                 &settings.atmosphere,
                 origin_x,
                 origin_y,
@@ -1357,32 +1273,7 @@ async fn main() {
             );
         }
 
-        // Front soft cloud echoes (N) — ahead of land for scale; plants stay readable.
-        if clouds_on {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Front,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-            );
-        }
-
-        // Humidity tile diagnostic (H) — not clouds.
+        // Humidity tile diagnostic (H) — vapour field, not cartoon banks.
         if humidity_overlay {
             draw_haze_and_wind(
                 &scene.humidity,
@@ -1401,21 +1292,37 @@ async fn main() {
             );
         }
         if wind_streaks_overlay {
-            draw_wind_streaks(&scene.wind, scene.world.tick, sw, sh);
+            draw_wind_streaks(
+                &scene.wind,
+                Some(&scene.world),
+                scene.world.tick,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
         }
 
         // Temperature heatmap overlay (blue cold → red hot).
         if temp_overlay && overlay_k > 0.01 {
             let tile_px = scene.temperature.tile_cols as f32 * cell_px;
-            let (t_min, t_max) = scene
-                .temperature
-                .cells
-                .values()
-                .copied()
-                .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
-            let t_min = t_min.min(8.0);
-            let t_max = t_max.max(t_min + 4.0).max(28.0);
-            for (&(hx, hy), &temp_c) in &scene.temperature.cells {
+            let tc = scene.temperature.tile_cols.max(1);
+            let view = view_tile_box(
+                tc,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
+            let paint_temp = |hx: i32, hy: i32, temp_c: f32| {
                 let base_gx = hx * scene.temperature.tile_cols;
                 let base_gy = hy * scene.temperature.tile_cols;
                 for &x_copy in x_copies {
@@ -1433,8 +1340,37 @@ async fn main() {
                         sy,
                         tile_px,
                         tile_px,
-                        scale_color_alpha(temp_overlay_color(temp_c, t_min, t_max), overlay_k),
+                        scale_color_alpha(temp_overlay_color(temp_c), overlay_k),
                     );
+                }
+            };
+            // Filled sky box is ~68k tiles. Probe the camera when it is
+            // smaller — leftover hasher on T, same as H. Sim T still
+            // steps the whole ring.
+            if let Some(view) = view {
+                if view.tile_count() < scene.temperature.cells.len() {
+                    for hy in view.hy_lo..=view.hy_hi {
+                        view.for_each_hx(|hx| {
+                            if let Some(&temp_c) = scene.temperature.cells.get(&(hx, hy)) {
+                                paint_temp(hx, hy, temp_c);
+                            }
+                        });
+                    }
+                } else {
+                    for (&(hx, hy), &temp_c) in &scene.temperature.cells {
+                        if view.contains(hx, hy) {
+                            paint_temp(hx, hy, temp_c);
+                        }
+                    }
+                }
+            } else {
+                let hy0 = y_min_vis.div_euclid(tc) - 1;
+                let hy1 = y_max_vis.div_euclid(tc) + 1;
+                for (&(hx, hy), &temp_c) in &scene.temperature.cells {
+                    if hy < hy0 || hy > hy1 {
+                        continue;
+                    }
+                    paint_temp(hx, hy, temp_c);
                 }
             }
         }
@@ -1464,13 +1400,22 @@ async fn main() {
 
         // Ground saturation heatmap (U): pore fill + free water.
         if sat_overlay && overlay_k > 0.01 {
-            for &x_copy in x_copies {
-                let x_shift = x_copy * scene.params.width_cols;
-                for x in 0..scene.params.width_cols {
-                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
-                    if sx + cell_px < 0.0 || sx > sw {
-                        continue;
-                    }
+            let (xr, xn) = view_cell_x_ranges(
+                origin_x,
+                cell_px,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+            );
+            for i in 0..xn as usize {
+                let (x0, x1) = xr[i];
+                for x in x0..=x1 {
+                    for &x_copy in x_copies {
+                        let sx = origin_x
+                            + (x + x_copy * scene.params.width_cols) as f32 * cell_px;
+                        if sx + cell_px < 0.0 || sx > sw {
+                            continue;
+                        }
                     for y in y_min_vis..y_max_vis {
                         let sy =
                             origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
@@ -1502,19 +1447,29 @@ async fn main() {
                             scale_color_alpha(sat_overlay_color(wet), overlay_k),
                         );
                     }
+                    }
                 }
             }
         }
 
         // Mycelium strain overlay: bright per-network colors by cream intensity.
         if mycelium_overlay && overlay_k > 0.01 {
-            for &x_copy in x_copies {
-                let x_shift = x_copy * scene.params.width_cols;
-                for x in 0..scene.params.width_cols {
-                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
-                    if sx + cell_px < 0.0 || sx > sw {
-                        continue;
-                    }
+            let (xr, xn) = view_cell_x_ranges(
+                origin_x,
+                cell_px,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+            );
+            for i in 0..xn as usize {
+                let (x0, x1) = xr[i];
+                for x in x0..=x1 {
+                    for &x_copy in x_copies {
+                        let sx = origin_x
+                            + (x + x_copy * scene.params.width_cols) as f32 * cell_px;
+                        if sx + cell_px < 0.0 || sx > sw {
+                            continue;
+                        }
                     for y in y_min_vis..y_max_vis {
                         let sy =
                             origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
@@ -1553,12 +1508,20 @@ async fn main() {
                             ),
                         );
                     }
+                    }
                 }
             }
         }
 
         // Geotech overlay: G cycles shear → σᵥ → wet → off.
         if geotech_mode != GeotechOverlayMode::Off && overlay_k > 0.01 {
+            let (gxr, gxn) = view_cell_x_ranges(
+                origin_x,
+                cell_px,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+            );
             match geotech_mode {
                 GeotechOverlayMode::Shear | GeotechOverlayMode::Wetness => {
                     let s_max = match geotech_mode {
@@ -1572,6 +1535,17 @@ async fn main() {
                         _ => 1.0,
                     };
                     for (&(gx, gy), stress) in &scene.geotech.faces {
+                        if gy < y_min_vis || gy >= y_max_vis {
+                            continue;
+                        }
+                        let wx = if scene.params.width_cols > 0 {
+                            gx.rem_euclid(scene.params.width_cols)
+                        } else {
+                            gx
+                        };
+                        if !gx_in_ranges(wx, &gxr, gxn) {
+                            continue;
+                        }
                         let value = match geotech_mode {
                             GeotechOverlayMode::Shear => stress.shear_score,
                             GeotechOverlayMode::Wetness => stress.wetness.max(
@@ -1607,6 +1581,17 @@ async fn main() {
                         .max(4.0);
                     for (&(gx, gy), &sigma) in &scene.geotech.overburden {
                         if sigma <= 0.05 {
+                            continue;
+                        }
+                        if gy < y_min_vis || gy >= y_max_vis {
+                            continue;
+                        }
+                        let wx = if scene.params.width_cols > 0 {
+                            gx.rem_euclid(scene.params.width_cols)
+                        } else {
+                            gx
+                        };
+                        if !gx_in_ranges(wx, &gxr, gxn) {
                             continue;
                         }
                         for &x_copy in x_copies {
@@ -1691,14 +1676,13 @@ async fn main() {
             draw_canopy_air_dim(
                 &scene.world,
                 &scene.organisms,
-                &scene.clouds,
+                &scene.humidity,
                 scene.world.tick,
                 draw_wind_vx,
                 sun_local,
                 celestial_sx,
                 celestial_sy,
                 false,
-                settings.cloud.downpour_mass,
                 &settings.atmosphere,
                 origin_x,
                 origin_y,
@@ -1778,25 +1762,15 @@ async fn main() {
             } else {
                 "night"
             };
-            let rain_tag = if !settings.climatic_rain_on {
-                "off"
-            } else if settings.rain.closed_loop {
-                "on/closed"
-            } else {
-                "on/MINT"
-            };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C drizzle={} evap={} phase={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
                 scene.temperature.mean(),
-                rain_tag,
                 if settings.cond_rain_on { "on" } else { "off" },
                 if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
-                scene.clouds.len(),
-                scene.clouds.visual_mass(),
                 scene.humidity.total_mass(),
                 scene.carbon.atmosphere,
                 scene.carbon.dissolved,
@@ -1814,7 +1788,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
+                "Tab|Space|R|C/E/K/O|I|T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

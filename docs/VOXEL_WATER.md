@@ -65,13 +65,13 @@ Not permeability-limited — this is how a lake bed fills sand, then clay/stone 
 
 Per wet Air cell (compute-then-apply, mass-conserving):
 
-1. **Diagonal-down** into Air with room — dump.
+1. **Diagonal-down** into Air with room — dump. **Surface only** (solid or full water below). Mid-air rain / thawed snow is gravity's job; a 255 cell used to peel `drain_step_cap` (160) off and leave 95 beside it.
 2. **Cascade edge** — side Air whose below is Air with room — dump.
 3. **Same-Y surface equalise**
    - Scan up to 12 standing cells for a cascade outlet; push toward it.
    - Pairwise head-equalise each `+x` standing edge (avoids checkerboard terraces on wide lakes).
 4. **Throughflow** — weep through a saturated porous stack (≤24 deep) at seepage rate into the **nearest opening**: a side Air face (cliff / spring) or Air below the stack.
-5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (`wake_confined_head` — not the dirty halo, so ocean evaporation cannot starve a quiet shaft).
+5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (`wake_confined_head` — not the dirty halo, so ocean evaporation cannot starve a quiet shaft). The wake visits chunks with solid **and** standing water (`has_solid && has_standing_air`), then only the standing-air y band plus one row for the rising film. Dry sky in shore chunks is leftover. Unset bands (old saves) still scan the full rect. Rain-film sky, mid-ocean water with no rock, and groundwater-only crust already reject per-cell. Uncased drizzle on wet ground skips before the free-surface / BFS probes — seepage owns that infiltration; a walled well still rises. Casing is **rock / bedrock** (`is_competent_rock` or Bedrock). Plants, litter, ice, and loose grains do not case a well — a vegetated or sandy film is open ground and must not BFS the aquifer. When no standing-air row is higher than the film, uncased BFS cannot produce a rise (same-row finish needs walls) and is skipped; a 1-wide well at the standing surface may still pull same-row sat. Unset standing bands (old saves) keep the walk. A high tarn still forces the ocean walk — do not skip uncased higher-row rise (large-ocean shafts stall). The equalized-ocean BFS still walks up to the cell cap; it uses FxHash and a reused queue/visited buffer (same rise, leftover SipHash / alloc). Evap refreshes `has_standing_air` and tightens the y band so a drained lake drops out.
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 
@@ -106,6 +106,7 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 Opt-in (wired in `wk-voxel-app` after `tick`, Tab → Grain / sediment):
 
 - Only cells with **flow bias** (cascade lip or clear head drop to a neighbor). Still lakes do not scour.
+- Chunk filter is `has_standing_air` when `min_flow_sat >= STANDING_AIR_SAT` (the default 180). Rain-wet land (`has_wet_air` only) is leftover — drizzle cannot scour. A lower custom `min_flow_sat` keeps the wet-air net.
 - Targets dense [`is_flow_erodible`] grains: Sand / Gravel / Clay / **Soil** / LooseRock / LooseLimestone (`erosion_resistance < 150`). Not Ice / Stone / Snow.
 - **Organic** is contextual: grounded beach litter and waterlogged/sunk mats scour under flow (deposits stay `WATERLOGGED` so they remain bedload). Thick / mycelium-bound floating rafts stay wind-owned. Thin unbound floating film is current-owned: deterministic drift under `flow_bias`, cascade-lip wash, scour, and a post-drift [`shove_floating_organic_with_current`] so mats do not dam free surfaces into comb teeth. Same-Y cascade pull looks past soft floating Organic lids. **Standing water washes through Organic spans** into Air beyond (Organic is a sponge, not a masonry dam). Mycelium felt does not hold vertical cliffs when Organic is wash-wet next to standing water.
 - **Bed scour** under standing water → vacated cell becomes **empty Air** (gravity pulls the column down — no minted water); **bank undercut** → Air (pore sat released).
@@ -217,7 +218,12 @@ while every other seepage component measured 1–3 ms.
 
 It now gates each seam on the sticky `has_wet_pores` / `has_wet_air` chunk
 flags and narrows the band to the local `x` span of columns where water could
-cross. The span predicate is deliberately looser than the per-column test in
+cross. The seepage accumulate walk itself skips a region whose chunk has
+neither flag (dry rock / empty sky still land in the flow halo from gravity
+and body writes). Bootstrap — no flags set yet — keeps every region so a
+legacy save cannot skip a wet chunk. Air cells whose +x / +y faces are
+also Air skip the neighbour loop — a 64×64 pond interior cannot infiltrate
+or weep, and diagonals are pore-only. The span predicate is deliberately looser than the per-column test in
 `wake_vertical_chunk_seam_pores` — both sides able to hold or pass water, one
 of them having some — so it cannot exclude a column the wake would couple.
 Result: 0.45 ms demo, 0.83 ms stress.
@@ -226,6 +232,25 @@ The lake-bed and seam pore wakes were also being called twice per tick: once
 under the seepage cadence, and again unguarded just before the seepage plan.
 Only the later call site matters (its dirty is what the seepage plan consumes),
 so the early copy is gone and the wakes ride the cadence as intended.
+
+`wake_lake_bed_pores` further skips rain-film sky and a quiet saturated
+water table. It walks chunks with standing water or an unsaturated pore
+front (`has_standing_air || has_unsaturated_pores`) and refreshes both
+flags from the same scan. Standing water still walks down into the bed
+in the chunk below, so a full table does not need its own 64×64.
+Mid-ocean / lake interiors (standing water on more water) peek
+chunk-local and skip the pore walk. Standing-only chunks (no
+unsaturated front) then scan only the standing-air y band — dry sky
+in shore / mid-ocean surface chunks is leftover.
+
+`wake_pore_weep_into_air` on buried crust (`!has_open_air`) only checks
+the chunk perimeter — an interior pore cannot face Air. Neighbour reads
+are chunk-local when they stay inside the 64×64. Digging a cavity writes
+Air and raises `has_open_air`, so the next weep is a full scan again.
+
+Deep / seam seepage skips pore↔pore faces that are **both at capacity**
+before the fire-odds roll and head math. Those cannot transfer; Air faces
+(infiltration / weep) still run.
 
 Use `tests/seepage_split_probe.rs` before tuning any of this. The profiler
 lumps five calls into one `seepage` bucket and the bucket cannot say which.
@@ -256,8 +281,11 @@ Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
   That leftover sat is usually below the surface threshold, so it
   feeds the underground path and lets conduits enlarge where water
   already is.
-- Chunks without `has_limestone` and without `has_wet_pores` are
-  skipped. Per-cell porosity/permeability ranges
+- Chunks without `has_soluble` are skipped. That flag is raised on
+  limestone / flowstone / sandstone / conglomerate writes and cleared
+  when a scan finds none left. Rain-soaked sand / soil used to enter
+  via `has_wet_pores` and pay a full-chunk walk with nothing to
+  dissolve. Per-cell porosity/permeability ranges
   ([`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md)) can later
   scale the same contact weight.
 
@@ -275,6 +303,10 @@ Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
 - `confined_head_wake_scans_despite_unrelated_dirty`
 - `confined_head_equalizes_across_large_deep_ocean`
 - `closed_basin_lake_does_not_fountain_upward`
+- `drizzle_film_on_wet_ground_does_not_confined_rise`
+- `plant_sided_film_on_wet_sand_does_not_confined_rise`
+- `sand_sided_film_on_wet_sand_does_not_confined_rise`
+- `a_well_bottomed_in_a_confined_aquifer_rises`
 - `solid_staircase_film_drains_left_into_lower_pool`
 - `lake_bed_sand_wets_clay_and_stone_below_via_tick`
 - `deep_stone_stack_keeps_wetting_after_surface_quiesces`
@@ -315,26 +347,30 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   `apply_grain_fall` (float on full water; drop through empty/haze Air).
   Phase break does **not** melt packs over empty or haze — fall owns those
   seats (melting haze used to fight freeze and pump flakes at the surface).
-- **Snow precip:** climatic rain and condensation call
-  `deposit_precip_on_surface`. **Air temp at precip origin** (`start_y` /
-  cloud height) chooses flake vs drop. Snow that hits **warm ground**
-  melts to liquid; cold air + cold ground → solid `Snow` pack (never
-  pore-soaks). Warm air always rains (ponds may freeze later via phase).
-  Solid seats cost a **full cell** (`min_budget_to_snow` default 255) —
-  thaw always yields `Air+FULL`, so a 64-sat droplet must not mint a
-  Snow cell. Short budget / full blanket → hold mass (`0`).
-- **Condensation drizzle (`C`):** warm → liquid film; cold air on cold
-  ground → thin `Ice` frost / rime (≤ `frost_coat_depth`, default 1;
-  lateral `frost_spread_radius`, default 3), also paid as a full cell
-  from the humidity tile. Never places `Snow` packs or ice towers —
-  climatic rain (`W`) owns packed snow. Tab exposes both frost knobs.
-- **Climatic rain (`W`):** **closed-loop by default** — deposits only what
+- **Snow precip:** condensation (`C`) and the library injector
+  `apply_rain` both call `deposit_precip_on_surface`. **Air temp at
+  precip origin** (`start_y` / tile height) chooses flake vs drop.
+  Snow that hits **warm ground** melts to liquid; cold air + cold
+  ground → solid `Snow` pack (never pore-soaks). Warm air always rains
+  (ponds may freeze later via phase). Solid seats cost a **full cell**
+  (`min_budget_to_snow` default 255) — thaw always yields `Air+FULL`,
+  so a 64-sat droplet must not mint a Snow cell. Short budget / full
+  blanket → hold mass (`0`).
+- **Condensation drizzle (`C`):** the play-app weather. Warm leftover
+  vapour rains a falling drop (`deposit_water_in_air`). Below freeze
+  the lottery gathers a **full-cell snowflake** — never liquid rain.
+  Surface frost / rime on cold ground is a thin `Ice` coat
+  (≤ `frost_coat_depth`, default 1; lateral `frost_spread_radius`,
+  default 3), also paid as a full cell from the humidity tile. Tab
+  exposes both frost knobs. There is no `W` climatic faucet in the
+  play app.
+- **`apply_rain` (library / tests only):** closed-loop column injector
+  kept for scenarios and `RainConfig` serde. Deposits only what
   humidity can pay, and refuses columns already flooded above
-  `sea_level + max_flood_above_sea`. Tab can reopen the legacy open
-  faucet (`closed_loop` off) for experiments; prefer condensation (`C`)
-  for weather. Atmosphere also has a soft per-tile cap
-  (`Humidity::MAX_MASS_PER_TILE`). Cloud parcels are a visual echo
-  only (`CloudConfig::max_parcels`) and are not a second water store.
+  `sea_level + max_flood_above_sea`. The play app does not call it.
+  Atmosphere also has a soft per-tile cap
+  (`Humidity::MAX_MASS_PER_TILE`). There is no cartoon cloud store.
+  `CloudStore` only returns leftover save-file parcel mass to humidity.
   Evap also refuses a near-saturated vapor column
   (`Humidity::column_near_saturated`) and stops entirely when
   `Humidity::atmosphere_overfull` — buoyant rise used to empty the
@@ -353,22 +389,22 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   condensation unable to reach sea-level lakes — looking at the ground
   only made evaporation win faster (higher FPS), which felt like a
   viewport cull.
-- **Cloud / humidity floor:** `cloud_floor_y` clips haze, parcels, and
-  precip streaks to the occupied column top. It starts at the worldgen
-  surface ±64, then climbs while the column is still rock / ice / wet
-  so editor towers above that band (inland ~y 263) still bump the
-  field instead of letting it pass through the stone.
+- **Cloud / humidity floor:** `cloud_floor_y` clips the `H` haze to the
+  occupied column top. It starts at the worldgen surface ±64, then climbs
+  while the column is still rock / ice / wet so editor towers above that
+  band (inland ~y 263) still bump the field instead of letting it pass
+  through the stone. Damp air is not a floor.
 - **Physics-leaning weather (still coarse tiles):** evap rate scales
   with surface temperature, wind, and local humidity deficit (same
   wet-chunk scan). Vapor rises harder when the lapse is unstable
   (warm under cold). Condensation prefers cold / supersaturated tiles
-  and dew when a colder tile sits below. `N` rebuilds a small visual
-  echo from the wettest sky tiles; leftover parcel mass from old saves
-  returns to humidity. Event caps and the atmosphere budget stay in
-  place so this cannot refill the 7 FPS soak.
+  and dew when a colder tile sits below. Leftover parcel mass from old
+  saves returns to humidity. Event caps and the atmosphere budget stay
+  in place so this cannot refill the 7 FPS soak.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
-  the blanket. Climatic rain uses a wider footprint when snowing.
+  the blanket. The library `apply_rain` injector uses a wider footprint
+  when snowing; play-app `C` snow is a full-cell flake in the source tile.
 - **Snow pack:** solid lid, no pore soak. Falls through empty Air; cold
   avalanche can spill onto lake ice (see Grain / cold avalanche sections).
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
@@ -376,7 +412,7 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 - Rate limits: freeze / thaw / slush / break per column per tick.
 - **Max Ice+Snow cells / column** — excess culled to empty Air (not melted).
 
-Cold snap: Tab → Base temp below 0°C (with rain/clouds on). Warm snap: raise
+Cold snap: Tab → Base temp below 0°C (keep `C` drizzle on). Warm snap: raise
 base temp above freeze point.
 
 ## Organisms (brief)

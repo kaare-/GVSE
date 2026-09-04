@@ -177,12 +177,13 @@ fn is_soluble(material: MaterialId) -> bool {
 /// Chunk scans use rayon when [`crate::parallel::parallel_enabled`]
 /// (frame-shell Phase 1).
 ///
-/// Chunks without [`Chunk::has_limestone`] and without
-/// [`Chunk::has_wet_pores`] are skipped. The limestone flag is sticky
-/// on write and cleared here when a scan finds no limestone left
-/// (empty sky / dry stone slabs stay cheap). Wet-pore chunks are
-/// visited so buried saturated stone can dissolve without a limestone
-/// flag.
+/// Chunks without [`Chunk::has_soluble`] are skipped. The flag is
+/// sticky on any soluble write (limestone, flowstone, sandstone,
+/// conglomerate) and cleared here when a scan finds none left. Rain-
+/// soaked sand / soil used to enter via `has_wet_pores` and pay a
+/// full-chunk walk with nothing to dissolve — that is the soak-age
+/// leftover. Buried saturated carbonate still wakes: worldgen writes
+/// raise `has_soluble` the same way they raise `has_limestone`.
 pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
     let period = cfg.period_ticks.max(1);
     if world.tick % period != 0 {
@@ -191,7 +192,7 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_limestone || c.has_wet_pores)
+        .filter(|(_, c)| c.has_soluble)
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
@@ -201,6 +202,7 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
     let per_chunk = map_chunk_coords_parallel(&coords, |coord| {
         let mut converts: Vec<(i32, i32, Cell)> = Vec::new();
         let mut still_lime = false;
+        let mut still_soluble = false;
         for y in 0..CHUNK_CELLS_H {
             let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in 0..CHUNK_CELLS_W {
@@ -210,7 +212,10 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
                 };
                 if cur.material == MaterialId::Limestone {
                     still_lime = true;
-                } else if !is_soluble(cur.material) {
+                }
+                if is_soluble(cur.material) {
+                    still_soluble = true;
+                } else {
                     continue;
                 }
                 let weight = contact_weight(world, gx, gy, cur, cfg);
@@ -249,14 +254,19 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
                 ));
             }
         }
-        (coord, still_lime, converts)
+        (coord, still_lime, still_soluble, converts)
     });
 
     let mut converts = Vec::new();
-    for (coord, still_lime, local) in per_chunk {
-        if !still_lime {
+    for (coord, still_lime, still_soluble, local) in per_chunk {
+        if !still_lime || !still_soluble {
             if let Some(chunk) = world.chunks.get_mut(&coord) {
-                chunk.has_limestone = false;
+                if !still_lime {
+                    chunk.has_limestone = false;
+                }
+                if !still_soluble {
+                    chunk.has_soluble = false;
+                }
             }
         }
         converts.extend(local);

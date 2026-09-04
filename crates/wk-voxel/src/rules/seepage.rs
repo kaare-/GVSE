@@ -8,15 +8,16 @@ use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::ActiveChunk;
 use crate::cell::{permeability_cell, water_capacity_cell, Cell, Sat};
-use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W, STANDING_AIR_SAT};
+use crate::fasthash::FxHashSet;
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
-    is_porous_cell, sat_move_to_equalize_heads, seepage_conduct_rate_cells, seepage_rate_cell,
-    seepage_fire_odds_cell, seepage_uptake_rate_cell,
+    is_porous_cell, sat_move_to_equalize_heads, seepage_conduct_rate_cells, seepage_fire_odds_cell,
+    seepage_rate_cell, seepage_uptake_rate_cell,
 };
-use super::plan::{regions_for_standalone, regions_wet_loaded};
+use super::plan::{regions_for_standalone, regions_lake_bed_loaded};
 
 /// Odds a *full* throughput through limestone opens the aperture one step.
 ///
@@ -77,22 +78,49 @@ fn touch_downward_pore_front(
 /// wetter-pore neighbour so seepage / gravity keep infiltrating.
 ///
 /// Runs every tick: cost is only the wet-chunk scan, and once beds are
-/// saturated the touch set is empty (steady lakes stay quiet).
+/// saturated the touch set is empty (steady lakes stay quiet). Standing
+/// water without an unsaturated front uses the standing-air y band so
+/// dry sky in shore / mid-ocean surface chunks is leftover.
 ///
 /// Also walks **down from standing wet Air** so beds that live in the
 /// chunk below (y=63 under water at y=64) are woken — `has_wet_air` alone
 /// never visits that dry cy-1 chunk.
 pub fn wake_lake_bed_pores(world: &mut World) {
     let hydro = world.hydro;
-    let regions = regions_wet_loaded(world);
+    let regions = regions_lake_bed_loaded(world);
     let mut touches: Vec<(i32, i32)> = Vec::new();
+    let mut standing_updates: Vec<(ChunkCoord, bool)> = Vec::new();
+    let mut unsat_updates: Vec<(ChunkCoord, bool)> = Vec::new();
     for ac in &regions {
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             continue;
         };
         let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
         let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
-        for y in ac.rect.y0..=ac.rect.y1 {
+        let mut any_standing = false;
+        let mut any_unsat = false;
+        // Quiet standing-only chunks: dry sky / buried rock is leftover.
+        // Unsaturated pores can sit anywhere, so those chunks keep the
+        // full rect. The downward walk from standing still reaches the
+        // bed in the chunk below.
+        let (scan_y0, scan_y1, standing_only) = if !chunk.has_unsaturated_pores {
+            match chunk.standing_band_y(ac.rect) {
+                Some((lo, hi)) => (lo, hi, true),
+                None => (ac.rect.y0, ac.rect.y1, false),
+            }
+        } else {
+            (ac.rect.y0, ac.rect.y1, false)
+        };
+        let cw = CHUNK_CELLS_W as i32;
+        let ch = CHUNK_CELLS_H as i32;
+        let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {
+            if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+                Some(chunk.get(lx as usize, ly as usize))
+            } else {
+                world.get_cell(gx, gy)
+            }
+        };
+        for y in scan_y0..=scan_y1 {
             let ly = y as usize;
             let gy = base_gy + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
@@ -106,28 +134,51 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 // unsaturated cell (the wetting front). Walking through dry
                 // cells marked the whole crust dirty and looked like
                 // groundwater "teleporting" under a dry gap.
-                if cell.material == MaterialId::Air && cell.sat.0 >= 160 {
-                    let mut yy = gy - 1;
-                    for _ in 0..(CHUNK_CELLS_H * 2) {
-                        let Some(below) = world.get_cell(gx, yy) else {
-                            break;
-                        };
-                        if !is_porous_cell(below, &hydro) {
-                            break;
+                if cell.material == MaterialId::Air && cell.sat.0 >= STANDING_AIR_SAT {
+                    any_standing = true;
+                    // Mid-ocean / lake interior: below is more water, not a
+                    // bed. One chunk-local peek replaces a get_cell walk.
+                    let below = if ly > 0 {
+                        Some(chunk.get(lx, ly - 1))
+                    } else {
+                        world.get_cell(gx, gy - 1)
+                    };
+                    if let Some(below) = below {
+                        if is_porous_cell(below, &hydro) {
+                            let cap = water_capacity_cell(below, &hydro);
+                            if cap > 0 && below.sat.0 < cap {
+                                touches.push((gx, gy - 1));
+                            } else if cap > 0 {
+                                let mut yy = gy - 2;
+                                for _ in 0..(CHUNK_CELLS_H * 2) {
+                                    let Some(b) = world.get_cell(gx, yy) else {
+                                        break;
+                                    };
+                                    if !is_porous_cell(b, &hydro) {
+                                        break;
+                                    }
+                                    let cap = water_capacity_cell(b, &hydro);
+                                    if cap == 0 {
+                                        break;
+                                    }
+                                    if b.sat.0 < cap {
+                                        touches.push((gx, yy));
+                                        break;
+                                    }
+                                    yy -= 1;
+                                }
+                            }
                         }
-                        let cap = water_capacity_cell(below, &hydro);
-                        if cap == 0 {
-                            break;
-                        }
-                        if below.sat.0 < cap {
-                            touches.push((gx, yy));
-                            break;
-                        }
-                        yy -= 1;
                     }
                     for dx in [-1_i32, 1] {
+                        let nlx = lx as i32 + dx;
                         let nx = world.wrap_x(gx + dx);
-                        if let Some(n) = world.get_cell(nx, gy) {
+                        let n = if nlx >= 0 && nlx < CHUNK_CELLS_W as i32 {
+                            Some(chunk.get(nlx as usize, ly))
+                        } else {
+                            world.get_cell(nx, gy)
+                        };
+                        if let Some(n) = n {
                             if is_porous_cell(n, &hydro) {
                                 let cap = water_capacity_cell(n, &hydro);
                                 if cap > 0 && n.sat.0 < cap {
@@ -142,16 +193,20 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     continue;
                 }
                 let cap = water_capacity_cell(cell, &hydro);
-                if cap == 0 || cell.sat.0 >= cap {
+                if cap == 0 {
+                    continue;
+                }
+                if cell.sat.0 < cap {
+                    any_unsat = true;
+                }
+                if cell.sat.0 >= cap {
                     continue;
                 }
                 let mut feed = false;
-                if let Some(above) = world.get_cell(gx, gy + 1) {
+                if let Some(above) = read(x as i32, y as i32 + 1, gx, gy + 1) {
                     if above.material == MaterialId::Air && above.sat.0 >= 160 {
                         feed = true;
-                    } else if is_porous_cell(above, &hydro)
-                        && above.sat.0 > cell.sat.0
-                    {
+                    } else if is_porous_cell(above, &hydro) && above.sat.0 > cell.sat.0 {
                         feed = true;
                     }
                 }
@@ -159,7 +214,7 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     for dx in [-1_i32, 1] {
                         let nx = world.wrap_x(gx + dx);
                         if matches!(
-                            world.get_cell(nx, gy),
+                            read(x as i32 + dx, y as i32, nx, gy),
                             Some(n) if n.material == MaterialId::Air && n.sat.0 >= 160
                         ) {
                             feed = true;
@@ -177,6 +232,26 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     }
                 }
             }
+        }
+        standing_updates.push((ac.coord, any_standing));
+        if !standing_only {
+            unsat_updates.push((ac.coord, any_unsat));
+        }
+    }
+    for (coord, any_standing) in standing_updates {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            if any_standing {
+                chunk.has_standing_air = true;
+            } else {
+                // Partial-rect scan: do not shrink the y band. Only
+                // clear when this walk saw no standing water at all.
+                chunk.clear_standing_air();
+            }
+        }
+    }
+    for (coord, any_unsat) in unsat_updates {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_unsaturated_pores = any_unsat;
         }
     }
     for (gx, gy) in touches {
@@ -197,6 +272,13 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
     let cw = CHUNK_CELLS_W as i32;
     let mut touches: Vec<(i32, i32)> = Vec::new();
     let coords: Vec<_> = world.chunks.keys().copied().collect();
+    // Bootstrap: a legacy save with no occupancy stamps must still
+    // walk every seam. Once any chunk is flagged, dry/dry pairs are
+    // leftover — same gate as [`seam_coupled_span`] / contact seepage.
+    let any_water = world
+        .chunks
+        .values()
+        .any(|c| c.has_wet_air || c.has_wet_pores);
     for coord in coords {
         let above = ChunkCoord::new(coord.cx, coord.cy + 1);
         if !world.chunks.contains_key(&above) {
@@ -214,6 +296,17 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         let Some(hi_chunk) = world.chunks.get(&above) else {
             continue;
         };
+        // Same occupancy as [`seam_coupled_span`]: a dry/dry pair has
+        // nothing to couple. Walking every loaded cy pair was leftover
+        // on a tall sky (272 chunks, most seams empty).
+        if any_water
+            && !lo_chunk.has_wet_pores
+            && !lo_chunk.has_wet_air
+            && !hi_chunk.has_wet_pores
+            && !hi_chunk.has_wet_air
+        {
+            continue;
+        }
         for lx in 0..cw {
             let gx = world.wrap_x(base_gx + lx);
             let lo = lo_chunk.get(lx as usize, (ch - 1) as usize);
@@ -243,8 +336,20 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
                 if yy < 0 {
                     continue;
                 }
-                let Some(c) = world.get_cell(gx, yy) else {
-                    continue;
+                // The four seam rows live in these two chunks.
+                let c = if yy == y_lo {
+                    lo_chunk.get(lx as usize, (ch - 1) as usize)
+                } else if yy == y_lo - 1 && ch >= 2 {
+                    lo_chunk.get(lx as usize, (ch - 2) as usize)
+                } else if yy == y_hi {
+                    hi_chunk.get(lx as usize, 0)
+                } else if yy == y_hi + 1 && ch >= 2 {
+                    hi_chunk.get(lx as usize, 1)
+                } else {
+                    match world.get_cell(gx, yy) {
+                        Some(c) => c,
+                        None => continue,
+                    }
                 };
                 if is_porous_cell(c, &hydro) {
                     let cap = water_capacity_cell(c, &hydro);
@@ -315,9 +420,14 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
     }
     let mut out: Vec<ActiveChunk> = map
         .into_iter()
-        .map(|(coord, rect)| ActiveChunk { coord, rect })
+        .map(|(coord, rect)| ActiveChunk::new(coord, rect))
         .collect();
-    out.sort_by(|a, b| a.coord.cy.cmp(&b.coord.cy).then(a.coord.cx.cmp(&b.coord.cx)));
+    out.sort_by(|a, b| {
+        a.coord
+            .cy
+            .cmp(&b.coord.cy)
+            .then(a.coord.cx.cmp(&b.coord.cx))
+    });
     out
 }
 
@@ -343,11 +453,7 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
 ///
 /// Deterministic: the amount ordering is total, and destination breaks ties.
 fn serve_best_faces_first(xfers: &mut [((i32, i32), (i32, i32), i32)]) {
-    xfers.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then(b.2.cmp(&a.2))
-            .then(a.1.cmp(&b.1))
-    });
+    xfers.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)).then(a.1.cmp(&b.1)));
 }
 
 /// Local `x` span of the columns where water could actually cross this seam,
@@ -490,11 +596,7 @@ pub fn apply_seepage_contact_regions(world: &mut World, active: &[ActiveChunk]) 
     apply_seepage_regions_ex(world, active, true)
 }
 
-pub fn apply_seepage_regions_ex(
-    world: &mut World,
-    active: &[ActiveChunk],
-    contact_only: bool,
-) {
+pub fn apply_seepage_regions_ex(world: &mut World, active: &[ActiveChunk], contact_only: bool) {
     if active.is_empty() {
         return;
     }
@@ -502,8 +604,14 @@ pub fn apply_seepage_regions_ex(
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_seepage_xfers_ex(world, active, &mut xfers, contact_only);
     // Nothing dissolved anywhere means load transport and precipitation have
-    // nothing to do; checked once rather than per transfer.
-    let track_load = !world.dissolved.is_empty();
+    // nothing to do. Snapshot keys once into FxHash: after karst the map
+    // stays non-empty, and most seepage sources still carry nothing.
+    // SipHash contains on every transfer was leftover as `diss` grows.
+    let mut loaded: FxHashSet<(i32, i32)> = if world.dissolved.is_empty() {
+        FxHashSet::default()
+    } else {
+        world.dissolved.keys().copied().collect()
+    };
 
     // Apply in a stable order. Each transfer re-reads live sat so a
     // source drained by an earlier xfer simply sends less — every
@@ -545,7 +653,7 @@ pub fn apply_seepage_regions_ex(
         // hot path, and the checks the loop already has in hand (is there any
         // load at all, is the receiver even soluble) skip the common case
         // without a map lookup or a cell re-read.
-        if track_load && crate::mineral::dissolved_at(world, from.0, from.1) > 0 {
+        if !loaded.is_empty() && loaded.contains(&(from.0, from.1)) {
             // Dissolved mineral travels with the water that carries it, so karst
             // load reaches an outlet instead of sitting where the rock dissolved.
             crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
@@ -553,11 +661,16 @@ pub fn apply_seepage_regions_ex(
             // back into the pore space. A conduit that keeps flowing stays open;
             // one that stalls or concentrates seals itself with flowstone.
             crate::mineral::precipitate_at(world, to.0, to.1);
+            // Later xfers in this apply must see the load that just arrived.
+            loaded.insert((to.0, to.1));
         }
         // Throughput widens the aperture it passed through. This is what turns
         // a preferential path into a conduit: more flow opens the rock, opener
-        // rock carries more flow.
-        if crate::mineral::is_soluble_rock(dst.material) {
+        // rock carries more flow. Below the yield threshold the call is a
+        // no-op — skip the cell re-read.
+        if amt as u8 > crate::mineral::APERTURE_MIN_THROUGHPUT
+            && crate::mineral::is_soluble_rock(dst.material)
+        {
             crate::mineral::widen_aperture(
                 world,
                 to.0,
@@ -595,12 +708,25 @@ fn accumulate_seepage_xfers_ex(
     let hydro = world.hydro;
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
+    // Sticky occupancy: a chunk that has never held wet Air or a wet
+    // pore has no face that can move water. The flow halo still includes
+    // dry rock / empty sky from gravity and body writes; walking those
+    // was the leftover seepage cost on a tall world. Bootstrap (no flags
+    // set yet) keeps every region so a legacy save cannot skip a wet
+    // chunk whose flags were never stamped.
+    let any_water = world
+        .chunks
+        .values()
+        .any(|c| c.has_wet_air || c.has_wet_pores);
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         // Chunk-local reads — same pattern as water_flow (~10× vs HashMap).
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             return local;
         };
+        if any_water && !chunk.has_wet_air && !chunk.has_wet_pores {
+            return local;
+        }
         let base_gx = ac.coord.cx * cw;
         let base_gy = ac.coord.cy * ch;
         let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {
@@ -610,18 +736,46 @@ fn accumulate_seepage_xfers_ex(
                 world.get_cell(gx, gy)
             }
         };
-        for y in ac.rect.y0..=ac.rect.y1 {
+        ac.for_each_cell(|x, y| {
             let ly = y as i32;
             let gy = base_gy + ly;
-            for x in ac.rect.x0..=ac.rect.x1 {
-                let lx = x as i32;
-                let gx = world.wrap_x(base_gx + lx);
-                let a = chunk.get(x as usize, y as usize);
-                let cap_a = water_capacity_cell(a, &hydro);
-                if cap_a == 0 {
-                    continue;
+            let lx = x as i32;
+            let gx = world.wrap_x(base_gx + lx);
+            let a = chunk.get(x as usize, y as usize);
+            let cap_a = water_capacity_cell(a, &hydro);
+            if cap_a == 0 {
+                return;
+            }
+            let a_solid = is_porous_cell(a, &hydro);
+            // Lake / rain interior: Air whose +x / +y faces are also Air
+            // cannot infiltrate or weep. Diagonals are pore-only. Skip
+            // before the neighbour loop so a 64×64 pond does not pay
+            // head math on every cell.
+            if !a_solid {
+                let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                let up = read(lx, ly + 1, gx, gy + 1);
+                let airish = |c: Option<Cell>| match c {
+                    Some(n) => n.material == MaterialId::Air && !is_porous_cell(n, &hydro),
+                    None => true,
+                };
+                if airish(right) && airish(up) {
+                    return;
                 }
-                let a_solid = is_porous_cell(a, &hydro);
+            }
+            // Contact pass is Air ↔ pore only. A dry pore cannot weep,
+            // and infiltration from −x / −y is owned by those cells.
+            // Rain-wet halos are full of dry sand that paid head math
+            // for faces it does not own (leftover every tick).
+            if contact_only && a_solid && a.sat.0 == 0 {
+                let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                let up = read(lx, ly + 1, gx, gy + 1);
+                let drinks = |c: Option<Cell>| {
+                    matches!(c, Some(n) if n.material == MaterialId::Air && n.sat.0 > 0)
+                };
+                if !drinks(right) && !drinks(up) {
+                    return;
+                }
+            }
                 // Air–Air / impermeable–impermeable edges are no-ops —
                 // check materials before head math. Dominates rainy
                 // ocean shore halos.
@@ -648,6 +802,16 @@ fn accumulate_seepage_xfers_ex(
                     // Contact pass: only the surface interface, not the slow
                     // percolation between two buried pores.
                     if contact_only && a_solid && b_solid {
+                        continue;
+                    }
+                    let cap_b = water_capacity_cell(b, &hydro);
+                    if cap_b == 0 {
+                        continue;
+                    }
+                    // Quiet saturated table: both pores full → no room
+                    // either way. Skip before the fire-odds roll and head
+                    // math. Air faces still run (infiltration / weep).
+                    if a_solid && b_solid && a.sat.0 >= cap_a && b.sat.0 >= cap_b {
                         continue;
                     }
                     // Diagonals only carry pore↔pore conduction, which is the
@@ -684,10 +848,6 @@ fn accumulate_seepage_xfers_ex(
                                 continue;
                             }
                         }
-                    }
-                    let cap_b = water_capacity_cell(b, &hydro);
-                    if cap_b == 0 {
-                        continue;
                     }
                     let mut move_amt = sat_move_to_equalize_heads(
                         a.sat.0, cap_a, gy, b.sat.0, cap_b, ny,
@@ -885,8 +1045,7 @@ fn accumulate_seepage_xfers_ex(
                         local.push(((nx, ny), (gx, gy), (-move_amt).min(rate)));
                     }
                 }
-            }
-        }
+        });
         local
     });
     for mut v in local {
@@ -986,26 +1145,49 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
     let cw = CHUNK_CELLS_W as i32;
     let mut touches: Vec<(i32, i32)> = Vec::new();
     let mut clear_pores: Vec<ChunkCoord> = Vec::new();
+    let mut air_updates: Vec<(ChunkCoord, bool)> = Vec::new();
+    let mut unsat_updates: Vec<(ChunkCoord, bool)> = Vec::new();
     const DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-    for (&coord, chunk) in &world.chunks {
-        // A chunk that has never held a wet permeable solid has no donor face,
-        // so the whole 64×64 scan below can only fail. Every other wake pass
-        // filters on a sticky flag; this one walked every loaded cell (~786 k
-        // on the stress world) on each seepage cadence.
-        if !chunk.has_wet_pores {
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_wet_pores)
+        .map(|(&coord, _)| coord)
+        .collect();
+    for coord in coords {
+        let Some(chunk) = world.chunks.get(&coord) else {
             continue;
-        }
+        };
+        // Buried crust (no Air at all) can only weep on the perimeter —
+        // an interior pore cannot face Air. Surface / cavity chunks keep
+        // the full scan. Neighbour reads stay chunk-local when they can.
+        let open_air = chunk.has_open_air;
         let base_gx = coord.cx * cw;
         let base_gy = coord.cy * ch;
         let mut still_wet = false;
+        let mut any_air = false;
+        let mut any_unsat = false;
         for y in 0..CHUNK_CELLS_H {
             for x in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(x, y);
-                if !is_porous_cell(cell, &hydro) {
+                if cell.material == MaterialId::Air {
+                    any_air = true;
+                }
+                if is_porous_cell(cell, &hydro) {
+                    if cell.sat.0 > 0 {
+                        still_wet = true;
+                    }
+                    let cap = water_capacity_cell(cell, &hydro);
+                    if cap > 0 && cell.sat.0 < cap {
+                        any_unsat = true;
+                    }
+                }
+                if !open_air && x != 0 && x + 1 != CHUNK_CELLS_W && y != 0 && y + 1 != CHUNK_CELLS_H
+                {
                     continue;
                 }
-                if cell.sat.0 > 0 {
-                    still_wet = true;
+                if !is_porous_cell(cell, &hydro) {
+                    continue;
                 }
                 let cap = water_capacity_cell(cell, &hydro);
                 // Need a meaningful donor — residual film only skipped.
@@ -1016,9 +1198,16 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
                 let gy = base_gy + y as i32;
                 let mut face = false;
                 for (dx, dy) in DIRS {
+                    let lx = x as i32 + dx;
+                    let ly = y as i32 + dy;
                     let nx = world.wrap_x(gx + dx);
                     let ny = gy + dy;
-                    let Some(n) = world.get_cell(nx, ny) else {
+                    let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+                        Some(chunk.get(lx as usize, ly as usize))
+                    } else {
+                        world.get_cell(nx, ny)
+                    };
+                    let Some(n) = n else {
                         continue;
                     };
                     if n.material == MaterialId::Air && !n.sat.is_full() {
@@ -1031,9 +1220,16 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
                     // Recharge halo: wake wet pore neighbours so the
                     // aquifer can keep feeding the spring face.
                     for (dx, dy) in DIRS {
+                        let lx = x as i32 + dx;
+                        let ly = y as i32 + dy;
                         let nx = world.wrap_x(gx + dx);
                         let ny = gy + dy;
-                        let Some(n) = world.get_cell(nx, ny) else {
+                        let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+                            Some(chunk.get(lx as usize, ly as usize))
+                        } else {
+                            world.get_cell(nx, ny)
+                        };
+                        let Some(n) = n else {
                             continue;
                         };
                         if is_porous_cell(n, &hydro) && n.sat.0 > 0 {
@@ -1046,6 +1242,8 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         if !still_wet {
             clear_pores.push(coord);
         }
+        air_updates.push((coord, any_air));
+        unsat_updates.push((coord, any_unsat));
     }
     for (gx, gy) in touches {
         world.touch_dirty(gx, gy);
@@ -1053,6 +1251,16 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
     for coord in clear_pores {
         if let Some(chunk) = world.chunks.get_mut(&coord) {
             chunk.has_wet_pores = false;
+        }
+    }
+    for (coord, any_air) in air_updates {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_open_air = any_air;
+        }
+    }
+    for (coord, any_unsat) in unsat_updates {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_unsaturated_pores = any_unsat;
         }
     }
 }
@@ -1083,7 +1291,10 @@ mod tests {
         // Order of arrival must not matter.
         let mut other = vec![(donor, strong, 30), (donor, weak, 2)];
         serve_best_faces_first(&mut other);
-        assert_eq!(other, xfers, "allocation must not depend on insertion order");
+        assert_eq!(
+            other, xfers,
+            "allocation must not depend on insertion order"
+        );
     }
 
     #[test]

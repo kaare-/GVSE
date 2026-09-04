@@ -361,10 +361,7 @@ fn regions_for_failure(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 

@@ -50,6 +50,8 @@ pub struct PhysicsTimings {
     pub substeps_ran: u64,
     pub active_regions: u64,
     pub active_area: u64,
+    /// AABB cells of the same plan (old dirty-rect metric).
+    pub active_aabb: u64,
     /// Ticks that took the deep ([`GRAIN_SETTLE_PASSES`]) settle path.
     pub deep_settle_ticks: u64,
     /// Ticks where [`super::grain::punch_through_floating_rafts`] moved mass.
@@ -88,6 +90,7 @@ impl PhysicsTimings {
         self.substeps_ran += other.substeps_ran;
         self.active_regions += other.active_regions;
         self.active_area += other.active_area;
+        self.active_aabb += other.active_aabb;
         self.deep_settle_ticks += other.deep_settle_ticks;
         self.punch_hits += other.punch_hits;
     }
@@ -110,9 +113,10 @@ pub const FLOW_SUBSTEPS_MIN: usize = 8;
 /// abort used to stutter runnels (4 hops, pause a tick, 4 hops) and
 /// also let open basins keep enough substeps to soak their beds.
 pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
-/// If the planned dirty area (cells) drops to this or below after
+/// If the planned dirty **AABB** (cells) drops to this or below after
 /// [`FLOW_SUBSTEPS_EO_AFTER`], stop the flow loop early — settled films
-/// don't need the full ×8. Busy rain / cascades stay at max.
+/// don't need the full ×8. Busy rain / cascades stay at max. The bit
+/// work-set can be smaller than this on a wide ramp; EO must not use it.
 pub const FLOW_QUIET_AREA: usize = 512;
 /// Interactive confined on the last flow halo is only for first-cell well
 /// rise. Condensation fattens dirty rects into chunk-scale boxes; walking
@@ -186,14 +190,11 @@ impl PerfConfig {
 }
 
 fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
-    active
-        .iter()
-        .map(|a| {
-            let w = (a.rect.x1 as usize).saturating_sub(a.rect.x0 as usize) + 1;
-            let h = (a.rect.y1 as usize).saturating_sub(a.rect.y0 as usize) + 1;
-            w.saturating_mul(h)
-        })
-        .sum()
+    active.iter().map(|a| a.cell_count()).sum()
+}
+
+fn active_aabb_area(active: &[crate::active::ActiveChunk]) -> usize {
+    active.iter().map(|a| a.aabb_area()).sum()
 }
 
 /// Keep only active regions whose chunk sticky-flag says loose material
@@ -353,24 +354,36 @@ fn merge_active_regions(
     b: Vec<crate::active::ActiveChunk>,
 ) -> Vec<crate::active::ActiveChunk> {
     use crate::active::ActiveChunk;
-    use crate::chunk::{ChunkCoord, Rect};
+    use crate::chunk::{ChunkCoord, DirtyBits, Rect};
     use crate::fasthash::FxHashMap;
-    let mut map: FxHashMap<ChunkCoord, Rect> = FxHashMap::default();
+    let mut map: FxHashMap<ChunkCoord, (Rect, DirtyBits, bool)> = FxHashMap::default();
     for ac in a.into_iter().chain(b) {
         map.entry(ac.coord)
-            .and_modify(|r| {
+            .and_modify(|(r, bits, dense)| {
                 *r = Rect {
                     x0: r.x0.min(ac.rect.x0),
                     y0: r.y0.min(ac.rect.y0),
                     x1: r.x1.max(ac.rect.x1),
                     y1: r.y1.max(ac.rect.y1),
                 };
+                if ac.is_dense() || *dense {
+                    *dense = true;
+                    *bits = DirtyBits::empty();
+                } else {
+                    bits.or_assign(ac.bits);
+                }
             })
-            .or_insert(ac.rect);
+            .or_insert((ac.rect, ac.bits, ac.is_dense()));
     }
     let mut out: Vec<ActiveChunk> = map
         .into_iter()
-        .map(|(coord, rect)| ActiveChunk { coord, rect })
+        .map(|(coord, (rect, bits, dense))| {
+            if dense {
+                ActiveChunk::new(coord, rect)
+            } else {
+                ActiveChunk::with_bits(coord, rect, bits)
+            }
+        })
         .collect();
     out.sort_by(|x, y| x.coord.cy.cmp(&y.coord.cy).then(x.coord.cx.cmp(&y.coord.cx)));
     out
@@ -450,6 +463,7 @@ fn tick_with_life_inner(
             local.substeps_ran += 1;
             local.active_regions += active.len() as u64;
             local.active_area += active_cell_area(&active) as u64;
+            local.active_aabb += active_aabb_area(&active) as u64;
         }
         flow_halo = active.clone();
         let passes = partition_checkerboard(&active);
@@ -485,9 +499,12 @@ fn tick_with_life_inner(
         // dirty written by this substep — a *tiny* halo means remaining
         // substeps are polish. Do **not** exit because a large halo is
         // steady (hillside jelly) or merely shrinking (stream stutter).
+        // Use the AABB, not the bit work-set: a wide ramp can have few
+        // dirty cells and still need the full cascade (bit-count EO
+        // parked mid-slope at 4 substeps).
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_EO_AFTER {
             let next = plan_active(world);
-            let next_area = active_cell_area(&next);
+            let next_area = active_aabb_area(&next);
             if next.is_empty() || next_area <= FLOW_QUIET_AREA {
                 break;
             }
@@ -677,6 +694,12 @@ fn tick_with_life_inner(
     }
     mass_checkpoint!("grain settle");
 
+    // Snow is not "unsupported grain" for deep settle. One cheap
+    // downward roll here so a shower still leaves the sky.
+    if world.chunks.values().any(|c| c.has_snow) {
+        let _ = super::grain::apply_airborne_snow_fall(world);
+    }
+
     // Dense cargo cannot ride floating Organic/Snow/Ice. Skip the full
     // loose punch scan when wake saw no raft cargo (demo: 0/200 hits but
     // still ~0.19 ms empty scan). Full wake every 16 still finds cargo
@@ -723,13 +746,12 @@ fn tick_with_life_inner(
         if world.tick % GRAIN_WAKE_EVERY == 0 {
             super::competent_fall::wake_floating_competent(world);
             let dirty = plan_active(world);
-            let coords: Vec<_> = if dirty.is_empty() {
-                flow_active.iter().map(|ac| ac.coord).collect()
+            if dirty.is_empty() {
+                if !flow_active.is_empty() {
+                    super::competent_fall::wake_competent_bodies_regions(world, &flow_active);
+                }
             } else {
-                dirty.iter().map(|ac| ac.coord).collect()
-            };
-            if !coords.is_empty() {
-                super::competent_fall::wake_competent_bodies(world, &coords);
+                super::competent_fall::wake_competent_bodies_regions(world, &dirty);
             }
         }
         // Bodies in flight re-dirty themselves every tick (cheap, O(moves)),
@@ -744,11 +766,15 @@ fn tick_with_life_inner(
             );
         if !body_active.is_empty() {
             let t0 = profile.then(Instant::now);
-            let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+            // Interactive default is quiet-early-out. Pairing FPS topology
+            // on `flow_every_other_substep` left the play path on six
+            // rebuilds; fall distance is split across the pass count so
+            // this does not change terminal velocity.
+            let fps_path = perf.flow_quiet_early_out;
             let competent_cfg = competent
                 .copied()
                 .unwrap_or_else(super::competent_fall::CompetentFallConfig::default);
-            let _ = super::competent_fall::apply_competent_fall_regions(
+            let _ = super::competent_fall::apply_competent_fall_wake(
                 world,
                 &body_active,
                 &competent_cfg,

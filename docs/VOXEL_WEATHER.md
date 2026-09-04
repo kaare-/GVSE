@@ -53,22 +53,73 @@ The atmosphere holds 44% less water because rain now lands and drains it. The
 0.7 ms is falling rain's churn, and it is affordable because rain is **sparse** —
 only columns under raining tiles activate.
 
-`CloudParcel::raining` is now only a HUD readout; nothing draws from it.
-
-**`nimbus` is the parcel *count*, not a rain count** — "how many N echo parcels
-are drawn (cap ~36)". It sits pinned at 36 because banding puts one parcel in
-each of 36 bands, so any moist sky fills them all. It is not a weather signal and
-was misread as one for several rounds. Use `hum` (total humidity mass) as the
-dial instead: it fell from 183k to 95k in playtest once rain started landing.
+The N cartoon-bank overlay is **deleted**. `CloudStore` only dumps leftover
+save-file parcel mass into humidity and runs buoyant rise. Shade, sky cover,
+and the vapour look come from the humidity field (`H`). Use `hum` (total
+humidity mass) as the sky-water dial.
 
 ### Pinned: wind streak overlay needs a real visual
 
-*Needs work.* The old `H` hairlines (1-px screen strokes drifting with
-`wind.effective_vx`) did not read speed or direction — they just speckled
-the humidity field. They now live on their own layer (`V`, default off,
-[`draw_wind_streaks`](../crates/wk-voxel-app/src/atmosphere.rs)). Replace
-with something that shows heading and force without looking like field
-noise (arrow field, lee streamlines, or a HUD needle — TBD).
+`V` draws a coarse lattice of short world-space arrows from the local
+wind heatmap (every 2nd tile, every 3rd when zoomed out). Direction is
+unit-length; length/alpha encode speed with a floor so the Tab default
+(~0.05 tiles/tick, weaker near the ground) still reads. The sim field
+is unchanged. Default off. Humidity haze no longer uses a global
+`sea_level + 4` cut — the per-column live floor clips buried cells.
+
+### Pinned: do not coarsen off-screen sim sky
+
+Terrain already frustum-culls. `H` / `V` skip **paint** (resample,
+floor walks, drop-top scans) for tiles / chunks that cannot touch the
+viewport. Seat collection probes the camera tile box when it is
+smaller than the vapour map, so a soaked sky does not walk every
+humidity key to draw a shore strip. Drop-top scans also skip chunks
+whose 64-high band sits entirely below the camera (shafts only go
+down). `T` probes the same tile box (the filled T map is ~68k tiles).
+`U` / `M` / `G` scan only visible world-x columns. That is leftover
+draw as `hum n` fills. Not a quadtree — chunks, occupancy flags, and
+a camera AABB already name the seats.
+
+Coarsening **advect / wind / condensation / temperature** off-camera
+would change weather: the world is a ring, vapour wraps, and panning
+must find the same mass that ran at full rate while it was off-screen.
+A quadtree over the sky would coarsen those same fields. Parked.
+Draw leftover only.
+
+### Pinned: time-coarsen quiet CA, not off-screen weather
+
+A bigger world cannot tick every cell every frame. Minecraft solves
+that by freezing far chunks. That breaks mass: water, vapour, and
+head stop at an invisible wall, then jump when the chunk wakes.
+
+The honest version is a **second clock**, not a coarser sky:
+
+1. **Exact skip** (any Δt). Equilibrium is a no-op: a full pore table
+   with no head gradient, an equalized confined body, dry rock. Dirty
+   bits and occupancy flags already name these. A larger world just
+   needs more of the map to qualify.
+2. **Conservation-form integrators** (Δt = 1k–10k). Pore seepage and
+   humidity/T diffusion can take an implicit step with a flux limiter
+   so `sat` stays in `[0, cap]` and tile mass is a discrete divergence.
+   The feel loses tick-by-tick sparkle; the budget matches.
+3. **Persistent bodies** (the confined solver). Label a communicating
+   vessel once, store donor + max head, apply `rate × Δt` capped by
+   donor sat and dest free. Period-16 BFS becomes a lookup. Ocean
+   evap updates the body so a far well still rises — that is why the
+   wake must not be the dirty halo.
+4. **Kinematic surface dump** for far hills. Do not replay 10k CA
+   hops. Move mobile Air sat along the D8 slope, deposit where it
+   dies. Mass is conserved; terrace/jelly will not match the CA.
+   Wake back to fine CA when the player is close or the chunk is
+   dirty.
+5. **Seam ledger.** A Δt=10k chunk next to a Δt=1 chunk must queue
+   face flux. Without it, mass vanishes at the cadence boundary.
+
+Stay fine: mid-air rain hops, an on-screen cascade, a phase front,
+anything whose 10k-tick path can fork. Do **not** implement this by
+skipping off-screen humidity/wind/T (the ring pin above). Do not
+skip the condensation lottery. Do not shrink the confined wake or
+lower the BFS limit — persist the body instead.
 
 ### Pinned: droplets fall too fast
 
@@ -124,63 +175,129 @@ scale.
 The coarse tile field is therefore not a hack. For a diffuse quantity that
 changes everywhere at once, coarse tiles are the right abstraction. Keep it.
 
-## Decided: no cloud animation at all — render the vapour field
+## Climate loop (wind × T × humidity) — budgeted
 
-**Design call (playtest, 2026-08-26).** Drop cloud parcels entirely rather than
-replacing them with a derived deck, and tune the *vapour field's own rendering*
-instead. The glitchy look of water condensing out of the field was judged
-visually interesting on its own and expected to improve with convection.
+The coupled weather stack is:
+
+- **Wind heatmap** — `Wind::rebuild_field` every `WIND_FIELD_PERIOD` (4)
+  ticks, only on wet seats + a 1-tile halo + a thin near-surface band.
+  Misses in `vector_at` return the climate mean after the same
+  surface-slip as the heatmap (no into-rock residual; a descent
+  turns along the skin). Humidity caches that sample once per
+  occupied seat before the two flux axes so a miss walks the
+  world once, not twice (evap after rebuild is the usual new
+  key). After blend, 6 Jacobi sweeps project
+  `∇·v` on that key set only (not the sky): a valley feels the
+  next wall before the last tile. Slip runs last.
+- **Humidity** — donor-cell fractional flux through that heatmap, with a
+  per-column free-air cache so buried seats lift over the crest without
+  scanning the hill once per tile. Vertical flux clamps `|vy|` to 0.10
+  so face-following / Jacobi climb cannot empty a tile in one hop
+  (that vacuumed vapour below `min_mass_to_rain` and stopped C drops;
+  the V overlay still shows the raw field). Convection stays
+  `buoyant_rise_thermal` (per-row T mean, never `Temperature::mean()`
+  in the loop). Condensation that samples a solid tile centre walks
+  up to four cells for the first Air (rain) or empty Air (snow)
+  before refusing. Rain pays 33 (visible drop + H shaft) and only
+  lotteries when the tile is over the Clausius–Clapeyron hold
+  (`saturation_mass_at_temp`). Below freeze the C pass never deposits
+  water: it gathers neighbour humidity for a 255 flake, or holds.
+  Snow does not carve the shaft.
+- **Temperature** — still period 20. Night humidity blanket, wind mix,
+  and near-surface air↔ground couple live *inside* that step. Do not
+  run a full-field `advect_air_with_wind` every tick.
+
+Do **not** resurrect N lobe-mask cloud banks, H per-cell haze as the
+default draw, or a full-sky wind rebuild every frame. Those were the
+FPS cliff that forced the earlier revert.
+
+### Fog sheet vs lofted cloud (no hardcoded Y pump)
+
+Playtest on the climate-budget branch parked almost all visible vapour
+as a film on the live crest, with the sky above washed to a thin equal
+haze. Two mechanics did that, and neither is "add a pump to sea+N":
+
+1. **`buoyant_rise_thermal` was capped at `sea + cloud_alt`.** That is
+   the Tab “Vapor rise deck above ground” lever. On a mountain the
+   surface tile already sits at or above that deck, so the rise no-ops
+   and `lift_buried_to_free_air` dumps every buried seat onto the crest.
+   The slider is gone; the cap is the humidity `hy_max` / sky box.
+
+   A second leftover Y pump survived that cut: horizontal advection
+   snapped dest `hy` to the neighbour's free-air crest, and lift-buried
+   hoisted any seat below that crest. Pond vapour that spread one tile
+   onto either bank teleported onto **both shores**, then humid-heat
+   and drizzle locked two hot rainy columns there. Horizontal flux now
+   stays at the same `hy`. Lift-buried only hoists seats deeper than
+   this column *and* both neighbours (truly inside a hill). Climate /
+   couple sit on the water skin (`live_skin_y`), not the excavated bed
+   — an inland pond is not a fake ocean hole.
+   Unstable lapse (warm under cold, plus the per-row T anomaly) is what
+   organises loft — same walk, no teleport. `cloud_alt_above_sea` stays
+   on the struct for save compat only.
+The draft itself is ground-heated air. The sun hits the ground; the
+ground always radiates. Night is the sun being off, not a second
+cool pulse, and there is no noon/midnight skin swing (`day_amp_c` is
+retired). Humidity in the column reflects incoming sun (daytime shade)
+and blankets the leak. Air only couples to that skin. Warm humid air
+under the colder lapse rises (`buoyant_rise_thermal`) and carries heat
+with it — vapor's specific heat is ~1.9× dry air
+(`humid_heat_scale`, Tab “Humid air heat capacity”). Wet tiles relax
+toward climate more slowly, and each lift mixes source T into the
+tile above. Surplus condenses aloft and falls. That is the pipe —
+not a deck slider.
+
+Keep the loft cheap: row means live on the period-20 thermal step
+(never `width × wet-rows` lookups per tick), rise runs every other
+tick, and the condensation film floor walks down from the wet tile
+(not up from y=0 through the mountain). A lofted sky has more wet
+seats — do not pay a full-field scan for each of them.
+
+2. **Condensation wiped the film.** At a few degrees below zero the
+   Clausius–Clapeyron sat is ~100–120 mass; `mass_per_droplet` is 255,
+   so the first free-air tile rained itself empty every event and never
+   fed a column. Rain now leaves `~0.82 × sat` in the tile and **skips
+   the lowest free-air row + one above it**, so the source layer can
+   lift. Aloft surplus still rains.
+
+   Cold air holding less vapour is a **separate** path
+   (`precipitate_thermal_surplus`). Surplus above `saturation_mass_at_temp`
+   becomes rain **only above freeze**. At or below 0 °C it is a snowflake
+   paid from the local 3×3 humidity parcel (a flake still costs 255 —
+   thaw is a full water cell; snow does not carry sat yet), or a hold if
+   the parcel cannot pay. It does not wait for the drizzle lottery, and
+   a refused deposit leaves the vapour — never a clamp that deletes the
+   mass, and never liquid rain at −20 °C.
+
+Do not add a sea-level humidity floor or a fixed "cloud row" teleport
+to get this look back. If the sky goes sheet-fog again, check those two
+gates first.
+
+## Landed: no cloud animation — humidity is the vapour look
+
+**Design call (playtest, 2026-08-26), deleted 2026-09-01.** Drop cloud parcels
+entirely rather than replacing them with a derived deck. Tune the *vapour
+field's own rendering* instead. The N overlay is gone and is not coming back.
 
 This is "a cloud is just an air block with saturation" taken to its conclusion:
 if the field is the cloud, there is no reason to derive an intermediate object
-from it. What goes:
+from it. What went:
 
-- `CloudStore`'s visual half — parcels, persistence, drift, lift, dissipation
+- `CloudStore`'s visual half — parcels, persistence, drift, dissipation
 - `draw_clouds` and the three `draw_depth_cloud_layer` call sites
-- quite possibly `deck_from_field` too (added just before this call — it derives a
-  banded deck, which is still an intermediate representation)
+- `deck_from_field`, `pick_spread_across_x`, `nimbus` / `echo` HUD tags
+- the `N` hotkey and Tab Clouds (N visual echo) tree
 
-What replaces it: draw humidity saturation directly as the sky's look, the way
-the `H` overlay already does but as the default presentation rather than a
-diagnostic.
+What stayed: leftover save-file parcel mass dumps into humidity; buoyant rise
+still lifts vapour; `cloud_floor_y` still clips the `H` haze against terrain
+(not damp air). Shade and sky cover read humidity (`cloud_sky_transmit`,
+`precip_cover_fraction`). `H` is the vapour look.
 
-Consequences worth knowing before starting:
+## Superseded plan: a derived deck instead of parcels
 
-- `pick_spread_across_x` and the banding exist to make a *parcel* selection
-  spatially stable. Rendering the field needs none of it — the field is already
-  spatially coherent everywhere. Banding can go with the parcels.
-- `CloudParcel::raining` and the `nimbus` HUD field lose their last purpose.
-- Cloud floor / ridge clearance (`cloud_floor_y`) exists to stop parcels sinking
-  into terrain. A field has no such problem, so that machinery may also go — which
-  would remove the function whose unbounded upward scan cost roughly two million
-  hashmap lookups per frame.
-
-## Superseded plan: clouds drawn from the field, parcels deleted
-
-"A cloud is just an air block with saturation" is a claim about where clouds
-*come from* — an observation about the field, not an object placed on top of it.
-That can be honoured at tile resolution without per-cell vapour, and it deletes
-the most code.
-
-Today `CloudStore` maintains parcels that must be placed, persisted, drifted,
-lifted and dissipated — five concerns, each of which has already been a bug. If
-the deck is derived from humidity saturation at draw time, all five stop existing:
-the field already has position, density and motion, because
-`Humidity::advect` moves it.
-
-Order of work:
-
-1. Expose the deck as a **derivation** of `(humidity, temperature)`: for each
-   band, saturation ratio → density, and condensation level → altitude
-   (`condensation_level`, already written and tested).
-2. Rewire the four app draw sites (`draw_depth_cloud_layer` ×3, `draw_clouds`) to
-   read that derivation instead of `CloudStore::parcels`.
-3. Delete parcel persistence, drift, dissipation, and `CloudStore`'s visual half.
-
-**Watch for:** the derivation must be *spatially stable* or the jitter of fix 5
-returns. Banding by world x (`pick_spread_across_x`) is what made it stable;
-without that, top-N selection by mass moves discontinuously. Keep a test that
-advecting the field moves the deck smoothly.
+Not taken. A humidity-derived deck would still have been a second
+representation. The landed call deletes the animation and draws the
+field (`H`) instead.
 
 ## It works (**playtest, full diurnal cycle**)
 
@@ -252,7 +369,7 @@ Not needed to fix constant rain any more — that is solved. Convection is now
 about **spatial** structure: fronts, and moisture organised by terrain and
 buoyancy rather than spread evenly. The remaining flatness is horizontal, not
 temporal. All the
-forcing exists — `day_amp_c`, `solar_heat_c`, `night_cool_c`, saturation mass
+forcing exists — `solar_heat_c`, `night_cool_c` (continuous radiate), saturation mass
 varying with temperature, a 1200-tick day — and it is swamped: measured **rain
 fraction day 80% vs night 76%**.
 
@@ -274,25 +391,62 @@ temperature steps every ~20 ticks, giving a time constant near **1370 ticks**. A
 never finishes warming before the sun sets. Day 3000 / night 3000 gives ~2.2 time
 constants per half and ~89%.
 
+Sun/radiate used to add raw °C. Water's low albedo plus a 0.15 leak made the
+ocean a sun magnet while dry sand could net-cool at noon. Forcing is now
+` (solar − radiate) / (1 + capacity × inertia × force_inertia) `, water radiates
+near land (`water_night_cool_scale` 0.70), and only 12 water cells add stack
+capacity. Lakes stay a buffer. Land skins lead the day.
+
+Air lapse follows the tile's own height up to a **tropopause knee**
+(`tropopause_elev_cells`, default 920 above sea 80 → **y = 1000**). One cell
+is 0.25 m, so that weather column is only **~250 m** — coarse, but it keeps
+peaks and climatic zones in the lapse instead of flattening halfway up.
+Above the knee the profile is a weak stratospheric slope (default 0 —
+isothermal). Default sky is 1064 (1000 + one 64-cell lid). Tile fields are
+4×4, so height still costs CPU; drop the ceiling if a machine cannot hold
+it. The old column-skin climate stamped `base − lapse × crest` onto every
+air tile above a hill, which painted a cold cap over the mountain while the
+same height over the sea stayed mild. Ground skin still uses crest elevation
+(high land is colder). Buoyant rise stops at the knee so the lid stays dry.
+`0` tropopause restores the linear profile. The old `sea + cloud_alt` deck
+cap is still gone — that parked fog on ridges.
+
 Convection proper — buoyancy from the ground-versus-air difference — is cheap on
 a tile field and is what would turn a steady rain rate into fronts.
 
 ## Snow falls gently (**landed**), wind drift (**landed**, carefully)
 
 Snow nucleates in the air (`phase::deposit_snow_in_air`) and now descends at a
-usable rate. The bug was that grain fall takes one step per pass and runs several
+usable rate. A flake costs a whole cell: do not let the cloudy remnant shave
+that budget, and walk a few cells up from a solid tile centre (same as rain)
+so a slope still snows. Rain carves the 1-wide H shaft; snow floats
+through the wash and does not. The bug was that grain fall takes one step per pass and runs several
 passes a tick — right for sand settling, and it made flakes appear in the sky and
 arrive on the ground in the same breath.
 
-Fixed by *odds* rather than a separate pass, which turned out much smaller than the
-plan above assumed: an airborne flake rolls to hold position most passes
-(`SNOWFALL_STEP_ODDS` 0.15), so one step is spread over many passes. The roll's
-irregularity is itself snow-like. Same technique as the fractional seepage rates,
-and it needs no new pass, so the hazard of "grain fall skips snow but the drift pass
-does not run" never arises.
+Snow starts when a tile is **over** the Clausius–Clapeyron hold and the
+local 3×3 parcel can pay a 255 flake. Inspector `humidity=` is that tile
+mass: **−0.1 °C → ~206** (cell-sat picture ~21/255), **−3 °C → ~162**
+(~16/255). Below freeze we never rain.
+
+Fall is gated (`SNOWFALL_STEP_ODDS` 0.38) plus a cheap once-per-tick
+`apply_airborne_snow_fall` on `has_snow` chunks. Flakes do **not** count
+as unsupported grain — that used to force the ×64 deep settle every
+tick and drop FPS to single digits. Surplus / C mint at most 8 flakes a
+tick and skip a column that already has one nearby. The roll's
+irregularity is itself snow-like. Same technique as the fractional
+seepage rates, so the hazard of "grain fall skips snow but the drift
+pass does not run" never arises.
 
 Gated on **airborne** snow only. Once a flake lands it is snowpack and behaves as
 any other loose material, which is what lets drifts build and repose.
+
+A flake that falls into air **above freeze** melts to `Air+FULL` rain the
+same tick (`thaw_airborne_snow`). Mid-air rain is gravity-only — surface
+flow used to peel `drain_step_cap` (160) off that 255 cell and leave 95
+beside it (two drops from one flake). The ordinary phase thaw only looks
+at a band above the ground and only on `period_ticks`, so a cold-lid
+shower used to ride the warm column as snow until it neared the surface.
 
 Ice is deliberately not gated and serves as the test control: if both slow down,
 the gate is catching the wrong material.
@@ -304,7 +458,7 @@ a flake cross the map in one tick. The drift pass:
 
 - runs **once** after physics (same place rafts already take the wind)
 - moves a flake **at most one cell** downwind
-- fires with odds `|wind_vx| * tile_cols * 0.25`, clamped to 1 (default 0.05 × 4 × 0.25 = 0.05 — about **three down for each sideways** against fall 0.15)
+- fires with odds `|wind_vx| * tile_cols * 0.25`, clamped to 1 (default 0.05 × 4 × 0.25 = 0.05 — several **down for each sideways** against fall 0.38)
 - ignores ice (control) and landed snowpack (repose owns piles)
 - refuses a solid or occupied destination
 - no-ops at zero wind, so every existing fall test stays honest
@@ -386,25 +540,50 @@ Do not re-walk these:
 - **Humidity + world water is conserved exactly.** Measured holding at
   3,869,370 across 3000 ticks. `audit::sat_totals` plus `Humidity::total_mass`
   is the harness; use it on any change here.
-- **Parcels must never hold real mass.** `mass` is always 0.0 and `vis_mass` is
-  the drawn size. `release_parcels_into_humidity` would otherwise pour a copy
-  back into the sky and mint vapour. That function also only releases parcels
-  that *do* hold mass — taking the whole list clears the deck every tick, which
-  silently made a first attempt at persistence a no-op.
+- **Parcels must never hold live mass.** `CloudStore` is save-compat only: the
+  next step dumps leftover parcel mass into humidity and clears the list. Do
+  not rebuild cartoon banks from the field.
 - A conservation test only checks what you point it at. `ground_sat_sum` reported
   conserved mass as lost once rain started nucleating in the air; it needed to be
   a whole-world sum.
 
 ## Probes
 
-- `tests/rain_probe.rs` — does it rain, and is it visible? Separates *water
-  delivered* from *parcels flagged raining*, reports cloud coverage against
-  eligible tiles, day/night rain fraction, and the dead ends above.
+- `tests/rain_probe.rs` — does humidity actually drain into ground water?
+  Reports tiles wanting rain, day/night rain fraction, and the dead ends above.
+  There is no parcel-animation half anymore.
 - `tests/perf_profile.rs` — frame budget, including the active-cell count that
   gates any per-cell atmospheric work. Includes snow drift and clay
   suspension (those live outside `tick_with_perf` in the app).
 
-  Fresh-stamp demo (1024×320, 40 warm + 200 measure, 2026-08-27): wall
-  **32.9 ms/tick**. Physics is 27.7 of that. Top three: confined wake
-  7.7, seepage 7.4, rock bodies 6.3. Snow drift 0.001, suspension 0.09.
-  The older 3 ms/tick figure is an *aged quiet* world, not this soak.
+## Current leftover (do not “fix” by deleting features)
+
+Latest `soak_age_inventory` after the humidity + wind slabs (256 plants,
+C drizzle / E evap, climatic-rain injector off, 8×400):
+
+```text
+tick   wall   phys  grav  flow  seep  conf  body  org   cond  hadv  wind  tmp
+440    16.58  9.35  0.36  0.51  2.23  1.09  3.33  0.87  0.33  1.62  0.89  0.35
+3240   52.65  29.33 1.02  1.51  4.04  3.04  4.03  2.02  2.91  3.91  4.11  0.48
+hum n 13415 → 55185 / 68096
+```
+
+What is still leftover:
+
+1. Humidity advect ~3.9 ms — pack/sync HashMap + `vector_at`
+2. Wind rebuild ~4.1 ms — compose + field HashMap write + slip
+3. Seepage ~4.0 ms
+4. Landscape bodies ~4.0 ms
+5. Equalized confined BFS ~3.0 ms — persist the body; do not starve the wake
+6. Condensation lottery ~2.9 ms — do not skip it
+
+`World.dissolved` and `Humidity::cells` stay `std::HashMap` (saved).
+Runtime slab / Fx dual is OK if serde still writes the HashMap.
+
+Do not coarsen off-screen humidity / wind / rain / temperature. Do not
+add a sky quadtree. Do not retry the wind Jacobi solid-cache. Do not
+add an organism ceiling. The play app no longer has a `W` climatic
+faucet; weather is `C` / `E`.
+
+The cut-by-cut soak ledger lives in
+[`archive/VOXEL_WEATHER_SOAK.md`](archive/VOXEL_WEATHER_SOAK.md).

@@ -55,13 +55,13 @@ impl Default for RainConfig {
 }
 
 
-/// Inject climatic rain that **lands on the ground / ocean surface**
-/// under each column (cosmetic sky streaks are drawn separately).
+/// Scenario / test injector: drop water on the ground / ocean surface
+/// under each column. The play app does **not** call this — weather
+/// there is condensation (`C`) plus evaporation (`E`).
 ///
 /// Closed-loop by default ([`RainConfig::closed_loop`]): deposits only
-/// what humidity can pay, so overnight `W` cannot mint a flood. Pass
-/// `humidity = None` with `closed_loop = false` for the legacy open
-/// faucet (unit tests).
+/// what humidity can pay. Pass `humidity = None` with
+/// `closed_loop = false` for the legacy open faucet (unit tests).
 ///
 /// Determinism: same world.seed + same tick + same config = same
 /// droplet placements.
@@ -235,13 +235,29 @@ pub(crate) fn deposit_water_in_air(world: &mut World, gx: i32, y: i32, budget: f
         return 0.0;
     }
     let jx = world.wrap_x(gx);
-    let Some(cell) = world.get_cell(jx, y) else {
+    let Some(air_y) = first_air_y_for_deposit(world, jx, y) else {
         return 0.0;
     };
-    if cell.material != MaterialId::Air {
+    let Some(cell) = world.get_cell(jx, air_y) else {
         return 0.0;
+    };
+    fill_air_sat(world, jx, air_y, cell, budget)
+}
+
+/// Condensation samples the humidity tile centre. After slip, that centre is
+/// often the last solid of a slope, with free air one cell up. Walk a short
+/// column so rain still nucleates; stay buried and refuse.
+fn first_air_y_for_deposit(world: &World, gx: i32, y: i32) -> Option<i32> {
+    for dy in 0..=4 {
+        let yy = y + dy;
+        if world
+            .get_cell(gx, yy)
+            .is_some_and(|c| c.material == MaterialId::Air)
+        {
+            return Some(yy);
+        }
     }
-    fill_air_sat(world, jx, y, cell, budget)
+    None
 }
 
 pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32, budget: f32) -> f32 {
@@ -324,4 +340,48 @@ fn fill_air_sat(world: &mut World, gx: i32, gy: i32, cell: Cell, budget: f32) ->
         },
     );
     u as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cell::Cell;
+    use crate::chunk::ChunkCoord;
+
+    #[test]
+    fn deposit_water_in_air_lands_on_first_air_above_solid() {
+        let mut world = World::new(7);
+        world.ensure_chunk(ChunkCoord::new(0, 0));
+        world.set_cell(16, 16, Cell::solid(MaterialId::Stone));
+        world.set_cell(16, 17, Cell::air());
+        assert_eq!(deposit_water_in_air(&mut world, 16, 16, 40.0), 40.0);
+        assert_eq!(
+            world.get_cell(16, 16).unwrap().material,
+            MaterialId::Stone
+        );
+        assert_eq!(world.get_cell(16, 17).unwrap().sat.0, 40);
+    }
+
+    #[test]
+    fn deposit_water_in_air_refuses_a_fully_buried_column() {
+        let mut world = World::new(8);
+        world.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..=20 {
+            world.set_cell(16, y, Cell::solid(MaterialId::Stone));
+        }
+        assert_eq!(deposit_water_in_air(&mut world, 16, 16, 40.0), 0.0);
+        assert_eq!(
+            world.get_cell(16, 16).unwrap().material,
+            MaterialId::Stone
+        );
+    }
+
+    #[test]
+    fn deposit_water_in_air_fills_empty_air() {
+        let mut world = World::new(9);
+        world.ensure_chunk(ChunkCoord::new(0, 0));
+        world.set_cell(16, 20, Cell::air());
+        assert_eq!(deposit_water_in_air(&mut world, 16, 20, 40.0), 40.0);
+        assert_eq!(world.get_cell(16, 20).unwrap().sat.0, 40);
+    }
 }

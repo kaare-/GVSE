@@ -7,9 +7,10 @@ notes intended to survive re-reads of the codebase.
 | Doc | Subject |
 |-----|---------|
 | [`COMPARISON.md`](COMPARISON.md) | Peer positioning vs game CA / eco sims and scientific hydro-geo tools. |
-| [`SKY.md`](SKY.md) | Sim-linked sky / ridges / multi-depth clouds (`N`) + humidity diagnostic (`H`). |
+| [`SKY.md`](SKY.md) | Sim-linked sky / ridges / humidity wash (`H`) / wind lattice (`V`). |
 | [`VOXEL_WATER.md`](VOXEL_WATER.md) | Working voxel water CA: gravity, surface flow, seepage, material capacities. |
 | [`VOXEL_WEATHER.md`](VOXEL_WEATHER.md) | Vapour, rain and clouds above ground: what is landed, what is measured unaffordable, and the recorded dead ends. |
+| [`archive/`](archive/README.md) | Cut-by-cut soak leftover ledger and other retired notes. |
 | [`VOXEL_PARALLEL.md`](VOXEL_PARALLEL.md) | Multithreading: what landed, next phases, what to avoid. |
 | [`VOXEL_FIELDS.md`](VOXEL_FIELDS.md) | Fields / heatmaps for richer material physics (future plan). |
 | [`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md) | Per-cell porosity / permeability within material ranges. |

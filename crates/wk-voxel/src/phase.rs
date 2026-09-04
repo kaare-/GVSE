@@ -36,6 +36,11 @@ use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
 use crate::worldgen::live_surface_at;
 
+/// Visible in-air **rain** drop. Terrain and the H shaft ignore Air sat
+/// ≤ 32 (haze film). Snow is a different seat — a whole cell — and must
+/// not use this floor or the sky turns to flakes and thaws mint water.
+pub const PRECIP_IN_AIR_MIN: f32 = 33.0;
+
 /// Freeze / thaw knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PhaseConfig {
@@ -55,10 +60,9 @@ pub struct PhaseConfig {
     pub max_slush_cells_per_column_per_tick: u8,
     /// Max unsupported Ice/Snow cells that may break **per column per tick**.
     pub max_break_cells_per_column_per_tick: u8,
-    /// Minimum precip budget (sat units) to place one Snow / frost Ice
-    /// cell. Must be a **full cell** (`255`): thaw / slush / break always
-    /// yield `Air+FULL`, so seating a solid from a 40–64 droplet minted
-    /// ~200 sat into the basin on melt. Shortfall → hold (`0`).
+    /// Minimum precip budget to place one Snow / frost Ice cell. A flake
+    /// is a whole cell (`255`): thaw yields `Air+FULL`, so a cheaper seat
+    /// mints water. Shortfall below freeze → hold, not liquid rain.
     pub min_budget_to_snow: f32,
     /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
     /// top is culled to empty Air (removed, not melted — melting would
@@ -146,6 +150,13 @@ impl Default for PhaseConfig {
 pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
     if !cfg.enabled {
         return;
+    }
+    // Airborne flakes used to wait for [`column_may_phase`] (surface
+    // band only) and `period_ticks`. A cold-lid shower then rode the
+    // whole warm column as snow. Melt those here every tick; landed
+    // pack still uses the rate-limited thaw below.
+    if cfg.enable_thaw {
+        thaw_airborne_snow(world, temp, cfg);
     }
     let period = cfg.period_ticks.max(1);
     if world.tick % period != 0 {
@@ -544,24 +555,35 @@ fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f
 /// `Snow` already falls through empty air and floats on water, so gravity takes it
 /// from here.
 ///
-/// Pays a **whole cell**, matching the frost convention: a frozen cell's water is
-/// its material rather than its `sat`, so 255 of humidity buys exactly one cell.
-/// Anything less is refused rather than part-paid, or the ledger drifts.
+/// Pays a **whole cell**. A cheaper flake thaws into `Air+FULL` and mints
+/// the shortfall. Cold drizzle that cannot pay becomes rain instead.
 pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f32 {
     if budget < u8::MAX as f32 {
         return 0.0;
     }
     let jx = world.wrap_x(gx);
-    let Some(cell) = world.get_cell(jx, y) else {
+    // Same walk as rain: after slip the humidity tile centre is often the
+    // last solid of a slope, or a wet film. A flake needs empty Air.
+    let Some(air_y) = first_empty_air_y_for_snow(world, jx, y) else {
         return 0.0;
     };
-    // Empty air only: seeding into a wet cell would strand its water inside a
-    // frozen cell that does not carry sat.
-    if cell.material != MaterialId::Air || !cell.sat.is_empty() {
-        return 0.0;
-    }
-    world.set_cell(jx, y, snow_cell());
+    world.set_cell(jx, air_y, snow_cell());
     u8::MAX as f32
+}
+
+/// Walk a short column for empty Air. Stay buried / in wet film and refuse —
+/// seeding into sat would strand that water inside Snow.
+fn first_empty_air_y_for_snow(world: &World, gx: i32, y: i32) -> Option<i32> {
+    for dy in 0..=4 {
+        let yy = y + dy;
+        if world
+            .get_cell(gx, yy)
+            .is_some_and(|c| c.material == MaterialId::Air && c.sat.is_empty())
+        {
+            return Some(yy);
+        }
+    }
+    None
 }
 
 fn deposit_ice_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
@@ -895,6 +917,71 @@ fn above_is_frozen(world: &World, gx: i32, gy: i32) -> bool {
     )
 }
 
+/// Melt falling snow that has reached air above freeze.
+///
+/// [`column_may_phase`] only peeks a band above the live surface so a
+/// full-sky walk stays cheap. Ceiling flakes never entered that band,
+/// so they crossed tens of warm cells before [`thaw_column`] saw them.
+/// This walk is the same `has_snow` scan as fall: one cell, `Air+FULL`.
+/// Surface flow must not peel that cell (mid-air rain is gravity-only).
+fn thaw_airborne_snow(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
+    if !world.chunks.values().any(|c| c.has_snow) {
+        return;
+    }
+    let freeze = cfg.freeze_point_c;
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_snow)
+        .map(|(&coord, _)| coord)
+        .collect();
+    let mut melt: Vec<(i32, i32)> = Vec::new();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if cell.material != MaterialId::Snow {
+                    continue;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                if !snow_is_airborne(world, gx, gy) {
+                    continue;
+                }
+                if temp.at_cell(gx, gy) <= freeze {
+                    continue;
+                }
+                melt.push((gx, gy));
+            }
+        }
+    }
+    for (gx, gy) in melt {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if cell.material != MaterialId::Snow {
+            continue;
+        }
+        world.set_cell(gx, gy, Cell::water());
+    }
+}
+
+fn snow_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
+    let Some(below) = world.get_cell(gx, gy - 1) else {
+        return false;
+    };
+    if below.material != MaterialId::Air {
+        return false;
+    }
+    // Lake lid is a seat; haze / empty air is the fall column.
+    !is_standing_water(world, gx, gy - 1)
+}
+
 /// Melt exposed Ice/Snow into `Air + FULL` water when warm.
 ///
 /// Top-down, rate-limited — a sudden warm snap cannot dump a whole
@@ -1070,6 +1157,62 @@ mod tests {
         let temp = cold_temp(16, 16, -20.0);
         apply_phase(&mut w, &temp, &PhaseConfig::default());
         assert_eq!(w.get_cell(1, 1).unwrap().material, MaterialId::Air);
+    }
+
+    #[test]
+    fn airborne_snow_melts_to_rain_in_warm_air() {
+        // Ceiling flakes sit far above column_may_phase's surface band.
+        // Warm air must turn them into rain without waiting for the
+        // period-gated near-ground thaw.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 50, snow_cell());
+        let temp = cold_temp(16, 64, 6.0);
+        let cfg = PhaseConfig {
+            period_ticks: 4,
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        let cell = w.get_cell(2, 50).unwrap();
+        assert_eq!(cell.material, MaterialId::Air);
+        assert!(cell.sat.is_full(), "warm-air snow must become a rain cell");
+    }
+
+    #[test]
+    fn airborne_snow_holds_in_freezing_air() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 50, snow_cell());
+        let temp = cold_temp(16, 64, -4.0);
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &PhaseConfig::default());
+        assert_eq!(w.get_cell(2, 50).unwrap().material, MaterialId::Snow);
+    }
+
+    #[test]
+    fn landed_snowpack_does_not_use_the_airborne_melt() {
+        // Period skip: only the airborne path runs. A pack on bedrock
+        // must wait for the rate-limited thaw, or a warm snap dumps
+        // every hillside at once.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, snow_cell());
+        let temp = cold_temp(16, 64, 8.0);
+        let cfg = PhaseConfig {
+            period_ticks: 4,
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(2, 1).unwrap().material,
+            MaterialId::Snow,
+            "landed pack must not melt on the airborne pass"
+        );
     }
 
     #[test]

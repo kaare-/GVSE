@@ -12,15 +12,139 @@
 
 use crate::fasthash::FxHashMap as HashMap;
 
-use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, DirtyBits, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
 /// One chunk region that should be visited by the next rule pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveChunk {
     pub coord: ChunkCoord,
-    /// Inclusive local-cell rectangle to scan.
+    /// Inclusive local-cell rectangle to scan (bbox of [`Self::bits`]
+    /// after inflate, or an explicit full-chunk rect for wakes).
     pub rect: Rect,
+    /// Dilated dirty cells. All-zero means **dense**: walk the whole
+    /// [`Self::rect`] (standalone tests, occupancy wakes, legacy saves).
+    pub bits: DirtyBits,
+}
+
+impl ActiveChunk {
+    /// Dense rect walk (no per-cell mask).
+    pub fn new(coord: ChunkCoord, rect: Rect) -> Self {
+        Self {
+            coord,
+            rect,
+            bits: DirtyBits::empty(),
+        }
+    }
+
+    pub fn with_bits(coord: ChunkCoord, rect: Rect, bits: DirtyBits) -> Self {
+        Self { coord, rect, bits }
+    }
+
+    pub fn is_dense(self) -> bool {
+        self.bits.is_empty()
+    }
+
+    #[inline]
+    pub fn visits(self, x: u8, y: u8) -> bool {
+        self.is_dense() || self.bits.get(x, y)
+    }
+
+    /// Cells this region will visit (set bits, or the rect area if dense).
+    pub fn cell_count(self) -> usize {
+        if self.is_dense() {
+            self.rect.area()
+        } else {
+            self.bits.count()
+        }
+    }
+
+    pub fn aabb_area(self) -> usize {
+        self.rect.area()
+    }
+
+    fn row_mask(x0: u8, x1: u8) -> u64 {
+        if x0 == 0 && x1 >= 63 {
+            u64::MAX
+        } else {
+            let hi = if x1 >= 63 {
+                u64::MAX
+            } else {
+                (1u64 << (x1 + 1)) - 1
+            };
+            let lo = (1u64 << x0) - 1;
+            hi ^ lo
+        }
+    }
+
+    /// Visit each planned cell. Sparse regions skip AABB holes.
+    pub fn for_each_cell(self, f: impl FnMut(u8, u8)) {
+        self.for_each_cell_in_y(self.rect.y0, self.rect.y1, f);
+    }
+
+    /// Like [`Self::for_each_cell`], restricted to `y0..=y1` (intersected
+    /// with the region rect). Confined rise uses the standing-air band
+    /// so a dense period-16 wake does not walk dry sky.
+    pub fn for_each_cell_in_y(self, y0: u8, y1: u8, mut f: impl FnMut(u8, u8)) {
+        let y0 = y0.max(self.rect.y0);
+        let y1 = y1.min(self.rect.y1);
+        if y0 > y1 {
+            return;
+        }
+        if self.is_dense() {
+            for y in y0..=y1 {
+                for x in self.rect.x0..=self.rect.x1 {
+                    f(x, y);
+                }
+            }
+            return;
+        }
+        let mask = Self::row_mask(self.rect.x0, self.rect.x1);
+        for y in y0..=y1 {
+            let mut row = self.bits.0[y as usize] & mask;
+            while row != 0 {
+                let x = row.trailing_zeros() as u8;
+                row &= row - 1;
+                f(x, y);
+            }
+        }
+    }
+
+    /// Visit each local-x column that has at least one planned cell.
+    pub fn for_each_x(self, mut f: impl FnMut(u8)) {
+        if self.is_dense() {
+            for x in self.rect.x0..=self.rect.x1 {
+                f(x);
+            }
+            return;
+        }
+        let mut cols = 0u64;
+        for y in self.rect.y0..=self.rect.y1 {
+            cols |= self.bits.0[y as usize];
+        }
+        cols &= Self::row_mask(self.rect.x0, self.rect.x1);
+        while cols != 0 {
+            let x = cols.trailing_zeros() as u8;
+            cols &= cols - 1;
+            f(x);
+        }
+    }
+
+    /// Visit planned rows in one column (bottom-up, gravity order).
+    pub fn for_each_y_in_col(self, x: u8, mut f: impl FnMut(u8)) {
+        if self.is_dense() {
+            for y in self.rect.y0..=self.rect.y1 {
+                f(y);
+            }
+            return;
+        }
+        let bit = 1u64 << x;
+        for y in self.rect.y0..=self.rect.y1 {
+            if self.bits.0[y as usize] & bit != 0 {
+                f(y);
+            }
+        }
+    }
 }
 
 fn merge_rect(a: Rect, b: Rect) -> Rect {
@@ -208,26 +332,102 @@ fn inflate_wake(
     }
 }
 
-/// Build the scan plan from current dirty rectangles.
-///
-/// Returns an empty list when the world is fully quiescent (no chunk
-/// has a dirty rect). Only chunks that already exist in `world.chunks`
-/// are retained — waking a neighbour that was never stamped is a no-op.
-pub fn plan_active(world: &World) -> Vec<ActiveChunk> {
-    let span_x = wrap_chunk_span_x(world);
-    let mut map: HashMap<ChunkCoord, Rect> = HashMap::default();
-    for (coord, chunk) in &world.chunks {
-        if let Some(rect) = chunk.dirty {
-            inflate_wake(&mut map, *coord, rect, span_x);
+/// Dilate one dirty cell into `map` (halo +1 x / +2 y, including
+/// neighbour chunks and wrap). Same topology as [`inflate_wake`].
+fn paint_dilated(
+    map: &mut HashMap<ChunkCoord, DirtyBits>,
+    coord: ChunkCoord,
+    lx: i32,
+    ly: i32,
+    span_x: Option<i32>,
+) {
+    const HALO_X: i32 = 1;
+    const HALO_Y: i32 = 2;
+    let w = CHUNK_CELLS_W as i32;
+    let h = CHUNK_CELLS_H as i32;
+    for dy in -HALO_Y..=HALO_Y {
+        for dx in -HALO_X..=HALO_X {
+            let mut x = lx + dx;
+            let mut y = ly + dy;
+            let mut cx = coord.cx;
+            let mut cy = coord.cy;
+            if x < 0 {
+                cx = wrap_cx(cx - 1, span_x);
+                x += w;
+            } else if x >= w {
+                cx = wrap_cx(cx + 1, span_x);
+                x -= w;
+            }
+            if y < 0 {
+                cy -= 1;
+                y += h;
+            } else if y >= h {
+                cy += 1;
+                y -= h;
+            }
+            if !(0..w).contains(&x) || !(0..h).contains(&y) {
+                continue;
+            }
+            map.entry(ChunkCoord::new(cx, cy))
+                .or_default()
+                .set(x as u8, y as u8);
         }
     }
-    // Drop wakes for chunks that aren't loaded.
-    map.retain(|c, _| world.chunks.contains_key(c));
+}
 
-    let mut out: Vec<ActiveChunk> = map
+fn dilate_bits(
+    map: &mut HashMap<ChunkCoord, DirtyBits>,
+    coord: ChunkCoord,
+    src: DirtyBits,
+    span_x: Option<i32>,
+) {
+    for y in 0..CHUNK_CELLS_H as u8 {
+        let mut row = src.0[y as usize];
+        while row != 0 {
+            let x = row.trailing_zeros() as u8;
+            row &= row - 1;
+            paint_dilated(map, coord, x as i32, y as i32, span_x);
+        }
+    }
+}
+
+/// Build the scan plan from current dirty cells.
+///
+/// Dilates each write (not the bounding box) so scattered rain does not
+/// scan the AABB holes. Legacy saves with a rect and empty bits still
+/// inflate the box. Returns empty when the world is quiescent. Only
+/// loaded chunks are retained.
+pub fn plan_active(world: &World) -> Vec<ActiveChunk> {
+    let span_x = wrap_chunk_span_x(world);
+    let mut bits_map: HashMap<ChunkCoord, DirtyBits> = HashMap::default();
+    let mut rect_map: HashMap<ChunkCoord, Rect> = HashMap::default();
+    for (coord, chunk) in &world.chunks {
+        let Some(rect) = chunk.dirty else {
+            continue;
+        };
+        if chunk.dirty_bits.is_empty() {
+            inflate_wake(&mut rect_map, *coord, rect, span_x);
+        } else {
+            dilate_bits(&mut bits_map, *coord, chunk.dirty_bits, span_x);
+        }
+    }
+    bits_map.retain(|c, _| world.chunks.contains_key(c));
+    rect_map.retain(|c, _| world.chunks.contains_key(c));
+
+    let mut out: Vec<ActiveChunk> = bits_map
         .into_iter()
-        .map(|(coord, rect)| ActiveChunk { coord, rect })
+        .filter_map(|(coord, bits)| {
+            let rect = bits.bbox()?;
+            Some(ActiveChunk::with_bits(coord, rect, bits))
+        })
         .collect();
+    for (coord, rect) in rect_map {
+        // Legacy dense box — do not OR into a sparse entry.
+        if out.iter().any(|a| a.coord == coord) {
+            continue;
+        }
+        out.push(ActiveChunk::new(coord, rect));
+    }
     out.sort_by(|a, b| {
         a.coord
             .cy
@@ -265,8 +465,7 @@ pub(crate) fn checkerboard_phase(coord: ChunkCoord) -> u8 {
 /// sorted by ascending `(cy, cx)` so bottom-up pull rules meet
 /// lower rows first.
 pub fn partition_checkerboard(active: &[ActiveChunk]) -> [Vec<ActiveChunk>; 4] {
-    let mut passes: [Vec<ActiveChunk>; 4] =
-        [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut passes: [Vec<ActiveChunk>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     for ac in active {
         let phase = checkerboard_phase(ac.coord) as usize;
         passes[phase].push(*ac);
@@ -295,6 +494,41 @@ mod tests {
         // ensure_chunk doesn't dirty; explicit clear.
         clear_all_dirty(&mut w);
         assert!(plan_active(&w).is_empty());
+    }
+
+    #[test]
+    fn two_far_writes_do_not_fill_the_aabb() {
+        let mut w = World::new(1);
+        w.set_cell(2, 2, Cell::water());
+        w.set_cell(50, 50, Cell::water());
+        let plan = plan_active(&w);
+        assert_eq!(plan.len(), 1);
+        let ac = plan[0];
+        assert!(!ac.is_dense(), "fresh writes must carry dirty bits");
+        assert!(ac.bits.get(2, 2));
+        assert!(ac.bits.get(50, 50));
+        assert!(
+            !ac.bits.get(26, 26),
+            "AABB hole between two writes must stay unset"
+        );
+        assert!(
+            ac.cell_count() * 2 < ac.aabb_area(),
+            "dilated bits ({}) must be much smaller than the box ({})",
+            ac.cell_count(),
+            ac.aabb_area()
+        );
+        let mut n = 0usize;
+        ac.for_each_cell(|x, y| {
+            n += 1;
+            assert!(
+                ac.visits(x, y),
+                "for_each_cell must only yield planned cells"
+            );
+        });
+        assert_eq!(n, ac.cell_count());
+        let mut band = 0usize;
+        ac.for_each_cell_in_y(0, 10, |_, _| band += 1);
+        assert!(band < n, "y-band walk must skip the high write at y=50");
     }
 
     #[test]
@@ -383,10 +617,7 @@ mod tests {
             ChunkCoord::new(2, 0),
         ]
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, Rect::full()))
         .collect();
         let passes = partition_checkerboard(&active);
         let total: usize = passes.iter().map(|p| p.len()).sum();

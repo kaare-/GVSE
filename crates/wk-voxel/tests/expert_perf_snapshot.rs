@@ -134,7 +134,7 @@ fn stack_tick(s: &mut Scene) -> (Duration, Duration, Duration) {
     let tick_no = s.world.tick;
     s.clouds.step_with_precip(
         &mut s.world, &mut s.humidity, &s.wind, s.params.sea_level_y,
-        s.params.sky_ceiling_y, tick_no, &s.cloud, Some(&s.temperature), Some(&s.phase),
+        s.params.sky_ceiling_y, tick_no, &s.cloud, Some(&mut s.temperature), Some(&s.phase),
     );
     apply_condensation_rain_phased(
         &mut s.world, &mut s.humidity, &s.cond, Some(&s.oro),
@@ -150,7 +150,7 @@ fn stack_tick(s: &mut Scene) -> (Duration, Duration, Duration) {
     }
     if temperature_step_due(s.world.tick) {
         let t = s.world.tick;
-        s.temperature.step(Some(&s.world), &s.humidity, t);
+        s.temperature.step(Some(&s.world), &s.humidity, t, None);
     }
     if s.phase.enabled
         && s.phase.enable_cold_avalanche

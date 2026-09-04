@@ -16,11 +16,16 @@ use wk_material::MaterialId;
 use crate::cell::Cell;
 
 /// Chunk width in cells.
+///
+/// [`DirtyBits`] packs one row into a `u64` — keep this 64.
 pub const CHUNK_CELLS_W: usize = 64;
 /// Chunk height in cells.
 pub const CHUNK_CELLS_H: usize = 64;
 /// Total cells per chunk.
 pub const CHUNK_CELLS: usize = CHUNK_CELLS_W * CHUNK_CELLS_H;
+/// Air sat at or above this is standing water / a full pipe film.
+/// Rain and falling drizzle sit well below (typically ~33).
+pub const STANDING_AIR_SAT: u8 = 160;
 
 /// Chunk coordinate in world-chunk space. `(cx, cy)` — positive `cy`
 /// is up (sky), negative `cy` is down (bedrock).
@@ -84,6 +89,85 @@ impl Rect {
         self.x1 = self.x1.max(x);
         self.y1 = self.y1.max(y);
     }
+
+    pub fn area(self) -> usize {
+        let w = (self.x1 as usize).saturating_sub(self.x0 as usize) + 1;
+        let h = (self.y1 as usize).saturating_sub(self.y0 as usize) + 1;
+        w.saturating_mul(h)
+    }
+}
+
+/// Per-cell dirty mask for one chunk. One `u64` row (bit `x` in row `y`).
+///
+/// The dirty **rect** is the bounding box of writes. Planning dilates
+/// these bits (not the box) so scattered rain does not scan the holes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyBits(pub [u64; CHUNK_CELLS_H]);
+
+impl Default for DirtyBits {
+    fn default() -> Self {
+        Self([0; CHUNK_CELLS_H])
+    }
+}
+
+impl DirtyBits {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0.iter().all(|&w| w == 0)
+    }
+
+    #[inline]
+    pub fn set(&mut self, x: u8, y: u8) {
+        debug_assert!((x as usize) < CHUNK_CELLS_W);
+        debug_assert!((y as usize) < CHUNK_CELLS_H);
+        self.0[y as usize] |= 1u64 << x;
+    }
+
+    #[inline]
+    pub fn get(self, x: u8, y: u8) -> bool {
+        self.0[y as usize] & (1u64 << x) != 0
+    }
+
+    pub fn or_assign(&mut self, other: Self) {
+        for (a, b) in self.0.iter_mut().zip(other.0.iter()) {
+            *a |= *b;
+        }
+    }
+
+    pub fn count(self) -> usize {
+        self.0.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// Inclusive bbox of set bits, or `None` if empty.
+    pub fn bbox(self) -> Option<Rect> {
+        let mut rect: Option<Rect> = None;
+        for y in 0..CHUNK_CELLS_H as u8 {
+            let row = self.0[y as usize];
+            if row == 0 {
+                continue;
+            }
+            let x0 = row.trailing_zeros() as u8;
+            let x1 = 63 - row.leading_zeros() as u8;
+            match &mut rect {
+                Some(r) => {
+                    r.expand_to_include(x0, y);
+                    r.expand_to_include(x1, y);
+                }
+                None => {
+                    rect = Some(Rect {
+                        x0,
+                        y0: y,
+                        x1,
+                        y1: y,
+                    });
+                }
+            }
+        }
+        rect
+    }
 }
 
 /// One `CHUNK_CELLS_W × CHUNK_CELLS_H` slab. Row-major, `y = 0` at the
@@ -95,6 +179,11 @@ pub struct Chunk {
     pub cells: Vec<Cell>,
     /// Bounding box around cells touched last tick. `None` = quiescent.
     pub dirty: Option<Rect>,
+    /// Per-cell dirty mask for the same writes as [`Self::dirty`].
+    /// Runtime only — old saves have the rect and empty bits, so
+    /// [`crate::active::plan_active`] falls back to the box.
+    #[serde(default, skip)]
+    pub dirty_bits: DirtyBits,
     /// Local tick counter (wraps freely — used for RNG salting only).
     pub tick: u64,
     /// Sticky occupancy: at least one `Air` cell with `sat > 0` was
@@ -142,6 +231,69 @@ pub struct Chunk {
     /// scan finds no flake left.
     #[serde(default)]
     pub has_snow: bool,
+    /// Sticky occupancy: at least one competent rock cell (stone /
+    /// limestone / flowstone / sandstone / conglomerate). Floating-body
+    /// wake skips empty sky and bedrock chunks. Cleared by
+    /// [`crate::rules::competent_fall::wake_floating_competent`] when a
+    /// scan finds none left.
+    #[serde(default)]
+    pub has_competent: bool,
+    /// Sticky occupancy: at least one `Air` cell with
+    /// `sat >= `[`STANDING_AIR_SAT`] (standing water / full pipe).
+    /// Lake-bed and confined-head wakes skip rain-film sky. Cleared
+    /// when a scan finds none left.
+    #[serde(default)]
+    pub has_standing_air: bool,
+    /// Sticky occupancy: at least one non-`Air` cell. Confined-head
+    /// wake skips mid-ocean chunks that are only water. Cleared when a
+    /// scan finds none left.
+    #[serde(default)]
+    pub has_solid: bool,
+    /// Sticky occupancy: at least one `Air` cell (wet or dry). Pore-weep
+    /// on buried crust only scans the chunk perimeter — interior cells
+    /// cannot face Air. Raised on any Air write; cleared when a scan
+    /// finds none left.
+    #[serde(default)]
+    pub has_open_air: bool,
+    /// Sticky occupancy: at least one porous solid below capacity.
+    /// Lake-bed skip of a quiet saturated water table. Raised on any
+    /// wet-solid write (capacity is not known at chunk level); cleared
+    /// when a scan finds every pore full.
+    #[serde(default)]
+    pub has_unsaturated_pores: bool,
+    /// Sticky occupancy: at least one `Clay` cell. Suspension scans skip
+    /// rain-wet sand / soil / gravel that can never entrain. Raised on a
+    /// Clay write; cleared by [`crate::sediment::apply_suspension`] when
+    /// a scan finds none left. `true` on old saves (missing field) so
+    /// they scan once, then the empty pass clears them.
+    #[serde(default = "serde_flag_true")]
+    pub has_clay: bool,
+    /// Sticky occupancy: at least one soluble rock (limestone, flowstone,
+    /// sandstone, conglomerate). Karst skips rain-soaked sand / soil that
+    /// has no carbonate to dissolve. Raised on a soluble write; cleared
+    /// when a karst scan finds none left. `true` on old saves so they
+    /// scan once, then the empty pass clears them.
+    #[serde(default = "serde_flag_true")]
+    pub has_soluble: bool,
+    /// Inclusive local-y band of standing Air. `y0 > y1` is unset
+    /// (old saves / bootstrap) so confined still scans the full rect.
+    /// Raised on a standing write; tightened by the evap occupancy walk.
+    #[serde(default = "standing_band_unset_lo")]
+    pub standing_air_y0: u8,
+    #[serde(default = "standing_band_unset_hi")]
+    pub standing_air_y1: u8,
+}
+
+fn serde_flag_true() -> bool {
+    true
+}
+
+fn standing_band_unset_lo() -> u8 {
+    255
+}
+
+fn standing_band_unset_hi() -> u8 {
+    0
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -168,6 +320,7 @@ impl Chunk {
             coord,
             cells: vec![Cell::default(); CHUNK_CELLS],
             dirty: None,
+            dirty_bits: DirtyBits::empty(),
             tick: 0,
             has_wet_air: false,
             has_wet_pores: false,
@@ -176,6 +329,15 @@ impl Chunk {
             has_organic: false,
             has_buoyant: false,
             has_snow: false,
+            has_competent: false,
+            has_standing_air: false,
+            has_solid: false,
+            has_open_air: false,
+            has_unsaturated_pores: false,
+            has_clay: false,
+            has_soluble: false,
+            standing_air_y0: 255,
+            standing_air_y1: 0,
         }
     }
 
@@ -214,6 +376,7 @@ impl Chunk {
                 });
             }
         }
+        self.dirty_bits.set(xu, yu);
         if cell.material == MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_air = true;
         }
@@ -223,6 +386,10 @@ impl Chunk {
         // over-wake a rare wet impermeable cell, but never misses water.
         if cell.material != MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_pores = true;
+            self.has_unsaturated_pores = true;
+        }
+        if cell.material == MaterialId::Air {
+            self.has_open_air = true;
         }
         if cell.material == MaterialId::Limestone {
             self.has_limestone = true;
@@ -242,12 +409,79 @@ impl Chunk {
         if cell.material == MaterialId::Snow {
             self.has_snow = true;
         }
+        if crate::cell::is_competent_rock(cell.material) {
+            self.has_competent = true;
+        }
+        if cell.material == MaterialId::Clay {
+            self.has_clay = true;
+        }
+        if wk_material::MaterialRegistry::base_props(cell.material).solubility > 0 {
+            self.has_soluble = true;
+        }
+        if cell.material == MaterialId::Air && cell.sat.0 >= STANDING_AIR_SAT {
+            self.has_standing_air = true;
+            self.note_standing_air_y(yu);
+        }
+        if cell.material != MaterialId::Air {
+            self.has_solid = true;
+        }
     }
 
     /// Wipe the dirty rectangle. Called at the start of each rule pass
     /// once the previous pass has been fully consumed.
     pub fn clear_dirty(&mut self) {
         self.dirty = None;
+        self.dirty_bits = DirtyBits::empty();
+    }
+
+    /// Expand the standing-air y band to include `y`.
+    pub fn note_standing_air_y(&mut self, y: u8) {
+        if self.standing_air_y0 > self.standing_air_y1 {
+            self.standing_air_y0 = y;
+            self.standing_air_y1 = y;
+            return;
+        }
+        self.standing_air_y0 = self.standing_air_y0.min(y);
+        self.standing_air_y1 = self.standing_air_y1.max(y);
+    }
+
+    /// Clear standing occupancy and the y band (scan found none).
+    pub fn clear_standing_air(&mut self) {
+        self.has_standing_air = false;
+        self.standing_air_y0 = 255;
+        self.standing_air_y1 = 0;
+    }
+
+    /// Local y range to scan for confined rise, intersected with `rect`.
+    ///
+    /// The rising film sits on the standing column, so the band is
+    /// expanded by one row. Unset bands (`y0 > y1`) keep the full rect.
+    pub fn standing_scan_y(&self, rect: Rect) -> (u8, u8) {
+        if self.standing_air_y0 > self.standing_air_y1 {
+            return (rect.y0, rect.y1);
+        }
+        let lo = self.standing_air_y0.saturating_sub(1).max(rect.y0);
+        let hi = (self.standing_air_y1.saturating_add(1)).min(rect.y1);
+        if lo <= hi {
+            (lo, hi)
+        } else {
+            (rect.y0, rect.y1)
+        }
+    }
+
+    /// Inclusive standing-air rows only (no rising-film pad).
+    /// `None` when the band is unset — caller keeps the full rect.
+    pub fn standing_band_y(&self, rect: Rect) -> Option<(u8, u8)> {
+        if self.standing_air_y0 > self.standing_air_y1 {
+            return None;
+        }
+        let lo = self.standing_air_y0.max(rect.y0);
+        let hi = self.standing_air_y1.min(rect.y1);
+        if lo <= hi {
+            Some((lo, hi))
+        } else {
+            None
+        }
     }
 
     /// Mark a local cell dirty without changing its contents.
@@ -266,12 +500,14 @@ impl Chunk {
                 });
             }
         }
+        self.dirty_bits.set(xu, yu);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell::{Cell, Sat};
     use wk_material::MaterialId;
 
     #[test]
@@ -285,6 +521,9 @@ mod tests {
         assert_eq!(r.x1, 10);
         assert_eq!(r.y0, 2);
         assert_eq!(r.y1, 5);
+        assert!(c.dirty_bits.get(3, 5));
+        assert!(c.dirty_bits.get(10, 2));
+        assert!(!c.dirty_bits.get(6, 3), "AABB hole is not a write");
     }
 
     #[test]
@@ -294,6 +533,7 @@ mod tests {
         assert!(c.dirty.is_some());
         c.clear_dirty();
         assert!(c.dirty.is_none());
+        assert!(c.dirty_bits.is_empty());
     }
 
     #[test]
@@ -310,14 +550,44 @@ mod tests {
         assert!(!c.has_limestone);
         assert!(!c.has_loose);
         assert!(!c.has_snow);
+        assert!(!c.has_competent);
+        assert!(!c.has_standing_air);
+        assert!(!c.has_solid);
+        assert!(!c.has_open_air);
+        assert!(!c.has_unsaturated_pores);
+        assert!(!c.has_clay);
+        assert!(!c.has_soluble);
+        let mut rain = Cell::air();
+        rain.sat = Sat(33);
+        c.set(0, 0, rain);
+        assert!(c.has_wet_air);
+        assert!(c.has_open_air);
+        assert!(!c.has_standing_air);
+        assert!(!c.has_solid);
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
+        assert!(c.has_standing_air);
+        assert_eq!(c.standing_air_y0, 1);
+        assert_eq!(c.standing_air_y1, 1);
+        assert!(c.has_open_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
+        assert!(c.has_soluble);
+        assert!(c.has_competent);
+        assert!(c.has_solid);
         c.set(3, 3, Cell::solid(MaterialId::Sand));
         assert!(c.has_loose);
+        assert!(!c.has_clay);
+        c.set(7, 7, Cell::solid(MaterialId::Clay));
+        assert!(c.has_clay);
+        let mut wet_sand = Cell::solid(MaterialId::Sand);
+        wet_sand.sat = Sat(8);
+        c.set(6, 6, wet_sand);
+        assert!(c.has_unsaturated_pores);
         c.set(4, 4, Cell::solid(MaterialId::Snow));
         assert!(c.has_snow);
+        c.set(5, 5, Cell::solid(MaterialId::Stone));
+        assert!(c.has_competent);
         // Dry air / stone do not clear sticky flags.
         c.set(1, 1, Cell::air());
         assert!(c.has_wet_air);
@@ -332,5 +602,19 @@ mod tests {
         c.clear_dirty();
         c.set(3, 4, Cell::water());
         assert!(c.dirty.is_none(), "identical rewrite must not wake physics");
+    }
+
+    #[test]
+    fn standing_scan_y_covers_the_rising_film() {
+        let mut c = Chunk::new(ChunkCoord::new(0, 0));
+        let full = Rect::full();
+        assert_eq!(c.standing_scan_y(full), (0, 63));
+        c.set(4, 10, Cell::water());
+        assert_eq!(c.standing_scan_y(full), (9, 11));
+        assert_eq!(c.standing_band_y(full), Some((10, 10)));
+        c.clear_standing_air();
+        assert_eq!(c.standing_band_y(full), None);
+        assert!(!c.has_standing_air);
+        assert_eq!(c.standing_scan_y(full), (0, 63));
     }
 }

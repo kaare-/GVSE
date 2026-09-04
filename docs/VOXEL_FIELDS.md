@@ -89,8 +89,11 @@ Possible uses without a second reservoir:
   cohesion for grain failure — still moving water via existing seepage
   / throughflow.
 
-- **Risk:** high if the field is allowed to invent water. Treat as
-  diagnostic + rate modulator only.
+- **Now (careful):** `WaterHead` on `World` (runtime only). Every
+  `WATER_HEAD_PERIOD` (24) ticks it samples every 4th column for the
+  top standing-water / ≥80% pore table, Darcy-smooths, and **boosts**
+  throughflow + confined-rise rates (1.0–1.4). It does not write `sat`
+  and does not change pore-pore seepage. Wind is not coupled yet.
 
 ### 5. Nutrient / litter plume
 
@@ -195,9 +198,30 @@ compaction → map-gated thin-dam shear.
 ### 7. Air pressure (research)
 
 Powder Toy–style gas. Migration already flags Air as first-class;
-voxel wind is still climate-scale (mean + natural variance for force /
-direction; no pressure field yet). Defer cell wind until hydro + thermal are
-boring.
+voxel wind is climate-scale mean + natural variance, plus a **local tile
+heatmap** (terrain / thermal ∇T / swirl) rebuilt every
+`WIND_FIELD_PERIOD` ticks on occupied humidity seats + a 1-tile halo + a
+thin near-surface band. Humidity uses per-tick fractional flux through
+`vector_at` (free-air height cached per column; wind samples cached once
+per seat before the two flux axes). Temperature stays on
+period 20. Sun and a standing radiate leak hit the **ground** (night
+is the sun off); humidity shades incoming sun and blankets the leak.
+Air sits on the climate lapse and couples to that skin (no day/night
+sky swap).
+Each air tile then upwind-mixes heat along the local wind. Wet air
+has more thermal mass (vapor Cp ~1.9× dry; Tab `humid_heat_scale`)
+so a rising plume pulls that heat with it. Warm humid skin under
+colder air is the draft that lofts vapour. Pond vapour is not
+teleported onto both banks — horizontal flux stays level; only
+seats inside a hill hoist to the crest. The T overlay uses a fixed −40..36 °C ramp (ice-white through
+yellow-green at 18 °C to red). Humidity hold follows
+Clausius–Clapeyron (Magnus): full tile at 40 °C, a few percent at
+0 °C, a trace at −100 °C. Cloud / haze floors follow the live
+column, not a global sea-level y. Coarse Jacobi on the **existing**
+wind heatmap (6 sweeps, occupied + halo + skin band) removes
+divergence into rock. That is not a cell-scale gas solver and it
+does not write humidity. Water-head is a separate slow overlay
+and is not coupled into wind yet.
 
 ## Architecture notes
 

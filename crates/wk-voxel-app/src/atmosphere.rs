@@ -7,45 +7,19 @@ use std::collections::HashMap;
 use macroquad::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
-    build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
+    airborne_loose_at, build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
     day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
     precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
-    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, Humidity,
-    ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
-    CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_SEARCH,
+    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, Humidity, ModuleId,
+    OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H,
+    CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH,
 };
 
-/// Active-layer parcel parallax (1 = locked to terrain; lower = farther).
-pub const CLOUD_PARALLAX: f32 = 0.78;
 pub const FAR_RIDGE_PARALLAX: f32 = 0.12;
 pub const NEAR_RIDGE_PARALLAX: f32 = 0.32;
-/// Soft cloud bank parallax for depth echoes (humidity-driven, not tile paint).
-pub const CLOUD_FAR_PARALLAX: f32 = 0.20;
-pub const CLOUD_MID_PARALLAX: f32 = 0.48;
-pub const CLOUD_FRONT_PARALLAX: f32 = 1.08;
 const RIDGE_REFRESH_TICKS: u64 = 30;
 const MILD_TEMP_C: f32 = 18.0;
-/// Depth pass for soft cloud banks (see `docs/SKY.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloudDepthLayer {
-    Far,
-    Mid,
-    /// Visual humidity echo on the playfield.
-    Active,
-    Front,
-}
-
-/// One soft lobe bank to stamp (parcel echo or humidity-peak ghost).
-#[derive(Debug, Clone, Copy)]
-struct SoftCloudSrc {
-    fx: f32,
-    fy: f32,
-    wet: f32,
-    shape_seed: u32,
-    deform: f32,
-    radius_cells: f32,
-}
 
 /// Live-tunable sky / ridge / cloud cosmetics (Tab → Climate → Sky look).
 ///
@@ -72,17 +46,10 @@ pub struct AtmosphereLookConfig {
     pub ridge_crest_blend: f32,
     /// Extra far-plate mix into mid crest when far sits behind it (0..1).
     pub ridge_far_into_crest: f32,
-    /// 0 = grey banks, 1 = bright white cores.
-    pub cloud_whiteness: f32,
     /// Strength of sun-angled cast shadows from plants/creatures (0..1).
     pub cast_shadow_strength: f32,
-    /// Mild column dim under cloud cover (0..1).
+    /// Mild column dim under wet humidity (0..1).
     pub cloud_shade_strength: f32,
-    /// Humidity vapour layer strengths (0..1).
-    pub vapour_far: f32,
-    pub vapour_mid: f32,
-    pub vapour_active: f32,
-    pub vapour_front: f32,
     /// `H` overlay: bilinear per-cell sample (on) vs flat 4×4 tiles (off).
     pub haze_resample: bool,
     /// `H` overlay: seats / samples below this mass do not paint.
@@ -105,13 +72,8 @@ impl Default for AtmosphereLookConfig {
             ridge_feather_far: 5.0,
             ridge_crest_blend: 0.55,
             ridge_far_into_crest: 0.70,
-            cloud_whiteness: 0.62,
             cast_shadow_strength: 0.85,
             cloud_shade_strength: 0.35,
-            vapour_far: 0.55,
-            vapour_mid: 0.70,
-            vapour_active: 0.85,
-            vapour_front: 0.65,
             haze_resample: true,
             haze_min_mass: 0.0,
         }
@@ -129,6 +91,15 @@ pub struct RidgeSilhouette {
 }
 
 impl RidgeSilhouette {
+    /// Drop the cached plates so the next `ensure` resamples live columns.
+    /// F3 erase must call this — otherwise the ghost hill stays for
+    /// [`RIDGE_REFRESH_TICKS`] and the walk used to keep the seed crest anyway.
+    pub fn invalidate(&mut self) {
+        self.far.clear();
+        self.near.clear();
+        self.last_tick = 0;
+    }
+
     pub fn ensure(
         &mut self,
         world: &World,
@@ -189,7 +160,7 @@ fn ridge_ground_at(world: &World, gx: i32, y: i32, sea_level: i32) -> bool {
     let Some(c) = world.get_cell(gx, y) else {
         return false;
     };
-    if falls_through_empty_air(c.material) {
+    if falls_through_empty_air(c.material) || airborne_loose_at(world, gx, y, c) {
         return false;
     }
     if c.material != MaterialId::Air {
@@ -201,13 +172,7 @@ fn ridge_ground_at(world: &World, gx: i32, y: i32, sea_level: i32) -> bool {
     y <= sea_level || is_standing_water(world, gx, y)
 }
 
-fn live_surface_y_ground(
-    world: &World,
-    gx: i32,
-    hint: i32,
-    search: i32,
-    sea_level: i32,
-) -> i32 {
+fn live_surface_y_ground(world: &World, gx: i32, hint: i32, search: i32, sea_level: i32) -> i32 {
     let jx = world.wrap_x(gx);
     let ground = |y: i32| ridge_ground_at(world, jx, y, sea_level);
     if world.get_cell(jx, hint).is_none() {
@@ -221,11 +186,36 @@ fn live_surface_y_ground(
             }
             y += 1;
         }
+        // Same extra climb as `live_surface_y`: an F3 tower can rise
+        // farther than the local window.
+        let extra = LIVE_SURFACE_DESCENT_MAX.saturating_sub(search);
+        for _ in 0..extra {
+            if world.get_cell(jx, y + 1).is_none() || !ground(y + 1) {
+                return y;
+            }
+            y += 1;
+        }
         return y;
     }
     let mut y = hint;
     for _ in 0..search {
         y -= 1;
+        if ground(y) {
+            return y;
+        }
+    }
+    // Same extra walk as `live_surface_y`: a wiped hill is farther than
+    // the local window. Keep the seed only when the column is loaded air
+    // with no bed (an unstamped neighbor, not an F3 wipe).
+    let extra = LIVE_SURFACE_DESCENT_MAX.saturating_sub(search);
+    for _ in 0..extra {
+        y -= 1;
+        if y < 0 {
+            break;
+        }
+        if world.get_cell(jx, y).is_none() {
+            break;
+        }
         if ground(y) {
             return y;
         }
@@ -253,12 +243,10 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
     out
 }
 
-/// True when this cell is the falling drop (1-wide water / flake), not vapour.
+/// True when this cell is falling **rain**. Snow floats through the wash
+/// and must not carve the 1-wide shaft.
 fn haze_cell_is_drop_cell(c: wk_voxel::Cell) -> bool {
-    if c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX {
-        return true;
-    }
-    falls_through_empty_air(c.material)
+    c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX
 }
 
 fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
@@ -270,10 +258,26 @@ fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
 
 /// Highest drop in each column. Haze below that cell is the open path.
 fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
+    collect_drop_tops_where(world, |_, _| true)
+}
+
+/// [`collect_drop_tops`] restricted to chunks that can affect the
+/// viewport shaft. Off-screen rain still falls in the sim; it cannot
+/// carve an on-screen wash. Full column height stays — a drop above
+/// the camera still opens the path below it. Chunks whose entire
+/// 64-high band sits **below** the camera are leftover (shafts only
+/// go down).
+fn collect_drop_tops_where(
+    world: &World,
+    mut keep_chunk: impl FnMut(i32, i32) -> bool,
+) -> HashMap<i32, i32> {
     let mut tops: HashMap<i32, i32> = HashMap::new();
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     for chunk in world.chunks.values() {
+        if !keep_chunk(chunk.coord.cx, chunk.coord.cy) {
+            continue;
+        }
         if !chunk.has_wet_air && !chunk.has_snow && !chunk.has_buoyant {
             continue;
         }
@@ -286,11 +290,300 @@ fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
                 }
                 let gx = world.wrap_x(ox + lx as i32);
                 let gy = oy + ly as i32;
-                tops.entry(gx).and_modify(|y| *y = (*y).max(gy)).or_insert(gy);
+                tops.entry(gx)
+                    .and_modify(|y| *y = (*y).max(gy))
+                    .or_insert(gy);
             }
         }
     }
     tops
+}
+
+/// True when a humidity tile's 4×4 can produce a pixel in the viewport
+/// (including ring `x` copies). Pad one tile so panning does not pop.
+fn humidity_tile_touches_view(
+    hx: i32,
+    hy: i32,
+    tc: i32,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+) -> bool {
+    if cell_px <= 0.0 {
+        return false;
+    }
+    let tc = tc.max(1);
+    let pad = tc as f32 * cell_px;
+    let gx0 = hx * tc;
+    let gy0 = hy * tc;
+    let tile_px = tc as f32 * cell_px;
+    // Same `top_sy` as [`draw_haze_and_wind`]: top of cell `gy` is
+    // `origin_y - (gy + 1 - bedrock) * cell_px`.
+    let top_sy = origin_y - (gy0 + tc - bedrock_floor_y) as f32 * cell_px;
+    let bot_sy = origin_y - (gy0 - bedrock_floor_y) as f32 * cell_px;
+    if bot_sy < -pad || top_sy > sh + pad {
+        return false;
+    }
+    let copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    for &copy in copies {
+        let sx = origin_x + (gx0 + copy * width_cols) as f32 * cell_px;
+        if sx + tile_px >= -pad && sx <= sw + pad {
+            return true;
+        }
+    }
+    false
+}
+
+/// Chunk `cx` whose 64-wide x band can touch the viewport (ring copies).
+fn chunk_x_touches_view(
+    cx: i32,
+    origin_x: f32,
+    cell_px: f32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+) -> bool {
+    if cell_px <= 0.0 {
+        return false;
+    }
+    let pad = CHUNK_CELLS_W as f32 * cell_px;
+    let gx0 = cx * CHUNK_CELLS_W as i32;
+    let copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    for &copy in copies {
+        let sx = origin_x + (gx0 + copy * width_cols) as f32 * cell_px;
+        if sx + pad >= 0.0 && sx <= sw {
+            return true;
+        }
+    }
+    false
+}
+
+/// Inclusive tile box that can produce a haze / overlay pixel.
+///
+/// Built from the camera so paint can probe O(view) instead of walking
+/// every humidity key (55k+ after a soak). One-tile pad matches
+/// [`humidity_tile_touches_view`] so bilinear neighbours stay.
+#[derive(Clone, Debug)]
+pub(crate) struct ViewTileBox {
+    pub hy_lo: i32,
+    pub hy_hi: i32,
+    hx_ranges: [(i32, i32); 2],
+    n_hx: u8,
+}
+
+impl ViewTileBox {
+    pub(crate) fn contains(&self, hx: i32, hy: i32) -> bool {
+        hy >= self.hy_lo && hy <= self.hy_hi && self.contains_hx(hx)
+    }
+
+    fn contains_hx(&self, hx: i32) -> bool {
+        for i in 0..self.n_hx as usize {
+            let (a, b) = self.hx_ranges[i];
+            if hx >= a && hx <= b {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn tile_count(&self) -> usize {
+        let h = (self.hy_hi - self.hy_lo + 1).max(0) as usize;
+        let mut w = 0usize;
+        for i in 0..self.n_hx as usize {
+            let (a, b) = self.hx_ranges[i];
+            w += (b - a + 1).max(0) as usize;
+        }
+        h.saturating_mul(w)
+    }
+
+    pub(crate) fn for_each_hx(&self, mut f: impl FnMut(i32)) {
+        for i in 0..self.n_hx as usize {
+            let (a, b) = self.hx_ranges[i];
+            for hx in a..=b {
+                f(hx);
+            }
+        }
+    }
+}
+
+/// World-x intervals (inclusive) visible in camera space, wrapped.
+pub(crate) fn wrap_world_x_ranges(
+    gx_lo: i32,
+    gx_hi: i32,
+    width_cols: i32,
+) -> ([(i32, i32); 2], u8) {
+    if width_cols <= 0 || gx_hi < gx_lo {
+        return ([(0, -1), (0, -1)], 0);
+    }
+    if gx_hi - gx_lo >= width_cols {
+        return ([(0, width_cols - 1), (0, -1)], 1);
+    }
+    let a = gx_lo.rem_euclid(width_cols);
+    let b = a + (gx_hi - gx_lo);
+    if b < width_cols {
+        ([(a, b), (0, -1)], 1)
+    } else {
+        ([(a, width_cols - 1), (0, b - width_cols)], 2)
+    }
+}
+
+/// Inclusive world-x ranges that can produce a cell-sized overlay pixel.
+///
+/// U / M / G used to scan `0..width_cols` and skip off-screen `sx`.
+/// Same leftover as H walking every humidity key — probe the camera.
+pub(crate) fn view_cell_x_ranges(
+    origin_x: f32,
+    cell_px: f32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+) -> ([(i32, i32); 2], u8) {
+    if cell_px <= 0.0 || sw <= 0.0 {
+        return ([(0, -1), (0, -1)], 0);
+    }
+    let gx_lo = ((-cell_px - origin_x) / cell_px).floor() as i32;
+    let gx_hi = ((sw + cell_px - origin_x) / cell_px).ceil() as i32;
+    if !wrap_x || width_cols <= 0 {
+        let a = gx_lo.max(0);
+        let b = if width_cols > 0 {
+            gx_hi.min(width_cols - 1)
+        } else {
+            gx_hi
+        };
+        if b < a {
+            return ([(0, -1), (0, -1)], 0);
+        }
+        return ([(a, b), (0, -1)], 1);
+    }
+    wrap_world_x_ranges(gx_lo, gx_hi, width_cols)
+}
+
+pub(crate) fn gx_in_ranges(gx: i32, ranges: &[(i32, i32); 2], n: u8) -> bool {
+    for i in 0..n as usize {
+        let (a, b) = ranges[i];
+        if gx >= a && gx <= b {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn view_tile_box(
+    tc: i32,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+) -> Option<ViewTileBox> {
+    if cell_px <= 0.0 || sw <= 0.0 || sh <= 0.0 {
+        return None;
+    }
+    let tc = tc.max(1);
+    let pad = tc as f32 * cell_px;
+    // Expand one tile so float rounding cannot drop a seat that
+    // [`humidity_tile_touches_view`] would keep.
+    let hy_hi =
+        ((bedrock_floor_y as f32 + (origin_y + pad) / cell_px) / tc as f32).floor() as i32 + 1;
+    let hy_lo = {
+        let raw =
+            (bedrock_floor_y as f32 - tc as f32 + (origin_y - sh - pad) / cell_px) / tc as f32;
+        raw.ceil() as i32 - 1
+    };
+    let gx_lo = ((-pad - origin_x) / cell_px).floor() as i32 - tc;
+    let gx_hi = ((sw + pad - origin_x) / cell_px).ceil() as i32;
+    let mut hx_ranges = [(0, -1), (0, -1)];
+    let n_hx;
+    if !wrap_x || width_cols <= 0 {
+        hx_ranges[0] = (gx_lo.div_euclid(tc), gx_hi.div_euclid(tc));
+        n_hx = 1;
+    } else {
+        let (wx, n) = wrap_world_x_ranges(gx_lo, gx_hi, width_cols);
+        n_hx = n;
+        for i in 0..n as usize {
+            let (a, b) = wx[i];
+            hx_ranges[i] = (a.div_euclid(tc), b.div_euclid(tc));
+        }
+    }
+    Some(ViewTileBox {
+        hy_lo,
+        hy_hi,
+        hx_ranges,
+        n_hx,
+    })
+}
+
+/// True unless this chunk's 64-high band sits entirely below the
+/// viewport. High sky stays — a drop above the camera still carves.
+fn chunk_not_below_view(
+    cy: i32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    sh: f32,
+) -> bool {
+    if cell_px <= 0.0 {
+        return true;
+    }
+    let oy = cy * CHUNK_CELLS_H as i32;
+    let top_sy = origin_y - (oy + CHUNK_CELLS_H as i32 - bedrock_floor_y) as f32 * cell_px;
+    top_sy <= sh + cell_px
+}
+
+/// On-screen tile is a seat when it holds mass or a cardinal neighbour
+/// does (off-screen mass still seeds bilinear).
+fn haze_view_seat_due(humidity: &Humidity, hx: i32, hy: i32) -> bool {
+    if humidity.at_tile(hx, hy) > 0.0 {
+        return true;
+    }
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let Some(nx) = humidity.wrap_tile_x(hx + dx) else {
+            continue;
+        };
+        let ny = hy + dy;
+        if let Some(b) = humidity.bounds {
+            if !b.contains(nx, ny) {
+                continue;
+            }
+        }
+        if humidity.at_tile(nx, ny) > 0.0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Occupied + neighbour seats that can touch `box` — probe the view
+/// when it is smaller than the vapour map, otherwise walk keys.
+fn haze_paint_seats_in_box(humidity: &Humidity, box_: &ViewTileBox) -> Vec<(i32, i32)> {
+    if box_.tile_count() >= humidity.cells.len().max(1) {
+        return haze_paint_seats_where(humidity, |hx, hy| box_.contains(hx, hy));
+    }
+    let mut seats = Vec::new();
+    for hy in box_.hy_lo..=box_.hy_hi {
+        for i in 0..box_.n_hx as usize {
+            let (hx0, hx1) = box_.hx_ranges[i];
+            for hx in hx0..=hx1 {
+                let Some(hx) = humidity.wrap_tile_x(hx) else {
+                    continue;
+                };
+                if haze_view_seat_due(humidity, hx, hy) {
+                    seats.push((hx, hy));
+                }
+            }
+        }
+    }
+    seats.sort_unstable();
+    seats.dedup();
+    seats
 }
 
 /// Inclusive bottom of the 4×4 column still painted. Everything at or
@@ -313,27 +606,39 @@ fn haze_column_y0(y0: i32, y1: i32, drop_y: Option<i32>) -> Option<i32> {
 /// the three sibling columns. Skipping it is the 4-wide hole. Neighbour
 /// keys go through [`Humidity::wrap_tile_x`] — raw `hx-1` was the ring
 /// seam.
-fn haze_paint_seats(humidity: &Humidity, sky_hy_min: i32) -> Vec<(i32, i32)> {
+fn haze_paint_seats(humidity: &Humidity) -> Vec<(i32, i32)> {
+    haze_paint_seats_where(humidity, |_, _| true)
+}
+
+/// Occupied tiles plus cardinal neighbours, then drop seats that cannot
+/// touch the viewport. Off-screen mass still seeds an on-screen neighbour
+/// (bilinear). The sim field is unchanged — coarsening off-screen
+/// advect / lottery would change weather on a ring world.
+fn haze_paint_seats_where(
+    humidity: &Humidity,
+    mut keep: impl FnMut(i32, i32) -> bool,
+) -> Vec<(i32, i32)> {
     let mut seats = std::collections::HashSet::new();
     for (&(hx, hy), &mass) in &humidity.cells {
-        if mass <= 0.0 || hy < sky_hy_min {
+        if mass <= 0.0 {
             continue;
         }
-        seats.insert((hx, hy));
+        if keep(hx, hy) {
+            seats.insert((hx, hy));
+        }
         for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
             let Some(nx) = humidity.wrap_tile_x(hx + dx) else {
                 continue;
             };
             let ny = hy + dy;
-            if ny < sky_hy_min {
-                continue;
-            }
             if let Some(b) = humidity.bounds {
                 if !b.contains(nx, ny) {
                     continue;
                 }
             }
-            seats.insert((nx, ny));
+            if keep(nx, ny) {
+                seats.insert((nx, ny));
+            }
         }
     }
     let mut out: Vec<_> = seats.into_iter().collect();
@@ -405,198 +710,6 @@ fn humidity_haze_alpha_gated(mass: f32, max_mass: f32, min_mass: f32) -> u8 {
     humidity_haze_alpha_cell(mass, max_mass, 0.0)
 }
 
-fn cloud_layer_strength(look: &AtmosphereLookConfig, layer: CloudDepthLayer) -> f32 {
-    match layer {
-        CloudDepthLayer::Far => look.vapour_far,
-        CloudDepthLayer::Mid => look.vapour_mid,
-        CloudDepthLayer::Active => look.vapour_active,
-        CloudDepthLayer::Front => look.vapour_front,
-    }
-    .clamp(0.0, 1.0)
-}
-
-/// Gather soft lobe sources from the visual humidity echo.
-///
-/// Far / mid / front are parallax echoes of the same `CloudStore` — humidity
-/// already owns the water; we do not paint the humidity tile raster here.
-fn gather_soft_cloud_srcs(
-    clouds: &CloudStore,
-    _humidity: &Humidity,
-    layer: CloudDepthLayer,
-    _sea_level_y: i32,
-    _world_seed: u64,
-    downpour_mass: f32,
-) -> Vec<SoftCloudSrc> {
-    let (size_k, wet_k, y_bias, seed_xor, skip_mod, skip_lt) = match layer {
-        CloudDepthLayer::Far => (0.72, 0.55, 14.0, 0xA11Fu32, 5u32, 2u32),
-        CloudDepthLayer::Mid => (0.90, 0.75, 6.0, 0xB22E, 4, 1),
-        CloudDepthLayer::Active => (1.0, 1.0, 0.0, 0, 1, 0),
-        CloudDepthLayer::Front => (1.15, 0.65, -4.0, 0xC33D, 3, 1),
-    };
-    let mut out = Vec::with_capacity(clouds.parcels.len());
-
-    if layer == CloudDepthLayer::Active {
-        for p in &clouds.parcels {
-            out.push(SoftCloudSrc {
-                fx: p.fx,
-                fy: p.fy,
-                wet: p.wetness_with(downpour_mass),
-                shape_seed: p.shape_seed,
-                deform: p.deform,
-                radius_cells: p.radius(),
-            });
-        }
-        return out;
-    }
-
-    for p in &clouds.parcels {
-        let seed = p.shape_seed ^ seed_xor;
-        if skip_mod > 1 && (seed % skip_mod) < skip_lt {
-            continue;
-        }
-        let phase = (seed & 0xFFFF) as f32 / 65535.0;
-        out.push(SoftCloudSrc {
-            fx: p.fx + (phase - 0.5) * 28.0,
-            fy: p.fy + y_bias + (phase - 0.5) * 10.0,
-            wet: (p.wetness_with(downpour_mass) * wet_k).clamp(0.0, 1.0),
-            shape_seed: seed,
-            deform: (p.deform * 0.45).clamp(0.0, 1.0),
-            radius_cells: (p.radius() * size_k).clamp(5.0, 22.0),
-        });
-    }
-    out
-}
-
-fn paint_soft_cloud_mask(
-    mask: &HashMap<(i32, i32), f32>,
-    cell_px: f32,
-    look: &AtmosphereLookConfig,
-    alpha_scale: f32,
-) {
-    let alpha_scale = alpha_scale.clamp(0.0, 1.0);
-    if alpha_scale < 0.02 || mask.is_empty() {
-        return;
-    }
-    let white = look.cloud_whiteness.clamp(0.0, 1.0);
-    for (&(ix, iy), &wet) in mask {
-        let mut n = 0u8;
-        for (dx, dy) in [
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (1, -1),
-            (-1, 1),
-            (1, 1),
-        ] {
-            if mask.contains_key(&(ix + dx, iy + dy)) {
-                n += 1;
-            }
-        }
-        let edge = (n as f32 / 8.0).clamp(0.0, 1.0);
-        let base = 165.0 + white * 70.0;
-        let shade = (base - wet * (28.0 + white * 12.0)) as u8;
-        let alpha =
-            ((120.0 + wet * 70.0) * (0.22 + 0.78 * edge) * alpha_scale).min(210.0) as u8;
-        if alpha < 10 {
-            continue;
-        }
-        let lift = (4.0 + white * 10.0) as u8;
-        draw_rectangle(
-            ix as f32 * cell_px,
-            iy as f32 * cell_px,
-            cell_px,
-            cell_px,
-            Color::from_rgba(
-                shade.saturating_add(lift),
-                shade.saturating_add(lift.saturating_add(2)),
-                shade.saturating_add(lift.saturating_add(4)),
-                alpha,
-            ),
-        );
-    }
-}
-
-/// Soft lobe cloud banks for one depth layer (never paints the humidity tile raster).
-pub fn draw_depth_cloud_layer(
-    clouds: &CloudStore,
-    humidity: &Humidity,
-    wind: &Wind,
-    tick: u64,
-    layer: CloudDepthLayer,
-    look: &AtmosphereLookConfig,
-    world_seed: u64,
-    sea_level_y: i32,
-    downpour_mass: f32,
-    cam_x: f32,
-    cam_y: f32,
-    origin_x: f32,
-    origin_y: f32,
-    cell_px: f32,
-    bedrock_floor_y: i32,
-    wrap_x: bool,
-    width_cols: i32,
-    sw: f32,
-    sh: f32,
-) {
-    let strength = cloud_layer_strength(look, layer);
-    if strength <= 0.02 || cell_px <= 0.0 {
-        return;
-    }
-    let srcs = gather_soft_cloud_srcs(
-        clouds,
-        humidity,
-        layer,
-        sea_level_y,
-        world_seed,
-        downpour_mass,
-    );
-    if srcs.is_empty() {
-        return;
-    }
-    let (parallax, y_lag_scale, scroll_k) = match layer {
-        CloudDepthLayer::Far => (CLOUD_FAR_PARALLAX, 0.40, 0.0),
-        CloudDepthLayer::Mid => (CLOUD_MID_PARALLAX, 0.50, 0.0),
-        CloudDepthLayer::Active => (CLOUD_PARALLAX, 0.55, 0.0),
-        CloudDepthLayer::Front => (CLOUD_FRONT_PARALLAX, 0.20, 0.18),
-    };
-    let lag_x = cam_x * (1.0 - parallax);
-    let lag_y = cam_y * (1.0 - parallax) * y_lag_scale;
-    let scroll_x = if scroll_k > 0.0 {
-        let vx = wind.effective_vx(tick);
-        (get_time() as f32 * vx * cell_px * scroll_k).rem_euclid(sw + 80.0)
-    } else {
-        0.0
-    };
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    let mut mask: HashMap<(i32, i32), f32> = HashMap::with_capacity(srcs.len() * 64);
-    for src in &srcs {
-        let r = src.radius_cells * cell_px;
-        for &x_copy in x_copies {
-            let sx = origin_x
-                + (src.fx + (x_copy * width_cols) as f32) * cell_px
-                + lag_x
-                + scroll_x;
-            let sy = origin_y - (src.fy - bedrock_floor_y as f32) * cell_px + lag_y;
-            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
-                continue;
-            }
-            stamp_pixel_cloud_mask(
-                &mut mask,
-                sx,
-                sy,
-                r,
-                src.wet,
-                src.shape_seed,
-                src.deform,
-                cell_px,
-            );
-        }
-    }
-    paint_soft_cloud_mask(&mask, cell_px, look, strength);
-}
-
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     let t = t.clamp(0.0, 1.0);
     (a as f32 + (b as f32 - a as f32) * t).round() as u8
@@ -664,28 +777,23 @@ fn ridge_palette(
 fn sample_sky_weather(
     _tick: u64,
     _climate: &ClimateConfig,
-    clouds: &CloudStore,
     humidity: &Humidity,
     temperature: &Temperature,
     carbon: &CarbonBudget,
     width_cols: i32,
-    wrap_x: bool,
-    sea_level_y: i32,
-    downpour_mass: f32,
     snow_bias: f32,
 ) -> SkyWeatherParams {
-    let wrap = if wrap_x { Some(width_cols) } else { None };
-    let precip_cover = precip_cover_fraction(clouds, 0, width_cols, wrap, downpour_mass);
-    let sky_hy_min = (sea_level_y + 4).div_euclid(humidity.tile_cols.max(1));
-    let humidity_mean = humidity_mean_norm(humidity, sky_hy_min);
+    let precip_cover = precip_cover_fraction(humidity, 0, width_cols);
+    // Mean the tiles that actually hold vapour — not a global sea+4 cut
+    // that pinned haze / sky tint to the lake line.
+    let humidity_mean = humidity_mean_norm(humidity, i32::MIN);
     let mut t_sum = 0.0f32;
     let mut t_n = 0u32;
-    let hy_min = sky_hy_min;
-    for (&(_hx, hy), &temp_c) in &temperature.cells {
-        if hy < hy_min {
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 {
             continue;
         }
-        t_sum += temp_c;
+        t_sum += temperature.at_tile(hx, hy);
         t_n += 1;
     }
     let mean_t = if t_n > 0 {
@@ -1089,8 +1197,7 @@ fn draw_ridge_band(
             let yl = profile[((i0 - 1).rem_euclid(n)) as usize];
             let yr = profile[((i0 + 1).rem_euclid(n)) as usize];
             let surf_soft = ((surf_y as i64 + yl as i64 + yr as i64) / 3) as i32;
-            let y_vis = bedrock_floor_y
-                + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
+            let y_vis = bedrock_floor_y + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
             let top_sy = origin_y - (y_vis - bedrock_floor_y) as f32 * cell_px + lag_y;
             // Extend solid fill to the bottom of the viewport. Stopping at
             // `origin_y + lag_y` (parallax-lagged bedrock line) left a hard
@@ -1115,8 +1222,8 @@ fn draw_ridge_band(
                 if bn > 0 {
                     let bi = i0.rem_euclid(bn) as usize;
                     let b_surf = b.profile[bi];
-                    let b_y = bedrock_floor_y
-                        + ((b_surf - bedrock_floor_y) as f32 * b.y_squash) as i32;
+                    let b_y =
+                        bedrock_floor_y + ((b_surf - bedrock_floor_y) as f32 * b.y_squash) as i32;
                     let b_lag_y = cam_y * (1.0 - b.parallax);
                     let b_top = origin_y - (b_y - bedrock_floor_y) as f32 * cell_px + b_lag_y;
                     // Far crest higher on screen (smaller sy) → far body is behind mid tip.
@@ -1162,7 +1269,6 @@ fn draw_ridge_band(
 /// Occupied 4×4 seats plus a one-tile neighbour halo (wrapped). A drop
 /// masks that column from itself downward (1-wide). Cells that remain
 /// bilinear-sample the store so tile edges do not read as a clamp.
-/// Soft cloud banks are separate (`N` / [`draw_depth_cloud_layer`]).
 /// Wind streaks are a separate overlay ([`draw_wind_streaks`], `V`).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
@@ -1191,10 +1297,43 @@ pub fn draw_haze_and_wind(
         .max(1.0);
     let min_mass = look.haze_min_mass.max(0.0);
     let resample = look.haze_resample;
+    let _ = sea_level_y;
     let tc = humidity.tile_cols.max(1);
-    let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
-    let drop_tops = collect_drop_tops(world);
-    let seats = haze_paint_seats(humidity, sky_hy_min);
+    let drop_tops = collect_drop_tops_where(world, |cx, cy| {
+        chunk_x_touches_view(cx, origin_x, cell_px, wrap_x, width_cols, sw)
+            && chunk_not_below_view(cy, origin_y, cell_px, bedrock_floor_y, sh)
+    });
+    // No global y-cut. Per-column `cloud_floor_y` already clips buried cells.
+    // Probe the viewport tile box so a soaked sky does not walk 55k keys
+    // to paint a few thousand on-screen seats. Sim field unchanged.
+    let seats = match view_tile_box(
+        tc,
+        origin_x,
+        origin_y,
+        cell_px,
+        bedrock_floor_y,
+        wrap_x,
+        width_cols,
+        sw,
+        sh,
+    ) {
+        Some(box_) => haze_paint_seats_in_box(humidity, &box_),
+        None => haze_paint_seats_where(humidity, |hx, hy| {
+            humidity_tile_touches_view(
+                hx,
+                hy,
+                tc,
+                origin_x,
+                origin_y,
+                cell_px,
+                bedrock_floor_y,
+                wrap_x,
+                width_cols,
+                sw,
+                sh,
+            )
+        }),
+    };
     let mut floor_cache: HashMap<i32, i32> = HashMap::new();
 
     for (hx, hy) in seats {
@@ -1205,9 +1344,9 @@ pub fn draw_haze_and_wind(
             &drop_tops,
             |x| world.wrap_x(x),
             |wx| {
-                *floor_cache.entry(wx).or_insert_with(|| {
-                    cloud_floor_y(world, wind, wx as f32).round() as i32
-                })
+                *floor_cache
+                    .entry(wx)
+                    .or_insert_with(|| cloud_floor_y(world, wind, wx as f32).round() as i32)
             },
             resample,
         ) {
@@ -1218,11 +1357,7 @@ pub fn draw_haze_and_wind(
             for &x_copy in x_copies {
                 let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
                 let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
-                if sx + cell_px < 0.0
-                    || sx > sw
-                    || top_sy > sh
-                    || top_sy + cell_px < 0.0
-                {
+                if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + cell_px < 0.0 {
                     continue;
                 }
                 draw_rectangle(
@@ -1237,24 +1372,182 @@ pub fn draw_haze_and_wind(
     }
 }
 
-/// Sparse screen-space wind strokes (`V` overlay).
+/// Map a climate-scale vector onto a readable overlay stroke.
 ///
-/// Placeholder: 1-px hairlines that do not read speed or direction well.
-/// Kept off `H` so the humidity field stays clean. Needs a real visual.
-pub fn draw_wind_streaks(wind: &Wind, tick: u64, sw: f32, sh: f32) {
-    let vx = wind.effective_vx(tick);
-    if vx.abs() < 0.008 {
+/// Sim wind is ~0.05 tiles/tick by default. Using `vx` as a pixel delta
+/// made arrows sub-pixel until the Tab slider was cranked. Direction is
+/// unit-length; length and alpha encode speed with a floor so the default
+/// breeze still reads. Kept short so neighbouring lattice points do not
+/// overlap into a scribble.
+fn wind_streak_geom(vx: f32, vy: f32, tile_px: f32) -> Option<(f32, f32, f32, u8)> {
+    let speed = vx.hypot(vy);
+    if speed < 0.0015 {
+        return None;
+    }
+    let ux = vx / speed;
+    let uy = vy / speed;
+    // 0.05 (Tab default) → vis 1.0. About one tile at the breeze; gusts ~2.
+    let vis = (speed / 0.05).clamp(0.40, 3.2);
+    let len = ((0.55 + 0.40 * vis) * tile_px).max(6.0);
+    let alpha = (140.0 + 80.0 * ((vis - 0.40) / 2.8).clamp(0.0, 1.0)) as u8;
+    Some((ux, uy, len, alpha))
+}
+
+/// Overlay lattice in tile coords. Zoomed-out views skip more so the
+/// screen does not fill with overlapping stems. The sim field is unchanged.
+fn wind_streak_stride(cell_px: f32) -> i32 {
+    if cell_px < 2.0 {
+        3
+    } else {
+        2
+    }
+}
+
+fn wind_streak_on_lattice(hx: i32, hy: i32, stride: i32) -> bool {
+    let s = stride.max(1);
+    hx.rem_euclid(s) == 0 && hy.rem_euclid(s) == 0
+}
+
+fn wind_tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
+    let Some(w) = world else {
+        return false;
+    };
+    let gx = w.wrap_x(hx * tc + tc / 2);
+    let gy = hy * tc + tc / 2;
+    matches!(w.get_cell(gx, gy), Some(c) if c.material.is_solid())
+}
+
+/// World-space wind strokes (`V` overlay) from the local heatmap.
+///
+/// A coarse lattice of short arrows — not one stroke per rebuilt tile —
+/// so heading and force read on the terrain without a hair on every seat.
+pub fn draw_wind_streaks(
+    wind: &Wind,
+    world: Option<&World>,
+    tick: u64,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+) {
+    if cell_px <= 0.0 {
         return;
     }
-    let t = get_time() as f32;
-    let n = ((sw / 36.0).ceil() as i32).clamp(8, 28);
-    let drift = (t * vx * 40.0).rem_euclid(sw + 40.0);
-    for i in 0..n {
-        let base = (i as f32 / n as f32) * (sw + 40.0) - 20.0;
-        let x = (base + drift).rem_euclid(sw + 40.0) - 20.0;
-        let y = sh * (0.14 + 0.32 * ((i as f32 * 0.37) % 1.0));
-        let len = 12.0 + (i % 5) as f32 * 4.0;
-        draw_rectangle(x, y, len, 1.0, Color::from_rgba(230, 236, 245, 16));
+    let tc = wind.tile_cols.max(1);
+    let evx = wind.effective_vx(tick);
+    let evy = wind.effective_vy(tick);
+    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+
+    let stride = wind_streak_stride(cell_px);
+    let view = view_tile_box(
+        tc,
+        origin_x,
+        origin_y,
+        cell_px,
+        bedrock_floor_y,
+        wrap_x,
+        width_cols,
+        sw,
+        sh,
+    );
+    let mut samples: Vec<(i32, i32, f32, f32)> = Vec::new();
+    if !wind.field.is_empty() {
+        for (&(hx, hy), &(vx, vy)) in &wind.field {
+            if !wind_streak_on_lattice(hx, hy, stride) {
+                continue;
+            }
+            if view.as_ref().is_some_and(|b| !b.contains(hx, hy)) {
+                continue;
+            }
+            if !humidity_tile_touches_view(
+                hx,
+                hy,
+                tc,
+                origin_x,
+                origin_y,
+                cell_px,
+                bedrock_floor_y,
+                wrap_x,
+                width_cols,
+                sw,
+                sh,
+            ) {
+                continue;
+            }
+            if wind_tile_center_is_solid(world, tc, hx, hy) {
+                continue;
+            }
+            samples.push((hx, hy, vx, vy));
+        }
+    } else {
+        // Field not rebuilt yet — still show climate wind on a viewport grid.
+        if evx.abs() + evy.abs() < 0.0015 {
+            return;
+        }
+        let gx0 = ((-origin_x) / cell_px).floor() as i32 - tc;
+        let gx1 = gx0 + (sw / cell_px).ceil() as i32 + tc * 2;
+        let gy_hi = bedrock_floor_y + (origin_y / cell_px).ceil() as i32 + 2;
+        let gy_lo = gy_hi - (sh / cell_px).ceil() as i32 - 2;
+        let mut hx = gx0.div_euclid(tc);
+        let hx1 = gx1.div_euclid(tc);
+        while hx <= hx1 {
+            let mut hy = gy_lo.div_euclid(tc);
+            let hy1 = gy_hi.div_euclid(tc);
+            while hy <= hy1 {
+                if wind_streak_on_lattice(hx, hy, stride)
+                    && !wind_tile_center_is_solid(world, tc, hx, hy)
+                {
+                    let (vx, vy) = wind.vector_at(world, hx, hy);
+                    samples.push((hx, hy, vx, vy));
+                }
+                hy += stride;
+            }
+            hx += stride;
+        }
+    }
+
+    let tile_px = tc as f32 * cell_px;
+    for (hx, hy, vx, vy) in samples {
+        let cx = hx * tc + tc / 2;
+        let cy = hy * tc + tc / 2;
+        let Some((ux, uy, len, alpha)) = wind_streak_geom(vx, vy, tile_px) else {
+            continue;
+        };
+        let color = Color::from_rgba(220, 234, 248, alpha);
+        for &x_copy in x_copies {
+            let sx = origin_x + (cx + x_copy * width_cols) as f32 * cell_px;
+            let sy = origin_y - (cy as f32 + 0.5 - bedrock_floor_y as f32) * cell_px;
+            if sx < -len || sx > sw + len || sy < -len || sy > sh + len {
+                continue;
+            }
+            let x2 = sx + ux * len;
+            let y2 = sy - uy * len;
+            // One stroke + two barbs. The old dark/light pair was six
+            // draw_line calls per tile and read as a scribble once dense.
+            draw_line(sx, sy, x2, y2, 1.35, color);
+            let hx_n = ux * (0.22 * len).min(5.5);
+            let hy_n = -uy * (0.22 * len).min(5.5);
+            draw_line(
+                x2,
+                y2,
+                x2 - hx_n + hy_n * 0.45,
+                y2 - hy_n - hx_n * 0.45,
+                1.2,
+                color,
+            );
+            draw_line(
+                x2,
+                y2,
+                x2 - hx_n - hy_n * 0.45,
+                y2 - hy_n + hx_n * 0.45,
+                1.2,
+                color,
+            );
+        }
     }
 }
 
@@ -1266,14 +1559,13 @@ pub fn draw_wind_streaks(wind: &Wind, tick: u64, sw: f32, sh: f32) {
 pub fn draw_canopy_air_dim(
     world: &World,
     organisms: &OrganismStore,
-    clouds: &CloudStore,
+    humidity: &Humidity,
     tick: u64,
     wind_vx: f32,
     celestial_local: f32,
     celestial_sx: f32,
     _celestial_sy: f32,
     is_day: bool,
-    downpour_mass: f32,
     look: &AtmosphereLookConfig,
     origin_x: f32,
     origin_y: f32,
@@ -1289,7 +1581,6 @@ pub fn draw_canopy_air_dim(
     let _ = (sw, sh); // frustum already applied by caller via y_min/y_max
     let posed = resolve_organism_draw_cells(world, &organisms.atoms, tick, wind_vx);
     let canopy = build_canopy_index_posed(&organisms.atoms, &posed);
-    let wrap = if wrap_x { Some(width_cols) } else { None };
     let cast_k = look.cast_shadow_strength.clamp(0.0, 1.0);
     let cloud_k = look.cloud_shade_strength.clamp(0.0, 1.0);
 
@@ -1320,18 +1611,19 @@ pub fn draw_canopy_air_dim(
         );
     }
 
-    // 3) Mild cloud dim on exposed surface (day + night).
-    if cloud_k > 0.02 && !clouds.is_empty() {
+    // 3) Mild vapour dim on exposed surface (day + night).
+    if cloud_k > 0.02 && !humidity.cells.is_empty() {
         for x in 0..width_cols {
-            let ct = cloud_sky_transmit(clouds, x, wrap, downpour_mass);
+            let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) else {
+                continue;
+            };
+            let ct = cloud_sky_transmit(humidity, x, y);
             let dim = ((1.0 - ct) * cloud_k * 0.50).clamp(0.0, 0.35);
             if dim < 0.04 {
                 continue;
             }
-            if let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) {
-                let e = shade.entry((x, y)).or_insert(0.0);
-                *e = (*e + dim).min(0.70);
-            }
+            let e = shade.entry((x, y)).or_insert(0.0);
+            *e = (*e + dim).min(0.70);
         }
     }
 
@@ -1793,218 +2085,57 @@ fn stamp_celestial_cast_shadows(
     }
 }
 
-/// Active-layer soft parcel banks + precip streaks (humidity echo in CloudStore).
-///
-/// Banks use lobe masks; precip streaks are world-aligned so they clip on ground.
-pub fn draw_clouds(
-    clouds: &CloudStore,
-    humidity: &Humidity,
-    world: &World,
-    wind: &Wind,
-    tick: u64,
-    cam_x: f32,
-    cam_y: f32,
-    origin_x: f32,
-    origin_y: f32,
-    cell_px: f32,
-    bedrock_floor_y: i32,
-    sea_level_y: i32,
-    wrap_x: bool,
-    width_cols: i32,
-    sw: f32,
-    sh: f32,
-    downpour_mass: f32,
-    look: &AtmosphereLookConfig,
-    world_seed: u64,
-    snowing: impl Fn(f32, f32) -> bool,
-) {
-    if cell_px <= 0.0 {
-        return;
-    }
-    draw_depth_cloud_layer(
-        clouds,
-        humidity,
-        wind,
-        tick,
-        CloudDepthLayer::Active,
-        look,
-        world_seed,
-        sea_level_y,
-        downpour_mass,
-        cam_x,
-        cam_y,
-        origin_x,
-        origin_y,
-        cell_px,
-        bedrock_floor_y,
-        wrap_x,
-        width_cols,
-        sw,
-        sh,
-    );
-
-    if clouds.is_empty() {
-        return;
-    }
-    let lag_x = cam_x * (1.0 - CLOUD_PARALLAX);
-    let lag_y = cam_y * (1.0 - CLOUD_PARALLAX) * 0.55;
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-
-    // No precip streaks: rain is real water in the grid now, nucleated in the
-    // air and drawn by the terrain pass as it falls. The streaks existed because
-    // rain teleported to the ground and something had to stand in for the fall;
-    // drawing both would show every shower twice.
-}
-
-
-fn cloud_lobe_layout(shape_seed: u32, deform: f32) -> (f32, f32, Vec<(f32, f32, f32)>) {
-    let d = deform.clamp(0.0, 1.0);
-    // Ridge scrape: wider, flatter.
-    let sx = 1.0 + d * 0.38;
-    let sy = 1.0 - d * 0.40;
-    let s = |n: u32| {
-        ((shape_seed
-            .wrapping_mul(0x9E37_79B9)
-            .wrapping_add(n.wrapping_mul(0x85EB_CA6B)))
-            >> 8) as f32
-            / 16_777_216.0
-    };
-    let jx = |n: u32| (s(n) - 0.5) * 0.28;
-    let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
-    let mut lobes: Vec<(f32, f32, f32)> = vec![
-        (0.0, 0.02, 0.95 * jr(1)),
-        (-0.72, 0.08, 0.70 * jr(2)),
-        (0.78, 0.06, 0.68 * jr(3)),
-        (-0.32 + jx(4) * 0.4, -0.42, 0.60 * jr(4)),
-        (0.28 + jx(5) * 0.4, -0.52, 0.66 * jr(5)),
-    ];
-    if shape_seed & 1 == 0 {
-        lobes.push((0.82, -0.22, 0.52 * jr(6)));
-    }
-    if shape_seed & 2 == 0 {
-        lobes.push((-0.88, -0.12, 0.48 * jr(7)));
-    }
-    if shape_seed % 5 < 3 {
-        lobes.push((jx(8) * 0.5, -0.68, 0.42 * jr(8)));
-    }
-    (sx, sy, lobes)
-}
-
-/// Stamp one parcel's lobe mask into the shared sky occupancy map.
-pub fn stamp_pixel_cloud_mask(
-    mask: &mut HashMap<(i32, i32), f32>,
-    cx: f32,
-    cy: f32,
-    r: f32,
-    wet: f32,
-    shape_seed: u32,
-    deform: f32,
-    cell_px: f32,
-) {
-    if r <= 0.0 || cell_px <= 0.0 {
-        return;
-    }
-    let (sx, sy, lobes) = cloud_lobe_layout(shape_seed, deform);
-    let jx1 = {
-        let s = ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(0x85EB_CA6B)) >> 8) as f32
-            / 16_777_216.0;
-        (s - 0.5) * 0.28
-    };
-    let half_w = r * sx * 1.35;
-    let half_h = r * sy * 1.15;
-    let min_x = ((cx - half_w) / cell_px).floor() as i32;
-    let max_x = ((cx + half_w) / cell_px).ceil() as i32;
-    let min_y = ((cy - half_h) / cell_px).floor() as i32;
-    let max_y = ((cy + half_h) / cell_px).ceil() as i32;
-    let inv_rx = 1.0 / (r * sx).max(1e-3);
-    let inv_ry = 1.0 / (r * sy).max(1e-3);
-
-    for iy in min_y..=max_y {
-        for ix in min_x..=max_x {
-            let px = (ix as f32 + 0.5) * cell_px;
-            let py = (iy as f32 + 0.5) * cell_px;
-            let nx = (px - cx) * inv_rx;
-            let ny = (py - cy) * inv_ry;
-            let mut inside = false;
-            for &(ox, oy, rr) in &lobes {
-                let dx = nx - (ox + jx1 * 0.05);
-                let dy = ny - oy;
-                if dx * dx + dy * dy <= rr * rr {
-                    inside = true;
-                    break;
-                }
-            }
-            if !inside {
-                continue;
-            }
-            mask.entry((ix, iy))
-                .and_modify(|w| *w = (*w).max(wet))
-                .or_insert(wet);
-        }
-    }
-}
-
 /// Build weather params + snow bias for the current scene view.
 pub fn sky_weather_for_scene(
     tick: u64,
     climate: &ClimateConfig,
-    clouds: &CloudStore,
     humidity: &Humidity,
     temperature: &Temperature,
     carbon: &CarbonBudget,
     width_cols: i32,
-    wrap_x: bool,
-    sea_level_y: i32,
-    downpour_mass: f32,
     snow_bias: f32,
 ) -> SkyWeatherParams {
     sample_sky_weather(
         tick,
         climate,
-        clouds,
         humidity,
         temperature,
         carbon,
         width_cols,
-        wrap_x,
-        sea_level_y,
-        downpour_mass,
         snow_bias,
     )
 }
 
-/// Helper: estimate snow bias from raining parcels (0..1).
-pub fn estimate_snow_bias(
-    clouds: &CloudStore,
-    snowing: impl Fn(f32, f32) -> bool,
-) -> f32 {
-    let mut raining = 0u32;
+/// Snow bias from wet tiles that sit at or below freeze (0..1).
+pub fn estimate_snow_bias(humidity: &Humidity, temperature: &Temperature, freeze_c: f32) -> f32 {
+    let mut wet = 0u32;
     let mut snow = 0u32;
-    for p in &clouds.parcels {
-        if !p.raining {
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 {
             continue;
         }
-        raining += 1;
-        if snowing(p.fx, p.fy) {
+        wet += 1;
+        if temperature.at_tile(hx, hy) <= freeze_c {
             snow += 1;
         }
     }
-    if raining == 0 {
+    if wet == 0 {
         0.0
     } else {
-        snow as f32 / raining as f32
+        snow as f32 / wet as f32
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
-        haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, humidity_haze_alpha_gated,
-        stamp_pixel_cloud_mask, CloudDepthLayer,
+        chunk_not_below_view, collect_drop_tops, gx_in_ranges, haze_cell_is_drop, haze_column_y0,
+        haze_paint_seats, haze_paint_seats_in_box, haze_paint_seats_where, haze_resampled_cells,
+        humidity_haze_alpha, humidity_haze_alpha_gated, humidity_tile_touches_view,
+        view_cell_x_ranges, view_tile_box,
     };
     use std::collections::HashMap;
-    use wk_voxel::{CloudStore, Humidity};
+    use wk_voxel::Humidity;
 
     #[test]
     fn airborne_snow_does_not_spike_the_ridge() {
@@ -2013,7 +2144,7 @@ mod tests {
         // 30-tick cache then made the spike linger until the sky cleared.
         use super::{column_surface_y, ridge_ground_at};
         use wk_material::MaterialId;
-        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, CHUNK_CELLS_H, World};
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, World, CHUNK_CELLS_H};
 
         let seed = 1u64;
         let width = 64;
@@ -2022,10 +2153,7 @@ mod tests {
         // below y=0 and the clamp would hide the stone from the walk.
         let gx = 22;
         let hint = continental_surface_y(seed, gx, sea, width);
-        assert!(
-            hint > sea,
-            "test column should be land (hint={hint})"
-        );
+        assert!(hint > sea, "test column should be land (hint={hint})");
         let mut w = World::new(seed);
         for y in [hint, hint + 30] {
             w.ensure_chunk(ChunkCoord::new(
@@ -2048,20 +2176,87 @@ mod tests {
     }
 
     #[test]
+    fn built_tower_lifts_the_ridge_past_the_search_window() {
+        use super::column_surface_y;
+        use wk_material::MaterialId;
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, World, CHUNK_CELLS_H};
+
+        let seed = 1u64;
+        let width = 64;
+        let sea = 20;
+        let gx = 22;
+        let hint = continental_surface_y(seed, gx, sea, width);
+        let crest = hint + 120;
+        assert!(hint > 0, "need a loaded seed hint (hint={hint})");
+        let mut w = World::new(seed);
+        for y in [0, hint, crest] {
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(64),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        for y in 0..=crest {
+            w.set_cell(gx, y, Cell::solid(MaterialId::Stone));
+        }
+        let sky = crest + 40;
+        assert_eq!(
+            column_surface_y(&w, gx, 0, sky, sea, seed, width),
+            crest,
+            "ridge must climb an F3 tower past the 64-cell window (hint={hint})"
+        );
+    }
+
+    #[test]
+    fn erased_hill_drops_the_ridge_off_the_seed_crest() {
+        use super::column_surface_y;
+        use wk_material::MaterialId;
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, World, CHUNK_CELLS_H};
+
+        let seed = 1u64;
+        let width = 64;
+        let sea = 20;
+        let gx = 22;
+        let hint = continental_surface_y(seed, gx, sea, width);
+        assert!(
+            hint > sea + 8,
+            "need a seed crest well above the leftover bed (hint={hint})"
+        );
+        let bed = (hint - 90).max(4);
+        let mut w = World::new(seed);
+        for y in [0, bed, hint] {
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(64),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        w.set_cell(gx, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=bed {
+            w.set_cell(gx, y, Cell::solid(MaterialId::Sand));
+        }
+        for y in (bed + 1)..=hint {
+            w.set_cell(gx, y, Cell::air());
+        }
+        w.set_cell(gx, hint - 6, Cell::solid(MaterialId::LooseLimestone));
+        let sky = hint + 40;
+        assert_eq!(
+            column_surface_y(&w, gx, 0, sky, sea, seed, width),
+            bed,
+            "ridge must follow the erased hill, not the seed crest or a scrap"
+        );
+    }
+
+    #[test]
     fn wet_air_above_the_sea_is_not_a_ridge_crest() {
         use super::column_surface_y;
         use wk_material::MaterialId;
-        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, Sat, CHUNK_CELLS_H, World};
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, Sat, World, CHUNK_CELLS_H};
 
         let seed = 1u64;
         let width = 64;
         let sea = 8;
         let gx = 23;
         let hint = continental_surface_y(seed, gx, sea, width);
-        assert!(
-            hint > sea,
-            "test column should be land (hint={hint})"
-        );
+        assert!(hint > sea, "test column should be land (hint={hint})");
         let mut w = World::new(seed);
         w.ensure_chunk(ChunkCoord::new(
             gx.div_euclid(64),
@@ -2109,6 +2304,20 @@ mod tests {
     }
 
     #[test]
+    fn haze_does_not_carve_under_snow() {
+        use wk_voxel::{Cell, ChunkCoord};
+
+        let mut w = wk_voxel::World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(5, 20, Cell::solid(wk_material::MaterialId::Snow));
+        let tops = collect_drop_tops(&w);
+        assert!(
+            tops.get(&5).is_none(),
+            "snow floats through the wash — it must not open a rain shaft"
+        );
+    }
+
+    #[test]
     fn haze_carves_only_the_drop_cell() {
         use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
 
@@ -2151,7 +2360,7 @@ mod tests {
         h.cells.insert((1, 5), 400.0);
         h.cells.insert((0, 4), 400.0);
         h.cells.insert((0, 6), 400.0);
-        let seats = haze_paint_seats(&h, 0);
+        let seats = haze_paint_seats(&h);
         assert!(
             seats.contains(&(0, 5)),
             "emptied nucleating tile must stay a seat or rain is 4-wide"
@@ -2165,9 +2374,7 @@ mod tests {
         drop_tops.insert(2, 21);
         let painted: std::collections::HashSet<_> = seats
             .iter()
-            .flat_map(|&(hx, hy)| {
-                haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0, true)
-            })
+            .flat_map(|&(hx, hy)| haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0, true))
             .filter(|&(_, _, m)| m > 0.0)
             .map(|(x, y, _)| (x, y))
             .collect();
@@ -2195,11 +2402,58 @@ mod tests {
     }
 
     #[test]
+    fn default_climate_wind_makes_a_readable_streak() {
+        // Tab default is 0.05 tiles/tick. The first V overlay used vx as a
+        // pixel delta, so that breeze was ~0.3 px long. The next pass made
+        // 16 px spears that overlapped into a scribble.
+        let near_surface = 0.05 * 0.20; // height shear at the ground
+        let (ux, _uy, len, alpha) =
+            super::wind_streak_geom(near_surface, 0.0, 4.0).expect("default breeze");
+        assert!((ux - 1.0).abs() < 1e-5);
+        assert!(
+            (6.0..14.0).contains(&len),
+            "default breeze is a short hatch, not a 16px spear (len={len})"
+        );
+        assert!(
+            alpha >= 130,
+            "default breeze must not be a 16-alpha hairline (alpha={alpha})"
+        );
+        assert!(super::wind_streak_geom(0.0, 0.0, 4.0).is_none());
+    }
+
+    #[test]
+    fn wind_overlay_skips_most_tiles() {
+        assert_eq!(super::wind_streak_stride(4.0), 2);
+        assert_eq!(super::wind_streak_stride(1.0), 3);
+        let stride = 2;
+        let keep = (0..8)
+            .flat_map(|hx| (0..8).map(move |hy| (hx, hy)))
+            .filter(|&(hx, hy)| super::wind_streak_on_lattice(hx, hy, stride))
+            .count();
+        assert_eq!(keep, 16, "2×2 lattice keeps a quarter of a 8×8 block");
+        assert!(super::wind_streak_on_lattice(-2, 0, 2));
+        assert!(!super::wind_streak_on_lattice(-1, 0, 2));
+    }
+
+    #[test]
+    fn haze_seats_include_lake_level_tiles() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 128);
+        // Tile hy=20 → world y 80..84. A global sea+4 cut (sea=80 → hy>=21)
+        // used to drop this seat and lock the wash to a shelf above the lake.
+        h.cells.insert((2, 20), 180.0);
+        let seats = haze_paint_seats(&h);
+        assert!(
+            seats.contains(&(2, 20)),
+            "humidity on the live waterline must stay a seat"
+        );
+    }
+
+    #[test]
     fn resample_wraps_neighbour_seats_at_the_ring() {
         let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 64);
         h.wrap_x = true;
         h.cells.insert((0, 5), 400.0);
-        let seats = haze_paint_seats(&h, 0);
+        let seats = haze_paint_seats(&h);
         assert!(seats.contains(&(3, 5)), "left neighbour wraps to hx_max");
         assert!(
             !seats.iter().any(|&(hx, _)| hx < 0 || hx > 3),
@@ -2208,42 +2462,153 @@ mod tests {
     }
 
     #[test]
-    fn depth_echoes_come_from_active_parcels() {
-        let mut clouds = CloudStore::new();
-        clouds.parcels.push(wk_voxel::CloudParcel {
-            fx: 10.0,
-            fy: 40.0,
-            mass: 80.0,
-            raining: false,
-            on_ridge: false,
-            shape_seed: 7,
-            cruise_fy: 40.0,
-            vis_mass: 80.0,
-            deform: 0.0,
-        });
-        let hum = Humidity::new(4);
-        let active = gather_soft_cloud_srcs(&clouds, &hum, CloudDepthLayer::Active, 20, 1, 200.0);
-        let mid = gather_soft_cloud_srcs(&clouds, &hum, CloudDepthLayer::Mid, 20, 1, 200.0);
-        assert_eq!(active.len(), 1);
-        assert_eq!(mid.len(), 1, "mid should echo the active parcel");
-        assert!((active[0].fx - 10.0).abs() < 1e-3);
-        assert!((mid[0].fx - active[0].fx).abs() > 0.01 || (mid[0].fy - active[0].fy).abs() > 0.01);
+    fn humidity_tile_view_cull_keeps_the_camera_tile() {
+        // origin_y such that world y=0 sits at the bottom of a 64px window.
+        let origin_x = 0.0;
+        let origin_y = 64.0;
+        let cell = 4.0;
+        assert!(humidity_tile_touches_view(
+            0, 0, 4, origin_x, origin_y, cell, 0, false, 64, 128.0, 64.0
+        ));
+        assert!(
+            !humidity_tile_touches_view(
+                0, 40, 4, origin_x, origin_y, cell, 0, false, 64, 128.0, 64.0
+            ),
+            "hy=40 is world y 160 — far above a 64px window"
+        );
+        assert!(
+            !humidity_tile_touches_view(
+                30, 0, 4, origin_x, origin_y, cell, 0, false, 256, 128.0, 64.0
+            ),
+            "hx=30 is world x 120 — past a 128px window"
+        );
     }
 
     #[test]
-    fn overlapping_parcels_union_into_one_mask() {
-        let cell = 3.0_f32;
-        let mut mask = HashMap::new();
-        stamp_pixel_cloud_mask(&mut mask, 100.0, 80.0, 36.0, 0.4, 1, 0.0, cell);
-        let alone = mask.len();
-        stamp_pixel_cloud_mask(&mut mask, 118.0, 82.0, 36.0, 0.9, 2, 0.0, cell);
-        assert!(alone > 20, "first parcel should stamp a real footprint");
+    fn haze_view_keeps_on_screen_neighbour_of_off_screen_mass() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 128);
+        h.cells.insert((20, 0), 180.0);
+        let seats = haze_paint_seats_where(&h, |hx, hy| hx == 0 && hy == 0);
         assert!(
-            mask.len() < alone * 2,
-            "overlap must share cells (alone={alone} union={})",
-            mask.len()
+            seats.is_empty(),
+            "far mass must not invent an on-screen seat without a neighbour"
         );
-        let wet_max = mask.values().cloned().fold(0.0_f32, f32::max);
-        assert!((wet_max - 0.9).abs() < 1e-5);
+        h.cells.insert((1, 0), 180.0);
+        let seats = haze_paint_seats_where(&h, |hx, hy| hx == 0 && hy == 0);
+        assert!(
+            seats.contains(&(0, 0)),
+            "on-screen neighbour of visible mass stays a bilinear seat"
+        );
+        assert!(!seats.contains(&(1, 0)));
+        assert!(!seats.contains(&(20, 0)));
+    }
+
+    #[test]
+    fn view_tile_box_covers_every_tile_that_touches_the_camera() {
+        let origin_x = 12.0;
+        let origin_y = 80.0;
+        let cell = 3.0;
+        let tc = 4;
+        let bedrock = 0;
+        let wrap = true;
+        let width = 256;
+        let sw = 160.0;
+        let sh = 90.0;
+        let box_ =
+            view_tile_box(tc, origin_x, origin_y, cell, bedrock, wrap, width, sw, sh).expect("box");
+        let hx_span = width / tc;
+        for hx in -4..70 {
+            for hy in -4..40 {
+                if humidity_tile_touches_view(
+                    hx, hy, tc, origin_x, origin_y, cell, bedrock, wrap, width, sw, sh,
+                ) {
+                    let whx = hx.rem_euclid(hx_span);
+                    assert!(
+                        box_.contains(whx, hy),
+                        "view box dropped a tile the pixel test keeps ({hx},{hy} → {whx})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn haze_view_box_keeps_the_same_on_screen_seats() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 256, 128);
+        h.wrap_x = true;
+        h.cells.insert((2, 1), 180.0);
+        h.cells.insert((40, 1), 180.0);
+        h.cells.insert((2, 20), 180.0);
+        let origin_x = 0.0;
+        let origin_y = 64.0;
+        let cell = 4.0;
+        let keep = |hx: i32, hy: i32| {
+            humidity_tile_touches_view(
+                hx, hy, 4, origin_x, origin_y, cell, 0, true, 256, 128.0, 64.0,
+            )
+        };
+        let old: std::collections::HashSet<_> =
+            haze_paint_seats_where(&h, keep).into_iter().collect();
+        let box_ =
+            view_tile_box(4, origin_x, origin_y, cell, 0, true, 256, 128.0, 64.0).expect("box");
+        let new: std::collections::HashSet<_> =
+            haze_paint_seats_in_box(&h, &box_).into_iter().collect();
+        for seat in &old {
+            assert!(
+                new.contains(seat),
+                "viewport probe dropped seat {seat:?} the key walk kept"
+            );
+        }
+        assert!(new.contains(&(2, 1)));
+        assert!(!old.contains(&(40, 1)));
+        assert!(!old.contains(&(2, 20)));
+    }
+
+    #[test]
+    fn drop_top_chunks_below_the_camera_are_leftover() {
+        // origin_y=64, cell=4, sh=64 → world y 0 sits at the bottom.
+        // cy=-1 tops out on the HUD line (keep). cy=-2 is world y
+        // [-128, -65], entirely below that window.
+        assert!(
+            !chunk_not_below_view(-2, 64.0, 4.0, 0, 64.0),
+            "chunk under the HUD must not scan for shafts"
+        );
+        assert!(
+            chunk_not_below_view(-1, 64.0, 4.0, 0, 64.0),
+            "the HUD-line chunk can still sliver into view"
+        );
+        assert!(
+            chunk_not_below_view(0, 64.0, 4.0, 0, 64.0),
+            "the camera chunk stays"
+        );
+        assert!(
+            chunk_not_below_view(3, 64.0, 4.0, 0, 64.0),
+            "high sky above the camera still carves"
+        );
+    }
+
+    #[test]
+    fn view_cell_x_ranges_cover_every_column_that_touches_the_camera() {
+        let origin_x = -80.0;
+        let cell = 4.0;
+        let width = 256;
+        let sw = 128.0;
+        let (ranges, n) = view_cell_x_ranges(origin_x, cell, true, width, sw);
+        for x in 0..width {
+            let mut on_screen = false;
+            for &copy in &[-1, 0, 1] {
+                let sx = origin_x + (x + copy * width) as f32 * cell;
+                if sx + cell >= 0.0 && sx <= sw {
+                    on_screen = true;
+                    break;
+                }
+            }
+            if on_screen {
+                assert!(
+                    gx_in_ranges(x, &ranges, n),
+                    "visible column {x} missing from {ranges:?}"
+                );
+            }
+        }
     }
 }

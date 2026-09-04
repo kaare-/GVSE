@@ -42,6 +42,7 @@ pub mod displace;
 pub mod landscape_body;
 pub mod symbiosis;
 pub mod temperature;
+pub mod water_head;
 pub mod wind;
 pub mod worldgen;
 
@@ -57,7 +58,8 @@ pub use cell::{
     Cell, CellFlags, Sat,
 };
 pub use chunk::{
-    material_is_loose, Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W,
+    material_is_loose, Chunk, ChunkCoord, DirtyBits, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W,
+    STANDING_AIR_SAT,
 };
 pub use fasthash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 pub use blueprint::{
@@ -162,15 +164,16 @@ pub use humidity::{
 };
 pub use phase::{
     apply_freeze, apply_phase, deposit_condensate_on_surface, deposit_precip_on_surface,
-    ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig,
+    ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig, PRECIP_IN_AIR_MIN,
 };
 pub use rules::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_condensation_rain,
-    apply_condensation_rain_phased, apply_condensation_rain_with_orographic, apply_evaporation,
+    apply_condensation_rain_phased, apply_condensation_rain_with_orographic,
+    precipitate_thermal_surplus, apply_evaporation,
     apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate, apply_flow_erosion,
     apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
-    apply_snow_wind_drift,
+    apply_snow_wind_drift, apply_airborne_snow_fall,
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_contact_regions, apply_seepage_regions, apply_water_flow,
@@ -189,7 +192,8 @@ pub use rules::{
     wake_vertical_chunk_seam_pores, apply_seepage_seam_coupling, wake_grains_for_settle, wake_grains_for_settle_coords,
     GrainWake,
     wake_unsupported_grains, wake_unstable_slopes,
-    apply_competent_fall_regions, wake_competent_bodies, wake_competent_bodies_all,
+    apply_competent_fall_regions, apply_competent_fall_wake, wake_competent_bodies,
+    wake_competent_bodies_all, wake_competent_bodies_regions,
     wake_floating_competent,
     CompetentFallConfig, CompetentFallStats, COMPETENT_FALL_PASSES, COMPETENT_FALL_PASSES_FPS,
     COMPETENT_TOPOLOGY_PASSES,
@@ -205,7 +209,7 @@ pub use rules::{
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
 };
-pub use wind::Wind;
+pub use wind::{Wind, WindConfig, WIND_FIELD_PERIOD};
 pub use save::{SimSnapshot, SIM_SAVE_DIR, SIM_SAVE_EXT, SIM_SCHEMA_VERSION};
 pub use sim_preset::{
     builtin_preset_names, list_all_presets, list_disk_presets, load_builtin_preset, load_preset,
@@ -214,7 +218,8 @@ pub use sim_preset::{
 };
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{
-    airborne_loose_at, continental_surface_y, live_surface_at, live_surface_y, stamp_world,
+    airborne_loose_at, continental_surface_y, live_skin_y, live_surface_at, live_surface_y,
+    stamp_world,
     WorldgenParams,
-    LIVE_SURFACE_SEARCH,
+    LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
