@@ -113,9 +113,10 @@ pub const FLOW_SUBSTEPS_MIN: usize = 8;
 /// abort used to stutter runnels (4 hops, pause a tick, 4 hops) and
 /// also let open basins keep enough substeps to soak their beds.
 pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
-/// If the planned dirty area (cells) drops to this or below after
+/// If the planned dirty **AABB** (cells) drops to this or below after
 /// [`FLOW_SUBSTEPS_EO_AFTER`], stop the flow loop early — settled films
-/// don't need the full ×8. Busy rain / cascades stay at max.
+/// don't need the full ×8. Busy rain / cascades stay at max. The bit
+/// work-set can be smaller than this on a wide ramp; EO must not use it.
 pub const FLOW_QUIET_AREA: usize = 512;
 /// Interactive confined on the last flow halo is only for first-cell well
 /// rise. Condensation fattens dirty rects into chunk-scale boxes; walking
@@ -498,9 +499,12 @@ fn tick_with_life_inner(
         // dirty written by this substep — a *tiny* halo means remaining
         // substeps are polish. Do **not** exit because a large halo is
         // steady (hillside jelly) or merely shrinking (stream stutter).
+        // Use the AABB, not the bit work-set: a wide ramp can have few
+        // dirty cells and still need the full cascade (bit-count EO
+        // parked mid-slope at 4 substeps).
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_EO_AFTER {
             let next = plan_active(world);
-            let next_area = active_cell_area(&next);
+            let next_area = active_aabb_area(&next);
             if next.is_empty() || next_area <= FLOW_QUIET_AREA {
                 break;
             }

@@ -8463,8 +8463,9 @@ fn hillside_blob_drains_downslope_instead_of_jelly() {
 fn wide_runoff_keeps_full_fps_flow_substeps() {
     // Interactive EO used to abort at 4 once a large halo shrank by 1/3 —
     // streams hopped, then sat idle until the next tick (spiky + slow).
-    // A wide wet ramp stays above FLOW_QUIET_AREA so it must run the
-    // full FPS cap, not park mid-cascade.
+    // A wide wet ramp's AABB stays above FLOW_QUIET_AREA so it must
+    // run the full FPS cap, not park mid-cascade (bit-count is the
+    // walk, not the EO gate).
     use crate::rules::{tick_with_perf_profiled, PhysicsTimings};
     let mut w = World::new(9);
     w.ensure_chunk(ChunkCoord::new(0, 0));
