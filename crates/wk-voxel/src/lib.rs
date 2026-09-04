@@ -45,6 +45,7 @@ pub mod temperature;
 pub mod water_head;
 pub mod wind;
 pub mod worldgen;
+pub mod world_step;
 
 pub use active::{clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk};
 pub use audit::{
@@ -215,6 +216,9 @@ pub use sim_preset::{
     builtin_preset_names, list_all_presets, list_disk_presets, load_builtin_preset, load_preset,
     preset_path, save_preset, sanitize_preset_name, PlantGenePreset, SimPreset, PRESET_DIR,
     PRESET_EXT, PRESET_SCHEMA_VERSION,
+};
+pub use world_step::{
+    step_world, WorldStep, WorldStepConfig, WorldStepOutcome, WorldStepTimings,
 };
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{

@@ -6,12 +6,11 @@
 //! cargo test -p wk-voxel --test perf_profile --release -- --ignored --nocapture
 //! ```
 //!
-//! Matches `wk-voxel-app` frame order (rain → evap → humidity advect →
-//! clouds → condensation → karst → physics tick → snow drift →
-//! suspension → erosion → humidity / temp cadence → phase → organisms).
-//! Physics sub-pass times come from the real [`tick_with_perf_profiled`]
-//! path (not a post-hoc mirror). Also prints a rayon on/off A/B on the
-//! demo world.
+//! Matches `wk-voxel-app` via [`wk_voxel::step_world`] (the product
+//! owner). Optional climatic `apply_rain` stays **outside** that step
+//! (play app retired the W faucet). Physics sub-pass times come from
+//! [`tick_with_life_profiled`] inside the owner. Also prints a rayon
+//! on/off A/B on the demo world.
 //!
 //! Snow drift and clay suspension live *outside* `tick_with_perf` in the
 //! app. A profile that skipped them was not measuring the frame.
@@ -19,15 +18,14 @@
 use std::time::{Duration, Instant};
 
 use wk_voxel::{
-    apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    apply_snow_wind_drift,
-    find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
-    temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
-    CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
-    KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig,
-    PhysicsTimings, RainConfig, Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H,
-    CHUNK_CELLS_W, FLOW_SUBSTEPS, WIND_FIELD_PERIOD,
+    apply_rain_with_temp, find_plant_slot, set_parallel_enabled, stamp_world, step_world, Blueprint,
+    CarbonBudget,
+    CarbonConfig, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig,
+    EvapConfig, FailureConfig, FungiConfig, Genome, GrainConfig, Humidity, KarstConfig,
+    OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, PhysicsTimings,
+    RainConfig,
+    Temperature, Wind, World, WorldStep, WorldStepConfig, WorldStepTimings, WorldgenParams,
+    CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_SUBSTEPS,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -112,6 +110,7 @@ struct Scene {
     clouds: CloudStore,
     temperature: Temperature,
     organisms: OrganismStore,
+    carbon: CarbonBudget,
     rain: RainConfig,
     evap: EvapConfig,
     cond: CondensationConfig,
@@ -122,6 +121,10 @@ struct Scene {
     phase: PhaseConfig,
     climate: ClimateConfig,
     perf: PerfConfig,
+    failure: FailureConfig,
+    fungi: FungiConfig,
+    competent: CompetentFallConfig,
+    carbon_cfg: CarbonConfig,
     /// Scenario injector (`apply_rain`). The play app retired that
     /// faucet; nightly soak leaves it off and lets C / E cycle water.
     climatic_rain: bool,
@@ -201,6 +204,7 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
         clouds: CloudStore::new(),
         temperature,
         organisms: OrganismStore::new(),
+        carbon: CarbonBudget::default(),
         rain,
         evap: EvapConfig::default(),
         cond: CondensationConfig {
@@ -214,6 +218,10 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
         phase: PhaseConfig::default(),
         climate: ClimateConfig::default(),
         perf: PerfConfig::default(),
+        failure: FailureConfig::default(),
+        fungi: FungiConfig::default(),
+        competent: CompetentFallConfig::default(),
+        carbon_cfg: CarbonConfig::default(),
         climatic_rain: true,
     }
 }
@@ -279,17 +287,24 @@ fn profile_label(label: &str, params: &WorldgenParams, chunks: usize) {
     );
 }
 
-fn rebuild_wind_if_due(scene: &mut Scene) {
-    if scene.world.tick % WIND_FIELD_PERIOD == 0 || scene.wind.field.is_empty() {
-        let occupied: Vec<(i32, i32)> = scene.humidity.cells.keys().copied().collect();
-        scene.wind.rebuild_field(
-            Some(&scene.world),
-            Some(&scene.temperature),
-            scene.world.tick,
-            &occupied,
-            None,
-        );
-    }
+fn add_step_timings(accum: &mut PassAccum, step: &WorldStepTimings) {
+    accum.wind_rebuild += step.wind_rebuild;
+    accum.evap += step.evap;
+    accum.humidity_advect += step.humidity_advect;
+    accum.clouds += step.clouds;
+    accum.condensation += step.condensation;
+    accum.karst += step.karst;
+    accum.physics_tick += step.physics_tick;
+    accum.snow_drift += step.snow_drift;
+    accum.suspension += step.suspension;
+    accum.erosion += step.erosion;
+    accum.humidity_diffuse += step.humidity_diffuse;
+    accum.humidity_diffuse_calls += step.humidity_diffuse_calls;
+    accum.temperature += step.temperature;
+    accum.temperature_calls += step.temperature_calls;
+    accum.cold_avalanche += step.cold_avalanche;
+    accum.phase += step.phase;
+    accum.organisms += step.organisms;
 }
 
 fn one_stack_tick(
@@ -297,219 +312,72 @@ fn one_stack_tick(
     accum: Option<&mut PassAccum>,
     phys: Option<&mut PhysicsTimings>,
 ) {
-    let tick_no = scene.world.tick;
-    match accum {
-        None => {
-            // Match app: shell scans always parallel; CA follows PerfConfig.
-            set_parallel_enabled(true);
-            rebuild_wind_if_due(scene);
-            if scene.climatic_rain {
-                apply_rain_with_temp(
-                    &mut scene.world,
-                    &scene.rain,
-                    Some(&scene.temperature),
-                    Some(&scene.phase),
-                    Some(&mut scene.humidity),
-                );
-            }
-            apply_evaporation_into_humidity(&mut scene.world, &mut scene.humidity, &scene.evap);
-            scene
-                .humidity
-                .advect_with_surface(
-                    scene.wind.climate_vx,
-                    scene.wind.climate_vy,
-                    &scene.wind,
-                    &scene.world,
-                );
-            scene.clouds.step_with_precip(
-                &mut scene.world,
-                &mut scene.humidity,
-                &scene.wind,
-                scene.params.sea_level_y,
-                scene.params.sky_ceiling_y,
-                tick_no,
-                &scene.cloud,
-                Some(&mut scene.temperature),
-                Some(&scene.phase),
-            );
-            apply_condensation_rain_phased(
-                &mut scene.world,
-                &mut scene.humidity,
-                &scene.cond,
-                Some(&scene.oro),
-                Some(&scene.temperature),
-                Some(&scene.phase),
-            );
-            apply_karst_dissolution(&mut scene.world, &scene.karst);
-            set_parallel_enabled(scene.perf.parallel_physics);
-            match phys {
-                Some(t) => {
-                    let _ = tick_with_perf_profiled(&mut scene.world, &scene.perf, t);
-                }
-                None => tick_with_perf(&mut scene.world, &scene.perf),
-            }
-            set_parallel_enabled(true);
-            apply_snow_wind_drift(&mut scene.world, CLIMATE_WIND_VX, HUMIDITY_TILE_COLS);
-            apply_flow_erosion(&mut scene.world, &scene.grain);
-            wk_voxel::sediment::apply_suspension(&mut scene.world);
-            if humidity_diffuse_due(scene.world.tick) {
-                scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
-            }
-            if temperature_step_due(scene.world.tick) {
-                let t = scene.world.tick;
-                scene
-                    .temperature
-                    .step(Some(&scene.world), &scene.humidity, t, None);
-            }
-            if scene.phase.enabled
-                && scene.phase.enable_cold_avalanche
-                && scene.world.tick % scene.phase.period_ticks.max(1) == 0
-            {
-                apply_cold_avalanche(
-                    &mut scene.world,
-                    &scene.temperature,
-                    scene.phase.freeze_point_c,
-                );
-            }
-            apply_phase(&mut scene.world, &scene.temperature, &scene.phase);
-            if !scene.organisms.is_empty() {
-                let t = scene.world.tick;
-                scene.organisms.step_with_climate(
-                    &mut scene.world,
-                    t,
-                    &scene.climate,
-                    Some(&mut scene.humidity),
-                );
-            }
+    let rain_start = accum.is_some().then(Instant::now);
+    if scene.climatic_rain {
+        apply_rain_with_temp(
+            &mut scene.world,
+            &scene.rain,
+            Some(&scene.temperature),
+            Some(&scene.phase),
+            Some(&mut scene.humidity),
+        );
+    }
+    let rain_dt = rain_start.map(|t| t.elapsed());
+
+    let mut step_t = WorldStepTimings::default();
+    if let Some(p) = phys.as_deref() {
+        step_t.physics = p.clone();
+    }
+    let need_t = accum.is_some() || phys.is_some();
+    let organisms_on = !scene.organisms.is_empty();
+    {
+        let cfg = WorldStepConfig {
+            perf: &scene.perf,
+            failure: &scene.failure,
+            evap: &scene.evap,
+            cond: &scene.cond,
+            oro: Some(&scene.oro),
+            karst: &scene.karst,
+            cloud: &scene.cloud,
+            phase: &scene.phase,
+            climate: &scene.climate,
+            carbon: &scene.carbon_cfg,
+            grain: &scene.grain,
+            fungi: &scene.fungi,
+            competent: &scene.competent,
+            humidity_diffusion_alpha: HUMIDITY_DIFFUSION_ALPHA,
+            sea_level_y: scene.params.sea_level_y,
+            sky_ceiling_y: scene.params.sky_ceiling_y,
+            evap_on: true,
+            cond_rain_on: true,
+            karst_on: true,
+            organisms_on,
+        };
+        let _ = step_world(
+            WorldStep {
+                world: &mut scene.world,
+                humidity: &mut scene.humidity,
+                wind: &mut scene.wind,
+                temperature: &mut scene.temperature,
+                clouds: &mut scene.clouds,
+                carbon: &mut scene.carbon,
+                organisms: Some(&mut scene.organisms),
+                landscape: None,
+                geotech: None,
+                support: None,
+            },
+            &cfg,
+            need_t.then_some(&mut step_t),
+        );
+    }
+    if let Some(a) = accum {
+        if let Some(dt) = rain_dt {
+            a.rain += dt;
         }
-        Some(a) => {
-            set_parallel_enabled(true);
-            let t0 = Instant::now();
-            rebuild_wind_if_due(scene);
-            a.wind_rebuild += t0.elapsed();
-
-            let t0 = Instant::now();
-            if scene.climatic_rain {
-                apply_rain_with_temp(
-                    &mut scene.world,
-                    &scene.rain,
-                    Some(&scene.temperature),
-                    Some(&scene.phase),
-                    Some(&mut scene.humidity),
-                );
-            }
-            a.rain += t0.elapsed();
-
-            let t0 = Instant::now();
-            apply_evaporation_into_humidity(&mut scene.world, &mut scene.humidity, &scene.evap);
-            a.evap += t0.elapsed();
-
-            let t0 = Instant::now();
-            scene
-                .humidity
-                .advect_with_surface(
-                    scene.wind.climate_vx,
-                    scene.wind.climate_vy,
-                    &scene.wind,
-                    &scene.world,
-                );
-            a.humidity_advect += t0.elapsed();
-
-            let t0 = Instant::now();
-            scene.clouds.step_with_precip(
-                &mut scene.world,
-                &mut scene.humidity,
-                &scene.wind,
-                scene.params.sea_level_y,
-                scene.params.sky_ceiling_y,
-                tick_no,
-                &scene.cloud,
-                Some(&mut scene.temperature),
-                Some(&scene.phase),
-            );
-            a.clouds += t0.elapsed();
-
-            let t0 = Instant::now();
-            apply_condensation_rain_phased(
-                &mut scene.world,
-                &mut scene.humidity,
-                &scene.cond,
-                Some(&scene.oro),
-                Some(&scene.temperature),
-                Some(&scene.phase),
-            );
-            a.condensation += t0.elapsed();
-
-            let t0 = Instant::now();
-            apply_karst_dissolution(&mut scene.world, &scene.karst);
-            a.karst += t0.elapsed();
-
-            set_parallel_enabled(scene.perf.parallel_physics);
-            let t0 = Instant::now();
-            match phys {
-                Some(t) => {
-                    let _ = tick_with_perf_profiled(&mut scene.world, &scene.perf, t);
-                }
-                None => tick_with_perf(&mut scene.world, &scene.perf),
-            }
-            a.physics_tick += t0.elapsed();
-
-            set_parallel_enabled(true);
-            let t0 = Instant::now();
-            apply_snow_wind_drift(&mut scene.world, CLIMATE_WIND_VX, HUMIDITY_TILE_COLS);
-            a.snow_drift += t0.elapsed();
-
-            let t0 = Instant::now();
-            apply_flow_erosion(&mut scene.world, &scene.grain);
-            a.erosion += t0.elapsed();
-
-            let t0 = Instant::now();
-            wk_voxel::sediment::apply_suspension(&mut scene.world);
-            a.suspension += t0.elapsed();
-
-            if humidity_diffuse_due(scene.world.tick) {
-                let t0 = Instant::now();
-                scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
-                a.humidity_diffuse += t0.elapsed();
-                a.humidity_diffuse_calls += 1;
-            }
-            if temperature_step_due(scene.world.tick) {
-                let t0 = Instant::now();
-                let t = scene.world.tick;
-                scene
-                    .temperature
-                    .step(Some(&scene.world), &scene.humidity, t, None);
-                a.temperature += t0.elapsed();
-                a.temperature_calls += 1;
-            }
-            if scene.phase.enabled
-                && scene.phase.enable_cold_avalanche
-                && scene.world.tick % scene.phase.period_ticks.max(1) == 0
-            {
-                let t0 = Instant::now();
-                apply_cold_avalanche(
-                    &mut scene.world,
-                    &scene.temperature,
-                    scene.phase.freeze_point_c,
-                );
-                a.cold_avalanche += t0.elapsed();
-            }
-            let t0 = Instant::now();
-            apply_phase(&mut scene.world, &scene.temperature, &scene.phase);
-            a.phase += t0.elapsed();
-
-            if !scene.organisms.is_empty() {
-                let t0 = Instant::now();
-                let t = scene.world.tick;
-                scene.organisms.step_with_climate(
-                    &mut scene.world,
-                    t,
-                    &scene.climate,
-                    Some(&mut scene.humidity),
-                );
-                a.organisms += t0.elapsed();
-            }
-        }
+        add_step_timings(a, &step_t);
+    }
+    if let Some(p) = phys {
+        *p = step_t.physics;
     }
 }
 

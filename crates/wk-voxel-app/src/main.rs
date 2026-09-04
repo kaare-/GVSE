@@ -55,19 +55,11 @@ mod terrain;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_cold_avalanche_bound, apply_condensation_rain_phased,
-    apply_evaporation_into_humidity_climate, precipitate_thermal_surplus,
-    apply_flow_erosion_bound, apply_karst_dissolution, apply_phase,
-    apply_weather_rgb, apply_competent_fall_regions, apply_landscape_fall, celestial_local_cfg,
-    celestial_moon_screen_pos_cfg,
-    celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, plan_active,
-    pore_wetness_with, sail_plants_on_wind_rafts_cfg,
-    set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
-    WIND_FIELD_PERIOD,
-    wake_competent_bodies_all, wake_unsupported_grains,
-    wake_unstable_slopes, GeotechOverlayMode,
-    SimSnapshot, WorldgenParams,
+    apply_competent_fall_regions, apply_landscape_fall, apply_weather_rgb, celestial_local_cfg,
+    celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg, day_night_factor_cfg,
+    is_daytime_cfg, plan_active, pore_wetness_with, step_world, wake_competent_bodies_all,
+    wake_unsupported_grains, wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldStep,
+    WorldStepConfig, WorldgenParams,
 };
 
 use crate::atmosphere::{
@@ -515,17 +507,6 @@ async fn main() {
         scene.wind.variance = settings.wind_variance;
         scene.wind.config = settings.wind;
         let wind_vx = scene.wind.effective_vx(scene.world.tick);
-        let wind_vy = scene.wind.effective_vy(scene.world.tick);
-        if scene.world.tick % WIND_FIELD_PERIOD == 0 || scene.wind.field.is_empty() {
-            let occupied: Vec<(i32, i32)> = scene.humidity.cells.keys().copied().collect();
-            scene.wind.rebuild_field(
-                Some(&scene.world),
-                Some(&scene.temperature),
-                scene.world.tick,
-                &occupied,
-                None,
-            );
-        }
         scene.temperature.config = settings.temp;
         scene.temperature.climate = settings.climate;
         settings.apply_pop_caps(&mut scene.organisms);
@@ -556,222 +537,45 @@ async fn main() {
             || terrain.open
             || quit_dialog.open;
         if !sim_paused {
-            // Frame-shell scans touch many loaded chunks — always worth
-            // rayon. CA physics stays on the Tab toggle (demo dirty plans
-            // are too narrow for parallel to win).
-            set_parallel_enabled(true);
-            if settings.evap_on {
-                let evap_wind = scene.wind.near_surface_abs(Some(&scene.world));
-                apply_evaporation_into_humidity_climate(
-                    &mut scene.world,
-                    &mut scene.humidity,
-                    &settings.evap,
-                    Some(&scene.temperature),
-                    evap_wind,
-                );
-            }
-            // Vapor drifts with the wind, then warm air rises and
-            // condenses where it meets colder air / ground.
-            scene
-                .humidity
-                .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
-            let tick_no = scene.world.tick;
-            scene.clouds.step_with_precip(
-                &mut scene.world,
-                &mut scene.humidity,
-                &scene.wind,
-                scene.params.sea_level_y,
-                scene.params.sky_ceiling_y,
-                tick_no,
-                &settings.cloud,
-                Some(&mut scene.temperature),
-                Some(&settings.phase),
+            let outcome = step_world(
+                WorldStep {
+                    world: &mut scene.world,
+                    humidity: &mut scene.humidity,
+                    wind: &mut scene.wind,
+                    temperature: &mut scene.temperature,
+                    clouds: &mut scene.clouds,
+                    carbon: &mut scene.carbon,
+                    organisms: Some(&mut scene.organisms),
+                    landscape: Some(&mut scene.landscape),
+                    geotech: Some(&mut scene.geotech),
+                    support: Some(&mut scene.support),
+                },
+                &WorldStepConfig {
+                    perf: &settings.perf,
+                    failure: &settings.failure,
+                    evap: &settings.evap,
+                    cond: &settings.cond,
+                    oro: Some(&settings.oro),
+                    karst: &settings.karst,
+                    cloud: &settings.cloud,
+                    phase: &settings.phase,
+                    climate: &settings.climate,
+                    carbon: &settings.carbon,
+                    grain: &settings.grain,
+                    fungi: &settings.fungi,
+                    competent: &settings.competent_fall,
+                    humidity_diffusion_alpha: settings.humidity_diffusion_alpha,
+                    sea_level_y: scene.params.sea_level_y,
+                    sky_ceiling_y: scene.params.sky_ceiling_y,
+                    evap_on: settings.evap_on,
+                    cond_rain_on: settings.cond_rain_on,
+                    karst_on: settings.karst_on,
+                    organisms_on,
+                },
+                None,
             );
-            // Surplus the local air cannot hold becomes water here.
-            // The drizzle lottery below is a different gate — a missed
-            // roll must not be how we "solve" a cold snap.
-            precipitate_thermal_surplus(
-                &mut scene.world,
-                &mut scene.humidity,
-                &scene.temperature,
-                Some(&settings.phase),
-            );
-            // Leftover vapor: liquid drizzle when warm; below freeze
-            // the lottery gathers a flake (never liquid rain).
-            if settings.cond_rain_on {
-                apply_condensation_rain_phased(
-                    &mut scene.world,
-                    &mut scene.humidity,
-                    &settings.cond,
-                    Some(&settings.oro),
-                    Some(&scene.temperature),
-                    Some(&settings.phase),
-                );
-            }
-            if settings.karst_on {
-                apply_karst_dissolution(&mut scene.world, &settings.karst);
-            }
-            // Period-20 stress map: refresh before failure (S3 gate), then
-            // again after CA so the HUD matches post-tick geometry.
-            let geotech_due = geotech_map_due(scene.world.tick);
-            if geotech_due {
-                scene.geotech.rebuild_smart(&scene.world);
-            }
-            // Surface / grounded maps + landscape rigid bodies (whole-slab fall).
-            // Quiet ticks skip the full-world hanger scan — that used to walk
-            // every loaded chunk looking for air-below rock. Periodic rebuild
-            // still catches missed floaters; live bodies still step.
-            let support_due = support_map_due(scene.world.tick);
-            let landscape_busy = !scene.landscape.is_empty();
-            if support_due || landscape_busy {
-                scene.support.rebuild(&scene.world);
-            }
-            {
-                let dirty = plan_active(&scene.world);
-                if landscape_busy || !dirty.is_empty() || support_due {
-                    let coords: Vec<_> = if dirty.is_empty() && support_due {
-                        scene.world.chunks.keys().copied().collect()
-                    } else {
-                        dirty.iter().map(|a| a.coord).collect()
-                    };
-                    let _ = apply_landscape_fall(
-                        &mut scene.world,
-                        &mut scene.landscape,
-                        &scene.support,
-                        &coords,
-                    );
-                }
-            }
-            // Living roots bind grain repose / bedload (legacy E15).
-            let rooted = if organisms_on {
-                Some(collect_live_root_world_cells(&scene.organisms.atoms))
-            } else {
-                None
-            };
-            set_parallel_enabled(settings.perf.parallel_physics);
-            let _ = tick_with_life(
-                &mut scene.world,
-                &settings.perf,
-                &settings.failure,
-                Some(&scene.geotech),
-                rooted.as_ref(),
-                Some(&settings.grain),
-                Some(&settings.fungi),
-                Some(&settings.competent_fall),
-            );
-            if organisms_on {
-                let moves = std::mem::take(&mut scene.world.competent_cell_moves);
-                scene
-                    .organisms
-                    .shift_atoms_with_moved_cells(&mut scene.world, &moves);
-            }
-            set_parallel_enabled(true);
-            // Airborne snow takes at most one cell downwind per tick. Kept
-            // out of grain settle so a deep pass cannot blow flakes across
-            // the map; landed pack is repose's problem.
-            let _ = wk_voxel::apply_snow_wind_drift(
-                &mut scene.world,
-                wind_vx,
-                scene.wind.tile_cols,
-            );
-            // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
-            step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);
-            // Floating Organic drifts with the wind; root-bound mats sail plants.
-            if organisms_on {
-                sail_plants_on_wind_rafts_cfg(
-                    &mut scene.world,
-                    &mut scene.organisms.atoms,
-                    wind_vx,
-                    scene.wind.tile_cols,
-                    &settings.grain,
-                );
-            } else {
-                let _ = wk_voxel::drift_floating_organic_cfg(
-                    &mut scene.world,
-                    wind_vx,
-                    scene.wind.tile_cols,
-                    None,
-                    None,
-                    &settings.grain,
-                );
-            }
-            // Current shoves unbound film so mats don't dam / comb the lake.
-            let _ = wk_voxel::shove_floating_organic_with_current(&mut scene.world);
-            // Bedload / bank transport after water has moved this tick.
-            apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
-            // The fine-grained half of the same process: clay too small to
-            // travel as bedload goes into suspension where the water moves, and
-            // settles back out as mud where it slows.
-            wk_voxel::sediment::apply_suspension(&mut scene.world);
-            if geotech_due {
-                // Post-CA dirty halo → incremental column update (S5).
-                scene.geotech.rebuild_smart(&scene.world);
-            }
-            // Atmospheric diffusion is periodic (column-GVSE
-            // HumidityField cadence: every 20 ticks). Evap still
-            // deposits every tick; only the spread step is throttled.
-            if humidity_diffuse_due(scene.world.tick) {
-                scene
-                    .humidity
-                    .diffuse(settings.humidity_diffusion_alpha);
-            }
-            if temperature_step_due(scene.world.tick) {
-                let tick_no = scene.world.tick;
-                scene
-                    .temperature
-                    .step(
-                        Some(&scene.world),
-                        &scene.humidity,
-                        tick_no,
-                        Some(&scene.wind),
-                    );
-                // Hold just shrank. Dump the surplus now, not next
-                // tick's drizzle lottery.
-                precipitate_thermal_surplus(
-                    &mut scene.world,
-                    &mut scene.humidity,
-                    &scene.temperature,
-                    Some(&settings.phase),
-                );
-            }
-            // Cold wet-sand / snow / hillside ice spill onto lake ice
-            // after the thermal step, then phase may break thin lids.
-            // Same `period_ticks` cadence as [`apply_phase`].
-            if settings.phase.enabled
-                && settings.phase.enable_cold_avalanche
-                && scene.world.tick % settings.phase.period_ticks.max(1) == 0
-            {
-                let rooted = if organisms_on {
-                    Some(collect_live_root_world_cells(&scene.organisms.atoms))
-                } else {
-                    None
-                };
-                apply_cold_avalanche_bound(
-                    &mut scene.world,
-                    &scene.temperature,
-                    settings.phase.freeze_point_c,
-                    rooted.as_ref(),
-                );
-            }
-            // Phase after the temp step so a Tab cold/warm snap applies
-            // the same frame (column order: thermal → phase change).
-            // Master enable lives on PhaseConfig (I / Tab settings).
-            apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
-            if organisms_on {
-                let tick_no = scene.world.tick;
-                let outcome = scene.organisms.step_with_weather(
-                    &mut scene.world,
-                    tick_no,
-                    &settings.climate,
-                    Some(&mut scene.humidity),
-                    wind_vx,
-                    Some(&scene.temperature),
-                    Some(&mut scene.carbon),
-                    &settings.carbon,
-                    Some(&scene.clouds),
-                    settings.cloud.downpour_mass,
-                );
-                spore_fx.burst_all(&outcome.spores, wind_vx);
+            if let Some(org) = outcome.organisms {
+                spore_fx.burst_all(&org.spores, outcome.wind_vx);
             }
         }
 
