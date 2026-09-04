@@ -57,6 +57,63 @@ fn seepage_prefers_high_pore_sand_over_low_pore_sand() {
 }
 
 #[test]
+fn contact_seepage_soaks_dry_sand_from_either_side() {
+    // Contact pass skips dry pores that do not own a +x / +y wet-Air
+    // edge (leftover on rain-wet halos). Infiltration from −x is owned
+    // by the water cell — both banks must still drink.
+    //
+    // An open puddle sitting *in* a sand row is runoff (existing
+    // hillside-drain rule) and does not prove the skip. Wall a basin
+    // so force-fill still soaks: floor sand owns +y, left bank owns
+    // +x, right bank is the skipped dry pore (water owns that +x).
+    use crate::active::ActiveChunk;
+    use crate::chunk::Rect;
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 2..=6 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(x, 2, Cell::solid(MaterialId::Sand));
+    }
+    w.set_cell(2, 1, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(2, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(6, 1, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(6, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(4, 2, Cell::water());
+    let regions = [ActiveChunk {
+        coord: ChunkCoord::new(0, 0),
+        rect: Rect {
+            x0: 2,
+            y0: 0,
+            x1: 6,
+            y1: 3,
+        },
+    }];
+    // One contact pass is enough: a pond facing three dry banks weeps
+    // back on the next tick (existing oscillation). The skip must not
+    // block that first soak.
+    super::seepage::apply_seepage_contact_regions(&mut w, &regions);
+    let floor = w.get_cell(4, 1).unwrap();
+    let left = w.get_cell(3, 2).unwrap();
+    let right = w.get_cell(5, 2).unwrap();
+    assert!(
+        floor.sat.0 > 0,
+        "sand under the pond must soak (owns +y wet-Air), sat={}",
+        floor.sat.0
+    );
+    assert!(
+        left.sat.0 > 0,
+        "sand left of the pond must soak (owns +x wet-Air), sat={}",
+        left.sat.0
+    );
+    assert!(
+        right.sat.0 > 0,
+        "sand right of the pond must soak (water owns the +x edge), sat={}",
+        right.sat.0
+    );
+}
+
+#[test]
 fn droplet_falls_one_cell_per_pass() {
     let mut w = setup_column_world();
     w.set_cell(4, 10, Cell::water());

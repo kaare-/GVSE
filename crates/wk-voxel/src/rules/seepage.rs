@@ -112,6 +112,15 @@ pub fn wake_lake_bed_pores(world: &mut World) {
             } else {
                 (ac.rect.y0, ac.rect.y1, false)
             };
+        let cw = CHUNK_CELLS_W as i32;
+        let ch = CHUNK_CELLS_H as i32;
+        let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {
+            if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+                Some(chunk.get(lx as usize, ly as usize))
+            } else {
+                world.get_cell(gx, gy)
+            }
+        };
         for y in scan_y0..=scan_y1 {
             let ly = y as usize;
             let gy = base_gy + y as i32;
@@ -195,7 +204,7 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     continue;
                 }
                 let mut feed = false;
-                if let Some(above) = world.get_cell(gx, gy + 1) {
+                if let Some(above) = read(x as i32, y as i32 + 1, gx, gy + 1) {
                     if above.material == MaterialId::Air && above.sat.0 >= 160 {
                         feed = true;
                     } else if is_porous_cell(above, &hydro)
@@ -208,7 +217,7 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     for dx in [-1_i32, 1] {
                         let nx = world.wrap_x(gx + dx);
                         if matches!(
-                            world.get_cell(nx, gy),
+                            read(x as i32 + dx, y as i32, nx, gy),
                             Some(n) if n.material == MaterialId::Air && n.sat.0 >= 160
                         ) {
                             feed = true;
@@ -266,6 +275,13 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
     let cw = CHUNK_CELLS_W as i32;
     let mut touches: Vec<(i32, i32)> = Vec::new();
     let coords: Vec<_> = world.chunks.keys().copied().collect();
+    // Bootstrap: a legacy save with no occupancy stamps must still
+    // walk every seam. Once any chunk is flagged, dry/dry pairs are
+    // leftover — same gate as [`seam_coupled_span`] / contact seepage.
+    let any_water = world
+        .chunks
+        .values()
+        .any(|c| c.has_wet_air || c.has_wet_pores);
     for coord in coords {
         let above = ChunkCoord::new(coord.cx, coord.cy + 1);
         if !world.chunks.contains_key(&above) {
@@ -283,6 +299,17 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         let Some(hi_chunk) = world.chunks.get(&above) else {
             continue;
         };
+        // Same occupancy as [`seam_coupled_span`]: a dry/dry pair has
+        // nothing to couple. Walking every loaded cy pair was leftover
+        // on a tall sky (272 chunks, most seams empty).
+        if any_water
+            && !lo_chunk.has_wet_pores
+            && !lo_chunk.has_wet_air
+            && !hi_chunk.has_wet_pores
+            && !hi_chunk.has_wet_air
+        {
+            continue;
+        }
         for lx in 0..cw {
             let gx = world.wrap_x(base_gx + lx);
             let lo = lo_chunk.get(lx as usize, (ch - 1) as usize);
@@ -312,8 +339,20 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
                 if yy < 0 {
                     continue;
                 }
-                let Some(c) = world.get_cell(gx, yy) else {
-                    continue;
+                // The four seam rows live in these two chunks.
+                let c = if yy == y_lo {
+                    lo_chunk.get(lx as usize, (ch - 1) as usize)
+                } else if yy == y_lo - 1 && ch >= 2 {
+                    lo_chunk.get(lx as usize, (ch - 2) as usize)
+                } else if yy == y_hi {
+                    hi_chunk.get(lx as usize, 0)
+                } else if yy == y_hi + 1 && ch >= 2 {
+                    hi_chunk.get(lx as usize, 1)
+                } else {
+                    match world.get_cell(gx, yy) {
+                        Some(c) => c,
+                        None => continue,
+                    }
                 };
                 if is_porous_cell(c, &hydro) {
                     let cap = water_capacity_cell(c, &hydro);
@@ -727,6 +766,20 @@ fn accumulate_seepage_xfers_ex(
                         None => true,
                     };
                     if airish(right) && airish(up) {
+                        continue;
+                    }
+                }
+                // Contact pass is Air ↔ pore only. A dry pore cannot weep,
+                // and infiltration from −x / −y is owned by those cells.
+                // Rain-wet halos are full of dry sand that paid head math
+                // for faces it does not own (leftover every tick).
+                if contact_only && a_solid && a.sat.0 == 0 {
+                    let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                    let up = read(lx, ly + 1, gx, gy + 1);
+                    let drinks = |c: Option<Cell>| {
+                        matches!(c, Some(n) if n.material == MaterialId::Air && n.sat.0 > 0)
+                    };
+                    if !drinks(right) && !drinks(up) {
                         continue;
                     }
                 }
