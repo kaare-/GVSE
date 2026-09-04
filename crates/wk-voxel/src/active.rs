@@ -78,9 +78,21 @@ impl ActiveChunk {
     }
 
     /// Visit each planned cell. Sparse regions skip AABB holes.
-    pub fn for_each_cell(self, mut f: impl FnMut(u8, u8)) {
+    pub fn for_each_cell(self, f: impl FnMut(u8, u8)) {
+        self.for_each_cell_in_y(self.rect.y0, self.rect.y1, f);
+    }
+
+    /// Like [`Self::for_each_cell`], restricted to `y0..=y1` (intersected
+    /// with the region rect). Confined rise uses the standing-air band
+    /// so a dense period-16 wake does not walk dry sky.
+    pub fn for_each_cell_in_y(self, y0: u8, y1: u8, mut f: impl FnMut(u8, u8)) {
+        let y0 = y0.max(self.rect.y0);
+        let y1 = y1.min(self.rect.y1);
+        if y0 > y1 {
+            return;
+        }
         if self.is_dense() {
-            for y in self.rect.y0..=self.rect.y1 {
+            for y in y0..=y1 {
                 for x in self.rect.x0..=self.rect.x1 {
                     f(x, y);
                 }
@@ -88,7 +100,7 @@ impl ActiveChunk {
             return;
         }
         let mask = Self::row_mask(self.rect.x0, self.rect.x1);
-        for y in self.rect.y0..=self.rect.y1 {
+        for y in y0..=y1 {
             let mut row = self.bits.0[y as usize] & mask;
             while row != 0 {
                 let x = row.trailing_zeros() as u8;
@@ -453,8 +465,7 @@ pub(crate) fn checkerboard_phase(coord: ChunkCoord) -> u8 {
 /// sorted by ascending `(cy, cx)` so bottom-up pull rules meet
 /// lower rows first.
 pub fn partition_checkerboard(active: &[ActiveChunk]) -> [Vec<ActiveChunk>; 4] {
-    let mut passes: [Vec<ActiveChunk>; 4] =
-        [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut passes: [Vec<ActiveChunk>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     for ac in active {
         let phase = checkerboard_phase(ac.coord) as usize;
         passes[phase].push(*ac);
@@ -506,6 +517,18 @@ mod tests {
             ac.cell_count(),
             ac.aabb_area()
         );
+        let mut n = 0usize;
+        ac.for_each_cell(|x, y| {
+            n += 1;
+            assert!(
+                ac.visits(x, y),
+                "for_each_cell must only yield planned cells"
+            );
+        });
+        assert_eq!(n, ac.cell_count());
+        let mut band = 0usize;
+        ac.for_each_cell_in_y(0, 10, |_, _| band += 1);
+        assert!(band < n, "y-band walk must skip the high write at y=50");
     }
 
     #[test]

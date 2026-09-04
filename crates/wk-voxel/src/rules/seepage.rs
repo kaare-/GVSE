@@ -14,8 +14,8 @@ use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
-    is_porous_cell, sat_move_to_equalize_heads, seepage_conduct_rate_cells, seepage_rate_cell,
-    seepage_fire_odds_cell, seepage_uptake_rate_cell,
+    is_porous_cell, sat_move_to_equalize_heads, seepage_conduct_rate_cells, seepage_fire_odds_cell,
+    seepage_rate_cell, seepage_uptake_rate_cell,
 };
 use super::plan::{regions_for_standalone, regions_lake_bed_loaded};
 
@@ -103,15 +103,14 @@ pub fn wake_lake_bed_pores(world: &mut World) {
         // Unsaturated pores can sit anywhere, so those chunks keep the
         // full rect. The downward walk from standing still reaches the
         // bed in the chunk below.
-        let (scan_y0, scan_y1, standing_only) =
-            if !chunk.has_unsaturated_pores {
-                match chunk.standing_band_y(ac.rect) {
-                    Some((lo, hi)) => (lo, hi, true),
-                    None => (ac.rect.y0, ac.rect.y1, false),
-                }
-            } else {
-                (ac.rect.y0, ac.rect.y1, false)
-            };
+        let (scan_y0, scan_y1, standing_only) = if !chunk.has_unsaturated_pores {
+            match chunk.standing_band_y(ac.rect) {
+                Some((lo, hi)) => (lo, hi, true),
+                None => (ac.rect.y0, ac.rect.y1, false),
+            }
+        } else {
+            (ac.rect.y0, ac.rect.y1, false)
+        };
         let cw = CHUNK_CELLS_W as i32;
         let ch = CHUNK_CELLS_H as i32;
         let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {
@@ -207,9 +206,7 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 if let Some(above) = read(x as i32, y as i32 + 1, gx, gy + 1) {
                     if above.material == MaterialId::Air && above.sat.0 >= 160 {
                         feed = true;
-                    } else if is_porous_cell(above, &hydro)
-                        && above.sat.0 > cell.sat.0
-                    {
+                    } else if is_porous_cell(above, &hydro) && above.sat.0 > cell.sat.0 {
                         feed = true;
                     }
                 }
@@ -425,7 +422,12 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
         .into_iter()
         .map(|(coord, rect)| ActiveChunk::new(coord, rect))
         .collect();
-    out.sort_by(|a, b| a.coord.cy.cmp(&b.coord.cy).then(a.coord.cx.cmp(&b.coord.cx)));
+    out.sort_by(|a, b| {
+        a.coord
+            .cy
+            .cmp(&b.coord.cy)
+            .then(a.coord.cx.cmp(&b.coord.cx))
+    });
     out
 }
 
@@ -451,11 +453,7 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
 ///
 /// Deterministic: the amount ordering is total, and destination breaks ties.
 fn serve_best_faces_first(xfers: &mut [((i32, i32), (i32, i32), i32)]) {
-    xfers.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then(b.2.cmp(&a.2))
-            .then(a.1.cmp(&b.1))
-    });
+    xfers.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)).then(a.1.cmp(&b.1)));
 }
 
 /// Local `x` span of the columns where water could actually cross this seam,
@@ -598,11 +596,7 @@ pub fn apply_seepage_contact_regions(world: &mut World, active: &[ActiveChunk]) 
     apply_seepage_regions_ex(world, active, true)
 }
 
-pub fn apply_seepage_regions_ex(
-    world: &mut World,
-    active: &[ActiveChunk],
-    contact_only: bool,
-) {
+pub fn apply_seepage_regions_ex(world: &mut World, active: &[ActiveChunk], contact_only: bool) {
     if active.is_empty() {
         return;
     }
@@ -742,50 +736,46 @@ fn accumulate_seepage_xfers_ex(
                 world.get_cell(gx, gy)
             }
         };
-        for y in ac.rect.y0..=ac.rect.y1 {
+        ac.for_each_cell(|x, y| {
             let ly = y as i32;
             let gy = base_gy + ly;
-            for x in ac.rect.x0..=ac.rect.x1 {
-                if !ac.visits(x, y) {
-                    continue;
+            let lx = x as i32;
+            let gx = world.wrap_x(base_gx + lx);
+            let a = chunk.get(x as usize, y as usize);
+            let cap_a = water_capacity_cell(a, &hydro);
+            if cap_a == 0 {
+                return;
+            }
+            let a_solid = is_porous_cell(a, &hydro);
+            // Lake / rain interior: Air whose +x / +y faces are also Air
+            // cannot infiltrate or weep. Diagonals are pore-only. Skip
+            // before the neighbour loop so a 64×64 pond does not pay
+            // head math on every cell.
+            if !a_solid {
+                let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                let up = read(lx, ly + 1, gx, gy + 1);
+                let airish = |c: Option<Cell>| match c {
+                    Some(n) => n.material == MaterialId::Air && !is_porous_cell(n, &hydro),
+                    None => true,
+                };
+                if airish(right) && airish(up) {
+                    return;
                 }
-                let lx = x as i32;
-                let gx = world.wrap_x(base_gx + lx);
-                let a = chunk.get(x as usize, y as usize);
-                let cap_a = water_capacity_cell(a, &hydro);
-                if cap_a == 0 {
-                    continue;
+            }
+            // Contact pass is Air ↔ pore only. A dry pore cannot weep,
+            // and infiltration from −x / −y is owned by those cells.
+            // Rain-wet halos are full of dry sand that paid head math
+            // for faces it does not own (leftover every tick).
+            if contact_only && a_solid && a.sat.0 == 0 {
+                let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                let up = read(lx, ly + 1, gx, gy + 1);
+                let drinks = |c: Option<Cell>| {
+                    matches!(c, Some(n) if n.material == MaterialId::Air && n.sat.0 > 0)
+                };
+                if !drinks(right) && !drinks(up) {
+                    return;
                 }
-                let a_solid = is_porous_cell(a, &hydro);
-                // Lake / rain interior: Air whose +x / +y faces are also Air
-                // cannot infiltrate or weep. Diagonals are pore-only. Skip
-                // before the neighbour loop so a 64×64 pond does not pay
-                // head math on every cell.
-                if !a_solid {
-                    let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
-                    let up = read(lx, ly + 1, gx, gy + 1);
-                    let airish = |c: Option<Cell>| match c {
-                        Some(n) => n.material == MaterialId::Air && !is_porous_cell(n, &hydro),
-                        None => true,
-                    };
-                    if airish(right) && airish(up) {
-                        continue;
-                    }
-                }
-                // Contact pass is Air ↔ pore only. A dry pore cannot weep,
-                // and infiltration from −x / −y is owned by those cells.
-                // Rain-wet halos are full of dry sand that paid head math
-                // for faces it does not own (leftover every tick).
-                if contact_only && a_solid && a.sat.0 == 0 {
-                    let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
-                    let up = read(lx, ly + 1, gx, gy + 1);
-                    let drinks = |c: Option<Cell>| {
-                        matches!(c, Some(n) if n.material == MaterialId::Air && n.sat.0 > 0)
-                    };
-                    if !drinks(right) && !drinks(up) {
-                        continue;
-                    }
-                }
+            }
                 // Air–Air / impermeable–impermeable edges are no-ops —
                 // check materials before head math. Dominates rainy
                 // ocean shore halos.
@@ -1055,8 +1045,7 @@ fn accumulate_seepage_xfers_ex(
                         local.push(((nx, ny), (gx, gy), (-move_amt).min(rate)));
                     }
                 }
-            }
-        }
+        });
         local
     });
     for mut v in local {
@@ -1193,11 +1182,7 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
                         any_unsat = true;
                     }
                 }
-                if !open_air
-                    && x != 0
-                    && x + 1 != CHUNK_CELLS_W
-                    && y != 0
-                    && y + 1 != CHUNK_CELLS_H
+                if !open_air && x != 0 && x + 1 != CHUNK_CELLS_W && y != 0 && y + 1 != CHUNK_CELLS_H
                 {
                     continue;
                 }
@@ -1306,7 +1291,10 @@ mod tests {
         // Order of arrival must not matter.
         let mut other = vec![(donor, strong, 30), (donor, weak, 2)];
         serve_best_faces_first(&mut other);
-        assert_eq!(other, xfers, "allocation must not depend on insertion order");
+        assert_eq!(
+            other, xfers,
+            "allocation must not depend on insertion order"
+        );
     }
 
     #[test]
