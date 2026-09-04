@@ -253,49 +253,58 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
             }
             false
         };
-        for x in ac.rect.x0..=ac.rect.x1 {
+        ac.for_each_x(|x| {
             let mut any_mobile = false;
-            for y in ac.rect.y0..=ac.rect.y1 {
+            ac.for_each_y_in_col(x, |y| {
+                if any_mobile {
+                    return;
+                }
                 let Some(above) = read_xy(x, y as i32 + 1) else {
-                    continue;
+                    return;
                 };
                 if above.sat.is_empty() {
-                    continue;
+                    return;
                 }
                 if mobile_cap(above) == 0 {
-                    continue;
+                    return;
                 }
                 any_mobile = true;
-                break;
-            }
+            });
             if !any_mobile {
-                continue;
+                return;
             }
             // Sliding window: after processing y, cell y+1 is the next
             // destination — reuse the post-pull (or untouched) above.
+            // A y gap resets the window (re-read); dilated bits are
+            // contiguous around each write.
             let mut next_cur: Option<Cell> = None;
-            for y in ac.rect.y0..=ac.rect.y1 {
+            let mut last_y: Option<u8> = None;
+            ac.for_each_y_in_col(x, |y| {
+                if last_y.is_some_and(|p| y != p.saturating_add(1)) {
+                    next_cur = None;
+                }
+                last_y = Some(y);
                 let cur = match next_cur.take() {
                     Some(c) => c,
                     None => match read_xy(x, y as i32) {
                         Some(c) => c,
-                        None => continue,
+                        None => return,
                     },
                 };
                 let cap = mobile_cap(cur);
                 if cap == 0 {
-                    continue;
+                    return;
                 }
                 let free = cap.saturating_sub(cur.sat.0);
                 if free == 0 {
-                    continue;
+                    return;
                 }
                 let Some(above) = read_xy(x, y as i32 + 1) else {
-                    continue;
+                    return;
                 };
                 if above.sat.is_empty() || mobile_cap(above) == 0 {
                     next_cur = Some(above);
-                    continue;
+                    return;
                 }
                 // Walled ponds and stacked lake interiors infiltrate the
                 // bed. Open surge / sheet faces stay in Air — seepage
@@ -308,11 +317,11 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
                     let settled_stack = stacked_air(x, src_y) && !open_surge_face(x, src_y);
                     if downhill_air_escape(x, src_y) {
                         next_cur = Some(above);
-                        continue;
+                        return;
                     }
                     if !walled_air(x, src_y) && !settled_stack {
                         next_cur = Some(above);
-                        continue;
+                        return;
                     }
                     // Cell-aware: infiltration under a lake is the dominant way
                     // water enters the ground, so reading a material average
@@ -325,12 +334,12 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
                     };
                     if rate <= 0 {
                         next_cur = Some(above);
-                        continue;
+                        return;
                     }
                     let move_amt = (above.sat.0 as i32).min(free as i32).min(rate) as u8;
                     if move_amt == 0 {
                         next_cur = Some(above);
-                        continue;
+                        return;
                     }
                     let new_above = Cell {
                         sat: Sat(above.sat.0 - move_amt),
@@ -352,7 +361,7 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
                         ));
                     }
                     next_cur = Some(new_above);
-                    continue;
+                    return;
                 }
 
                 // Free water falls only through Air. Pore water in solids
@@ -361,13 +370,13 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
                 // (powder freefall through the mountain).
                 if cur.material != MaterialId::Air || above.material != MaterialId::Air {
                     next_cur = Some(above);
-                    continue;
+                    return;
                 }
 
                 let move_amt = above.sat.0.min(free);
                 if move_amt == 0 {
                     next_cur = Some(above);
-                    continue;
+                    return;
                 }
                 let new_above = Cell {
                     sat: Sat(above.sat.0 - move_amt),
@@ -388,8 +397,8 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
                     ));
                 }
                 next_cur = Some(new_above);
-            }
-        }
+            });
+        });
     });
     if track_load {
         for (from, to, moved, donor_before) in load_moves.into_inner().unwrap() {

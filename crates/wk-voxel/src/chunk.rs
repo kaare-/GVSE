@@ -16,6 +16,8 @@ use wk_material::MaterialId;
 use crate::cell::Cell;
 
 /// Chunk width in cells.
+///
+/// [`DirtyBits`] packs one row into a `u64` — keep this 64.
 pub const CHUNK_CELLS_W: usize = 64;
 /// Chunk height in cells.
 pub const CHUNK_CELLS_H: usize = 64;
@@ -87,6 +89,85 @@ impl Rect {
         self.x1 = self.x1.max(x);
         self.y1 = self.y1.max(y);
     }
+
+    pub fn area(self) -> usize {
+        let w = (self.x1 as usize).saturating_sub(self.x0 as usize) + 1;
+        let h = (self.y1 as usize).saturating_sub(self.y0 as usize) + 1;
+        w.saturating_mul(h)
+    }
+}
+
+/// Per-cell dirty mask for one chunk. One `u64` row (bit `x` in row `y`).
+///
+/// The dirty **rect** is the bounding box of writes. Planning dilates
+/// these bits (not the box) so scattered rain does not scan the holes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyBits(pub [u64; CHUNK_CELLS_H]);
+
+impl Default for DirtyBits {
+    fn default() -> Self {
+        Self([0; CHUNK_CELLS_H])
+    }
+}
+
+impl DirtyBits {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0.iter().all(|&w| w == 0)
+    }
+
+    #[inline]
+    pub fn set(&mut self, x: u8, y: u8) {
+        debug_assert!((x as usize) < CHUNK_CELLS_W);
+        debug_assert!((y as usize) < CHUNK_CELLS_H);
+        self.0[y as usize] |= 1u64 << x;
+    }
+
+    #[inline]
+    pub fn get(self, x: u8, y: u8) -> bool {
+        self.0[y as usize] & (1u64 << x) != 0
+    }
+
+    pub fn or_assign(&mut self, other: Self) {
+        for (a, b) in self.0.iter_mut().zip(other.0.iter()) {
+            *a |= *b;
+        }
+    }
+
+    pub fn count(self) -> usize {
+        self.0.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// Inclusive bbox of set bits, or `None` if empty.
+    pub fn bbox(self) -> Option<Rect> {
+        let mut rect: Option<Rect> = None;
+        for y in 0..CHUNK_CELLS_H as u8 {
+            let row = self.0[y as usize];
+            if row == 0 {
+                continue;
+            }
+            let x0 = row.trailing_zeros() as u8;
+            let x1 = 63 - row.leading_zeros() as u8;
+            match &mut rect {
+                Some(r) => {
+                    r.expand_to_include(x0, y);
+                    r.expand_to_include(x1, y);
+                }
+                None => {
+                    rect = Some(Rect {
+                        x0,
+                        y0: y,
+                        x1,
+                        y1: y,
+                    });
+                }
+            }
+        }
+        rect
+    }
 }
 
 /// One `CHUNK_CELLS_W × CHUNK_CELLS_H` slab. Row-major, `y = 0` at the
@@ -98,6 +179,11 @@ pub struct Chunk {
     pub cells: Vec<Cell>,
     /// Bounding box around cells touched last tick. `None` = quiescent.
     pub dirty: Option<Rect>,
+    /// Per-cell dirty mask for the same writes as [`Self::dirty`].
+    /// Runtime only — old saves have the rect and empty bits, so
+    /// [`crate::active::plan_active`] falls back to the box.
+    #[serde(default, skip)]
+    pub dirty_bits: DirtyBits,
     /// Local tick counter (wraps freely — used for RNG salting only).
     pub tick: u64,
     /// Sticky occupancy: at least one `Air` cell with `sat > 0` was
@@ -234,6 +320,7 @@ impl Chunk {
             coord,
             cells: vec![Cell::default(); CHUNK_CELLS],
             dirty: None,
+            dirty_bits: DirtyBits::empty(),
             tick: 0,
             has_wet_air: false,
             has_wet_pores: false,
@@ -289,6 +376,7 @@ impl Chunk {
                 });
             }
         }
+        self.dirty_bits.set(xu, yu);
         if cell.material == MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_air = true;
         }
@@ -343,6 +431,7 @@ impl Chunk {
     /// once the previous pass has been fully consumed.
     pub fn clear_dirty(&mut self) {
         self.dirty = None;
+        self.dirty_bits = DirtyBits::empty();
     }
 
     /// Expand the standing-air y band to include `y`.
@@ -411,6 +500,7 @@ impl Chunk {
                 });
             }
         }
+        self.dirty_bits.set(xu, yu);
     }
 }
 
@@ -431,6 +521,9 @@ mod tests {
         assert_eq!(r.x1, 10);
         assert_eq!(r.y0, 2);
         assert_eq!(r.y1, 5);
+        assert!(c.dirty_bits.get(3, 5));
+        assert!(c.dirty_bits.get(10, 2));
+        assert!(!c.dirty_bits.get(6, 3), "AABB hole is not a write");
     }
 
     #[test]
@@ -440,6 +533,7 @@ mod tests {
         assert!(c.dirty.is_some());
         c.clear_dirty();
         assert!(c.dirty.is_none());
+        assert!(c.dirty_bits.is_empty());
     }
 
     #[test]

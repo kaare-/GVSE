@@ -80,15 +80,15 @@ fn contact_seepage_soaks_dry_sand_from_either_side() {
     w.set_cell(6, 1, Cell::solid(MaterialId::Bedrock));
     w.set_cell(6, 2, Cell::solid(MaterialId::Bedrock));
     w.set_cell(4, 2, Cell::water());
-    let regions = [ActiveChunk {
-        coord: ChunkCoord::new(0, 0),
-        rect: Rect {
+    let regions = [ActiveChunk::new(
+        ChunkCoord::new(0, 0),
+        Rect {
             x0: 2,
             y0: 0,
             x1: 6,
             y1: 3,
         },
-    }];
+    )];
     // One contact pass is enough: a pond facing three dry banks weeps
     // back on the next tick (existing oscillation). The skip must not
     // block that first soak.
@@ -8044,15 +8044,15 @@ fn a_diagonal_vein_conducts_along_its_own_axis() {
     wet.sat.0 = water_capacity(MaterialId::Gravel);
     w.set_cell(vein[0].0, vein[0].1, wet);
 
-    let region = crate::active::ActiveChunk {
-        coord: ChunkCoord::new(0, 0),
-        rect: crate::chunk::Rect {
+    let region = crate::active::ActiveChunk::new(
+        ChunkCoord::new(0, 0),
+        crate::chunk::Rect {
             x0: 0,
             y0: 0,
             x1: 15,
             y1: 15,
         },
-    };
+    );
     for _ in 0..200 {
         super::seepage::apply_seepage_regions(&mut w, std::slice::from_ref(&region));
         w.tick += 1;

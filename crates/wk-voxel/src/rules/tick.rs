@@ -50,6 +50,8 @@ pub struct PhysicsTimings {
     pub substeps_ran: u64,
     pub active_regions: u64,
     pub active_area: u64,
+    /// AABB cells of the same plan (old dirty-rect metric).
+    pub active_aabb: u64,
     /// Ticks that took the deep ([`GRAIN_SETTLE_PASSES`]) settle path.
     pub deep_settle_ticks: u64,
     /// Ticks where [`super::grain::punch_through_floating_rafts`] moved mass.
@@ -88,6 +90,7 @@ impl PhysicsTimings {
         self.substeps_ran += other.substeps_ran;
         self.active_regions += other.active_regions;
         self.active_area += other.active_area;
+        self.active_aabb += other.active_aabb;
         self.deep_settle_ticks += other.deep_settle_ticks;
         self.punch_hits += other.punch_hits;
     }
@@ -186,14 +189,11 @@ impl PerfConfig {
 }
 
 fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
-    active
-        .iter()
-        .map(|a| {
-            let w = (a.rect.x1 as usize).saturating_sub(a.rect.x0 as usize) + 1;
-            let h = (a.rect.y1 as usize).saturating_sub(a.rect.y0 as usize) + 1;
-            w.saturating_mul(h)
-        })
-        .sum()
+    active.iter().map(|a| a.cell_count()).sum()
+}
+
+fn active_aabb_area(active: &[crate::active::ActiveChunk]) -> usize {
+    active.iter().map(|a| a.aabb_area()).sum()
 }
 
 /// Keep only active regions whose chunk sticky-flag says loose material
@@ -353,24 +353,36 @@ fn merge_active_regions(
     b: Vec<crate::active::ActiveChunk>,
 ) -> Vec<crate::active::ActiveChunk> {
     use crate::active::ActiveChunk;
-    use crate::chunk::{ChunkCoord, Rect};
+    use crate::chunk::{ChunkCoord, DirtyBits, Rect};
     use crate::fasthash::FxHashMap;
-    let mut map: FxHashMap<ChunkCoord, Rect> = FxHashMap::default();
+    let mut map: FxHashMap<ChunkCoord, (Rect, DirtyBits, bool)> = FxHashMap::default();
     for ac in a.into_iter().chain(b) {
         map.entry(ac.coord)
-            .and_modify(|r| {
+            .and_modify(|(r, bits, dense)| {
                 *r = Rect {
                     x0: r.x0.min(ac.rect.x0),
                     y0: r.y0.min(ac.rect.y0),
                     x1: r.x1.max(ac.rect.x1),
                     y1: r.y1.max(ac.rect.y1),
                 };
+                if ac.is_dense() || *dense {
+                    *dense = true;
+                    *bits = DirtyBits::empty();
+                } else {
+                    bits.or_assign(ac.bits);
+                }
             })
-            .or_insert(ac.rect);
+            .or_insert((ac.rect, ac.bits, ac.is_dense()));
     }
     let mut out: Vec<ActiveChunk> = map
         .into_iter()
-        .map(|(coord, rect)| ActiveChunk { coord, rect })
+        .map(|(coord, (rect, bits, dense))| {
+            if dense {
+                ActiveChunk::new(coord, rect)
+            } else {
+                ActiveChunk::with_bits(coord, rect, bits)
+            }
+        })
         .collect();
     out.sort_by(|x, y| x.coord.cy.cmp(&y.coord.cy).then(x.coord.cx.cmp(&y.coord.cx)));
     out
@@ -450,6 +462,7 @@ fn tick_with_life_inner(
             local.substeps_ran += 1;
             local.active_regions += active.len() as u64;
             local.active_area += active_cell_area(&active) as u64;
+            local.active_aabb += active_aabb_area(&active) as u64;
         }
         flow_halo = active.clone();
         let passes = partition_checkerboard(&active);

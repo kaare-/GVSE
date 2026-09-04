@@ -29,10 +29,7 @@ pub(crate) fn regions_all_loaded(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 
@@ -54,10 +51,7 @@ pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 
@@ -86,10 +80,7 @@ pub(crate) fn regions_confined_loaded(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 
@@ -116,10 +107,7 @@ pub(crate) fn regions_lake_bed_loaded(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 
@@ -136,10 +124,7 @@ pub(crate) fn regions_wet_air_loaded(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 
@@ -172,10 +157,7 @@ pub(crate) fn regions_loose_moore(world: &World) -> Vec<ActiveChunk> {
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: crate::chunk::Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
         .collect()
 }
 

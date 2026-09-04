@@ -423,7 +423,7 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
     }
     let mut out: Vec<ActiveChunk> = map
         .into_iter()
-        .map(|(coord, rect)| ActiveChunk { coord, rect })
+        .map(|(coord, rect)| ActiveChunk::new(coord, rect))
         .collect();
     out.sort_by(|a, b| a.coord.cy.cmp(&b.coord.cy).then(a.coord.cx.cmp(&b.coord.cx)));
     out
@@ -746,6 +746,9 @@ fn accumulate_seepage_xfers_ex(
             let ly = y as i32;
             let gy = base_gy + ly;
             for x in ac.rect.x0..=ac.rect.x1 {
+                if !ac.visits(x, y) {
+                    continue;
+                }
                 let lx = x as i32;
                 let gx = world.wrap_x(base_gx + lx);
                 let a = chunk.get(x as usize, y as usize);

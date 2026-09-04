@@ -284,10 +284,7 @@ mod tests {
 
     #[test]
     fn pull_write_coords_include_above_neighbour() {
-        let active = [ActiveChunk {
-            coord: ChunkCoord::new(0, 0),
-            rect: Rect::full(),
-        }];
+        let active = [ActiveChunk::new(ChunkCoord::new(0, 0), Rect::full())];
         let coords = pull_write_coords(&active);
         assert!(coords.contains(&ChunkCoord::new(0, 0)));
         assert!(coords.contains(&ChunkCoord::new(0, 1)));
@@ -303,10 +300,7 @@ mod tests {
             ChunkCoord::new(1, 1),
         ]
         .into_iter()
-        .map(|coord| ActiveChunk {
-            coord,
-            rect: Rect::full(),
-        })
+        .map(|coord| ActiveChunk::new(coord, Rect::full()))
         .collect();
         let passes = partition_checkerboard(&active);
         for pass in &passes {
@@ -326,14 +320,8 @@ mod tests {
         // Same colour would not schedule these together; the helper must
         // still report overlap if a caller ever did.
         let active = [
-            ActiveChunk {
-                coord: ChunkCoord::new(0, 0),
-                rect: Rect::full(),
-            },
-            ActiveChunk {
-                coord: ChunkCoord::new(0, 1),
-                rect: Rect::full(),
-            },
+            ActiveChunk::new(ChunkCoord::new(0, 0), Rect::full()),
+            ActiveChunk::new(ChunkCoord::new(0, 1), Rect::full()),
         ];
         assert!(!pull_write_coords_disjoint(&active));
     }

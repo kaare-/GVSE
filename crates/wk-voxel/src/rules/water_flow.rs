@@ -651,6 +651,9 @@ fn accumulate_confined_upward_xfers(
             let gy = base_gy + y as i32;
             let ly = y as usize;
             for x in ac.rect.x0..=ac.rect.x1 {
+                if !ac.visits(x, y) {
+                    continue;
+                }
                 let dst = chunk.get(x as usize, ly);
                 if dst.material != MaterialId::Air || dst.sat.is_full() {
                     continue;
@@ -803,6 +806,9 @@ fn accumulate_water_flow_xfers(
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = base_gy + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
+                if !ac.visits(x, y) {
+                    continue;
+                }
                 let lx = x as i32;
                 let ly = y as i32;
                 // Source cell — always in-chunk under the rect bounds.
@@ -1109,6 +1115,9 @@ fn accumulate_throughflow_xfers(
             let ly = y as i32;
             let gy = base_gy + ly;
             for x in ac.rect.x0..=ac.rect.x1 {
+                if !ac.visits(x, y) {
+                    continue;
+                }
                 let lx = x as i32;
                 let gx = world.wrap_x(base_gx + lx);
                 let cur = chunk.get(x as usize, y as usize);

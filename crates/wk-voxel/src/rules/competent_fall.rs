@@ -2473,10 +2473,7 @@ fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
 pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
   let regions: Vec<ActiveChunk> = coords
     .iter()
-    .map(|&coord| ActiveChunk {
-      coord,
-      rect: Rect::full(),
-    })
+    .map(|&coord| ActiveChunk::new(coord, Rect::full()))
     .collect();
   wake_competent_bodies_regions(world, &regions);
 }
@@ -2759,7 +2756,7 @@ fn expand_competent_regions_ex(
       y1: ry1,
     };
     if !union_per_chunk {
-      loose.push(ActiveChunk { coord, rect });
+      loose.push(ActiveChunk::new(coord, rect));
       return;
     }
     map.entry(coord)
@@ -2830,7 +2827,7 @@ fn expand_competent_regions_ex(
   }
   let mut out: Vec<ActiveChunk> = map
     .into_iter()
-    .map(|(coord, rect)| ActiveChunk { coord, rect })
+    .map(|(coord, rect)| ActiveChunk::new(coord, rect))
     .collect();
   out.extend(loose);
   out.sort_by(|a, b| {
@@ -2907,12 +2904,12 @@ fn expand_regions_to_cells(
         .or_insert(rect);
       continue;
     }
-    seeds.push(ActiveChunk { coord, rect });
+    seeds.push(ActiveChunk::new(coord, rect));
   }
   seeds.extend(
     unioned
       .into_iter()
-      .map(|(coord, rect)| ActiveChunk { coord, rect }),
+      .map(|(coord, rect)| ActiveChunk::new(coord, rect)),
   );
   seeds.sort_by(|a, b| {
     a.coord
@@ -2970,10 +2967,7 @@ fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: 
       .chunks
       .keys()
       .copied()
-      .map(|coord| ActiveChunk {
-        coord,
-        rect: Rect::full(),
-      })
+      .map(|coord| ActiveChunk::new(coord, Rect::full()))
       .collect()
   } else {
     active
@@ -4746,15 +4740,15 @@ mod tests {
     w.set_cell(4, 8, Cell::solid(MaterialId::Stone));
     w.set_cell(50, 8, Cell::solid(MaterialId::Stone));
     w.competent_wake.clear();
-    let ac = ActiveChunk {
-      coord: ChunkCoord::new(0, 0),
-      rect: Rect {
+    let ac = ActiveChunk::new(
+      ChunkCoord::new(0, 0),
+      Rect {
         x0: 2,
         y0: 6,
         x1: 6,
         y1: 10,
       },
-    };
+    );
     wake_competent_bodies_regions(&mut w, &[ac]);
     assert!(
       w.competent_wake.iter().any(|&(x, y)| x == 4 && y == 8),
