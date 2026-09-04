@@ -778,3 +778,12 @@ Do not re-walk these:
   `hum n` **13k → 55k / 68k**. Not view LOD — every tile still
   steps. Do not coarsen off-screen advect. Do not retry the wind
   Jacobi solid-cache.
+
+  After caching orographic speed/lift/descent per column for one
+  rebuild, and packing Jacobi face-blocked + neighbour indices for
+  that rebuild only (repeat soak, 256 plants, 8×400): wind
+  **1.13 → 7.20** (was **2.67 → 19.73**). Wall **17.2 → 62.3**
+  (was **18.8 → 76.9**). Humidity advect **1.85 → 13.38**
+  (unchanged — still tracks `hum n`). Temperature **0.35 → 0.45**.
+  Same compose stencil and slip. Do not cache solids across
+  rebuilds. Do not coarsen off-screen wind.
