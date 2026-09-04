@@ -75,12 +75,16 @@ viewport. Seat collection probes the camera tile box when it is
 smaller than the vapour map, so a soaked sky does not walk every
 humidity key to draw a shore strip. Drop-top scans also skip chunks
 whose 64-high band sits entirely below the camera (shafts only go
-down). That is leftover draw as `hum n` fills.
+down). `T` probes the same tile box (the filled T map is ~68k tiles).
+`U` / `M` / `G` scan only visible world-x columns. That is leftover
+draw as `hum n` fills. Not a quadtree — chunks, occupancy flags, and
+a camera AABB already name the seats.
 
 Coarsening **advect / wind / condensation / temperature** off-camera
 would change weather: the world is a ring, vapour wraps, and panning
 must find the same mass that ran at full rate while it was off-screen.
-Parked. Draw leftover only.
+A quadtree over the sky would coarsen those same fields. Parked.
+Draw leftover only.
 
 ### Pinned: droplets fall too fast
 
@@ -684,3 +688,13 @@ Do not re-walk these:
   wall **20.1 → 80.7** — same leftover as before. Temperature is a
   period-20 hitch, not the soak grower. `Temperature::cells` stays
   `HashMap` for serde. Do not coarsen off-screen sim.
+
+  After caching orographic `live_surface_at` per column (same factors
+  for every over-sat tile in the column), sharing the lottery sat
+  `at_tile` with the dew read, and draining winners from the snapshot
+  mass: leftover world walks / hasher on the condensation lottery as
+  `hum n` fills. Lottery still visits every over-sat tile. `col_lo`
+  still built for every key. Draw leftover: `T` / `U` / `M` / `G`
+  now use the camera box (headless soak does not draw). Do not skip
+  the lottery. Do not coarsen off-screen sim. Do not add a sky
+  quadtree.

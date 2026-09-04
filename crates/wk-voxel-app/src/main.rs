@@ -74,9 +74,10 @@ use wk_voxel::{
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
     draw_celestials, draw_haze_and_wind, draw_wind_streaks,
-    draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
-    organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
-    toward_light_celestial, RidgeSilhouette,
+    draw_ridge_silhouettes, draw_sky, estimate_snow_bias, gx_in_ranges,
+    is_organism_aboveground, organism_celestial_rim, sky_weather_for_scene,
+    terrain_celestial_key_strength, toward_light_celestial, view_cell_x_ranges,
+    view_tile_box, RidgeSilhouette,
 };
 use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
@@ -1323,12 +1324,18 @@ async fn main() {
         if temp_overlay && overlay_k > 0.01 {
             let tile_px = scene.temperature.tile_cols as f32 * cell_px;
             let tc = scene.temperature.tile_cols.max(1);
-            let hy0 = y_min_vis.div_euclid(tc) - 1;
-            let hy1 = y_max_vis.div_euclid(tc) + 1;
-            for (&(hx, hy), &temp_c) in &scene.temperature.cells {
-                if hy < hy0 || hy > hy1 {
-                    continue;
-                }
+            let view = view_tile_box(
+                tc,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
+            let paint_temp = |hx: i32, hy: i32, temp_c: f32| {
                 let base_gx = hx * scene.temperature.tile_cols;
                 let base_gy = hy * scene.temperature.tile_cols;
                 for &x_copy in x_copies {
@@ -1348,6 +1355,35 @@ async fn main() {
                         tile_px,
                         scale_color_alpha(temp_overlay_color(temp_c), overlay_k),
                     );
+                }
+            };
+            // Filled sky box is ~68k tiles. Probe the camera when it is
+            // smaller — leftover hasher on T, same as H. Sim T still
+            // steps the whole ring.
+            if let Some(view) = view {
+                if view.tile_count() < scene.temperature.cells.len() {
+                    for hy in view.hy_lo..=view.hy_hi {
+                        view.for_each_hx(|hx| {
+                            if let Some(&temp_c) = scene.temperature.cells.get(&(hx, hy)) {
+                                paint_temp(hx, hy, temp_c);
+                            }
+                        });
+                    }
+                } else {
+                    for (&(hx, hy), &temp_c) in &scene.temperature.cells {
+                        if view.contains(hx, hy) {
+                            paint_temp(hx, hy, temp_c);
+                        }
+                    }
+                }
+            } else {
+                let hy0 = y_min_vis.div_euclid(tc) - 1;
+                let hy1 = y_max_vis.div_euclid(tc) + 1;
+                for (&(hx, hy), &temp_c) in &scene.temperature.cells {
+                    if hy < hy0 || hy > hy1 {
+                        continue;
+                    }
+                    paint_temp(hx, hy, temp_c);
                 }
             }
         }
@@ -1377,13 +1413,22 @@ async fn main() {
 
         // Ground saturation heatmap (U): pore fill + free water.
         if sat_overlay && overlay_k > 0.01 {
-            for &x_copy in x_copies {
-                let x_shift = x_copy * scene.params.width_cols;
-                for x in 0..scene.params.width_cols {
-                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
-                    if sx + cell_px < 0.0 || sx > sw {
-                        continue;
-                    }
+            let (xr, xn) = view_cell_x_ranges(
+                origin_x,
+                cell_px,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+            );
+            for i in 0..xn as usize {
+                let (x0, x1) = xr[i];
+                for x in x0..=x1 {
+                    for &x_copy in x_copies {
+                        let sx = origin_x
+                            + (x + x_copy * scene.params.width_cols) as f32 * cell_px;
+                        if sx + cell_px < 0.0 || sx > sw {
+                            continue;
+                        }
                     for y in y_min_vis..y_max_vis {
                         let sy =
                             origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
@@ -1415,19 +1460,29 @@ async fn main() {
                             scale_color_alpha(sat_overlay_color(wet), overlay_k),
                         );
                     }
+                    }
                 }
             }
         }
 
         // Mycelium strain overlay: bright per-network colors by cream intensity.
         if mycelium_overlay && overlay_k > 0.01 {
-            for &x_copy in x_copies {
-                let x_shift = x_copy * scene.params.width_cols;
-                for x in 0..scene.params.width_cols {
-                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
-                    if sx + cell_px < 0.0 || sx > sw {
-                        continue;
-                    }
+            let (xr, xn) = view_cell_x_ranges(
+                origin_x,
+                cell_px,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+            );
+            for i in 0..xn as usize {
+                let (x0, x1) = xr[i];
+                for x in x0..=x1 {
+                    for &x_copy in x_copies {
+                        let sx = origin_x
+                            + (x + x_copy * scene.params.width_cols) as f32 * cell_px;
+                        if sx + cell_px < 0.0 || sx > sw {
+                            continue;
+                        }
                     for y in y_min_vis..y_max_vis {
                         let sy =
                             origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
@@ -1466,12 +1521,20 @@ async fn main() {
                             ),
                         );
                     }
+                    }
                 }
             }
         }
 
         // Geotech overlay: G cycles shear → σᵥ → wet → off.
         if geotech_mode != GeotechOverlayMode::Off && overlay_k > 0.01 {
+            let (gxr, gxn) = view_cell_x_ranges(
+                origin_x,
+                cell_px,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+            );
             match geotech_mode {
                 GeotechOverlayMode::Shear | GeotechOverlayMode::Wetness => {
                     let s_max = match geotech_mode {
@@ -1485,6 +1548,17 @@ async fn main() {
                         _ => 1.0,
                     };
                     for (&(gx, gy), stress) in &scene.geotech.faces {
+                        if gy < y_min_vis || gy >= y_max_vis {
+                            continue;
+                        }
+                        let wx = if scene.params.width_cols > 0 {
+                            gx.rem_euclid(scene.params.width_cols)
+                        } else {
+                            gx
+                        };
+                        if !gx_in_ranges(wx, &gxr, gxn) {
+                            continue;
+                        }
                         let value = match geotech_mode {
                             GeotechOverlayMode::Shear => stress.shear_score,
                             GeotechOverlayMode::Wetness => stress.wetness.max(
@@ -1520,6 +1594,17 @@ async fn main() {
                         .max(4.0);
                     for (&(gx, gy), &sigma) in &scene.geotech.overburden {
                         if sigma <= 0.05 {
+                            continue;
+                        }
+                        if gy < y_min_vis || gy >= y_max_vis {
+                            continue;
+                        }
+                        let wx = if scene.params.width_cols > 0 {
+                            gx.rem_euclid(scene.params.width_cols)
+                        } else {
+                            gx
+                        };
+                        if !gx_in_ranges(wx, &gxr, gxn) {
                             continue;
                         }
                         for &x_copy in x_copies {

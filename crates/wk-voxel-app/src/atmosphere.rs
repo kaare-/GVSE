@@ -7,14 +7,13 @@ use std::collections::HashMap;
 use macroquad::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
-    build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
+    airborne_loose_at, build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
     day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
     precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
-    sky_rgb_at_height_weather, airborne_loose_at, CanopyIndex, CarbonBudget, ClimateConfig,
-    Humidity, ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind,
-    World, CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX,
-    LIVE_SURFACE_SEARCH,
+    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, Humidity, ModuleId,
+    OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H,
+    CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH,
 };
 
 pub const FAR_RIDGE_PARALLAX: f32 = 0.12;
@@ -173,13 +172,7 @@ fn ridge_ground_at(world: &World, gx: i32, y: i32, sea_level: i32) -> bool {
     y <= sea_level || is_standing_water(world, gx, y)
 }
 
-fn live_surface_y_ground(
-    world: &World,
-    gx: i32,
-    hint: i32,
-    search: i32,
-    sea_level: i32,
-) -> i32 {
+fn live_surface_y_ground(world: &World, gx: i32, hint: i32, search: i32, sea_level: i32) -> i32 {
     let jx = world.wrap_x(gx);
     let ground = |y: i32| ridge_ground_at(world, jx, y, sea_level);
     if world.get_cell(jx, hint).is_none() {
@@ -297,7 +290,9 @@ fn collect_drop_tops_where(
                 }
                 let gx = world.wrap_x(ox + lx as i32);
                 let gy = oy + ly as i32;
-                tops.entry(gx).and_modify(|y| *y = (*y).max(gy)).or_insert(gy);
+                tops.entry(gx)
+                    .and_modify(|y| *y = (*y).max(gy))
+                    .or_insert(gy);
             }
         }
     }
@@ -374,15 +369,15 @@ fn chunk_x_touches_view(
 /// every humidity key (55k+ after a soak). One-tile pad matches
 /// [`humidity_tile_touches_view`] so bilinear neighbours stay.
 #[derive(Clone, Debug)]
-struct ViewTileBox {
-    hy_lo: i32,
-    hy_hi: i32,
+pub(crate) struct ViewTileBox {
+    pub hy_lo: i32,
+    pub hy_hi: i32,
     hx_ranges: [(i32, i32); 2],
     n_hx: u8,
 }
 
 impl ViewTileBox {
-    fn contains(&self, hx: i32, hy: i32) -> bool {
+    pub(crate) fn contains(&self, hx: i32, hy: i32) -> bool {
         hy >= self.hy_lo && hy <= self.hy_hi && self.contains_hx(hx)
     }
 
@@ -396,7 +391,7 @@ impl ViewTileBox {
         false
     }
 
-    fn tile_count(&self) -> usize {
+    pub(crate) fn tile_count(&self) -> usize {
         let h = (self.hy_hi - self.hy_lo + 1).max(0) as usize;
         let mut w = 0usize;
         for i in 0..self.n_hx as usize {
@@ -405,10 +400,23 @@ impl ViewTileBox {
         }
         h.saturating_mul(w)
     }
+
+    pub(crate) fn for_each_hx(&self, mut f: impl FnMut(i32)) {
+        for i in 0..self.n_hx as usize {
+            let (a, b) = self.hx_ranges[i];
+            for hx in a..=b {
+                f(hx);
+            }
+        }
+    }
 }
 
 /// World-x intervals (inclusive) visible in camera space, wrapped.
-fn wrap_world_x_ranges(gx_lo: i32, gx_hi: i32, width_cols: i32) -> ([(i32, i32); 2], u8) {
+pub(crate) fn wrap_world_x_ranges(
+    gx_lo: i32,
+    gx_hi: i32,
+    width_cols: i32,
+) -> ([(i32, i32); 2], u8) {
     if width_cols <= 0 || gx_hi < gx_lo {
         return ([(0, -1), (0, -1)], 0);
     }
@@ -424,7 +432,48 @@ fn wrap_world_x_ranges(gx_lo: i32, gx_hi: i32, width_cols: i32) -> ([(i32, i32);
     }
 }
 
-fn view_tile_box(
+/// Inclusive world-x ranges that can produce a cell-sized overlay pixel.
+///
+/// U / M / G used to scan `0..width_cols` and skip off-screen `sx`.
+/// Same leftover as H walking every humidity key — probe the camera.
+pub(crate) fn view_cell_x_ranges(
+    origin_x: f32,
+    cell_px: f32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+) -> ([(i32, i32); 2], u8) {
+    if cell_px <= 0.0 || sw <= 0.0 {
+        return ([(0, -1), (0, -1)], 0);
+    }
+    let gx_lo = ((-cell_px - origin_x) / cell_px).floor() as i32;
+    let gx_hi = ((sw + cell_px - origin_x) / cell_px).ceil() as i32;
+    if !wrap_x || width_cols <= 0 {
+        let a = gx_lo.max(0);
+        let b = if width_cols > 0 {
+            gx_hi.min(width_cols - 1)
+        } else {
+            gx_hi
+        };
+        if b < a {
+            return ([(0, -1), (0, -1)], 0);
+        }
+        return ([(a, b), (0, -1)], 1);
+    }
+    wrap_world_x_ranges(gx_lo, gx_hi, width_cols)
+}
+
+pub(crate) fn gx_in_ranges(gx: i32, ranges: &[(i32, i32); 2], n: u8) -> bool {
+    for i in 0..n as usize {
+        let (a, b) = ranges[i];
+        if gx >= a && gx <= b {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn view_tile_box(
     tc: i32,
     origin_x: f32,
     origin_y: f32,
@@ -660,7 +709,6 @@ fn humidity_haze_alpha_gated(mass: f32, max_mass: f32, min_mass: f32) -> u8 {
     }
     humidity_haze_alpha_cell(mass, max_mass, 0.0)
 }
-
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     let t = t.clamp(0.0, 1.0);
@@ -1149,8 +1197,7 @@ fn draw_ridge_band(
             let yl = profile[((i0 - 1).rem_euclid(n)) as usize];
             let yr = profile[((i0 + 1).rem_euclid(n)) as usize];
             let surf_soft = ((surf_y as i64 + yl as i64 + yr as i64) / 3) as i32;
-            let y_vis = bedrock_floor_y
-                + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
+            let y_vis = bedrock_floor_y + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
             let top_sy = origin_y - (y_vis - bedrock_floor_y) as f32 * cell_px + lag_y;
             // Extend solid fill to the bottom of the viewport. Stopping at
             // `origin_y + lag_y` (parallax-lagged bedrock line) left a hard
@@ -1175,8 +1222,8 @@ fn draw_ridge_band(
                 if bn > 0 {
                     let bi = i0.rem_euclid(bn) as usize;
                     let b_surf = b.profile[bi];
-                    let b_y = bedrock_floor_y
-                        + ((b_surf - bedrock_floor_y) as f32 * b.y_squash) as i32;
+                    let b_y =
+                        bedrock_floor_y + ((b_surf - bedrock_floor_y) as f32 * b.y_squash) as i32;
                     let b_lag_y = cam_y * (1.0 - b.parallax);
                     let b_top = origin_y - (b_y - bedrock_floor_y) as f32 * cell_px + b_lag_y;
                     // Far crest higher on screen (smaller sy) → far body is behind mid tip.
@@ -1297,9 +1344,9 @@ pub fn draw_haze_and_wind(
             &drop_tops,
             |x| world.wrap_x(x),
             |wx| {
-                *floor_cache.entry(wx).or_insert_with(|| {
-                    cloud_floor_y(world, wind, wx as f32).round() as i32
-                })
+                *floor_cache
+                    .entry(wx)
+                    .or_insert_with(|| cloud_floor_y(world, wind, wx as f32).round() as i32)
             },
             resample,
         ) {
@@ -1310,11 +1357,7 @@ pub fn draw_haze_and_wind(
             for &x_copy in x_copies {
                 let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
                 let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
-                if sx + cell_px < 0.0
-                    || sx > sw
-                    || top_sy > sh
-                    || top_sy + cell_px < 0.0
-                {
+                if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + cell_px < 0.0 {
                     continue;
                 }
                 draw_rectangle(
@@ -1365,12 +1408,7 @@ fn wind_streak_on_lattice(hx: i32, hy: i32, stride: i32) -> bool {
     hx.rem_euclid(s) == 0 && hy.rem_euclid(s) == 0
 }
 
-fn wind_tile_center_is_solid(
-    world: Option<&World>,
-    tc: i32,
-    hx: i32,
-    hy: i32,
-) -> bool {
+fn wind_tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
     let Some(w) = world else {
         return false;
     };
@@ -2047,7 +2085,6 @@ fn stamp_celestial_cast_shadows(
     }
 }
 
-
 /// Build weather params + snow bias for the current scene view.
 pub fn sky_weather_for_scene(
     tick: u64,
@@ -2070,11 +2107,7 @@ pub fn sky_weather_for_scene(
 }
 
 /// Snow bias from wet tiles that sit at or below freeze (0..1).
-pub fn estimate_snow_bias(
-    humidity: &Humidity,
-    temperature: &Temperature,
-    freeze_c: f32,
-) -> f32 {
+pub fn estimate_snow_bias(humidity: &Humidity, temperature: &Temperature, freeze_c: f32) -> f32 {
     let mut wet = 0u32;
     let mut snow = 0u32;
     for (&(hx, hy), &mass) in &humidity.cells {
@@ -2096,10 +2129,10 @@ pub fn estimate_snow_bias(
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_not_below_view, collect_drop_tops, haze_cell_is_drop, haze_column_y0,
-        haze_paint_seats, haze_paint_seats_in_box, haze_paint_seats_where,
-        haze_resampled_cells, humidity_haze_alpha, humidity_haze_alpha_gated,
-        humidity_tile_touches_view, view_tile_box,
+        chunk_not_below_view, collect_drop_tops, gx_in_ranges, haze_cell_is_drop, haze_column_y0,
+        haze_paint_seats, haze_paint_seats_in_box, haze_paint_seats_where, haze_resampled_cells,
+        humidity_haze_alpha, humidity_haze_alpha_gated, humidity_tile_touches_view,
+        view_cell_x_ranges, view_tile_box,
     };
     use std::collections::HashMap;
     use wk_voxel::Humidity;
@@ -2111,7 +2144,7 @@ mod tests {
         // 30-tick cache then made the spike linger until the sky cleared.
         use super::{column_surface_y, ridge_ground_at};
         use wk_material::MaterialId;
-        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, CHUNK_CELLS_H, World};
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, World, CHUNK_CELLS_H};
 
         let seed = 1u64;
         let width = 64;
@@ -2120,10 +2153,7 @@ mod tests {
         // below y=0 and the clamp would hide the stone from the walk.
         let gx = 22;
         let hint = continental_surface_y(seed, gx, sea, width);
-        assert!(
-            hint > sea,
-            "test column should be land (hint={hint})"
-        );
+        assert!(hint > sea, "test column should be land (hint={hint})");
         let mut w = World::new(seed);
         for y in [hint, hint + 30] {
             w.ensure_chunk(ChunkCoord::new(
@@ -2149,7 +2179,7 @@ mod tests {
     fn built_tower_lifts_the_ridge_past_the_search_window() {
         use super::column_surface_y;
         use wk_material::MaterialId;
-        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, CHUNK_CELLS_H, World};
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, World, CHUNK_CELLS_H};
 
         let seed = 1u64;
         let width = 64;
@@ -2180,7 +2210,7 @@ mod tests {
     fn erased_hill_drops_the_ridge_off_the_seed_crest() {
         use super::column_surface_y;
         use wk_material::MaterialId;
-        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, CHUNK_CELLS_H, World};
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, World, CHUNK_CELLS_H};
 
         let seed = 1u64;
         let width = 64;
@@ -2219,17 +2249,14 @@ mod tests {
     fn wet_air_above_the_sea_is_not_a_ridge_crest() {
         use super::column_surface_y;
         use wk_material::MaterialId;
-        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, Sat, CHUNK_CELLS_H, World};
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, Sat, World, CHUNK_CELLS_H};
 
         let seed = 1u64;
         let width = 64;
         let sea = 8;
         let gx = 23;
         let hint = continental_surface_y(seed, gx, sea, width);
-        assert!(
-            hint > sea,
-            "test column should be land (hint={hint})"
-        );
+        assert!(hint > sea, "test column should be land (hint={hint})");
         let mut w = World::new(seed);
         w.ensure_chunk(ChunkCoord::new(
             gx.div_euclid(64),
@@ -2347,9 +2374,7 @@ mod tests {
         drop_tops.insert(2, 21);
         let painted: std::collections::HashSet<_> = seats
             .iter()
-            .flat_map(|&(hx, hy)| {
-                haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0, true)
-            })
+            .flat_map(|&(hx, hy)| haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0, true))
             .filter(|&(_, _, m)| m > 0.0)
             .map(|(x, y, _)| (x, y))
             .collect();
@@ -2489,10 +2514,8 @@ mod tests {
         let width = 256;
         let sw = 160.0;
         let sh = 90.0;
-        let box_ = view_tile_box(
-            tc, origin_x, origin_y, cell, bedrock, wrap, width, sw, sh,
-        )
-        .expect("box");
+        let box_ =
+            view_tile_box(tc, origin_x, origin_y, cell, bedrock, wrap, width, sw, sh).expect("box");
         let hx_span = width / tc;
         for hx in -4..70 {
             for hy in -4..40 {
@@ -2520,11 +2543,14 @@ mod tests {
         let origin_y = 64.0;
         let cell = 4.0;
         let keep = |hx: i32, hy: i32| {
-            humidity_tile_touches_view(hx, hy, 4, origin_x, origin_y, cell, 0, true, 256, 128.0, 64.0)
+            humidity_tile_touches_view(
+                hx, hy, 4, origin_x, origin_y, cell, 0, true, 256, 128.0, 64.0,
+            )
         };
-        let old: std::collections::HashSet<_> = haze_paint_seats_where(&h, keep).into_iter().collect();
-        let box_ = view_tile_box(4, origin_x, origin_y, cell, 0, true, 256, 128.0, 64.0)
-            .expect("box");
+        let old: std::collections::HashSet<_> =
+            haze_paint_seats_where(&h, keep).into_iter().collect();
+        let box_ =
+            view_tile_box(4, origin_x, origin_y, cell, 0, true, 256, 128.0, 64.0).expect("box");
         let new: std::collections::HashSet<_> =
             haze_paint_seats_in_box(&h, &box_).into_iter().collect();
         for seat in &old {
@@ -2559,5 +2585,30 @@ mod tests {
             chunk_not_below_view(3, 64.0, 4.0, 0, 64.0),
             "high sky above the camera still carves"
         );
+    }
+
+    #[test]
+    fn view_cell_x_ranges_cover_every_column_that_touches_the_camera() {
+        let origin_x = -80.0;
+        let cell = 4.0;
+        let width = 256;
+        let sw = 128.0;
+        let (ranges, n) = view_cell_x_ranges(origin_x, cell, true, width, sw);
+        for x in 0..width {
+            let mut on_screen = false;
+            for &copy in &[-1, 0, 1] {
+                let sx = origin_x + (x + copy * width) as f32 * cell;
+                if sx + cell >= 0.0 && sx <= sw {
+                    on_screen = true;
+                    break;
+                }
+            }
+            if on_screen {
+                assert!(
+                    gx_in_ranges(x, &ranges, n),
+                    "visible column {x} missing from {ranges:?}"
+                );
+            }
+        }
     }
 }

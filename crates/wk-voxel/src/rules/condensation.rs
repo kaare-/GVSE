@@ -139,9 +139,7 @@ const SNOW_COLUMN_CLEARANCE: i32 = 16;
 /// the C lottery and the surplus pass may snow (if they can pay a flake)
 /// or hold — they never `deposit_water_in_air`.
 fn air_is_freezing(air_t: f32, phase: Option<&crate::phase::PhaseConfig>) -> bool {
-    let freeze = phase
-        .map(|ph| ph.freeze_point_c)
-        .unwrap_or(0.0);
+    let freeze = phase.map(|ph| ph.freeze_point_c).unwrap_or(0.0);
     air_t <= freeze
 }
 
@@ -298,11 +296,10 @@ pub fn apply_condensation_rain_phased(
     // Collect first, then apply the heaviest hits so a saturated sky
     // cannot walk every column every tick (~thousands → 7 FPS).
     let mut hits: Vec<(f32, i32, i32, f32)> = Vec::new(); // mass, hx, hy, take_mass
-    // Lowest wet tile per column — hint for the floor walk. Built for
-    // every key (cheap) so a high lottery winner cannot start 24 cells
-    // above the crest, miss the ground, and cache "no floor".
-    let mut col_lo: crate::fasthash::FxHashMap<i32, i32> =
-        crate::fasthash::FxHashMap::default();
+                                                          // Lowest wet tile per column — hint for the floor walk. Built for
+                                                          // every key (cheap) so a high lottery winner cannot start 24 cells
+                                                          // above the crest, miss the ground, and cache "no floor".
+    let mut col_lo: crate::fasthash::FxHashMap<i32, i32> = crate::fasthash::FxHashMap::default();
     for &((hx, hy), _) in &tiles {
         col_lo
             .entry(hx)
@@ -310,6 +307,11 @@ pub fn apply_condensation_rain_phased(
             .or_insert(hy);
     }
     let mut film_floor: crate::fasthash::FxHashMap<i32, i32> =
+        crate::fasthash::FxHashMap::default();
+    // Orographic factors are per column, not per tile. Two
+    // `live_surface_at` walks on every over-sat tile were leftover
+    // as `hum n` fills. Lottery still visits every over-sat tile.
+    let mut oro_by_hx: crate::fasthash::FxHashMap<i32, (f32, f32, f32)> =
         crate::fasthash::FxHashMap::default();
     for ((hx, hy), mass) in tiles {
         // Cheap sat / min-mass gate, then lottery, then the column floor
@@ -320,25 +322,30 @@ pub fn apply_condensation_rain_phased(
         let mut full_mass = cfg.full_mass;
         let mut leftover = 0.0f32;
         if let Some(th) = temp {
-            let sat = thermal_sat_mass(th, hx, hy);
+            let air = th.at_tile(hx, hy);
+            let sat = crate::humidity::Humidity::saturation_mass_at_temp(air).max(1.0);
             if mass < sat {
                 continue;
             }
-            let (tp, tm, tmin, sat) = thermal_rain_factors(th, hx, hy, tile_cols);
+            let (tp, tm, tmin, sat) =
+                thermal_rain_factors_from_air(th, hx, hy, tile_cols, air, sat);
             prob_mult *= tp;
             mass_mult *= tm;
             min_mass = tmin;
             full_mass = sat.max(min_mass + 1.0);
             leftover = (sat * CLOUD_REMNANT_SAT_FRAC).max(1.0);
             if let Some(o) = oro {
-                let (op, om, _) = orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain);
+                let (op, om, _) = *oro_by_hx.entry(hx).or_insert_with(|| {
+                    orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain)
+                });
                 prob_mult *= op;
                 mass_mult *= om;
             }
         } else {
             if let Some(o) = oro {
-                let (op, om, omin) =
-                    orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain);
+                let (op, om, omin) = *oro_by_hx.entry(hx).or_insert_with(|| {
+                    orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain)
+                });
                 prob_mult = op;
                 mass_mult = om;
                 min_mass = omin;
@@ -359,8 +366,7 @@ pub fn apply_condensation_rain_phased(
         // effectively stopped. Headroom above saturation gives both somewhere
         // to act, and makes a supersaturated tile rain harder — which is also
         // what pulls the equilibrium back down.
-        let t = ((mass - min_mass) / (full_mass - min_mass))
-            .clamp(0.0, SUPERSATURATION_HEADROOM);
+        let t = ((mass - min_mass) / (full_mass - min_mass)).clamp(0.0, SUPERSATURATION_HEADROOM);
         let effective_prob = (cfg.max_prob_per_tick * t * prob_mult).clamp(0.0, 0.95);
         // Hash uses tile coord + tick + salt for per-tile determinism.
         let roll = hash_prob(
@@ -421,8 +427,9 @@ pub fn apply_condensation_rain_phased(
         hits.len().min(cfg.max_events_per_tick as usize)
     };
     let mut flakes = 0u32;
-    for &(_mass, hx, hy, take_mass) in hits.iter().take(limit) {
-        let mass = humidity.at_tile(hx, hy);
+    for &(mass, hx, hy, take_mass) in hits.iter().take(limit) {
+        // Snapshot mass — a second `at_tile` was leftover hasher.
+        // Each key is pushed once; surplus already ran before this pass.
         if mass <= 0.0 {
             continue;
         }
@@ -557,22 +564,19 @@ fn orographic_factors(
 /// Uses the existing temperature tiles only (no extra world walk).
 /// Cold air holds less vapor, so the same mass is closer to rain;
 /// a colder tile below (ridge, lake, night skin) adds dew.
-fn thermal_sat_mass(temp: &crate::temperature::Temperature, hx: i32, hy: i32) -> f32 {
-    crate::humidity::Humidity::saturation_mass_at_temp(temp.at_tile(hx, hy)).max(1.0)
-}
-
-fn thermal_rain_factors(
+fn thermal_rain_factors_from_air(
     temp: &crate::temperature::Temperature,
     hx: i32,
     hy: i32,
     tile_cols: i32,
+    air: f32,
+    sat: f32,
 ) -> (f32, f32, f32, f32) {
-    let air = temp.at_tile(hx, hy);
     // The Clausius–Clapeyron hold is the rain gate. The old 0.30 clamp
     // kept min_mass ≈ 19 even at −20 °C, so leftover vapour rained as
     // liquid. Below freeze the apply path refuses water anyway; above
     // freeze we only lottery when the tile is actually over sat.
-    let sat = crate::humidity::Humidity::saturation_mass_at_temp(air).max(1.0);
+    // `air` / `sat` are the lottery gate reads — do not `at_tile` again.
     let min_mass = sat;
     let gx = hx * tile_cols + tile_cols / 2;
     let gy_below = hy * tile_cols - tile_cols;
@@ -636,7 +640,10 @@ mod tests {
         w.ensure_chunk(ChunkCoord::new(0, 0));
         // A flake is a whole cell. Part-paying mints the rest on thaw.
         let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, 200.0);
-        assert_eq!(paid, 0.0, "under a whole cell must be refused, not part-paid");
+        assert_eq!(
+            paid, 0.0,
+            "under a whole cell must be refused, not part-paid"
+        );
         assert_ne!(w.get_cell(4, 20).unwrap().material, MaterialId::Snow);
         let _ = Cell::air();
     }
@@ -660,7 +667,11 @@ mod tests {
             "seeding into wet air would strand that water inside a cell that does \
              not carry sat"
         );
-        assert_eq!(w.get_cell(4, 20).unwrap().sat.0, 200, "its water is untouched");
+        assert_eq!(
+            w.get_cell(4, 20).unwrap().sat.0,
+            200,
+            "its water is untouched"
+        );
     }
 
     #[test]
@@ -831,7 +842,10 @@ mod tests {
         let mut h = Humidity::new(4);
         // Tile (1, 8) → world (6, 34). Load that band of air.
         for y in 32i32..40 {
-            w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+            w.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
         }
         let start = 400.0;
         h.cells.insert((1, 8), start);
@@ -878,7 +892,10 @@ mod tests {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
         }
         for y in 32i32..40 {
-            w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+            w.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
         }
         w.set_cell(6, 34, Cell::air());
         let mut h = Humidity::new(4);
@@ -928,8 +945,14 @@ mod tests {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
         }
         for y in 32i32..40 {
-            w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
-            w.ensure_chunk(ChunkCoord::new(1, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+            w.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+            w.ensure_chunk(ChunkCoord::new(
+                1,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
         }
         w.set_cell(6, 34, Cell::air());
         let mut h = Humidity::new(4);
@@ -1022,7 +1045,10 @@ mod tests {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
         }
         for y in 32i32..40 {
-            w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+            w.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
         }
         w.set_cell(6, 34, Cell::solid(MaterialId::Snow));
         let mut h = Humidity::new(4);
