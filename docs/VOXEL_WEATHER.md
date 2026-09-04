@@ -804,3 +804,12 @@ Do not re-walk these:
   soak stays sparse (`hum n` **13k / 68k**). Same stencil and
   valley test. Do not coarsen off-screen advect. Lottery still
   visits every over-sat tile.
+
+  After packing wind compose / spatial blend / Jacobi on that same
+  filled-sky box (solids packed for this rebuild only; thermal ∇T
+  reads the existing temperature slab; repeat soak, 256 plants,
+  8×400): wind **0.89 → 4.11** (was **1.09 → 7.29**). Wall
+  **16.6 → 52.7** (was **17.2 → 53.9**). Humidity advect
+  **1.62 → 3.91**. Same drivers, same six Jacobi sweeps, same slip.
+  Do not cache solids across rebuilds. Do not coarsen off-screen
+  wind. Lottery still visits every over-sat tile.

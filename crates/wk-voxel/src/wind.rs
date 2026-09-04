@@ -306,7 +306,9 @@ impl Wind {
 
     /// Rebuild local vectors for `occupied` humidity seats + a 1-tile halo
     /// and a thin near-surface band. Skips empty sky (the old full-grid
-    /// rebuild was a multi-ms FPS cliff).
+    /// rebuild was a multi-ms FPS cliff). When the seated set is at
+    /// least half the box, compose / blend / project walk a packed
+    /// slab. Solids are packed for this rebuild only.
     pub fn rebuild_field(
         &mut self,
         world: Option<&World>,
