@@ -63,9 +63,35 @@ impl TileBounds {
     }
 
     pub fn tile_capacity(self) -> usize {
+        let (w, h) = self.dims();
+        w.saturating_mul(h)
+    }
+
+    /// `(width, height)` in tiles. Either side may be zero.
+    pub fn dims(self) -> (usize, usize) {
         let w = (self.hx_max - self.hx_min + 1).max(0) as usize;
         let h = (self.hy_max - self.hy_min + 1).max(0) as usize;
-        w.saturating_mul(h)
+        (w, h)
+    }
+
+    /// Row-major index. Caller guarantees `contains(hx, hy)` and `w > 0`.
+    pub fn index(self, w: usize, hx: i32, hy: i32) -> usize {
+        (hy - self.hy_min) as usize * w + (hx - self.hx_min) as usize
+    }
+
+    /// Inverse of [`Self::index`]. Caller guarantees `w > 0`.
+    pub fn coords(self, w: usize, i: usize) -> (i32, i32) {
+        (
+            self.hx_min + (i % w) as i32,
+            self.hy_min + (i / w) as i32,
+        )
+    }
+
+    /// Packed sequential walk when the box is tiny (tests) or at least
+    /// half occupied. Same stencil as the sparse path — not view LOD.
+    pub fn prefer_dense_walk(self, occupied: usize) -> bool {
+        let cap = self.tile_capacity();
+        cap > 0 && (cap <= 256 || occupied.saturating_mul(2) >= cap)
     }
 }
 
@@ -139,32 +165,16 @@ impl Humidity {
         self.bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
     }
 
-    /// Sequential +x/+y walk when the sky box is small (tests) or at
-    /// least half full. Same stencil as the sparse path — not view LOD.
     fn use_dense_slab(&self, b: TileBounds) -> bool {
-        let cap = b.tile_capacity();
-        if cap == 0 {
-            return false;
-        }
-        cap <= 256 || self.cells.len().saturating_mul(2) >= cap
-    }
-
-    fn slab_dims(b: TileBounds) -> (usize, usize) {
-        let w = (b.hx_max - b.hx_min + 1).max(0) as usize;
-        let h = (b.hy_max - b.hy_min + 1).max(0) as usize;
-        (w, h)
-    }
-
-    fn slab_index(b: TileBounds, w: usize, hx: i32, hy: i32) -> usize {
-        (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize
+        b.prefer_dense_walk(self.cells.len())
     }
 
     fn pack_slab(&self, b: TileBounds) -> Vec<f32> {
-        let (w, h) = Self::slab_dims(b);
+        let (w, h) = b.dims();
         let mut slab = vec![0.0f32; w.saturating_mul(h)];
         for (&(hx, hy), &v) in &self.cells {
             if b.contains(hx, hy) {
-                slab[Self::slab_index(b, w, hx, hy)] = v;
+                slab[b.index(w, hx, hy)] = v;
             }
         }
         slab
@@ -601,7 +611,7 @@ impl Humidity {
     /// bound box instead of cloning the SipHash map and sorting a 5×
     /// neighbour set. Implicit zeros are empty tiles (neighbour expand).
     fn diffuse_slab(&mut self, alpha: f32, b: TileBounds) {
-        let (w, h) = Self::slab_dims(b);
+        let (w, h) = b.dims();
         let n = w.saturating_mul(h);
         if n == 0 {
             return;
@@ -616,7 +626,7 @@ impl Humidity {
                 let val = snap[i];
                 if let Some(nx) = self.wrap_hx(hx + 1) {
                     if self.accepts(nx, hy) && nx != hx {
-                        let ni = Self::slab_index(b, w, nx, hy);
+                        let ni = b.index(w, nx, hy);
                         let flow = (val - snap[ni]) * alpha;
                         if flow.abs() >= 1e-9 {
                             deltas[i] -= flow;
@@ -626,7 +636,7 @@ impl Humidity {
                 }
                 let n_key = (hx, hy + 1);
                 if self.accepts(n_key.0, n_key.1) {
-                    let ni = Self::slab_index(b, w, n_key.0, n_key.1);
+                    let ni = b.index(w, n_key.0, n_key.1);
                     let flow = (val - snap[ni]) * alpha;
                     if flow.abs() >= 1e-9 {
                         deltas[i] -= flow;
@@ -811,7 +821,7 @@ impl Humidity {
         b: TileBounds,
     ) {
         let free_air = self.build_free_air_cache(wind, world);
-        let (w, h) = Self::slab_dims(b);
+        let (w, h) = b.dims();
         let n = w.saturating_mul(h);
         if n == 0 {
             return;
@@ -826,7 +836,7 @@ impl Humidity {
             if snap[i].abs() < 1e-9 {
                 continue;
             }
-            let (hx, hy) = Self::coords_of(b, w, i);
+            let (hx, hy) = b.coords(w, i);
             vectors[i] = wind.vector_at(Some(world), hx, hy);
         }
         self.flux_axis_into(&snap, &mut work, vx, vy, surface, true, b, w, &vectors);
@@ -884,44 +894,15 @@ impl Humidity {
                         .unwrap_or((climate_vx, climate_vy)),
                     None => (climate_vx, climate_vy),
                 };
-                let v = if horizontal {
-                    vx
-                } else {
-                    vy.clamp(-HUMIDITY_VY_ADV_CAP, HUMIDITY_VY_ADV_CAP)
+                let Some((step, leave)) = Self::flux_step_leave(mass, vx, vy, horizontal) else {
+                    continue;
                 };
-                let step = v.clamp(-1.0, 1.0);
-                if step.abs() < 1e-9 {
+                let Some((tx, ty)) = self.flux_dest(hx, hy, step, horizontal, surface) else {
                     continue;
-                }
-                let leave = mass * step.abs();
-                if leave < 1e-12 {
-                    continue;
-                }
-                let (tx, ty) = if horizontal {
-                    let dir = if step > 0.0 { 1 } else { -1 };
-                    let nhx = match self.wrap_hx(hx + dir) {
-                        Some(x) => x,
-                        None => continue,
-                    };
-                    if !self.accepts(nhx, hy) {
-                        continue;
-                    }
-                    (nhx, hy)
-                } else {
-                    let dir = if step > 0.0 { 1 } else { -1 };
-                    let nhy = hy + dir;
-                    let mut dest_hy = nhy;
-                    if let Some((wnd, wrld, cache)) = surface {
-                        dest_hy = self.free_air_cached(wnd, wrld, hx, cache).max(nhy);
-                    }
-                    if !self.accepts(hx, dest_hy) {
-                        continue;
-                    }
-                    (hx, dest_hy)
                 };
                 deltas[i] -= leave;
                 if b.contains(tx, ty) {
-                    deltas[Self::slab_index(b, w, tx, ty)] += leave;
+                    deltas[b.index(w, tx, ty)] += leave;
                 }
             }
         }
@@ -933,7 +914,7 @@ impl Humidity {
             if d < 0.0 {
                 work[i] = (work[i] + d).max(0.0);
             } else {
-                let (hx, hy) = Self::coords_of(b, w, i);
+                let (hx, hy) = b.coords(w, i);
                 if self.accepts(hx, hy) {
                     work[i] += d;
                 }
@@ -984,7 +965,7 @@ impl Humidity {
                 if !self.accepts(hx, air) {
                     continue;
                 }
-                let dest = Self::slab_index(b, w, hx, air);
+                let dest = b.index(w, hx, air);
                 if dest >= n {
                     continue;
                 }
@@ -1041,7 +1022,7 @@ impl Humidity {
                     }
                 }
                 let n_val = if b.contains(hx, above_hy) {
-                    work[Self::slab_index(b, w, hx, above_hy)]
+                    work[b.index(w, hx, above_hy)]
                 } else {
                     0.0
                 };
@@ -1051,7 +1032,7 @@ impl Humidity {
                 }
                 deltas[i] -= flow;
                 if b.contains(hx, above_hy) {
-                    deltas[Self::slab_index(b, w, hx, above_hy)] += flow;
+                    deltas[b.index(w, hx, above_hy)] += flow;
                 }
             }
         }
@@ -1078,7 +1059,7 @@ impl Humidity {
                     let take = val * sink;
                     deltas[i] -= take;
                     if b.contains(hx, below) {
-                        deltas[Self::slab_index(b, w, hx, below)] += take;
+                        deltas[b.index(w, hx, below)] += take;
                     }
                 }
             }
@@ -1091,7 +1072,7 @@ impl Humidity {
             if d < 0.0 {
                 work[i] = (work[i] + d).max(0.0);
             } else {
-                let (hx, hy) = Self::coords_of(b, w, i);
+                let (hx, hy) = b.coords(w, i);
                 if self.accepts(hx, hy) {
                     work[i] += d;
                 }
@@ -1151,7 +1132,7 @@ impl Humidity {
                 }
                 deltas[i] -= take;
                 if b.contains(hx, dest) {
-                    deltas[Self::slab_index(b, w, hx, dest)] += take;
+                    deltas[b.index(w, hx, dest)] += take;
                 }
             }
         }
@@ -1163,7 +1144,7 @@ impl Humidity {
             if d < 0.0 {
                 work[i] += d;
             } else {
-                let (hx, hy) = Self::coords_of(b, w, i);
+                let (hx, hy) = b.coords(w, i);
                 if self.accepts(hx, hy) {
                     work[i] += d;
                 }
@@ -1171,20 +1152,14 @@ impl Humidity {
         }
     }
 
-    fn coords_of(b: TileBounds, w: usize, i: usize) -> (i32, i32) {
-        let hy = b.hy_min + (i / w) as i32;
-        let hx = b.hx_min + (i % w) as i32;
-        (hx, hy)
-    }
-
     fn sync_slab_changes(&mut self, b: TileBounds, before: &[f32], after: &[f32]) {
-        let (w, _) = Self::slab_dims(b);
+        let (w, _) = b.dims();
         let n = before.len().min(after.len());
         for i in 0..n {
             if (after[i] - before[i]).abs() < 1e-12 {
                 continue;
             }
-            let (hx, hy) = Self::coords_of(b, w, i);
+            let (hx, hy) = b.coords(w, i);
             if after[i] > 1e-6 {
                 self.cells.insert((hx, hy), after[i]);
             } else {
@@ -1264,6 +1239,26 @@ impl Humidity {
         self.advect_rx = 0.0;
         self.advect_ry = 0.0;
 
+        // Climate-only packed flux. Surface dense already ran through
+        // [`Self::advect_with_surface_slab`] (lift / mix / oro too).
+        if surface.is_none() {
+            if let Some(b) = self.bounds {
+                if self.use_dense_slab(b) {
+                    let (w, _) = b.dims();
+                    let snap = self.pack_slab(b);
+                    let mut work = snap.clone();
+                    self.flux_axis_into(
+                        &snap, &mut work, climate_vx, climate_vy, None, true, b, w, &[],
+                    );
+                    self.flux_axis_into(
+                        &snap, &mut work, climate_vx, climate_vy, None, false, b, w, &[],
+                    );
+                    self.sync_slab_changes(b, &snap, &work);
+                    return;
+                }
+            }
+        }
+
         // Flux only iterates the snapshot — a Vec avoids rehashing the
         // saved SipHash map every tick (leftover as humidity fills).
         let snap: Vec<((i32, i32), f32)> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
@@ -1287,6 +1282,62 @@ impl Humidity {
         });
     }
 
+    /// `|v|` is the fraction that leaves this tick, capped at 1.
+    /// Vertical hop is damped so face-following / Jacobi climb cannot
+    /// empty a tile (uncapped `|vy|` vacuums below `min_mass_to_rain`).
+    fn flux_step_leave(mass: f32, vx: f32, vy: f32, horizontal: bool) -> Option<(f32, f32)> {
+        let v = if horizontal {
+            vx
+        } else {
+            vy.clamp(-HUMIDITY_VY_ADV_CAP, HUMIDITY_VY_ADV_CAP)
+        };
+        let step = v.clamp(-1.0, 1.0);
+        if step.abs() < 1e-9 {
+            return None;
+        }
+        let leave = mass * step.abs();
+        if leave < 1e-12 {
+            return None;
+        }
+        Some((step, leave))
+    }
+
+    /// Horizontal dest stays at this `hy`. Snapping to the neighbour's
+    /// free-air crest was a leftover Y pump (pond vapour teleported
+    /// onto both shores). Vertical dest may lift to free air.
+    fn flux_dest(
+        &self,
+        hx: i32,
+        hy: i32,
+        step: f32,
+        horizontal: bool,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &FxHashMap<i32, i32>,
+        )>,
+    ) -> Option<(i32, i32)> {
+        if horizontal {
+            let dir = if step > 0.0 { 1 } else { -1 };
+            let nhx = self.wrap_hx(hx + dir)?;
+            if !self.accepts(nhx, hy) {
+                return None;
+            }
+            Some((nhx, hy))
+        } else {
+            let dir = if step > 0.0 { 1 } else { -1 };
+            let nhy = hy + dir;
+            let mut dest_hy = nhy;
+            if let Some((wind, world, cache)) = surface {
+                dest_hy = self.free_air_cached(wind, world, hx, cache).max(nhy);
+            }
+            if !self.accepts(hx, dest_hy) {
+                return None;
+            }
+            Some((hx, dest_hy))
+        }
+    }
+
     /// Donor-cell flux along one axis. `|v|` is the fraction of mass that
     /// leaves toward the neighbour this tick (capped at 1).
     fn flux_axis(
@@ -1302,14 +1353,6 @@ impl Humidity {
         horizontal: bool,
         vectors: Option<&[(f32, f32)]>,
     ) {
-        if let Some(b) = self.bounds {
-            if self.use_dense_slab(b) {
-                self.flux_axis_slab(
-                    snap, climate_vx, climate_vy, surface, horizontal, vectors, b,
-                );
-                return;
-            }
-        }
         let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         deltas.reserve(snap.len());
         for (i, &((hx, hy), mass)) in snap.iter().enumerate() {
@@ -1322,49 +1365,11 @@ impl Humidity {
                     .unwrap_or_else(|| wind.vector_at(Some(world), hx, hy)),
                 None => (climate_vx, climate_vy),
             };
-            // Slip / look-ahead / Jacobi can put |vy| ~0.2–1 on a face.
-            // Flux treats |v| as the fraction that leaves this tick —
-            // using that raw climb empties the sky and drizzle never
-            // reaches min_mass (no falling drops, haze still there).
-            let v = if horizontal {
-                vx
-            } else {
-                vy.clamp(-HUMIDITY_VY_ADV_CAP, HUMIDITY_VY_ADV_CAP)
+            let Some((step, leave)) = Self::flux_step_leave(mass, vx, vy, horizontal) else {
+                continue;
             };
-            let step = v.clamp(-1.0, 1.0);
-            if step.abs() < 1e-9 {
+            let Some((tx, ty)) = self.flux_dest(hx, hy, step, horizontal, surface) else {
                 continue;
-            }
-            let leave = mass * step.abs();
-            if leave < 1e-12 {
-                continue;
-            }
-            let (tx, ty) = if horizontal {
-                let dir = if step > 0.0 { 1 } else { -1 };
-                let nhx = match self.wrap_hx(hx + dir) {
-                    Some(x) => x,
-                    None => continue,
-                };
-                // Stay at this hy. Snapping dest to the neighbour's
-                // free-air crest was a leftover Y pump: pond vapour
-                // that took one step onto either bank teleported onto
-                // both shores, then heat and rain locked there.
-                // Orographic + buoyant rise climb real hills.
-                if !self.accepts(nhx, hy) {
-                    continue;
-                }
-                (nhx, hy)
-            } else {
-                let dir = if step > 0.0 { 1 } else { -1 };
-                let nhy = hy + dir;
-                let mut dest_hy = nhy;
-                if let Some((wind, world, cache)) = surface {
-                    dest_hy = self.free_air_cached(wind, world, hx, cache).max(nhy);
-                }
-                if !self.accepts(hx, dest_hy) {
-                    continue;
-                }
-                (hx, dest_hy)
             };
             *deltas.entry((hx, hy)).or_insert(0.0) -= leave;
             *deltas.entry((tx, ty)).or_insert(0.0) += leave;
@@ -1381,100 +1386,6 @@ impl Humidity {
             }
         }
         // Caller retains once after both axes.
-    }
-
-    /// Same donor flux as [`Self::flux_axis`], writing merged deltas
-    /// into the bound box instead of hashing every seat.
-    fn flux_axis_slab(
-        &mut self,
-        snap: &[((i32, i32), f32)],
-        climate_vx: f32,
-        climate_vy: f32,
-        surface: Option<(
-            &crate::wind::Wind,
-            &crate::grid::World,
-            &FxHashMap<i32, i32>,
-        )>,
-        horizontal: bool,
-        vectors: Option<&[(f32, f32)]>,
-        b: TileBounds,
-    ) {
-        let (w, h) = Self::slab_dims(b);
-        let n = w.saturating_mul(h);
-        if n == 0 {
-            return;
-        }
-        let mut deltas = vec![0.0f32; n];
-        for (i, &((hx, hy), mass)) in snap.iter().enumerate() {
-            if mass.abs() < 1e-9 || !b.contains(hx, hy) {
-                continue;
-            }
-            let (vx, vy) = match surface {
-                Some((wind, world, _)) => vectors
-                    .and_then(|v| v.get(i).copied())
-                    .unwrap_or_else(|| wind.vector_at(Some(world), hx, hy)),
-                None => (climate_vx, climate_vy),
-            };
-            let v = if horizontal {
-                vx
-            } else {
-                vy.clamp(-HUMIDITY_VY_ADV_CAP, HUMIDITY_VY_ADV_CAP)
-            };
-            let step = v.clamp(-1.0, 1.0);
-            if step.abs() < 1e-9 {
-                continue;
-            }
-            let leave = mass * step.abs();
-            if leave < 1e-12 {
-                continue;
-            }
-            let (tx, ty) = if horizontal {
-                let dir = if step > 0.0 { 1 } else { -1 };
-                let nhx = match self.wrap_hx(hx + dir) {
-                    Some(x) => x,
-                    None => continue,
-                };
-                if !self.accepts(nhx, hy) {
-                    continue;
-                }
-                (nhx, hy)
-            } else {
-                let dir = if step > 0.0 { 1 } else { -1 };
-                let nhy = hy + dir;
-                let mut dest_hy = nhy;
-                if let Some((wind, world, cache)) = surface {
-                    dest_hy = self.free_air_cached(wind, world, hx, cache).max(nhy);
-                }
-                if !self.accepts(hx, dest_hy) {
-                    continue;
-                }
-                (hx, dest_hy)
-            };
-            let si = Self::slab_index(b, w, hx, hy);
-            deltas[si] -= leave;
-            if b.contains(tx, ty) {
-                deltas[Self::slab_index(b, w, tx, ty)] += leave;
-            } else if self.accepts(tx, ty) {
-                *self.cells.entry((tx, ty)).or_insert(0.0) += leave;
-            }
-        }
-        for iy in 0..h {
-            for ix in 0..w {
-                let d = deltas[iy * w + ix];
-                if d.abs() < 1e-12 {
-                    continue;
-                }
-                let hx = b.hx_min + ix as i32;
-                let hy = b.hy_min + iy as i32;
-                if d < 0.0 {
-                    if let Some(e) = self.cells.get_mut(&(hx, hy)) {
-                        *e = (*e + d).max(0.0);
-                    }
-                } else if self.accepts(hx, hy) {
-                    *self.cells.entry((hx, hy)).or_insert(0.0) += d;
-                }
-            }
-        }
     }
 
     /// High wind mixes the column so vapour does not translate as a slab.
@@ -2470,8 +2381,12 @@ mod tests {
         sparse.flux_axis(&snap, 0.25, 0.05, None, true, None);
         sparse.flux_axis(&snap, 0.25, 0.05, None, false, None);
         let b = dense.bounds.unwrap();
-        dense.flux_axis_slab(&snap, 0.25, 0.05, None, true, None, b);
-        dense.flux_axis_slab(&snap, 0.25, 0.05, None, false, None, b);
+        let (w, _) = b.dims();
+        let packed = dense.pack_slab(b);
+        let mut work = packed.clone();
+        dense.flux_axis_into(&packed, &mut work, 0.25, 0.05, None, true, b, w, &[]);
+        dense.flux_axis_into(&packed, &mut work, 0.25, 0.05, None, false, b, w, &[]);
+        dense.sync_slab_changes(b, &packed, &work);
         assert!(
             (sparse.total_mass() - dense.total_mass()).abs() < 1e-4,
             "slab flux must conserve like sparse: {} vs {}",

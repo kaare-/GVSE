@@ -352,25 +352,15 @@ impl Temperature {
         }
     }
 
-    fn slab_dims(b: TileBounds) -> (usize, usize) {
-        let w = (b.hx_max - b.hx_min + 1).max(0) as usize;
-        let h = (b.hy_max - b.hy_min + 1).max(0) as usize;
-        (w, h)
-    }
-
-    fn slab_index(b: TileBounds, w: usize, hx: i32, hy: i32) -> usize {
-        (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize
-    }
-
     fn pack_slab(&mut self, b: TileBounds) {
-        let (w, h) = Self::slab_dims(b);
+        let (w, h) = b.dims();
         let n = w.saturating_mul(h);
         let base = self.config.base_temp_c;
         self.slab.clear();
         self.slab.resize(n, base);
         for (&(hx, hy), &v) in &self.cells {
             if b.contains(hx, hy) {
-                self.slab[Self::slab_index(b, w, hx, hy)] = v;
+                self.slab[b.index(w, hx, hy)] = v;
             }
         }
         if self.slab_deltas.len() != n {
@@ -379,7 +369,7 @@ impl Temperature {
     }
 
     fn rebuild_row_means_from_slab(&mut self, b: TileBounds) {
-        let (w, h) = Self::slab_dims(b);
+        let (w, h) = b.dims();
         if w == 0 || h == 0 || self.slab.len() != w * h {
             self.rebuild_row_means();
             return;
@@ -448,8 +438,8 @@ impl Temperature {
         if let Some(b) = self.bounds {
             let cap = b.tile_capacity();
             if cap > 0 && self.slab.len() == cap && b.contains(hx, hy) {
-                let (w, _) = Self::slab_dims(b);
-                return self.slab[Self::slab_index(b, w, hx, hy)];
+                let (w, _) = b.dims();
+                return self.slab[b.index(w, hx, hy)];
             }
         }
         self.at_tile(hx, hy)
@@ -703,7 +693,7 @@ impl Temperature {
             }
         }
         self.surf_cache.clone_from(&surf_by_hx);
-        let slab_w = bounds.map(Self::slab_dims).map(|(w, _)| w).unwrap_or(0);
+        let slab_w = bounds.map(TileBounds::dims).map(|(w, _)| w).unwrap_or(0);
         for (hx, hy) in keys {
             let props = self
                 .props_cache
@@ -713,7 +703,7 @@ impl Temperature {
             let t = if dense {
                 if let Some(b) = bounds {
                     if b.contains(hx, hy) && self.slab.len() == b.tile_capacity() {
-                        self.slab[Self::slab_index(b, slab_w, hx, hy)]
+                        self.slab[b.index(slab_w, hx, hy)]
                     } else {
                         self.at_tile(hx, hy)
                     }
@@ -757,7 +747,7 @@ impl Temperature {
                                     if b.contains(hx, surf_hy)
                                         && self.slab.len() == b.tile_capacity()
                                     {
-                                        self.slab[Self::slab_index(b, slab_w, hx, surf_hy)]
+                                        self.slab[b.index(slab_w, hx, surf_hy)]
                                     } else {
                                         self.at_tile(hx, surf_hy)
                                     }
@@ -841,7 +831,7 @@ impl Temperature {
                 if dense {
                     if let Some(b) = bounds {
                         if b.contains(hx, hy) && self.slab.len() == b.tile_capacity() {
-                            self.slab[Self::slab_index(b, slab_w, hx, hy)] = next;
+                            self.slab[b.index(slab_w, hx, hy)] = next;
                         }
                     }
                 }
@@ -1074,7 +1064,7 @@ impl Temperature {
     /// Pair stencil on [`Self::slab`]. Caller packed (or couple already
     /// wrote) the slab. Write back only deltas.
     fn diffuse_slab(&mut self, alpha: f32, b: TileBounds) {
-        let (w, h) = Self::slab_dims(b);
+        let (w, h) = b.dims();
         let n = w.saturating_mul(h);
         if w == 0 || h == 0 || self.slab.len() != n {
             return;
@@ -1087,12 +1077,12 @@ impl Temperature {
         let mut any = false;
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
-                let i = Self::slab_index(b, w, hx, hy);
+                let i = b.index(w, hx, hy);
                 let val = self.slab[i];
                 let here_sky = self.tile_is_free_sky(hx, hy);
                 if let Some(nx) = self.wrap_hx(hx + 1) {
                     if b.contains(nx, hy) && nx != hx {
-                        let ni = Self::slab_index(b, w, nx, hy);
+                        let ni = b.index(w, nx, hy);
                         let n_val = self.slab[ni];
                         if here_sky && self.tile_is_free_sky(nx, hy) && (val - n_val).abs() < 0.35 {
                             // skip
@@ -1111,7 +1101,7 @@ impl Temperature {
                     if here_sky && self.tile_is_free_sky(hx, n_hy) {
                         continue;
                     }
-                    let ni = Self::slab_index(b, w, hx, n_hy);
+                    let ni = b.index(w, hx, n_hy);
                     let n_val = self.slab[ni];
                     let flow = (val - n_val) * alpha * 0.35;
                     if flow.abs() >= 1e-9 {
@@ -1127,7 +1117,7 @@ impl Temperature {
         }
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
-                let i = Self::slab_index(b, w, hx, hy);
+                let i = b.index(w, hx, hy);
                 let d = self.slab_deltas[i];
                 if d.abs() >= 1e-9 {
                     self.slab[i] += d;

@@ -388,7 +388,7 @@ impl Wind {
             }
         }
 
-        if Self::use_dense_field(bounds, keys.len()) {
+        if bounds.prefer_dense_walk(keys.len()) {
             self.rebuild_field_slab(
                 world,
                 temp,
@@ -518,24 +518,8 @@ impl Wind {
         bounds.hx_min + (hx - bounds.hx_min).rem_euclid(w)
     }
 
-    /// Sequential compose / blend / project when the occupied+halo set
-    /// is at least half the sky box. Same seats as the HashMap path —
-    /// not view LOD. Solids are packed for **this rebuild only**.
-    fn use_dense_field(bounds: TileBounds, key_count: usize) -> bool {
-        let cap = bounds.tile_capacity();
-        cap > 0 && (cap <= 256 || key_count.saturating_mul(2) >= cap)
-    }
-
-    fn slab_dims(b: TileBounds) -> (usize, usize) {
-        let w = (b.hx_max - b.hx_min + 1).max(0) as usize;
-        let h = (b.hy_max - b.hy_min + 1).max(0) as usize;
-        (w, h)
-    }
-
-    fn slab_index(b: TileBounds, w: usize, hx: i32, hy: i32) -> usize {
-        (hy - b.hy_min) as usize * w + (hx - b.hx_min) as usize
-    }
-
+    /// Compose / blend / project on a packed box. Solids are packed for
+    /// **this rebuild only**. Same seats as the HashMap path — not view LOD.
     fn rebuild_field_slab(
         &mut self,
         world: Option<&World>,
@@ -551,7 +535,7 @@ impl Wind {
         col_oro: &FxHashMap<i32, ColOro>,
         drag: Option<&FxHashMap<(i32, i32), f32>>,
     ) {
-        let (w, h) = Self::slab_dims(bounds);
+        let (w, h) = bounds.dims();
         let n = w.saturating_mul(h);
         if n == 0 || w == 0 {
             self.field.clear();
@@ -561,7 +545,7 @@ impl Wind {
         let mut seated = vec![false; n];
         for &(hx, hy) in keys.keys() {
             if bounds.contains(hx, hy) {
-                seated[Self::slab_index(bounds, w, hx, hy)] = true;
+                seated[bounds.index(w, hx, hy)] = true;
             }
         }
         // This rebuild only. Do not keep this across rebuilds — a
@@ -608,7 +592,7 @@ impl Wind {
                     if !bounds.contains(hx, hy) {
                         continue;
                     }
-                    let i = Self::slab_index(bounds, w, hx, hy);
+                    let i = bounds.index(w, hx, hy);
                     if !live[i] {
                         continue;
                     }
@@ -690,7 +674,7 @@ impl Wind {
                     if !bounds.contains(nhx, hy) {
                         continue;
                     }
-                    let ni = Self::slab_index(bounds, w, nhx, hy);
+                    let ni = bounds.index(w, nhx, hy);
                     if live[ni] {
                         let (nvx, nvy) = snap[ni];
                         sx += nvx * 2.0;
@@ -703,7 +687,7 @@ impl Wind {
                     if nhy < bounds.hy_min || nhy > bounds.hy_max {
                         continue;
                     }
-                    let ni = Self::slab_index(bounds, w, hx, nhy);
+                    let ni = bounds.index(w, hx, nhy);
                     if live[ni] {
                         let (nvx, nvy) = snap[ni];
                         sx += nvx;
@@ -759,7 +743,7 @@ impl Wind {
                 if !bounds.contains(nhx, nhy) {
                     continue;
                 }
-                let j = Self::slab_index(bounds, w, nhx, nhy);
+                let j = bounds.index(w, nhx, nhy);
                 if j < inv.len() && inv[j] != usize::MAX {
                     neigh[pi][d] = inv[j];
                 }
@@ -851,7 +835,7 @@ impl Wind {
         let nhx = self.wrap_tile_hx(hx + dx, bounds);
         let nhy = hy + dy;
         if bounds.contains(nhx, nhy) {
-            if solid[Self::slab_index(bounds, w, nhx, nhy)] {
+            if solid[bounds.index(w, nhx, nhy)] {
                 return true;
             }
         } else if tile_center_is_solid(world, self.tile_cols.max(1), nhx, nhy) {
