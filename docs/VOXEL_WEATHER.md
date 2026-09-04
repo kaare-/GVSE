@@ -710,3 +710,14 @@ Do not re-walk these:
   pays the contact walk; the skip does not move soak seep. Deep
   pore↔pore is unchanged. Do not apply the dry-pore skip on the deep
   pass. Do not skip a dry pore that owns the +x / +y wet-Air face.
+
+  After planning gravity / flow / seepage from dilated dirty bits
+  (each write +1 x / +2 y, not the bounding box; repeat soak, 256
+  plants, 8×400): work-set **2295 / 4619** vs AABB **6861 / 29171**
+  (old halo **7227 / 38144**). Gravity **0.36 → 1.00** (was **0.54 →
+  2.24** — column walk is bits only). Seepage **2.35 → 4.45** (was
+  **3.83 → 5.95**). Flow **0.98 → 3.25** (was **0.71 → 2.65**) — the
+  flow scan still walks the box and bit-tests holes. Physics **10.0 →
+  32.5** (was **10.7 → 33.3**). Wall **20.8 → 83.9** — same leftover
+  growers. Legacy saves with a rect and empty bits keep the old
+  inflate. Do not drop the +1 x / +2 y halo.
