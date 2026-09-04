@@ -61,6 +61,32 @@ pub const WIND_FIELD_PERIOD: u64 = 4;
 /// valley to feel the next wall; not a sky-wide Poisson.
 const AIR_PROJECT_ITERS: u32 = 6;
 
+/// Per-column orographic numbers for one [`Wind::rebuild_field`].
+/// Compose used to recompute these on every tile of a tall sky.
+#[derive(Clone, Copy)]
+struct ColOro {
+    speed: f32,
+    lift: f32,
+    descent: f32,
+    surf_hy: i32,
+}
+
+impl ColOro {
+    fn height_shear(self, hy: i32) -> f32 {
+        let above = (hy - self.surf_hy).max(0) as f32;
+        (0.20 + 0.80 * (above / 5.0).clamp(0.0, 1.0)).clamp(0.15, 1.15)
+    }
+
+    fn lee_sink(self, hy: i32) -> f32 {
+        if self.descent <= 1.0 {
+            return 0.0;
+        }
+        let shear = self.height_shear(hy);
+        let wake = (1.0 - (shear - 0.45).abs() * 1.4).clamp(0.25, 1.0);
+        (self.descent / 55.0).clamp(0.0, 0.14) * wake
+    }
+}
+
 /// Tab → Climate wind drivers.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct WindConfig {
@@ -340,12 +366,23 @@ impl Wind {
         // (tile centre ± one tile) so later `vector_at` / evap reads
         // never walk the world. Collected while inserting keys —
         // sort+dedup of the key list was leftover.
-        for hx in unique_hx {
+        for &hx in &unique_hx {
             let gx = hx * tc + tc / 2;
             self.cache_surface(world, gx);
             for step in 1..=3 {
                 self.cache_surface(world, gx + step * tc);
                 self.cache_surface(world, gx - step * tc);
+            }
+        }
+        // Same column math compose used to recompute per tile. hx±1 is
+        // unwrapped so the ring-edge sample matches the old walk.
+        let mut col_oro: FxHashMap<i32, ColOro> = FxHashMap::default();
+        col_oro.reserve(unique_hx.len().saturating_mul(3));
+        for &hx in &unique_hx {
+            for dx in -1..=1 {
+                col_oro
+                    .entry(hx + dx)
+                    .or_insert_with(|| self.pack_col_oro(world, hx + dx));
             }
         }
 
@@ -359,7 +396,7 @@ impl Wind {
                 continue;
             }
             let (mut vx, mut vy) =
-                self.compose_drivers(world, temp, hx, hy, tick, evx, evy, &cfg);
+                self.compose_drivers(world, temp, hx, hy, tick, evx, evy, &cfg, &col_oro);
             vx = vx.clamp(-1.0, 1.0);
             vy = vy.clamp(-1.0, 1.0);
             if smooth > 1e-4 {
@@ -507,36 +544,14 @@ impl Wind {
         false
     }
 
-    fn face_velocity(
-        &self,
-        world: Option<&World>,
-        bounds: TileBounds,
-        field: &FxHashMap<(i32, i32), (f32, f32)>,
-        hx: i32,
-        hy: i32,
-        dx: i32,
-        dy: i32,
-        here: f32,
-        horiz: bool,
-    ) -> f32 {
-        if self.face_blocked(world, bounds, hx, hy, dx, dy) {
-            return 0.0;
-        }
-        let nhx = self.wrap_tile_hx(hx + dx, bounds);
-        let nhy = hy + dy;
-        if let Some(&v) = field.get(&(nhx, nhy)) {
-            let n = if horiz { v.0 } else { v.1 };
-            return 0.5 * (here + n);
-        }
-        here
-    }
-
     /// `∇²p = ∇·v` then `v -= ∇p` on the existing keys only.
     ///
     /// Pressure lives in parallel `Vec`s indexed by `keys`. HashMap
     /// `p.clone()` + per-iter `insert` was leftover hasher on the
-    /// occupied set — same Jacobi, same slip. Do not cache solids
-    /// across rebuilds (tried; compose + project are the real cost).
+    /// occupied set — same Jacobi, same slip. Face-blocked and
+    /// neighbour indices are packed **for this rebuild only**. Do not
+    /// cache solids across rebuilds (tried; compose + project are the
+    /// real cost; stale walls after a cave-in).
     fn project_incompressible(
         &self,
         world: Option<&World>,
@@ -553,30 +568,55 @@ impl Wind {
         for (i, &k) in keys.iter().enumerate() {
             idx.insert(k, i);
         }
-        let mut divs = vec![0.0f32; n];
+        let mut vel = vec![(0.0f32, 0.0f32); n];
+        for (i, &k) in keys.iter().enumerate() {
+            vel[i] = field[&k];
+        }
+        // bit 0=+x, 1=-x, 2=+y, 3=-y. `neigh` is usize::MAX when the
+        // face is blocked *or* the neighbour is not in this key set.
+        const DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+        let mut blocked = vec![0u8; n];
+        let mut neigh = vec![[usize::MAX; 4]; n];
         for (i, &(hx, hy)) in keys.iter().enumerate() {
-            let (vx, vy) = field[&(hx, hy)];
-            let ue = self.face_velocity(world, bounds, field, hx, hy, 1, 0, vx, true);
-            let uw = self.face_velocity(world, bounds, field, hx, hy, -1, 0, vx, true);
-            let vn = self.face_velocity(world, bounds, field, hx, hy, 0, 1, vy, false);
-            let vs = self.face_velocity(world, bounds, field, hx, hy, 0, -1, vy, false);
+            for (d, &(dx, dy)) in DIRS.iter().enumerate() {
+                if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+                    blocked[i] |= 1 << d;
+                    continue;
+                }
+                if let Some(&j) = idx.get(&(self.wrap_tile_hx(hx + dx, bounds), hy + dy)) {
+                    neigh[i][d] = j;
+                }
+            }
+        }
+        let face = |blocked: u8, neigh: [usize; 4], d: usize, here: f32, horiz: bool| -> f32 {
+            if blocked & (1 << d) != 0 {
+                return 0.0;
+            }
+            let j = neigh[d];
+            if j == usize::MAX {
+                return here;
+            }
+            let n = if horiz { vel[j].0 } else { vel[j].1 };
+            0.5 * (here + n)
+        };
+        let mut divs = vec![0.0f32; n];
+        for i in 0..n {
+            let (vx, vy) = vel[i];
+            let ue = face(blocked[i], neigh[i], 0, vx, true);
+            let uw = face(blocked[i], neigh[i], 1, vx, true);
+            let vn = face(blocked[i], neigh[i], 2, vy, false);
+            let vs = face(blocked[i], neigh[i], 3, vy, false);
             divs[i] = ue - uw + vn - vs;
         }
         let mut p = vec![0.0f32; n];
         let mut next = vec![0.0f32; n];
-        let neighbour = |hx: i32, hy: i32, dx: i32, dy: i32| -> Option<usize> {
-            if self.face_blocked(world, bounds, hx, hy, dx, dy) {
-                return None;
-            }
-            idx.get(&(self.wrap_tile_hx(hx + dx, bounds), hy + dy))
-                .copied()
-        };
         for _ in 0..AIR_PROJECT_ITERS {
-            for (i, &(hx, hy)) in keys.iter().enumerate() {
+            for i in 0..n {
                 let mut sum = 0.0;
                 let mut count = 0.0;
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    if let Some(j) = neighbour(hx, hy, dx, dy) {
+                for d in 0..4 {
+                    let j = neigh[i][d];
+                    if j != usize::MAX {
                         sum += p[j];
                         count += 1.0;
                     }
@@ -589,39 +629,46 @@ impl Wind {
             }
             std::mem::swap(&mut p, &mut next);
         }
-        for (i, &(hx, hy)) in keys.iter().enumerate() {
+        for (i, &k) in keys.iter().enumerate() {
             let here = p[i];
-            let at = |dx: i32, dy: i32| -> f32 {
-                neighbour(hx, hy, dx, dy)
-                    .map(|j| p[j])
-                    .unwrap_or(0.0)
+            let at = |d: usize| -> f32 {
+                let j = neigh[i][d];
+                if j == usize::MAX {
+                    0.0
+                } else {
+                    p[j]
+                }
             };
             // Blocked face: Neumann (here). Missing neighbour is 0.
-            let pr = if self.face_blocked(world, bounds, hx, hy, 1, 0) {
-                here
-            } else {
-                at(1, 0)
-            };
-            let pl = if self.face_blocked(world, bounds, hx, hy, -1, 0) {
-                here
-            } else {
-                at(-1, 0)
-            };
-            let pu = if self.face_blocked(world, bounds, hx, hy, 0, 1) {
-                here
-            } else {
-                at(0, 1)
-            };
-            let pd = if self.face_blocked(world, bounds, hx, hy, 0, -1) {
-                here
-            } else {
-                at(0, -1)
-            };
-            if let Some(v) = field.get_mut(&(hx, hy)) {
+            let pr = if blocked[i] & 1 != 0 { here } else { at(0) };
+            let pl = if blocked[i] & 2 != 0 { here } else { at(1) };
+            let pu = if blocked[i] & 4 != 0 { here } else { at(2) };
+            let pd = if blocked[i] & 8 != 0 { here } else { at(3) };
+            if let Some(v) = field.get_mut(&k) {
                 v.0 = (v.0 - 0.5 * (pr - pl)).clamp(-1.0, 1.0);
                 v.1 = (v.1 - 0.5 * (pu - pd)).clamp(-1.0, 1.0);
             }
         }
+    }
+
+    fn pack_col_oro(&self, world: Option<&World>, hx: i32) -> ColOro {
+        ColOro {
+            speed: self.orographic_speed_factor(world, hx),
+            lift: self.orographic_lift(world, hx),
+            descent: self.descent_cells(world, hx),
+            surf_hy: self.surface_tile_hy(world, hx),
+        }
+    }
+
+    fn col_oro_at(
+        &self,
+        world: Option<&World>,
+        cols: &FxHashMap<i32, ColOro>,
+        hx: i32,
+    ) -> ColOro {
+        cols.get(&hx)
+            .copied()
+            .unwrap_or_else(|| self.pack_col_oro(world, hx))
     }
 
     fn compose_drivers(
@@ -634,13 +681,15 @@ impl Wind {
         evx: f32,
         evy: f32,
         cfg: &WindConfig,
+        cols: &FxHashMap<i32, ColOro>,
     ) -> (f32, f32) {
-        let shear = self.height_shear(world, hx, hy);
+        let here = self.col_oro_at(world, cols, hx);
+        let shear = here.height_shear(hy);
         let mut vx = evx * shear;
         let mut vy = evy * 0.35;
         let td = cfg.terrain_drive.clamp(0.0, 2.0);
         if td > 1e-4 {
-            let (speed, lift, sink) = self.orographic_soft(world, hx, hy);
+            let (speed, lift, sink) = self.orographic_soft_cached(world, cols, hx, hy);
             let sped = 1.0 + (speed - 1.0) * td.min(1.0);
             vx = (evx * shear * sped).clamp(-1.0, 1.0);
             let height_fade = (1.0 - (shear - 0.2) * 0.7).clamp(0.2, 1.0);
@@ -663,7 +712,7 @@ impl Wind {
         }
         // Aloft only. Near the skin, `deflect_along_surface` needs a
         // real vy so a face can turn the breeze up or along the ground.
-        let surf_hy = self.surface_tile_hy(world, hx);
+        let surf_hy = here.surf_hy;
         let above = (hy - surf_hy).max(0);
         if above >= 3 {
             let v_cap = (vx.abs() * 0.45 + 0.04).min(0.35);
@@ -793,15 +842,26 @@ impl Wind {
         hx: i32,
         hy: i32,
     ) -> (f32, f32, f32) {
+        let empty = FxHashMap::default();
+        self.orographic_soft_cached(world, &empty, hx, hy)
+    }
+
+    fn orographic_soft_cached(
+        &self,
+        world: Option<&World>,
+        cols: &FxHashMap<i32, ColOro>,
+        hx: i32,
+        hy: i32,
+    ) -> (f32, f32, f32) {
         let mut speed = 0.0;
         let mut lift = 0.0;
         let mut sink = 0.0;
         let mut w = 0.0;
         for (dx, wt) in [(-1, 0.25f32), (0, 0.50), (1, 0.25)] {
-            let x = hx + dx;
-            speed += self.orographic_speed_factor(world, x) * wt;
-            lift += self.orographic_lift(world, x) * wt;
-            sink += self.lee_sink(world, x, hy) * wt;
+            let col = self.col_oro_at(world, cols, hx + dx);
+            speed += col.speed * wt;
+            lift += col.lift * wt;
+            sink += col.lee_sink(hy) * wt;
             w += wt;
         }
         (speed / w, lift / w, sink / w)
@@ -1096,6 +1156,38 @@ mod tests {
             samples.iter().any(|&v| v.abs() > 0.12),
             "gusts should exceed the mean |vx|"
         );
+    }
+
+    #[test]
+    fn column_oro_cache_matches_live_soft() {
+        let p = WorldgenParams::default();
+        let wind = Wind::climate(
+            4,
+            0.12,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        let mut cols = FxHashMap::default();
+        for hx in 0..24 {
+            for dx in -1..=1 {
+                cols.entry(hx + dx)
+                    .or_insert_with(|| wind.pack_col_oro(None, hx + dx));
+            }
+        }
+        for hx in 0..24 {
+            for hy in [8, 20, 40] {
+                let a = wind.orographic_soft(None, hx, hy);
+                let b = wind.orographic_soft_cached(None, &cols, hx, hy);
+                assert!(
+                    (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6 && (a.2 - b.2).abs() < 1e-6,
+                    "hx={hx} hy={hy} live={a:?} cached={b:?}"
+                );
+            }
+        }
     }
 
     #[test]
