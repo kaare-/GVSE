@@ -699,3 +699,14 @@ Do not re-walk these:
   `G` now use the camera box (headless soak does not draw). Do not
   skip the lottery. Do not coarsen off-screen sim. Do not add a sky
   quadtree.
+
+  After skipping dry contact-seepage pores that own no +x / +y wet-Air
+  edge (infiltration from −x / −y is already owned by those cells),
+  skipping dry/dry vertical seam wakes once any occupancy flag is set,
+  and reading lake-bed / seam-band neighbours from the in-chunk cells
+  (repeat soak, 256 plants, 8×400): seepage **3.83 → 5.95** (was
+  **3.77 → 6.10**). Wall **20.8 → 83.7** — same leftover growers.
+  Rain-wet halo sand that owns a wet edge, or already holds sat, still
+  pays the contact walk; the skip does not move soak seep. Deep
+  pore↔pore is unchanged. Do not apply the dry-pore skip on the deep
+  pass. Do not skip a dry pore that owns the +x / +y wet-Air face.
