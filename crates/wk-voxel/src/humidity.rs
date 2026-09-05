@@ -110,6 +110,13 @@ pub fn humidity_diffuse_due(tick: u64) -> bool {
     tick % HUMIDITY_DIFFUSE_PERIOD == HUMIDITY_DIFFUSE_PHASE
 }
 
+/// Packed bound-box mass. Runtime only — serde still writes [`Humidity::cells`].
+#[derive(Debug, Clone)]
+struct HumiditySlab {
+    bounds: TileBounds,
+    mass: Vec<f32>,
+}
+
 /// A sparse 2D heatmap keyed by tile coordinates. Each tile covers
 /// `tile_cols` × `tile_cols` world cells. Missing keys are implicit
 /// zero — a fresh atmosphere is dry.
@@ -134,6 +141,11 @@ pub struct Humidity {
     pub advect_rx: f32,
     #[serde(default)]
     pub advect_ry: f32,
+    /// Last packed box. Reused when bounds match so dense advect /
+    /// diffuse do not re-walk SipHash every tick. Evap / rain write
+    /// through; serde still writes [`Self::cells`].
+    #[serde(skip)]
+    slab: Option<HumiditySlab>,
 }
 
 impl Humidity {
@@ -145,6 +157,7 @@ impl Humidity {
             wrap_x: false,
             advect_rx: 0.0,
             advect_ry: 0.0,
+            slab: None,
         }
     }
 
@@ -178,6 +191,80 @@ impl Humidity {
             }
         }
         slab
+    }
+
+    /// Reuse the last packed box when bounds match. First dense tick
+    /// (or a bounds change) walks SipHash once.
+    fn packed_mass(&self, b: TileBounds) -> Vec<f32> {
+        if let Some(s) = &self.slab {
+            if s.bounds == b {
+                return s.mass.clone();
+            }
+        }
+        self.pack_slab(b)
+    }
+
+    fn write_tile(&mut self, hx: i32, hy: i32, v: f32) {
+        if v > 1e-6 {
+            self.cells.insert((hx, hy), v);
+        } else {
+            self.cells.remove(&(hx, hy));
+        }
+        if let Some(s) = &mut self.slab {
+            if s.bounds.contains(hx, hy) {
+                let (w, _) = s.bounds.dims();
+                if w > 0 {
+                    let i = s.bounds.index(w, hx, hy);
+                    if i < s.mass.len() {
+                        s.mass[i] = v.max(0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_tile_delta(&mut self, hx: i32, hy: i32, d: f32) {
+        if d.abs() < 1e-12 {
+            return;
+        }
+        if d < 0.0 {
+            let cur = self.at_tile(hx, hy);
+            if cur <= 0.0 {
+                return;
+            }
+            self.write_tile(hx, hy, (cur + d).max(0.0));
+            return;
+        }
+        if self.accepts(hx, hy) {
+            self.write_tile(hx, hy, self.at_tile(hx, hy) + d);
+        }
+    }
+
+    fn prune_near_zero(&mut self) {
+        let bounds = self.bounds;
+        self.cells.retain(|&(hx, hy), v| {
+            *v > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+        });
+        if let Some(s) = &mut self.slab {
+            for m in &mut s.mass {
+                if *m <= 1e-6 {
+                    *m = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Drain `amount` from a humidity tile (rain / surplus). Write-through
+    /// keeps the runtime slab honest so the next dense pack can reuse it.
+    pub fn drain_tile(&mut self, hx: i32, hy: i32, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        let cur = self.at_tile(hx, hy);
+        if cur <= 0.0 {
+            return;
+        }
+        self.write_tile(hx, hy, (cur - amount.min(cur)).max(0.0));
     }
 
     /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.
@@ -288,10 +375,12 @@ impl Humidity {
         if !self.accepts(key.0, key.1) {
             return 0.0;
         }
-        let entry = self.cells.entry(key).or_insert(0.0);
-        let room = (cap.max(0.5) - *entry).max(0.0);
+        let cur = self.at_tile(key.0, key.1);
+        let room = (cap.max(0.5) - cur).max(0.0);
         let take = mass.min(room);
-        *entry += take;
+        if take > 0.0 {
+            self.write_tile(key.0, key.1, cur + take);
+        }
         take
     }
 
@@ -302,13 +391,16 @@ impl Humidity {
             return 0.0;
         }
         let key = self.tile_of(gx, gy);
-        let Some(entry) = self.cells.get_mut(&key) else {
+        let cur = self.at_tile(key.0, key.1);
+        if cur <= 0.0 {
             return 0.0;
-        };
-        let take = mass.min(*entry);
-        *entry -= take;
-        if *entry < 1e-3 {
-            self.cells.remove(&key);
+        }
+        let take = mass.min(cur);
+        let next = cur - take;
+        if next < 1e-3 {
+            self.write_tile(key.0, key.1, 0.0);
+        } else {
+            self.write_tile(key.0, key.1, next);
         }
         take
     }
@@ -418,11 +510,22 @@ impl Humidity {
     /// Humidity mass at world cell `(gx, gy)`. Missing tile → 0.
     pub fn at_cell(&self, gx: i32, gy: i32) -> f32 {
         let key = self.tile_of(gx, gy);
-        *self.cells.get(&key).unwrap_or(&0.0)
+        self.at_tile(key.0, key.1)
     }
 
     /// Humidity mass at tile coord `(hx, hy)`. Missing → 0.
     pub fn at_tile(&self, hx: i32, hy: i32) -> f32 {
+        if let Some(s) = &self.slab {
+            if s.bounds.contains(hx, hy) {
+                let (w, _) = s.bounds.dims();
+                if w > 0 {
+                    let i = s.bounds.index(w, hx, hy);
+                    if i < s.mass.len() {
+                        return s.mass[i];
+                    }
+                }
+            }
+        }
         *self.cells.get(&(hx, hy)).unwrap_or(&0.0)
     }
 
@@ -513,6 +616,9 @@ impl Humidity {
             return;
         };
         self.cells.retain(|&(hx, hy), _| b.contains(hx, hy));
+        if self.slab.as_ref().is_some_and(|s| s.bounds != b) {
+            self.slab = None;
+        }
     }
 
     /// Explicit 4-neighbour diffusion step.
@@ -595,16 +701,11 @@ impl Humidity {
                 }
             }
         }
+        self.slab = None;
         for (k, d) in deltas {
-            if !self.accepts(k.0, k.1) {
-                continue;
-            }
-            *self.cells.entry(k).or_insert(0.0) += d;
+            self.apply_tile_delta(k.0, k.1, d);
         }
-        let bounds = self.bounds;
-        self.cells.retain(|&(hx, hy), v| {
-            v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
-        });
+        self.prune_near_zero();
     }
 
     /// Same +x/+y pairwise stencil as [`Self::diffuse`], walking the
@@ -616,7 +717,7 @@ impl Humidity {
         if n == 0 {
             return;
         }
-        let snap = self.pack_slab(b);
+        let snap = self.packed_mass(b);
         let mut deltas = vec![0.0f32; n];
         for iy in 0..h {
             for ix in 0..w {
@@ -645,23 +746,20 @@ impl Humidity {
                 }
             }
         }
-        for iy in 0..h {
-            for ix in 0..w {
-                let d = deltas[iy * w + ix];
-                if d.abs() < 1e-9 {
-                    continue;
-                }
-                let hx = b.hx_min + ix as i32;
-                let hy = b.hy_min + iy as i32;
-                if !self.accepts(hx, hy) {
-                    continue;
-                }
-                *self.cells.entry((hx, hy)).or_insert(0.0) += d;
+        let mut work = snap.clone();
+        for i in 0..n {
+            let d = deltas[i];
+            if d.abs() < 1e-9 {
+                continue;
+            }
+            let (hx, hy) = b.coords(w, i);
+            if d < 0.0 || self.accepts(hx, hy) {
+                work[i] = (work[i] + d).max(0.0);
             }
         }
-        self.cells.retain(|&(hx, hy), v| {
-            v.abs() > 1e-6 && b.contains(hx, hy)
-        });
+        self.sync_slab_changes(b, &snap, &work);
+        self.slab = Some(HumiditySlab { bounds: b, mass: work });
+        self.prune_near_zero();
     }
 
     /// Buoyant lift: a fraction of each tile's mass moves one tile up
@@ -751,15 +849,9 @@ impl Humidity {
             heat_lifts.push((hx, hy, lift / mass));
         }
         for (k, d) in deltas {
-            if !self.accepts(k.0, k.1) {
-                continue;
-            }
-            *self.cells.entry(k).or_insert(0.0) += d;
+            self.apply_tile_delta(k.0, k.1, d);
         }
-        let bounds = self.bounds;
-        self.cells.retain(|&(hx, hy), v| {
-            *v > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
-        });
+        self.prune_near_zero();
         if let Some(t) = temp.as_deref_mut() {
             t.lift_heat_with_vapor(&heat_lifts);
         }
@@ -788,8 +880,10 @@ impl Humidity {
     /// world, and calling that twice per tile was the leftover cost
     /// after the field rebuild. When the bound box is at least half
     /// full, flux / lift / mix / oro share one packed slab and only
-    /// tiles that moved are written back. Sparse maps keep the
-    /// HashMap walk (demo soak early). Not view LOD.
+    /// tiles that moved are written back. The slab stays for the next
+    /// dense tick (evap / rain write through) so we do not re-walk
+    /// SipHash every frame. Sparse maps keep the HashMap walk (demo
+    /// soak early). Not view LOD.
     pub fn advect_with_surface(
         &mut self,
         vx: f32,
@@ -826,7 +920,7 @@ impl Humidity {
         if n == 0 {
             return;
         }
-        let snap = self.pack_slab(b);
+        let snap = self.packed_mass(b);
         let mut work = snap.clone();
         let surface = Some((wind, world, &free_air));
         // One sample per occupied seat — same leftover the sparse
@@ -852,6 +946,7 @@ impl Humidity {
         );
         self.oro_into(&mut work, wind, Some(world), b, w, h);
         self.sync_slab_changes(b, &snap, &work);
+        self.slab = Some(HumiditySlab { bounds: b, mass: work });
     }
 
     /// Donor-cell flux into `work`. Masses come from the pre-advect
@@ -1245,7 +1340,7 @@ impl Humidity {
             if let Some(b) = self.bounds {
                 if self.use_dense_slab(b) {
                     let (w, _) = b.dims();
-                    let snap = self.pack_slab(b);
+                    let snap = self.packed_mass(b);
                     let mut work = snap.clone();
                     self.flux_axis_into(
                         &snap, &mut work, climate_vx, climate_vy, None, true, b, w, &[],
@@ -1254,11 +1349,15 @@ impl Humidity {
                         &snap, &mut work, climate_vx, climate_vy, None, false, b, w, &[],
                     );
                     self.sync_slab_changes(b, &snap, &work);
+                    self.slab = Some(HumiditySlab { bounds: b, mass: work });
                     return;
                 }
             }
         }
 
+        // Sparse walk owns HashMap; drop a leftover dense pack so the
+        // next dense tick re-reads cells.
+        self.slab = None;
         // Flux only iterates the snapshot — a Vec avoids rehashing the
         // saved SipHash map every tick (leftover as humidity fills).
         let snap: Vec<((i32, i32), f32)> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
@@ -1276,10 +1375,7 @@ impl Humidity {
         if let Some((wind, world, cache)) = surface {
             self.lift_buried_to_free_air(wind, world, cache);
         }
-        let bounds = self.bounds;
-        self.cells.retain(|&(hx, hy), v| {
-            v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
-        });
+        self.prune_near_zero();
     }
 
     /// `|v|` is the fraction that leaves this tick, capped at 1.
@@ -1375,15 +1471,7 @@ impl Humidity {
             *deltas.entry((tx, ty)).or_insert(0.0) += leave;
         }
         for (k, d) in deltas {
-            if d < 0.0 {
-                if let Some(e) = self.cells.get_mut(&k) {
-                    *e = (*e + d).max(0.0);
-                }
-                continue;
-            }
-            if self.accepts(k.0, k.1) {
-                *self.cells.entry(k).or_insert(0.0) += d;
-            }
+            self.apply_tile_delta(k.0, k.1, d);
         }
         // Caller retains once after both axes.
     }
@@ -1447,17 +1535,9 @@ impl Humidity {
             }
         }
         for (k, d) in deltas {
-            if d < 0.0 {
-                if let Some(e) = self.cells.get_mut(&k) {
-                    *e = (*e + d).max(0.0);
-                }
-                continue;
-            }
-            if self.accepts(k.0, k.1) {
-                *self.cells.entry(k).or_insert(0.0) += d;
-            }
+            self.apply_tile_delta(k.0, k.1, d);
         }
-        self.cells.retain(|_, v| *v > 1e-6);
+        self.prune_near_zero();
     }
 
     /// First tile row whose centre sits in free air above the live crest.
@@ -1524,12 +1604,10 @@ impl Humidity {
             moves.push(((hx, hy), (hx, air), mass));
         }
         for (from, to, mass) in moves {
-            if let Some(e) = self.cells.get_mut(&from) {
-                *e -= mass;
-            }
-            *self.cells.entry(to).or_insert(0.0) += mass;
+            self.apply_tile_delta(from.0, from.1, -mass);
+            self.apply_tile_delta(to.0, to.1, mass);
         }
-        self.cells.retain(|_, v| v.abs() > 1e-6);
+        self.prune_near_zero();
     }
 
     /// Move a lift-fraction of each tile one step up where the live
@@ -1576,20 +1654,9 @@ impl Humidity {
             *deltas.entry((hx, dest)).or_insert(0.0) += take;
         }
         for (k, d) in deltas {
-            if d < 0.0 {
-                if let Some(e) = self.cells.get_mut(&k) {
-                    *e += d;
-                }
-                continue;
-            }
-            if self.accepts(k.0, k.1) {
-                *self.cells.entry(k).or_insert(0.0) += d;
-            }
+            self.apply_tile_delta(k.0, k.1, d);
         }
-        let bounds = self.bounds;
-        self.cells.retain(|&(hx, hy), v| {
-            *v > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
-        });
+        self.prune_near_zero();
     }
 }
 
@@ -2516,5 +2583,62 @@ mod convection_tests {
             "convection must conserve vapour ({before} -> {after})"
         );
         let _ = TempConfig::default();
+    }
+
+    #[test]
+    fn persistent_slab_reuses_pack_after_evap_write_through() {
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.10,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.field_smooth = 0.0;
+        let world = World::new(p.seed);
+        let y0 = p.sea_level_y + 16;
+        let mut live = Humidity::with_world_bounds(4, 0, y0, 32, y0 + 32);
+        live.wrap_x = true;
+        let gy = y0 + 8;
+        live.add(8, gy, 80.0);
+        assert!(live.use_dense_slab(live.bounds.unwrap()));
+        live.advect_with_surface(0.12, 0.0, &wind, &world);
+        assert!(
+            live.slab.as_ref().is_some_and(|s| s.bounds == live.bounds.unwrap()),
+            "dense advect must keep the runtime slab"
+        );
+        // Evap-shaped deposit between ticks. Write-through must land
+        // in the slab or the next reuse would drop the new mass.
+        live.add(12, gy + 4, 40.0);
+        let mut fresh = live.clone();
+        fresh.slab = None;
+        live.advect_with_surface(0.12, 0.0, &wind, &world);
+        fresh.advect_with_surface(0.12, 0.0, &wind, &world);
+        assert!(
+            (live.total_mass() - fresh.total_mass()).abs() < 1e-3,
+            "reused slab must match a re-pack: {} vs {}",
+            live.total_mass(),
+            fresh.total_mass()
+        );
+        for key in live.cells.keys().chain(fresh.cells.keys()) {
+            let a = live.at_tile(key.0, key.1);
+            let b = fresh.at_tile(key.0, key.1);
+            assert!(
+                (a - b).abs() < 1e-3,
+                "tile {:?} reused={a} repack={b}",
+                key
+            );
+        }
     }
 }

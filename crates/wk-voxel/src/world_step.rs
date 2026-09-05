@@ -179,7 +179,7 @@ pub fn step_world(
 
     {
         let t0 = profile.then(Instant::now);
-        if tick_no % WIND_FIELD_PERIOD == 0 || wind.field.is_empty() {
+        if tick_no % WIND_FIELD_PERIOD == 0 || wind.field_is_empty() {
             let occupied: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
             wind.rebuild_field(Some(world), Some(temperature), tick_no, &occupied, None);
         }

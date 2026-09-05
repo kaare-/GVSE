@@ -231,11 +231,7 @@ pub fn precipitate_thermal_surplus(
         if landed <= 0.0 {
             continue;
         }
-        let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
-        *entry -= landed.min(*entry);
-        if *entry < 1e-6 {
-            humidity.cells.remove(&(hx, hy));
-        }
+        humidity.drain_tile(hx, hy, landed);
     }
 }
 
@@ -479,11 +475,7 @@ pub fn apply_condensation_rain_phased(
             continue;
         }
         // Drain the humidity tile by the mass that landed (clamp to tile).
-        let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
-        *entry -= landed.min(*entry);
-        if *entry < 1e-6 {
-            humidity.cells.remove(&(hx, hy));
-        }
+        humidity.drain_tile(hx, hy, landed);
     }
 }
 
