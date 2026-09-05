@@ -103,7 +103,9 @@ The honest version is a **second clock**, not a coarser sky:
    drops mid-ocean and a known-full table over inert rock; seepage
    apply skips wet-Air-only chunks (no solid, no loose) and dry
    inland rock far from water. Dry sand and dry stone under a new
-   puddle or seam still walk.
+   puddle or seam still walk. Surface throughflow exact-skips
+   mid-ocean wet Air and dry rock with no porous bed here or in
+   `cy-1`.
 2. **Conservation-form integrators** (Δt = 1k–10k). Pore seepage and
    humidity/T diffusion can take an implicit step with a flux limiter
    so `sat` stays in `[0, cap]` and tile mass is a discrete divergence.
@@ -591,6 +593,10 @@ What is still leftover:
 5. Equalized confined BFS ~3.0 ms — **Δt=1 persist is in**
    (`World.confined` lookup). Do not starve the wake. Δt>1 still parked.
 6. Condensation lottery ~2.9 ms — do not skip it
+
+Flow throughflow (Priority 4) exact-skips mid-ocean wet Air and dry
+rock with no porous bed in this chunk or `cy-1`. That cut is inside
+the flow column above; surface cascade / equalise still walk wet Air.
 
 `World.dissolved` and `Humidity::cells` stay `std::HashMap` (saved).
 Runtime slab / Fx dual is OK if serde still writes the HashMap.
