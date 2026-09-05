@@ -84,12 +84,46 @@ pub(crate) fn regions_confined_loaded(world: &World) -> Vec<ActiveChunk> {
         .collect()
 }
 
+/// True when standing water in `coord` can still wet a pore — this
+/// chunk has a dry-loose or unsaturated bed, or the chunk below does.
+/// Mid-ocean and a known-full table over inert rock are a no-op
+/// (time-coarsen exact skip).
+fn standing_can_still_infiltrate(
+    world: &World,
+    coord: ChunkCoord,
+    chunk: &crate::chunk::Chunk,
+) -> bool {
+    if chunk.has_unsaturated_pores {
+        return true;
+    }
+    // Dry sand / soil in this chunk has never raised the wet-pore flag.
+    if chunk.has_loose && !chunk.has_wet_pores {
+        return true;
+    }
+    let below = ChunkCoord::new(coord.cx, coord.cy - 1);
+    match world.chunks.get(&below) {
+        None => false,
+        Some(b) => {
+            if b.has_unsaturated_pores {
+                return true;
+            }
+            if b.has_wet_pores && !b.has_unsaturated_pores {
+                return false;
+            }
+            // Never wetted. Loose grains can drink; bedrock cannot.
+            b.has_loose
+        }
+    }
+}
+
 /// Loaded chunks that may have a standing-water bed or a wetting front.
 ///
-/// A quiet saturated water table (`has_wet_pores` only) is skipped —
-/// standing water still walks down into the bed below, and an
-/// unsaturated front keeps its own chunk. Rain-film sky is skipped.
-/// Bootstrap (no flags set yet) falls back to [`regions_wet_loaded`].
+/// A quiet saturated water table (`has_wet_pores` only) is skipped.
+/// Standing water walks down into a dry-loose or unsaturated bed
+/// (this chunk or `cy-1`). Mid-ocean and a full table over inert
+/// rock drop out — exact skip, not a frozen chunk. Rain-film sky is
+/// skipped. Bootstrap (no flags set yet) falls back to
+/// [`regions_wet_loaded`].
 pub(crate) fn regions_lake_bed_loaded(world: &World) -> Vec<ActiveChunk> {
     let ready = world
         .chunks
@@ -101,7 +135,10 @@ pub(crate) fn regions_lake_bed_loaded(world: &World) -> Vec<ActiveChunk> {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_standing_air || c.has_unsaturated_pores)
+        .filter(|(&coord, c)| {
+            c.has_unsaturated_pores
+                || (c.has_standing_air && standing_can_still_infiltrate(world, coord, c))
+        })
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
@@ -182,10 +219,11 @@ mod tests {
         w.ensure_chunk(ChunkCoord::new(2, 0));
         // cx=0: drizzle only — must not enter either insurance walk.
         w.set_cell(2, 2, rain_film());
-        // cx=1: standing water next to rock — confined + lake-bed.
+        // cx=1: standing water next to rock — confined; lake-bed is
+        // exact-skip (bedrock cannot drink).
         w.set_cell(65, 1, Cell::solid(MaterialId::Bedrock));
         w.set_cell(66, 2, Cell::water());
-        // cx=2: mid-ocean water, no solid — lake-bed only.
+        // cx=2: mid-ocean water, no solid — exact-skip lake-bed.
         w.set_cell(130, 2, Cell::water());
         // cx=3: groundwater-only crust — lake-bed soak, not a confined shaft.
         w.ensure_chunk(ChunkCoord::new(3, 0));
@@ -205,11 +243,8 @@ mod tests {
             .collect();
         assert_eq!(
             lake,
-            vec![
-                ChunkCoord::new(1, 0),
-                ChunkCoord::new(2, 0),
-                ChunkCoord::new(3, 0)
-            ]
+            vec![ChunkCoord::new(3, 0)],
+            "mid-ocean and standing-on-bedrock are exact-skip; unsat sand stays"
         );
 
         // Quiet saturated table: after a lake-bed scan clears the unsat
@@ -235,6 +270,30 @@ mod tests {
             !lake.contains(&ChunkCoord::new(4, 0)),
             "full water-table chunk must leave the lake-bed walk"
         );
-        assert!(lake.contains(&ChunkCoord::new(1, 0)));
+        assert!(
+            !lake.contains(&ChunkCoord::new(1, 0)),
+            "standing-on-bedrock stays exact-skip"
+        );
+        assert!(lake.contains(&ChunkCoord::new(3, 0)));
+    }
+
+    #[test]
+    fn lake_bed_keeps_standing_above_dry_sand() {
+        // cy=1 standing water, cy=0 dry loose — the wake must still
+        // walk down. Skipping the ocean chunk is only legal when the
+        // bed is known-full or inert.
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        w.set_cell(2, 2, Cell::solid(MaterialId::Sand));
+        w.set_cell(2, 66, Cell::water());
+        let lake: Vec<_> = regions_lake_bed_loaded(&w)
+            .into_iter()
+            .map(|ac| ac.coord)
+            .collect();
+        assert!(
+            lake.contains(&ChunkCoord::new(0, 1)),
+            "standing above dry sand must stay on the lake-bed walk"
+        );
     }
 }

@@ -92,7 +92,7 @@ noise plus mild depth compaction; editor / constructed cells use the
 midpoint. See [`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md).
 Fully saturated solid→Air faces get a ×3 spring boost (capped at 16) so cliff pores weep visibly.
 
-This is what wets a dry beach **sideways** from a puddle, equalises pore sat between sand and clay/stone, and lets saturated hillsides drip into open Air. Vertical fill under a lake is dominated by **gravity**, not seepage.
+This is what wets a dry beach **sideways** from a puddle, equalises pore sat between sand and clay/stone, and lets saturated hillsides drip into open Air. Vertical fill under a lake is dominated by **gravity**, not seepage. Lake-bed and seepage apply **exact-skip** mid-ocean and no-pore chunks; dry loose under a new puddle still walks. Do not apply the contact dry-pore skip on the deep pass.
 
 ### Grain fall + repose
 

@@ -724,7 +724,15 @@ fn accumulate_seepage_xfers_ex(
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             return local;
         };
-        if any_water && !chunk.has_wet_air && !chunk.has_wet_pores {
+        // Exact skip: no pore that can drink or weep. Wet-Air-only
+        // (mid-ocean / rain sky) is Air–Air leftover. Dry loose still
+        // scans — a new puddle has not raised `has_wet_pores` yet.
+        // Bootstrap (no water flags anywhere) keeps every region.
+        if any_water
+            && !chunk.has_wet_pores
+            && !chunk.has_unsaturated_pores
+            && !chunk.has_loose
+        {
             return local;
         }
         let base_gx = ac.coord.cx * cw;
