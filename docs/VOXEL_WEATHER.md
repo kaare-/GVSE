@@ -99,8 +99,8 @@ The honest version is a **second clock**, not a coarser sky:
    bits and occupancy flags already name these. A larger world just
    needs more of the map to qualify. **Shipped for pores:** lake-bed
    drops mid-ocean and a known-full table over inert rock; seepage
-   apply skips wet-Air-only / bedrock chunks (`!has_loose`). Dry
-   sand under a new puddle still walks.
+   apply skips wet-Air-only chunks (no solid, no loose). Dry sand
+   and dry stone under a new puddle or seam still walk.
 2. **Conservation-form integrators** (Δt = 1k–10k). Pore seepage and
    humidity/T diffusion can take an implicit step with a flux limiter
    so `sat` stays in `[0, cap]` and tile mass is a discrete divergence.
@@ -579,7 +579,7 @@ What is still leftover:
 1. Humidity advect ~3.9 ms — pack/sync HashMap + `vector_at`
 2. Wind rebuild ~4.1 ms — compose + field HashMap write + slip
 3. Seepage ~4.0 ms — lake-bed / apply exact-skip mid-ocean and
-   no-pore chunks. Dirty-halo contact on wet sand is still real work.
+   wet-Air-only chunks. Dry stone under a seam still scans.
 4. Landscape bodies ~4.0 ms
 5. Equalized confined BFS ~3.0 ms — **Δt=1 persist is in**
    (`World.confined` lookup). Do not starve the wake. Δt>1 still parked.
