@@ -159,8 +159,14 @@ impl SupportMap {
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
 
+    // Ocean / empty sky never hold a support solid. Walking those
+    // 64×64s every SUPPORT_MAP_PERIOD was leftover inside the
+    // landscape bucket. Occupancy is the source of truth.
     // --- Surface: solid with an open 4-neighbour.
     for (&coord, chunk) in &world.chunks {
+      if !chunk.has_solid {
+        continue;
+      }
       let base_gx = coord.cx * cw;
       let base_gy = coord.cy * ch;
       let Some(mask) = self.surface.get_mut(&coord) else {
@@ -207,6 +213,9 @@ impl SupportMap {
     // --- Grounded: BFS from Bedrock through solids (crosses chunk seams).
     let mut queue: Vec<(i32, i32)> = Vec::new();
     for (&coord, chunk) in &world.chunks {
+      if !chunk.has_solid {
+        continue;
+      }
       let base_gx = coord.cx * cw;
       let base_gy = coord.cy * ch;
       let Some(mask) = self.grounded.get_mut(&coord) else {
@@ -420,15 +429,13 @@ pub fn void_below_competent_seeds_with(
   // Sticky occupancy: ocean / rain-wet sky never holds competent rock.
   // The play-app dirty halo still hands those chunks to landscape
   // detach every tick (rain, plants). Walking 64×64 of water looking
-  // for stone-over-void was the leftover landscape cost. Bootstrap
-  // (no flags set yet) keeps every coord so a legacy save still finds
-  // a sky slab whose `has_competent` was never stamped.
-  let any_competent = world.chunks.values().any(|c| c.has_competent);
+  // for stone-over-void was the leftover landscape cost. A false
+  // flag is a skip — occupancy is the source of truth.
   for &coord in coords {
     let Some(chunk) = world.chunks.get(&coord) else {
       continue;
     };
-    if any_competent && !chunk.has_competent {
+    if !chunk.has_competent {
       continue;
     }
     let base_gx = coord.cx * cw;
@@ -532,7 +539,7 @@ mod tests {
   }
 
   #[test]
-  fn bootstrap_scans_when_no_competent_flag() {
+  fn cleared_competent_flag_is_a_skip() {
     let mut w = World::new(8);
     w.ensure_chunk(ChunkCoord::new(0, 1));
     for x in 0..8 {
@@ -545,9 +552,33 @@ mod tests {
     }
     let all: Vec<_> = w.chunks.keys().copied().collect();
     assert!(
-      !void_below_competent_seeds(&w, &all).is_empty(),
-      "legacy save with no occupancy flags must still find the sky slab"
+      void_below_competent_seeds(&w, &all).is_empty(),
+      "occupancy is the source of truth — a false flag does not scan"
     );
+  }
+
+  #[test]
+  fn support_rebuild_skips_chunks_without_solid() {
+    let mut w = World::new(32);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    for x in 0..8 {
+      w.set_cell(x, 70, Cell::water());
+    }
+    w.chunks.get_mut(&ChunkCoord::new(0, 0)).unwrap().has_solid = false;
+    let mut map = SupportMap::new();
+    map.rebuild(&w);
+    assert!(
+      !map.is_grounded(5, 1),
+      "cleared has_solid must skip the land chunk"
+    );
+    w.chunks.get_mut(&ChunkCoord::new(0, 0)).unwrap().has_solid = true;
+    map.rebuild(&w);
+    assert!(map.is_grounded(5, 1), "restored occupancy still grounds");
   }
 
   #[test]

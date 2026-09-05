@@ -210,14 +210,13 @@ pub fn apply_grain_fall(world: &mut World) {
 /// repose's problem, not the wind's.
 pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) -> u32 {
     let wind_on = wind_vx.is_finite() && wind_vx.abs() >= 1e-4;
-    // Prefer the snow flag so organic rafts and ice sheets are not
-    // scanned for flakes they never held. Legacy saves stamp the flag
-    // on the first pass that still has to walk `has_buoyant`.
+    // Occupancy is the source of truth. Organic rafts and ice sheets
+    // are not scanned for flakes they never held.
     let any_snow = world.chunks.values().any(|c| c.has_snow);
     // Calm nights still have to drop empty sky chunks: a flake marks
     // every column it falls through, and leaving `has_snow` set keeps
     // those chunks in this scan forever.
-    if !any_snow && !wind_on {
+    if !any_snow {
         return 0;
     }
     let dx = if wind_on {
@@ -242,7 +241,7 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
     let coords = world
         .chunks
         .iter()
-        .filter(|(_, c)| if any_snow { c.has_snow } else { c.has_buoyant })
+        .filter(|(_, c)| c.has_snow)
         .map(|(&coord, _)| coord)
         .collect::<Vec<_>>();
     for coord in coords {
@@ -281,11 +280,7 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
                 }
             }
         }
-        if saw_snow && !any_snow {
-            if let Some(chunk) = world.chunks.get_mut(&coord) {
-                chunk.has_snow = true;
-            }
-        } else if !saw_snow && any_snow {
+        if !saw_snow {
             clear_snow.push(coord);
         }
     }
@@ -692,7 +687,7 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
 
 /// Chunks that may hold grain / litter (sticky [`Chunk::has_loose`]).
 ///
-/// Falls back to every loaded chunk when no flag is set yet (old saves).
+/// Occupancy is the source of truth — no loose flag means no walk.
 fn loose_chunk_coords(world: &World) -> Vec<ChunkCoord> {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
@@ -700,9 +695,6 @@ fn loose_chunk_coords(world: &World) -> Vec<ChunkCoord> {
         .filter(|(_, c)| c.has_loose)
         .map(|(&coord, _)| coord)
         .collect();
-    if coords.is_empty() && !world.chunks.is_empty() {
-        coords = world.chunks.keys().copied().collect();
-    }
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
 }
@@ -977,13 +969,10 @@ pub fn settle_loose_grains_regions(
 /// `allow_buoyancy = false` so Organic does not one-cell bob through
 /// wet Air for dozens of passes (FPS spike).
 /// Keep only regions whose chunk may hold loose material (sticky
-/// [`Chunk::has_loose`]). Bootstrap (no flags set yet) keeps everything.
+/// [`Chunk::has_loose`]). Occupancy is the source of truth.
 fn keep_loose_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
     if active.is_empty() {
         return Vec::new();
-    }
-    if !world.chunks.values().any(|c| c.has_loose) {
-        return active.to_vec();
     }
     active
         .iter()

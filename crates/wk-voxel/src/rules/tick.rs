@@ -198,17 +198,13 @@ fn active_aabb_area(active: &[crate::active::ActiveChunk]) -> usize {
 }
 
 /// Keep only active regions whose chunk sticky-flag says loose material
-/// may be present. Bootstrap (no flags set yet) keeps the full list.
+/// may be present. Occupancy is the source of truth.
 fn filter_loose_regions(
     world: &crate::grid::World,
     active: &[crate::active::ActiveChunk],
 ) -> Vec<crate::active::ActiveChunk> {
     if active.is_empty() {
         return Vec::new();
-    }
-    let any_flag = world.chunks.values().any(|c| c.has_loose);
-    if !any_flag {
-        return active.to_vec();
     }
     active
         .iter()

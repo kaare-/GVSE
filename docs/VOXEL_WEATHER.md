@@ -97,7 +97,9 @@ The honest version is a **second clock**, not a coarser sky:
 1. **Exact skip** (any Δt). Equilibrium is a no-op: a full pore table
    with no head gradient, an equalized confined body, dry rock. Dirty
    bits and occupancy flags already name these. A larger world just
-   needs more of the map to qualify. **Shipped for pores:** lake-bed
+   needs more of the map to qualify. Occupancy is the source of
+   truth — do not keep a fallback walk for unstamped flags.
+   **Shipped for pores:** lake-bed
    drops mid-ocean and a known-full table over inert rock; seepage
    apply skips wet-Air-only chunks (no solid, no loose). Dry sand
    and dry stone under a new puddle or seam still walk.
@@ -581,8 +583,9 @@ What is still leftover:
 3. Seepage ~4.0 ms — lake-bed / apply exact-skip mid-ocean and
    wet-Air-only chunks. Dry stone under a seam still scans.
 4. Landscape bodies ~4.0 ms — hanger-seed exact-skip of
-   water-only / empty-sky chunks (`has_competent`). Dry stone
-   and a hanging slab still scan. Bootstrap walks every coord.
+   `!has_competent` chunks; support rebuild skips `!has_solid`
+   (empty sky / ocean). Occupancy is the source of truth —
+   a false flag is a skip, not a full-world walk.
 5. Equalized confined BFS ~3.0 ms — **Δt=1 persist is in**
    (`World.confined` lookup). Do not starve the wake. Δt>1 still parked.
 6. Condensation lottery ~2.9 ms — do not skip it

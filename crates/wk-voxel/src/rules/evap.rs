@@ -135,21 +135,11 @@ fn collect_evap_deltas(
     // Surface films only. Rain-film sky (`has_wet_air` without solid or
     // standing water) cannot rest on a bed, so the per-cell `rests`
     // check always fails — walking those 64×64s was the leftover evap
-    // cost on a tall box. Bootstrap (no flags yet) keeps wet-air.
-    let ready = world
-        .chunks
-        .values()
-        .any(|c| c.has_standing_air || (c.has_wet_air && c.has_solid));
+    // cost on a tall box. Occupancy is the source of truth.
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| {
-            if ready {
-                c.has_standing_air || (c.has_wet_air && c.has_solid)
-            } else {
-                c.has_wet_air
-            }
-        })
+        .filter(|(_, c)| c.has_standing_air || (c.has_wet_air && c.has_solid))
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));

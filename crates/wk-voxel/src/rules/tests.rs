@@ -1118,20 +1118,16 @@ fn airborne_snow_drifts_downwind_and_ice_does_not() {
 }
 
 #[test]
-fn snow_drift_bootstraps_the_snow_flag_on_legacy_chunks() {
-    // Saves from before has_snow still have flakes, just no flag.
-    // The first pass must walk has_buoyant, stamp the flag, and still
-    // move the flake — otherwise a loaded winter world never drifts.
+fn snow_drift_trusts_the_snow_flag() {
     let mut w = setup_column_world();
     w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
     for chunk in w.chunks.values_mut() {
         chunk.has_snow = false;
     }
     let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
-    assert_eq!(moved, 1);
-    assert!(
-        w.chunks.values().any(|c| c.has_snow),
-        "the bootstrap pass must stamp has_snow so later ticks skip rafts"
+    assert_eq!(
+        moved, 0,
+        "occupancy is the source of truth — a false flag does not drift"
     );
 }
 
