@@ -786,6 +786,7 @@ fn tick_with_life_inner(
     // Geotech: roof / overhang collapse after grain has seated.
     // Cadence-gated — full-grid ~1.3 ms/call on Super-Server; every 4
     // ticks keeps cliffs responding without owning the quiet-world budget.
+    // Occupancy skips !has_solid (mid-ocean / empty sky).
     const FAILURE_EVERY: u64 = 4;
     let failure_stats = if world.tick % FAILURE_EVERY == 0 {
         let t0 = profile.then(Instant::now);

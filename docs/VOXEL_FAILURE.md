@@ -439,6 +439,10 @@ F1/F2 start serial compute-then-apply. When hot, scan via
 across chunk seams for roof spans that cross chunks — either inflate
 halo or serialize span measurement per row.
 
+The insurance walk is occupancy-filtered: `!has_solid` chunks
+(mid-ocean / empty sky) are exact-skip. Occupancy is the source of
+truth. A sand ceiling beside ocean still collapses.
+
 ## Save / schema
 
 `FailureConfig` lives in app settings (like `PerfConfig`), not
