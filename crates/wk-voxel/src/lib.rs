@@ -17,6 +17,7 @@ pub mod cell;
 pub mod chunk;
 pub mod climate;
 pub mod clouds;
+pub mod confined;
 pub mod competent_probe;
 pub mod event_log;
 pub mod failure;

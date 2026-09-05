@@ -108,6 +108,7 @@ impl WorldV5 {
             chunk_cache_id: Default::default(),
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            confined: Default::default(),
         }
     }
 }
@@ -155,6 +156,7 @@ impl WorldV6 {
             chunk_cache_id: Default::default(),
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            confined: Default::default(),
         }
     }
 }
@@ -207,6 +209,7 @@ impl WorldV7 {
             chunk_cache_id: Default::default(),
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            confined: Default::default(),
         };
         // Promote sole ownership → one share matching current `_pad`.
         for ((gx, gy), strain) in sole {
@@ -268,6 +271,7 @@ impl WorldV8 {
             chunk_cache_id: Default::default(),
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            confined: Default::default(),
         }
     }
 }
@@ -323,6 +327,7 @@ impl WorldV11 {
             chunk_cache_id: Default::default(),
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            confined: Default::default(),
         }
     }
 }
@@ -423,6 +428,7 @@ impl WorldV10 {
             chunk_cache_id: Default::default(),
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            confined: Default::default(),
         }
     }
 }
@@ -491,6 +497,7 @@ impl WorldV9 {
             chunk_cache_id: Default::default(),
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            confined: Default::default(),
         }
     }
 }

@@ -196,6 +196,10 @@ pub struct World {
     /// Step 3 (wind couple) is not wired.
     #[serde(skip, default)]
     pub water_head: crate::water_head::WaterHead,
+    /// Persistent confined vessels (period-16 BFS → lookup). Derived,
+    /// not saved. Losing it costs one communicating-vessel walk.
+    #[serde(skip, default)]
+    pub confined: crate::confined::ConfinedStore,
 }
 
 impl World {
@@ -224,6 +228,7 @@ impl World {
             chunk_cache_id: ChunkCacheId::default(),
             buoyant_flags_ready: false,
             water_head: crate::water_head::WaterHead::default(),
+            confined: crate::confined::ConfinedStore::default(),
         }
     }
 
