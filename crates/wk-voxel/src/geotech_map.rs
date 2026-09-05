@@ -150,6 +150,17 @@ impl GeotechMap {
         rebuild_overburden(world, &coords, &mut self.overburden);
 
         for coord in &coords {
+            // Faces need a solid. Mid-ocean / empty sky never host one —
+            // leftover 64×64 on the period-20 full sweep. Overburden still
+            // walks those columns: sky wet Air loads σᵥ on land below.
+            // Occupancy is the source of truth.
+            if world
+                .chunks
+                .get(coord)
+                .is_some_and(|c| !c.has_solid)
+            {
+                continue;
+            }
             rescan_faces_in_chunk(world, *coord, None, &self.overburden, &mut self.faces);
         }
         self.last_rebuild_tick = world.tick;
@@ -261,6 +272,13 @@ fn rescan_faces_in_chunk(
     overburden: &HashMap<(i32, i32), f32>,
     faces: &mut HashMap<(i32, i32), FaceStress>,
 ) {
+    if world
+        .chunks
+        .get(&coord)
+        .is_some_and(|c| !c.has_solid)
+    {
+        return;
+    }
     for ly in 0..CHUNK_CELLS_H {
         let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
         if gy <= 0 {
@@ -291,6 +309,14 @@ fn rescan_faces_column(
     let y0 = y_lo.saturating_sub(2).max(1);
     let y1 = y_hi + HYDRO_LOAD_CAP;
     for gy in y0..=y1 {
+        let (coord, _, _) = World::split(gx, gy);
+        if world
+            .chunks
+            .get(&coord)
+            .is_some_and(|c| !c.has_solid)
+        {
+            continue;
+        }
         maybe_insert_face(world, gx, gy, overburden, faces);
     }
 }
@@ -742,5 +768,50 @@ mod tests {
         map.rebuild_smart(&w);
         assert!(map.last_was_incremental);
         assert_eq!(map.faces.len(), faces_before);
+    }
+
+    #[test]
+    fn face_rescan_skips_water_only_chunks() {
+        let mut w = World::new(128);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..8 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        w.set_cell(68, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=4 {
+            w.set_cell(68, y, Cell::solid(MaterialId::Stone));
+            w.set_cell(69, y, Cell::air());
+        }
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        assert!(
+            (0..8).all(|x| (0..8).all(|y| map.at_cell(x, y).is_none())),
+            "mid-ocean must not mint faces"
+        );
+        let face = map.at_cell(68, 3).expect("cliff beside ocean still maps");
+        assert!(face.demand >= 1);
+    }
+
+    #[test]
+    fn overburden_still_counts_sky_wet_air() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::solid(MaterialId::Stone));
+        for y in 66..72 {
+            w.set_cell(3, y, Cell::water());
+        }
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        assert!(
+            map.overburden_at(3, 1) > 0.0,
+            "sky wet Air in a !has_solid chunk must still load σᵥ"
+        );
+        assert!(
+            !w.chunks[&ChunkCoord::new(0, 1)].has_solid,
+            "precondition: water column did not raise has_solid"
+        );
     }
 }

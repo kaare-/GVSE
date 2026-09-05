@@ -84,6 +84,9 @@ temperature.step if due
 - Rebuild **after** CA so the map matches post-tick geometry.
 - F2b may keep using live `face_shear_demand` until **S3** wires
   map-gated failure (avoid double semantics mid-migration).
+- Face rescan exact-skips `!has_solid` (mid-ocean / empty sky).
+  Overburden still walks those columns — sky wet Air loads σᵥ on
+  land below. Occupancy is the source of truth.
 
 ## HUD
 
