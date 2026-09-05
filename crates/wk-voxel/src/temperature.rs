@@ -878,12 +878,12 @@ impl Temperature {
     /// 1000-cell no-op that cloned every tile.
     pub(crate) fn advect_air(&mut self, world: Option<&World>, wind: &crate::wind::Wind) {
         let mix = self.config.wind_mix.clamp(0.0, 1.0);
-        if mix < 1e-4 || self.cells.is_empty() || wind.field.is_empty() {
+        if mix < 1e-4 || self.cells.is_empty() || wind.field_is_empty() {
             return;
         }
         let mut snap: FxHashMap<(i32, i32), f32> = FxHashMap::default();
-        snap.reserve(wind.field.len().saturating_mul(3));
-        for &(hx, hy) in wind.field.keys() {
+        snap.reserve(wind.field_len().saturating_mul(3));
+        wind.for_each_field(|(hx, hy), _| {
             snap.entry((hx, hy)).or_insert_with(|| self.at_tile(hx, hy));
             snap.entry((hx, hy + 1))
                 .or_insert_with(|| self.at_tile(hx, hy + 1));
@@ -895,8 +895,10 @@ impl Temperature {
             if let Some(sx) = self.wrap_hx(hx - 1) {
                 snap.entry((sx, hy)).or_insert_with(|| self.at_tile(sx, hy));
             }
-        }
-        for &(hx, hy) in wind.field.keys() {
+        });
+        let mut seats: Vec<(i32, i32)> = Vec::with_capacity(wind.field_len());
+        wind.for_each_field(|(hx, hy), _| seats.push((hx, hy)));
+        for &(hx, hy) in &seats {
             let t = *snap.get(&(hx, hy)).unwrap_or(&self.config.base_temp_c);
             match self.props_cache.get(&(hx, hy)).map(|p| p.layer) {
                 Some(TileLayer::Buried { .. }) | Some(TileLayer::Surface { .. }) => continue,

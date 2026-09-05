@@ -114,6 +114,32 @@ impl Default for WindConfig {
     }
 }
 
+/// Packed compose output. Runtime only — do not dump every seat into
+/// [`Wind::field`] after a dense rebuild.
+#[derive(Debug, Clone)]
+struct FieldSlab {
+    bounds: TileBounds,
+    vel: Vec<(f32, f32)>,
+    live: Vec<bool>,
+}
+
+impl FieldSlab {
+    fn get(&self, hx: i32, hy: i32) -> Option<(f32, f32)> {
+        if !self.bounds.contains(hx, hy) {
+            return None;
+        }
+        let (w, _) = self.bounds.dims();
+        if w == 0 {
+            return None;
+        }
+        let i = self.bounds.index(w, hx, hy);
+        if i >= self.live.len() || !self.live[i] {
+            return None;
+        }
+        Some(self.vel[i])
+    }
+}
+
 /// Tile-scale wind used to advect atmospheric water and shove rafts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wind {
@@ -132,9 +158,14 @@ pub struct Wind {
     /// Fractional advection residual (shared; climate is uniform).
     pub residual_x: f32,
     pub residual_y: f32,
-    /// Rebuilt `(vx, vy)` on occupied / near-surface tiles. Runtime only.
+    /// Sparse / test / climate-seed vectors. Dense rebuilds keep the
+    /// packed slab instead of writing every live seat here.
     #[serde(skip)]
     pub field: FxHashMap<(i32, i32), (f32, f32)>,
+    /// Last dense compose. Solids are not stored — do not cache walls
+    /// across rebuilds.
+    #[serde(skip)]
+    field_slab: Option<FieldSlab>,
     /// Column surface y, filled during [`Self::rebuild_field`].
     #[serde(skip)]
     surf_cache: FxHashMap<i32, i32>,
@@ -167,6 +198,7 @@ impl Wind {
             residual_x: 0.0,
             residual_y: 0.0,
             field: FxHashMap::default(),
+            field_slab: None,
             surf_cache: FxHashMap::default(),
             tile_cols: tile_cols.max(1),
             bounds: Some(TileBounds::from_world_cells(
@@ -319,6 +351,7 @@ impl Wind {
     ) {
         let Some(bounds) = self.bounds else {
             self.field.clear();
+            self.field_slab = None;
             return;
         };
         self.surf_cache.clear();
@@ -327,6 +360,7 @@ impl Wind {
         let cfg = self.config;
         let smooth = cfg.field_smooth.clamp(0.0, 0.95);
         let prev = std::mem::take(&mut self.field);
+        let prev_slab = self.field_slab.take();
 
         let mut keys: FxHashMap<(i32, i32), ()> = FxHashMap::default();
         let mut unique_hx: FxHashSet<i32> = FxHashSet::default();
@@ -398,6 +432,7 @@ impl Wind {
                 &cfg,
                 smooth,
                 &prev,
+                prev_slab.as_ref(),
                 bounds,
                 &keys,
                 &col_oro,
@@ -421,6 +456,9 @@ impl Wind {
             vy = vy.clamp(-1.0, 1.0);
             if smooth > 1e-4 {
                 if let Some(&(px, py)) = prev.get(&(hx, hy)) {
+                    vx = px * smooth + vx * (1.0 - smooth);
+                    vy = py * smooth + vy * (1.0 - smooth);
+                } else if let Some((px, py)) = prev_slab.as_ref().and_then(|s| s.get(hx, hy)) {
                     vx = px * smooth + vx * (1.0 - smooth);
                     vy = py * smooth + vy * (1.0 - smooth);
                 }
@@ -448,6 +486,7 @@ impl Wind {
         for (&(hx, hy), v) in blended.iter_mut() {
             *v = self.deflect_along_surface(world, hx, hy, v.0, v.1);
         }
+        self.field_slab = None;
         self.field = blended;
     }
 
@@ -530,6 +569,7 @@ impl Wind {
         cfg: &WindConfig,
         smooth: f32,
         prev: &FxHashMap<(i32, i32), (f32, f32)>,
+        prev_slab: Option<&FieldSlab>,
         bounds: TileBounds,
         keys: &FxHashMap<(i32, i32), ()>,
         col_oro: &FxHashMap<i32, ColOro>,
@@ -539,6 +579,7 @@ impl Wind {
         let n = w.saturating_mul(h);
         if n == 0 || w == 0 {
             self.field.clear();
+            self.field_slab = None;
             return;
         }
         let tc = self.tile_cols.max(1);
@@ -578,6 +619,9 @@ impl Wind {
                     if let Some(&(px, py)) = prev.get(&(hx, hy)) {
                         vx = px * smooth + vx * (1.0 - smooth);
                         vy = py * smooth + vy * (1.0 - smooth);
+                    } else if let Some((px, py)) = prev_slab.and_then(|s| s.get(hx, hy)) {
+                        vx = px * smooth + vx * (1.0 - smooth);
+                        vy = py * smooth + vy * (1.0 - smooth);
                     }
                 }
                 vel[i] = (vx, vy);
@@ -614,21 +658,12 @@ impl Wind {
                 vel[i] = self.deflect_along_surface(world, hx, hy, vel[i].0, vel[i].1);
             }
         }
-        let mut next = FxHashMap::default();
-        next.reserve(keys.len());
-        for iy in 0..h {
-            for ix in 0..w {
-                let i = iy * w + ix;
-                if !live[i] {
-                    continue;
-                }
-                next.insert(
-                    (bounds.hx_min + ix as i32, bounds.hy_min + iy as i32),
-                    vel[i],
-                );
-            }
-        }
-        self.field = next;
+        self.field.clear();
+        self.field_slab = Some(FieldSlab {
+            bounds,
+            vel,
+            live,
+        });
     }
 
     fn spatial_blend_slab(
@@ -1262,8 +1297,57 @@ impl Wind {
         (sx, sy)
     }
 
+    /// True when neither the sparse map nor the last dense slab has a seat.
+    pub fn field_is_empty(&self) -> bool {
+        self.field.is_empty()
+            && !self
+                .field_slab
+                .as_ref()
+                .is_some_and(|s| s.live.iter().any(|&l| l))
+    }
+
+    pub fn field_len(&self) -> usize {
+        if !self.field.is_empty() {
+            return self.field.len();
+        }
+        self.field_slab
+            .as_ref()
+            .map(|s| s.live.iter().filter(|&&l| l).count())
+            .unwrap_or(0)
+    }
+
+    pub fn field_has(&self, hx: i32, hy: i32) -> bool {
+        self.field.contains_key(&(hx, hy))
+            || self.field_slab.as_ref().and_then(|s| s.get(hx, hy)).is_some()
+    }
+
+    pub fn for_each_field(&self, mut f: impl FnMut((i32, i32), (f32, f32))) {
+        if let Some(s) = &self.field_slab {
+            let (w, h) = s.bounds.dims();
+            if w > 0 {
+                for iy in 0..h {
+                    for ix in 0..w {
+                        let i = iy * w + ix;
+                        if i < s.live.len() && s.live[i] {
+                            f(
+                                (s.bounds.hx_min + ix as i32, s.bounds.hy_min + iy as i32),
+                                s.vel[i],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for (&k, &v) in &self.field {
+            f(k, v);
+        }
+    }
+
     pub fn vector_at(&self, world: Option<&World>, hx: i32, hy: i32) -> (f32, f32) {
         if let Some(&v) = self.field.get(&(hx, hy)) {
+            return v;
+        }
+        if let Some(v) = self.field_slab.as_ref().and_then(|s| s.get(hx, hy)) {
             return v;
         }
         // Miss: climate mean + the same downwind climb / slip as the field.
@@ -1344,18 +1428,18 @@ impl Wind {
 
     /// Mean |vx| on near-surface field tiles (evap / thermal mix).
     pub fn near_surface_abs(&self, world: Option<&World>) -> f32 {
-        if self.field.is_empty() {
+        if self.field_is_empty() {
             return self.climate_vx.abs().max(self.climate_vy.abs());
         }
         let mut sum = 0.0f32;
         let mut n = 0u32;
-        for (&(hx, hy), &(vx, _)) in &self.field {
+        self.for_each_field(|(hx, hy), (vx, _)| {
             let surf = self.surface_tile_hy(world, hx);
             if hy >= surf && hy <= surf + 2 {
                 sum += vx.abs();
                 n += 1;
             }
-        }
+        });
         if n == 0 {
             self.climate_vx.abs()
         } else {
@@ -1570,8 +1654,9 @@ mod tests {
         wind.config.field_smooth = 0.0;
         let occupied: Vec<(i32, i32)> = (0..16).map(|hx| (hx, 20)).collect();
         wind.rebuild_field(None, None, 40, &occupied, None);
-        assert!(!wind.field.is_empty());
-        let vals: Vec<f32> = wind.field.values().map(|&(vx, _)| vx).collect();
+        assert!(!wind.field_is_empty());
+        let mut vals: Vec<f32> = Vec::new();
+        wind.for_each_field(|_, (vx, _)| vals.push(vx));
         let lo = vals.iter().cloned().fold(f32::INFINITY, f32::min);
         let hi = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         assert!(
@@ -1606,7 +1691,7 @@ mod tests {
         wind.rebuild_field(Some(&w), None, 40, &occupied, None);
         let tunnel_hy = 256 / 4; // y=256–259, the screenshot band
         assert!(
-            !wind.field.contains_key(&(0, tunnel_hy)),
+            !wind.field_has(0, tunnel_hy),
             "wind must not sit inside the tower at tile hy={tunnel_hy}"
         );
         let surf = crate::worldgen::live_surface_y(&w, 2, hint, crate::worldgen::LIVE_SURFACE_SEARCH);
@@ -1678,21 +1763,21 @@ mod tests {
         }).collect();
         wind.rebuild_field(Some(&w), None, 10, &occupied, None);
         let mut best_up = 0.0f32;
-        for (&(hx, hy), &(vx, vy)) in &wind.field {
+        wind.for_each_field(|(hx, hy), (vx, vy)| {
             if hx < 1 || hx > 6 {
-                continue;
+                return;
             }
             let gx = hx * 4 + 2;
             let surf = crate::worldgen::live_surface_y(&w, gx, 8 + gx * 2, 64);
             if (hy * 4 + 2) > surf + 12 {
-                continue;
+                return;
             }
             best_up = best_up.max(vy);
             assert!(
                 vx >= -0.02,
                 "upslope should not reverse the climate breeze (hx={hx} vx={vx:.3})"
             );
-        }
+        });
         assert!(
             best_up > 0.016,
             "a +x breeze on a rising ramp must pick up a climb (best vy={best_up:.3})"
@@ -1753,12 +1838,12 @@ mod tests {
             .collect();
         wind.rebuild_field(Some(&w), None, 8, &occupied, None);
         let mut worst_tilt = 0.0f32;
-        for (&(hx, hy), &(_, vy)) in &wind.field {
+        wind.for_each_field(|(hx, hy), (_, vy)| {
             if !(1..=6).contains(&hx) || !(6..=9).contains(&hy) {
-                continue;
+                return;
             }
             worst_tilt = worst_tilt.max(vy.abs());
-        }
+        });
         assert!(
             worst_tilt < 0.04,
             "open flat must not invent a climb (max |vy|={worst_tilt:.3})"
@@ -1800,14 +1885,14 @@ mod tests {
         let mut mid_up = 0.0f32;
         let mut mid_vx = 0.0f32;
         let mut n = 0u32;
-        for (&(hx, hy), &(vx, vy)) in &wind.field {
+        wind.for_each_field(|(hx, hy), (vx, vy)| {
             if hx != 4 || hy < 7 || hy > 11 {
-                continue;
+                return;
             }
             mid_up += vy;
             mid_vx += vx;
             n += 1;
-        }
+        });
         assert!(n > 0, "expected field seats in the mid-valley");
         let mid_up = mid_up / n as f32;
         let mid_vx = mid_vx / n as f32;
@@ -1819,6 +1904,47 @@ mod tests {
         assert!(
             mid_vx > 0.02,
             "through-flow should remain, not reverse (mean vx={mid_vx:.3})"
+        );
+    }
+
+    #[test]
+    fn dense_rebuild_keeps_the_runtime_slab_not_the_field_map() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let sea: i32 = 16;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
+        for x in 0..32 {
+            for y in 0..=sea {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, sea, 0, 80, false);
+        wind.variance = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        let occupied: Vec<(i32, i32)> = (1..7)
+            .flat_map(|hx| (6..10).map(move |hy| (hx, hy)))
+            .collect();
+        wind.rebuild_field(Some(&w), None, 8, &occupied, None);
+        assert!(
+            wind.field.is_empty(),
+            "dense rebuild must not dump live seats into the HashMap"
+        );
+        assert!(!wind.field_is_empty(), "slab seats must still count as a field");
+        let (vx, vy) = wind.vector_at(Some(&w), 3, 7);
+        assert!(
+            vx.abs() + vy.abs() > 1e-4,
+            "vector_at must read the slab (vx={vx:.3} vy={vy:.3})"
+        );
+        wind.rebuild_field(Some(&w), None, 12, &occupied, None);
+        let (vx2, vy2) = wind.vector_at(Some(&w), 3, 7);
+        assert!(
+            vx2.abs() + vy2.abs() > 1e-4,
+            "second rebuild must still seat the slab"
         );
     }
 }

@@ -1455,13 +1455,13 @@ pub fn draw_wind_streaks(
         sh,
     );
     let mut samples: Vec<(i32, i32, f32, f32)> = Vec::new();
-    if !wind.field.is_empty() {
-        for (&(hx, hy), &(vx, vy)) in &wind.field {
+    if !wind.field_is_empty() {
+        wind.for_each_field(|(hx, hy), (vx, vy)| {
             if !wind_streak_on_lattice(hx, hy, stride) {
-                continue;
+                return;
             }
             if view.as_ref().is_some_and(|b| !b.contains(hx, hy)) {
-                continue;
+                return;
             }
             if !humidity_tile_touches_view(
                 hx,
@@ -1476,13 +1476,13 @@ pub fn draw_wind_streaks(
                 sw,
                 sh,
             ) {
-                continue;
+                return;
             }
             if wind_tile_center_is_solid(world, tc, hx, hy) {
-                continue;
+                return;
             }
             samples.push((hx, hy, vx, vy));
-        }
+        });
     } else {
         // Field not rebuilt yet — still show climate wind on a viewport grid.
         if evx.abs() + evy.abs() < 0.0015 {
