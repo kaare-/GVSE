@@ -672,6 +672,15 @@ fn heal_orphan_mycelium_pads(world: &mut World) {
     let mut orphans: Vec<(i32, i32, u8)> = Vec::new();
     let coords: Vec<_> = world.chunks.keys().copied().collect();
     for coord in coords {
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        // Hosts are non-Air solids. Mid-ocean / empty sky never hold
+        // cream — leftover 64×64 every orphan pulse. Occupancy is the
+        // source of truth.
+        if !chunk.has_solid {
+            continue;
+        }
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
@@ -2332,6 +2341,15 @@ pub fn try_emergent_fruiting(
     let mut candidates: Vec<(i32, i32, u8)> = Vec::new(); // gx, air_y, myc
     let coords: Vec<_> = world.chunks.keys().copied().collect();
     for coord in coords {
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        // Fruiting seats on Organic open to Air. Mid-ocean never held
+        // litter — leftover on the emerge pulse. Occupancy is the
+        // source of truth.
+        if !chunk.has_organic {
+            continue;
+        }
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let gx = world.wrap_x(coord.cx * CHUNK_CELLS_W as i32 + lx as i32);
@@ -3024,6 +3042,36 @@ mod tests {
             w.get_cell(4, 2).map(|c| c.mycelium()),
             Some(0),
             "isolated myc=1 soil with no shares should clear as oxidation ghost"
+        );
+    }
+
+    #[test]
+    fn orphan_heal_skips_water_only_chunks() {
+        let mut w = World::new(128);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..8 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        w.set_cell(68, 0, Cell::solid(MaterialId::Bedrock));
+        let mut soil = Cell::solid(MaterialId::Soil);
+        soil.sat = Sat(160);
+        soil.set_mycelium(1);
+        w.set_cell(68, 1, soil);
+        assert!(
+            !w.chunks[&ChunkCoord::new(0, 0)].has_solid,
+            "precondition: mid-ocean did not raise has_solid"
+        );
+        assert!(
+            w.chunks[&ChunkCoord::new(1, 0)].has_solid,
+            "precondition: soil raised has_solid"
+        );
+        w.tick = MYCELIUM_FIELD_PERIOD * 4;
+        step_mycelium_field(&mut w);
+        assert_eq!(
+            w.get_cell(68, 1).map(|c| c.mycelium()),
+            Some(0),
+            "ghost cream beside ocean must still heal"
         );
     }
 

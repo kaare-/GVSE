@@ -239,7 +239,9 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   shares with the host cell so piles keep strain color (cream `_pad` alone
   without shares used to paint orphan red dots). Each field pulse also runs a
   full-world orphan heal: shareless cream inherits a neighbour strain or
-  clears (never mints a fake strain). Inspector lists every strain on the cell.
+  clears (never mints a fake strain). Heal exact-skips `!has_solid`
+  (mid-ocean / empty sky). Emergence exact-skips `!has_organic`.
+  Occupancy is the source of truth. Inspector lists every strain on the cell.
 - **Emergence** — a rare forest event. Only after the network has
   **breached the surface** (colonized Organic open to Air *and* feeder
   mycelium below/beside — feeders may be mineral corridors), with high
