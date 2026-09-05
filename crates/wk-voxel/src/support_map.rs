@@ -417,10 +417,20 @@ pub fn void_below_competent_seeds_with(
   if coords.is_empty() {
     return seeds;
   }
+  // Sticky occupancy: ocean / rain-wet sky never holds competent rock.
+  // The play-app dirty halo still hands those chunks to landscape
+  // detach every tick (rain, plants). Walking 64×64 of water looking
+  // for stone-over-void was the leftover landscape cost. Bootstrap
+  // (no flags set yet) keeps every coord so a legacy save still finds
+  // a sky slab whose `has_competent` was never stamped.
+  let any_competent = world.chunks.values().any(|c| c.has_competent);
   for &coord in coords {
     let Some(chunk) = world.chunks.get(&coord) else {
       continue;
     };
+    if any_competent && !chunk.has_competent {
+      continue;
+    }
     let base_gx = coord.cx * cw;
     let base_gy = coord.cy * ch;
     for ly in 0..CHUNK_CELLS_H {
@@ -481,6 +491,62 @@ mod tests {
     assert!(
       !void_below_competent_seeds(&w, &all).is_empty(),
       "explicit full sweep still finds the sky slab"
+    );
+  }
+
+  #[test]
+  fn water_only_coords_do_not_seed_when_competent_exists() {
+    let mut w = World::new(32);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    w.ensure_chunk(ChunkCoord::new(1, 0));
+    for x in 0..64 {
+      for y in 0..64 {
+        w.set_cell(x, y, Cell::water());
+      }
+    }
+    for x in 0..8 {
+      for y in 70..80 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let water = ChunkCoord::new(0, 0);
+    let empty = ChunkCoord::new(1, 0);
+    let rock = ChunkCoord::new(0, 1);
+    assert!(
+      w.chunks[&rock].has_competent,
+      "precondition: the slab raised has_competent"
+    );
+    assert!(
+      !w.chunks[&water].has_competent,
+      "precondition: standing water did not raise has_competent"
+    );
+    assert!(
+      void_below_competent_seeds(&w, &[water, empty]).is_empty(),
+      "water-only / empty coords must not seed when another chunk has rock"
+    );
+    assert!(
+      !void_below_competent_seeds(&w, &[rock]).is_empty(),
+      "the competent chunk still seeds the hanging slab"
+    );
+  }
+
+  #[test]
+  fn bootstrap_scans_when_no_competent_flag() {
+    let mut w = World::new(8);
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+      for y in 70..80 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    for chunk in w.chunks.values_mut() {
+      chunk.has_competent = false;
+    }
+    let all: Vec<_> = w.chunks.keys().copied().collect();
+    assert!(
+      !void_below_competent_seeds(&w, &all).is_empty(),
+      "legacy save with no occupancy flags must still find the sky slab"
     );
   }
 

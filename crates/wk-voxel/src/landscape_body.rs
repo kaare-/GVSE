@@ -551,6 +551,33 @@ mod tests {
   }
 
   #[test]
+  fn water_dirty_coords_do_not_detach_a_far_slab() {
+    let mut w = World::new(40);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 0..40 {
+      for y in 2..12 {
+        w.set_cell(x, y, Cell::water());
+      }
+    }
+    // Slab must live in cy=1 (y≥64). A 25×10 block at y=40 sits in
+    // the same chunk as the water and would still be a legal seed.
+    for x in 5..30 {
+      for y in 70..80 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let mut store = LandscapeBodyStore::new();
+    let n = detach_landscape_bodies(&mut w, &mut store, &[ChunkCoord::new(0, 0)]);
+    assert_eq!(n, 0, "water-only dirty coord must not harvest a slab in cy=1");
+    assert!(store.is_empty());
+    assert_eq!(detach_all(&mut w, &mut store), 1, "a real scan still detaches");
+  }
+
+  #[test]
   fn floating_slab_detaches_and_falls() {
     let mut w = World::new(40);
     w.ensure_chunk(ChunkCoord::new(0, 0));

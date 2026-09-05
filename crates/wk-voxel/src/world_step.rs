@@ -279,6 +279,8 @@ pub fn step_world(
             }
             let dirty = plan_active(world);
             if landscape_busy || !dirty.is_empty() || support_due {
+                // Seed walk exact-skips !has_competent chunks once any
+                // occupancy flag is set — rain-dirty ocean/sky is leftover.
                 let coords: Vec<_> = if dirty.is_empty() && support_due {
                     world.chunks.keys().copied().collect()
                 } else {
