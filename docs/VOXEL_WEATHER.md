@@ -105,7 +105,7 @@ The honest version is a **second clock**, not a coarser sky:
    inland rock far from water. Dry sand and dry stone under a new
    puddle or seam still walk. Surface throughflow exact-skips
    mid-ocean wet Air and dry rock with no porous bed here or in
-   `cy-1`.
+   `cy-1`. F1/F2/F3 skip `!has_solid` chunks.
 2. **Conservation-form integrators** (Δt = 1k–10k). Pore seepage and
    humidity/T diffusion can take an implicit step with a flux limiter
    so `sat` stays in `[0, cap]` and tile mass is a discrete divergence.
@@ -597,6 +597,9 @@ What is still leftover:
 Flow throughflow (Priority 4) exact-skips mid-ocean wet Air and dry
 rock with no porous bed in this chunk or `cy-1`. That cut is inside
 the flow column above; surface cascade / equalise still walk wet Air.
+
+F1/F2/F3 exact-skip `!has_solid` (mid-ocean / empty sky) every
+`FAILURE_EVERY`. Cliffs and compactable beds still scan.
 
 `World.dissolved` and `Humidity::cells` stay `std::HashMap` (saved).
 Runtime slab / Fx dual is OK if serde still writes the HashMap.

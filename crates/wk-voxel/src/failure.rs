@@ -353,11 +353,20 @@ fn is_roof_candidate(material: MaterialId) -> bool {
     material != MaterialId::Air && roof_span_limit_cells(material) < i32::MAX
 }
 
-/// Failure scans every loaded chunk. Dirty halos from flow/seepage are
-/// often tiny and miss static wet cliff faces / roofs that still need
-/// geotech evaluation — event caps keep the write set bounded.
+/// Failure scans loaded chunks that hold a solid.
+///
+/// Dirty halos from flow/seepage are often tiny and miss static wet
+/// cliff faces / roofs — so this is not the dirty set. Mid-ocean and
+/// empty sky never host a roof, shear face, or compactable bed;
+/// walking those 64×64s every `FAILURE_EVERY` was leftover.
+/// Occupancy is the source of truth.
 fn regions_for_failure(world: &World) -> Vec<ActiveChunk> {
-    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_solid)
+        .map(|(&coord, _)| coord)
+        .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
@@ -396,6 +405,9 @@ pub fn apply_roof_collapse_regions(
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             continue;
         };
+        if !chunk.has_solid {
+            continue;
+        }
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             if gy <= 0 {
@@ -627,6 +639,12 @@ pub fn apply_shear_weaken_regions(
     // (gy, gx) for determinism.
     let mut candidates: Vec<(i32, i32)> = Vec::new();
     for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        if !chunk.has_solid {
+            continue;
+        }
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             if gy <= 0 {
@@ -834,6 +852,12 @@ pub fn apply_compaction_regions(
     let use_map = cfg.use_geotech_map && geotech.is_some();
     let mut candidates: Vec<(i32, i32)> = Vec::new();
     for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        if !chunk.has_solid {
+            continue;
+        }
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             if gy <= 0 {
@@ -1009,6 +1033,39 @@ mod tests {
             MaterialId::Sand,
             "sand debris drops into the cavity"
         );
+    }
+
+    #[test]
+    fn failure_regions_skip_water_only_chunks() {
+        let mut w = World::new(128);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..8 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        w.set_cell(68, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(67, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(69, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(68, 1, Cell::air());
+        w.set_cell(67, 2, Cell::solid(MaterialId::Sand));
+        w.set_cell(68, 2, Cell::solid(MaterialId::Sand));
+        w.set_cell(69, 2, Cell::solid(MaterialId::Sand));
+        let coords: Vec<_> = regions_for_failure(&w)
+            .into_iter()
+            .map(|ac| ac.coord)
+            .collect();
+        assert_eq!(
+            coords,
+            vec![ChunkCoord::new(1, 0)],
+            "mid-ocean must leave the F1/F2/F3 walk"
+        );
+        apply_roof_collapse(&mut w, &FailureConfig::default());
+        assert_eq!(
+            w.get_cell(68, 2).unwrap().material,
+            MaterialId::Air,
+            "sand ceiling beside ocean still collapses"
+        );
+        assert_eq!(w.get_cell(68, 1).unwrap().material, MaterialId::Sand);
     }
 
     #[test]
