@@ -39,6 +39,50 @@ const SEAM_SEEPAGE_DEPTH_LO: i32 = 16;
 /// sideways at y=70 and stalled infiltration in unit tests.
 const SEAM_SEEPAGE_DEPTH_HI: i32 = 4;
 
+/// Whether this chunk can move water on the seepage apply walk.
+///
+/// Mid-ocean / empty sky (wet Air, no solid, no loose) is leftover.
+/// Dry rock / dry loose on the plant/rain halo is leftover unless a
+/// Moore neighbour holds water — dry stone under a vertical seam
+/// drinks from `cy+1` and must still scan.
+fn seepage_chunk_live(
+    world: &World,
+    coord: ChunkCoord,
+    chunk: &crate::chunk::Chunk,
+) -> bool {
+    let can_hold_pore = chunk.has_wet_pores
+        || chunk.has_unsaturated_pores
+        || chunk.has_loose
+        || chunk.has_solid;
+    if !can_hold_pore {
+        return false;
+    }
+    if chunk.has_wet_pores || chunk.has_unsaturated_pores || chunk.has_wet_air {
+        return true;
+    }
+    moore_neighbour_holds_water(world, coord)
+}
+
+fn moore_neighbour_holds_water(world: &World, coord: ChunkCoord) -> bool {
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            if world
+                .chunks
+                .get(&ChunkCoord::new(coord.cx + dx, coord.cy + dy))
+                .is_some_and(|c| {
+                    c.has_wet_air || c.has_wet_pores || c.has_unsaturated_pores
+                })
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Walk down a porous column from `start_y` through saturated cells and
 /// re-dirty the first unsaturated pore (the wetting front). Stops at
 /// impermeable / void. Mirrors the standing-water lake-bed walk.
@@ -700,26 +744,16 @@ fn accumulate_seepage_xfers_ex(
     let hydro = world.hydro;
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
-    // Sticky occupancy: a chunk that has never held wet Air or a wet
-    // pore has no face that can move water. The flow halo still includes
-    // dry rock / empty sky from gravity and body writes; walking those
-    // was the leftover seepage cost on a tall world. Occupancy is the
-    // source of truth.
+    // Sticky occupancy: mid-ocean / empty sky and dry inland rock far
+    // from water are leftover on the plant/rain halo. Dry stone under
+    // a wet seam still walks. Occupancy is the source of truth.
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         // Chunk-local reads — same pattern as water_flow (~10× vs HashMap).
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             return local;
         };
-        // Exact skip: wet-Air-only / empty sky (Air–Air leftover).
-        // Dry loose *and* dry solid still scan — stone below a vertical
-        // seam has not raised `has_wet_pores` yet, and skipping it
-        // shelves sat at y=63|64.
-        if !chunk.has_wet_pores
-            && !chunk.has_unsaturated_pores
-            && !chunk.has_loose
-            && !chunk.has_solid
-        {
+        if !seepage_chunk_live(world, ac.coord, chunk) {
             return local;
         }
         let base_gx = ac.coord.cx * cw;
@@ -1320,5 +1354,44 @@ mod tests {
         assert_eq!(xfers[2].0, (2, 2));
         assert_eq!(xfers[3].0, (2, 2));
         assert_eq!(xfers[2].2, 40, "biggest first within a donor");
+    }
+
+    #[test]
+    fn inland_dry_stone_is_not_a_seepage_scan() {
+        let mut w = World::new(192);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(2, 0));
+        for x in 0..8 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+        }
+        for x in 128..136 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        let stone = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(
+            !seepage_chunk_live(&w, ChunkCoord::new(0, 0), stone),
+            "dry inland rock with no wet Moore neighbour is leftover"
+        );
+        let ocean = &w.chunks[&ChunkCoord::new(2, 0)];
+        assert!(
+            !seepage_chunk_live(&w, ChunkCoord::new(2, 0), ocean),
+            "wet-Air-only ocean stays exact-skip"
+        );
+    }
+
+    #[test]
+    fn dry_stone_under_a_wet_seam_stays_on_the_walk() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        for x in 0..8 {
+            w.set_cell(x, 60, Cell::solid(MaterialId::Stone));
+            w.set_cell(x, 66, Cell::water());
+        }
+        let stone = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(
+            seepage_chunk_live(&w, ChunkCoord::new(0, 0), stone),
+            "dry stone under cy+1 water must still scan"
+        );
     }
 }
