@@ -724,7 +724,17 @@ fn accumulate_seepage_xfers_ex(
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             return local;
         };
-        if any_water && !chunk.has_wet_air && !chunk.has_wet_pores {
+        // Exact skip: wet-Air-only / empty sky (Air–Air leftover).
+        // Dry loose *and* dry solid still scan — stone below a vertical
+        // seam has not raised `has_wet_pores` yet, and skipping it
+        // shelves sat at y=63|64.
+        // Bootstrap (no water flags anywhere) keeps every region.
+        if any_water
+            && !chunk.has_wet_pores
+            && !chunk.has_unsaturated_pores
+            && !chunk.has_loose
+            && !chunk.has_solid
+        {
             return local;
         }
         let base_gx = ac.coord.cx * cw;
