@@ -11,6 +11,7 @@ use wk_material::MaterialId;
 use crate::active::ActiveChunk;
 use crate::cell::{is_competent_rock, water_capacity_cell, water_capacity_with, Cell, Sat};
 use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::confined::ConfinedStore;
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
@@ -42,7 +43,8 @@ use super::plan::{regions_confined_loaded, regions_for_standalone};
 ///    (cliff / spring) or Air below the stack.
 /// 5. **Confined upward head** — Air-with-room on a full wet column pulls
 ///    from the connected free-surface donor (bedrock pipes / communicating
-///    vessels). See [`wake_confined_head`].
+///    vessels). See [`wake_confined_head`]. Equalized bodies persist on
+///    [`World::confined`] so the period-16 wake is a lookup, not a BFS.
 ///
 /// Vertical bulk fall stays in [`apply_gravity_fall`] (pull-based).
 /// Porous soak stays in [`apply_seepage`]. Mass is preserved by greedy
@@ -97,7 +99,9 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     world.refresh_water_head();
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_water_flow_xfers(world, active, &mut xfers, true);
-    accumulate_confined_upward_xfers(world, active, &mut xfers);
+    let mut store = std::mem::take(&mut world.confined);
+    accumulate_confined_upward_xfers(world, active, &mut xfers, &mut store);
+    world.confined = store;
     commit_air_sat_xfers(world, &mut xfers);
 }
 
@@ -138,7 +142,9 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
     }
     world.refresh_water_head();
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
-    accumulate_confined_upward_xfers(world, active, &mut xfers);
+    let mut store = std::mem::take(&mut world.confined);
+    accumulate_confined_upward_xfers(world, active, &mut xfers, &mut store);
+    world.confined = store;
     commit_air_sat_xfers(world, &mut xfers);
     // Artesian discharge: water that just *rose* against gravity arrived under
     // pressure and gives up part of its load as it depressurises. Without this
@@ -178,7 +184,9 @@ fn max_standing_air_gy(world: &World) -> Option<i32> {
 /// Periodic full-chunk confined-head wake (communicating vessels).
 ///
 /// Must not use dirty-halo planning — ocean evaporation keeps surface
-/// cells dirty forever and would starve a quiet pipe shaft.
+/// cells dirty forever and would starve a quiet pipe shaft. Equalized
+/// vessels persist on [`World::confined`]; this still **runs** every
+/// period so a far well can rise. The BFS is the leftover we skip.
 pub fn wake_confined_head(world: &mut World) {
     if world.tick % CONFINED_HEAD_WAKE_EVERY != 0 {
         return;
@@ -523,6 +531,40 @@ fn climb_full_air_column(
     }
 }
 
+/// Live head from a stored donor. Ocean evap updates sat in place so
+/// a far well still sees the new reservoir without a BFS. `None` means
+/// the vessel changed (empty donor, buried surface, dead seed).
+fn body_from_stored_donor(
+    world: &World,
+    seed_x: i32,
+    seed_y: i32,
+    donor: (i32, i32),
+    cap: u8,
+) -> Option<PressureBody> {
+    let seed = world.get_cell(seed_x, seed_y)?;
+    if !transmits_pressure(world, &seed) {
+        return None;
+    }
+    let (dx, dy) = donor;
+    let donor_c = world.get_cell(dx, dy)?;
+    if donor_c.material != MaterialId::Air || donor_c.sat.0 == 0 {
+        return None;
+    }
+    // Stored free-surface cell now has full water above — the surface
+    // rose. Miss so the next BFS can find the new donor.
+    if donor_c.sat.is_full() {
+        if let Some(above) = world.get_cell(dx, dy + 1) {
+            if above.material == MaterialId::Air && above.sat.is_full() {
+                return None;
+            }
+        }
+    }
+    Some(PressureBody {
+        max_head: hydraulic_head(dy, donor_c.sat, cap),
+        donor,
+    })
+}
+
 /// Pressure-connected body through **full** wet Air, starting at a full
 /// seed. Free-surface head is the max `hydraulic_head` among full cells
 /// that have room above and among adjacent partial wet-Air cells.
@@ -530,22 +572,36 @@ fn climb_full_air_column(
 /// Deep oceans are handled by climbing each touched column to its free
 /// surface instead of visiting every submerged cell; once a free surface
 /// higher than the seed column is found we stop (enough to drive a rise).
+///
+/// When `persist`, a remembered donor is reused (evap updates head from
+/// live sat). The BFS limit is unchanged.
 fn pressure_body_from_full(
     world: &World,
     seed_x: i32,
     seed_y: i32,
     cache: &mut FxHashMap<(i32, i32), PressureBody>,
     scratch: &mut ConfinedBfsScratch,
+    store: &mut ConfinedStore,
+    persist: bool,
 ) -> Option<PressureBody> {
     if let Some(&body) = cache.get(&(seed_x, seed_y)) {
         return Some(body);
+    }
+    let cap = water_capacity_with(MaterialId::Air, &world.hydro);
+    if persist {
+        if let Some(donor) = store.donor_of((seed_x, seed_y)) {
+            if let Some(body) = body_from_stored_donor(world, seed_x, seed_y, donor, cap) {
+                cache.insert((seed_x, seed_y), body);
+                return Some(body);
+            }
+            store.forget((seed_x, seed_y));
+        }
     }
     let seed = world.get_cell(seed_x, seed_y)?;
     if !transmits_pressure(world, &seed) {
         return None;
     }
-
-    let cap = water_capacity_with(MaterialId::Air, &world.hydro);
+    store.bfs_runs += 1;
     let head_eps = 1.0 / (cap as f32);
     // Require a free surface at least one full cell above the seed
     // before early-out. The shaft's own rising film sits just above the
@@ -607,9 +663,15 @@ fn pressure_body_from_full(
     };
     for key in visited.iter() {
         cache.insert(*key, body);
+        if persist {
+            store.remember(*key, body.donor);
+        }
     }
     // Seed may equal best when the climb marked it; always cache seed.
     cache.insert((seed_x, seed_y), body);
+    if persist {
+        store.remember((seed_x, seed_y), body.donor);
+    }
     Some(body)
 }
 
@@ -621,6 +683,7 @@ fn accumulate_confined_upward_xfers(
     world: &World,
     active: &[ActiveChunk],
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
+    store: &mut ConfinedStore,
 ) {
     let mut cache: FxHashMap<(i32, i32), PressureBody> = FxHashMap::default();
     let mut scratch = ConfinedBfsScratch::new();
@@ -629,6 +692,7 @@ fn accumulate_confined_upward_xfers(
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     let max_stand_gy = max_standing_air_gy(world);
+    let persist = store.begin_wake(max_stand_gy);
 
     for ac in active {
         let Some(chunk) = world.chunks.get(&ac.coord) else {
@@ -714,7 +778,8 @@ fn accumulate_confined_upward_xfers(
                     return;
                 }
             }
-            let Some(body) = pressure_body_from_full(world, gx, gy - 1, &mut cache, &mut scratch)
+            let Some(body) =
+                pressure_body_from_full(world, gx, gy - 1, &mut cache, &mut scratch, store, persist)
             else {
                 return;
             };

@@ -4364,6 +4364,80 @@ fn confined_head_wake_scans_despite_unrelated_dirty() {
     );
 }
 
+/// Reservoir + L-pipe + empty shaft (same geometry as the mass test).
+fn confined_l_pipe_world(seed: u64) -> World {
+    let mut w = World::new(seed);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=10 {
+        w.set_cell(7, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+    for x in 1..=6 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 7..=10 {
+        w.set_cell(x, 1, Cell::water());
+    }
+    w
+}
+
+#[test]
+fn confined_body_lookup_skips_equalized_bfs() {
+    // Time-coarsen item 3 at Δt=1: after the vessel equalises, the
+    // period-16 / full_feel confined apply must not walk again.
+    let mut w = confined_l_pipe_world(82);
+    for _ in 0..400 {
+        tick(&mut w);
+    }
+    let bfs = w.confined.bfs_runs;
+    assert!(bfs > 0, "first equalise must BFS");
+    let regions = super::plan::regions_confined_loaded(&w);
+    super::water_flow::apply_confined_upward_regions(&mut w, &regions);
+    super::water_flow::apply_confined_upward_regions(&mut w, &regions);
+    assert_eq!(
+        w.confined.bfs_runs, bfs,
+        "equalized vessel must look up the stored donor, not BFS"
+    );
+}
+
+#[test]
+fn confined_persist_rises_when_reservoir_grows() {
+    // A higher standing row must drop the store so the far well
+    // finds the new tarn (this is why we do not freeze the wake).
+    let mut w = confined_l_pipe_world(83);
+    for _ in 0..400 {
+        tick(&mut w);
+    }
+    let before = (1..=11)
+        .rev()
+        .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .unwrap_or(0);
+    for x in 1..=6 {
+        w.set_cell(x, 9, Cell::water());
+    }
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+    let after = (1..=11)
+        .rev()
+        .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .unwrap_or(0);
+    assert!(
+        after > before,
+        "higher reservoir must lift the shaft (before={before} after={after})"
+    );
+}
+
 #[test]
 fn confined_head_equalizes_across_large_deep_ocean() {
     // Naive flood-fill of a deep ocean exceeds CONFINED_HEAD_BFS_LIMIT

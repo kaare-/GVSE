@@ -106,7 +106,10 @@ The honest version is a **second clock**, not a coarser sky:
    vessel once, store donor + max head, apply `rate × Δt` capped by
    donor sat and dest free. Period-16 BFS becomes a lookup. Ocean
    evap updates the body so a far well still rises — that is why the
-   wake must not be the dirty halo.
+   wake must not be the dirty halo. **Δt = 1 is shipped**
+   (`World.confined`): equalized shafts look up the stored donor and
+   recompute head from live sat. A higher standing row clears the
+   store. Δt>1 and the seam ledger are still parked.
 4. **Kinematic surface dump** for far hills. Do not replay 10k CA
    hops. Move mobile Air sat along the D8 slope, deposit where it
    dies. Mass is conserved; terrace/jelly will not match the CA.
@@ -574,7 +577,8 @@ What is still leftover:
 2. Wind rebuild ~4.1 ms — compose + field HashMap write + slip
 3. Seepage ~4.0 ms
 4. Landscape bodies ~4.0 ms
-5. Equalized confined BFS ~3.0 ms — persist the body; do not starve the wake
+5. Equalized confined BFS ~3.0 ms — **Δt=1 persist is in**
+   (`World.confined` lookup). Do not starve the wake. Δt>1 still parked.
 6. Condensation lottery ~2.9 ms — do not skip it
 
 `World.dissolved` and `Humidity::cells` stay `std::HashMap` (saved).
