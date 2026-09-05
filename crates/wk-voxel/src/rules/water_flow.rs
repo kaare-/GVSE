@@ -843,6 +843,11 @@ fn accumulate_water_flow_xfers(
         if !chunk_or_moore_has_wet_air(world, ac.coord) {
             return local;
         };
+        // Throughflow needs a porous bed. Mid-ocean wet Air and dry
+        // plant-halo rock have none — exact skip (same occupancy rule
+        // as the interactive throughflow-only pass).
+        let plan_throughflow =
+            include_throughflow && throughflow_chunk_live(world, ac.coord, chunk);
         let base_gx = ac.coord.cx * cw;
         let base_gy = ac.coord.cy * ch;
         // Read (gx, gy) via chunk when (lx, ly) is in-chunk, else world.
@@ -1093,7 +1098,7 @@ fn accumulate_water_flow_xfers(
                     );
                 }
 
-                if remaining == 0 || !on_surface || !include_throughflow {
+                if remaining == 0 || !on_surface || !plan_throughflow {
                     return;
                 }
 
@@ -1133,6 +1138,34 @@ fn chunk_or_moore_has_wet_air(world: &World, coord: ChunkCoord) -> bool {
     false
 }
 
+/// True when a chunk can host a saturated porous column for Priority-4
+/// throughflow (solid / loose / wet or unsaturated pores).
+fn chunk_can_host_throughflow_bed(chunk: &Chunk) -> bool {
+    chunk.has_solid
+        || chunk.has_loose
+        || chunk.has_wet_pores
+        || chunk.has_unsaturated_pores
+}
+
+/// Whether Priority-4 throughflow can fire in this chunk.
+///
+/// Needs wet Air as the source. Needs a porous bed in this chunk, or
+/// in `cy-1` when a surface film sits on a bed across the seam.
+/// Mid-ocean wet Air and dry plant-halo rock are leftover — no bed,
+/// no transfer. Occupancy is the source of truth.
+fn throughflow_chunk_live(world: &World, coord: ChunkCoord, chunk: &Chunk) -> bool {
+    if !chunk.has_wet_air {
+        return false;
+    }
+    if chunk_can_host_throughflow_bed(chunk) {
+        return true;
+    }
+    world
+        .chunks
+        .get(&ChunkCoord::new(coord.cx, coord.cy - 1))
+        .is_some_and(chunk_can_host_throughflow_bed)
+}
+
 /// Throughflow-only scan (Priority 4) — once per tick from [`tick`].
 fn accumulate_throughflow_xfers(
     world: &World,
@@ -1147,6 +1180,11 @@ fn accumulate_throughflow_xfers(
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             return local;
         };
+        // Exact skip: no wet Air, or wet Air with no porous bed here
+        // or in cy-1 (mid-ocean / empty sky on the rain/plant halo).
+        if !throughflow_chunk_live(world, ac.coord, chunk) {
+            return local;
+        }
         let base_gx = ac.coord.cx * cw;
         let base_gy = ac.coord.cy * ch;
         let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {
@@ -1529,5 +1567,88 @@ fn plan_throughflow_from_cell(
             remaining -= amt;
             placed = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mid_ocean_wet_air_is_not_a_throughflow_scan() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        for x in 0..8 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 64..72 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        let ocean = &w.chunks[&ChunkCoord::new(0, 1)];
+        assert!(
+            ocean.has_wet_air,
+            "precondition: standing water raised has_wet_air"
+        );
+        assert!(
+            !throughflow_chunk_live(&w, ChunkCoord::new(0, 1), ocean),
+            "wet-Air stack over more wet Air has no porous bed"
+        );
+    }
+
+    #[test]
+    fn dry_inland_rock_is_not_a_throughflow_scan() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+        }
+        let rock = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(
+            !throughflow_chunk_live(&w, ChunkCoord::new(0, 0), rock),
+            "dry plant-halo rock has no wet-Air source"
+        );
+    }
+
+    #[test]
+    fn surface_film_over_cy1_sand_stays_on_the_walk() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        for x in 0..8 {
+            w.set_cell(x, 60, Cell::solid(MaterialId::Sand));
+            w.set_cell(x, 66, Cell::water());
+        }
+        let film = &w.chunks[&ChunkCoord::new(0, 1)];
+        assert!(
+            throughflow_chunk_live(&w, ChunkCoord::new(0, 1), film),
+            "wet Air over a sand bed in cy-1 must still throughflow"
+        );
+    }
+
+    #[test]
+    fn cliff_pillar_with_pool_stays_on_the_walk() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let cap = water_capacity_with(MaterialId::Stone, &w.hydro);
+        for y in 1..=4 {
+            w.set_cell(
+                3,
+                y,
+                Cell {
+                    material: MaterialId::Stone,
+                    sat: Sat(cap),
+                    ..Cell::default()
+                },
+            );
+        }
+        w.set_cell(3, 5, Cell::water());
+        let chunk = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(
+            throughflow_chunk_live(&w, ChunkCoord::new(0, 0), chunk),
+            "pool on saturated stone is a live throughflow source"
+        );
     }
 }
