@@ -23,7 +23,7 @@ pub struct ActiveChunk {
     /// after inflate, or an explicit full-chunk rect for wakes).
     pub rect: Rect,
     /// Dilated dirty cells. All-zero means **dense**: walk the whole
-    /// [`Self::rect`] (standalone tests, occupancy wakes, legacy saves).
+    /// [`Self::rect`] (standalone tests, occupancy wakes).
     pub bits: DirtyBits,
 }
 

@@ -273,8 +273,7 @@ which A/Bs `enable_competent_fall` over a real `tick_with_life` loop.
 - **Sticky `has_competent`** — `wake_floating_competent` used to walk every
   loaded cell looking for air-below rock. On a 1000-cell troposphere most
   chunks are empty sky or bedrock. The flag (raised on write, cleared when a
-  scan finds none) skips those. Bootstrap — no flags set yet — still walks
-  everything so a legacy save cannot hang a painted boulder.
+  scan finds none) skips those. Occupancy is the source of truth.
 - **Wake tiles stay tiles** — cadence seed scans the dirty rect, not the
   whole chunk, and `apply_competent_fall_wake` does not re-union those
   tiles per chunk. Re-expanding the wake list was the leftover that turned

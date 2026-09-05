@@ -104,8 +104,7 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
     // Gravity only pulls free water. Plant-dirty dry land under dry sky
     // is leftover — dest can still receive a fall from `cy+1`, so skip
     // only when this chunk *and* the chunk above have no wet Air.
-    // Bootstrap (no flag yet) keeps every region.
-    let any_wet_air = world.chunks.values().any(|c| c.has_wet_air);
+    // Occupancy is the source of truth.
     // Dissolved / suspended load has to ride these transfers, but the hot
     // loop runs over raw chunk pointers and cannot touch the sparse maps.
     // Collect the moves and apply them after. Once karst has emitted *any*
@@ -126,7 +125,7 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
             return;
         };
         let above_ptr = ptrs.get(&ChunkCoord::new(ac.coord.cx, ac.coord.cy + 1));
-        if any_wet_air {
+        {
             // SAFETY: occupancy flags are read-only here; write set is
             // the checkerboard colour already granted to this closure.
             let dest_wet = unsafe { (*own).has_wet_air };

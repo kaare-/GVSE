@@ -44,10 +44,6 @@ pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
         .filter(|(_, c)| c.has_wet_air || c.has_wet_pores)
         .map(|(&coord, _)| coord)
         .collect();
-    // Bootstrap: old saves / stamps that never raised the flag.
-    if coords.is_empty() && !world.chunks.is_empty() {
-        return regions_all_loaded(world);
-    }
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
@@ -60,17 +56,9 @@ pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
 /// Needs standing water next to rock. Rain-film sky, mid-ocean water with
 /// no solid, and groundwater-only crust (wet pores, no free surface) are
 /// skipped — those cells already reject per-cell, and walking them was
-/// the leftover period-16 cost. Bootstrap (no flags set yet) falls back
-/// to [`regions_wet_air_loaded`]. Once any flag is live, an empty match
-/// means "no shaft this tick", not "scan every wet-air chunk".
+/// the leftover period-16 cost. Occupancy is the source of truth: an
+/// empty match means no shaft this tick.
 pub(crate) fn regions_confined_loaded(world: &World) -> Vec<ActiveChunk> {
-    let ready = world
-        .chunks
-        .values()
-        .any(|c| c.has_solid || c.has_standing_air);
-    if !ready {
-        return regions_wet_air_loaded(world);
-    }
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -122,16 +110,8 @@ fn standing_can_still_infiltrate(
 /// Standing water walks down into a dry-loose or unsaturated bed
 /// (this chunk or `cy-1`). Mid-ocean and a full table over inert
 /// rock drop out — exact skip, not a frozen chunk. Rain-film sky is
-/// skipped. Bootstrap (no flags set yet) falls back to
-/// [`regions_wet_loaded`].
+/// skipped. Occupancy is the source of truth.
 pub(crate) fn regions_lake_bed_loaded(world: &World) -> Vec<ActiveChunk> {
-    let ready = world
-        .chunks
-        .values()
-        .any(|c| c.has_standing_air || c.has_unsaturated_pores);
-    if !ready {
-        return regions_wet_loaded(world);
-    }
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -155,9 +135,6 @@ pub(crate) fn regions_wet_air_loaded(world: &World) -> Vec<ActiveChunk> {
         .filter(|(_, c)| c.has_wet_air)
         .map(|(&coord, _)| coord)
         .collect();
-    if coords.is_empty() && !world.chunks.is_empty() {
-        return regions_wet_loaded(world);
-    }
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
@@ -168,16 +145,14 @@ pub(crate) fn regions_wet_air_loaded(world: &World) -> Vec<ActiveChunk> {
 /// Loaded chunks with sticky [`crate::chunk::Chunk::has_loose`], plus
 /// Moore neighbours (repose / cold-avalanche write into adjacent Air).
 ///
-/// Bootstrap (no flag ever set) falls back to all loaded chunks.
+/// Occupancy is the source of truth — no loose flag means no walk.
 pub(crate) fn regions_loose_moore(world: &World) -> Vec<ActiveChunk> {
     use std::collections::HashSet;
     let mut coords: HashSet<ChunkCoord> = HashSet::new();
-    let mut any = false;
     for (&coord, c) in &world.chunks {
         if !c.has_loose {
             continue;
         }
-        any = true;
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let n = ChunkCoord::new(coord.cx + dx, coord.cy + dy);
@@ -186,9 +161,6 @@ pub(crate) fn regions_loose_moore(world: &World) -> Vec<ActiveChunk> {
                 }
             }
         }
-    }
-    if !any {
-        return regions_all_loaded(world);
     }
     let mut coords: Vec<ChunkCoord> = coords.into_iter().collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));

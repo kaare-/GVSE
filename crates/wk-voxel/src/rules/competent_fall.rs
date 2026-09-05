@@ -2487,13 +2487,12 @@ pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
 pub fn wake_competent_bodies_regions(world: &mut World, regions: &[ActiveChunk]) {
   let cw = CHUNK_CELLS_W as i32;
   let ch = CHUNK_CELLS_H as i32;
-  let any_competent = world.chunks.values().any(|c| c.has_competent);
   let mut touches: Vec<(i32, i32)> = Vec::new();
   for ac in regions {
     let Some(chunk) = world.chunks.get(&ac.coord) else {
       continue;
     };
-    if any_competent && !chunk.has_competent {
+    if !chunk.has_competent {
       continue;
     }
     let base_gx = ac.coord.cx * cw;
@@ -2603,16 +2602,14 @@ pub fn wake_floating_competent(world: &mut World) {
   let mut settled_scanned = HashSet::default();
   let mut clear_competent: Vec<ChunkCoord> = Vec::new();
   let mut stamp_competent: Vec<ChunkCoord> = Vec::new();
-  // Bootstrap (no flags set yet) walks every loaded chunk so a legacy
-  // save still finds sky-painted boulders. After the first scan, empty
-  // sky / bedrock drop out — that was the leftover bodies cost on a
-  // 1000-cell troposphere (most chunks have never held rock).
-  let any_competent = world.chunks.values().any(|c| c.has_competent);
+  // Occupancy is the source of truth. Empty sky / bedrock drop out —
+  // leftover bodies cost on a 1000-cell troposphere. A false flag
+  // is a skip, not a reason to walk the world.
   for coord in coords {
     let Some(chunk) = world.chunks.get(&coord) else {
       continue;
     };
-    if any_competent && !chunk.has_competent {
+    if !chunk.has_competent {
       continue;
     }
     let base_gx = coord.cx * cw;
@@ -4698,7 +4695,7 @@ mod tests {
   }
 
   #[test]
-  fn floating_wake_bootstraps_and_clears_the_competent_flag() {
+  fn floating_wake_clears_the_competent_flag() {
     let mut w = World::new(11);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     w.ensure_chunk(ChunkCoord::new(0, 1));
@@ -4706,13 +4703,9 @@ mod tests {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
     w.set_cell(3, CHUNK_CELLS_H as i32 + 4, Cell::solid(MaterialId::Stone));
-    for chunk in w.chunks.values_mut() {
-      chunk.has_competent = false;
-    }
-    wake_floating_competent(&mut w);
     assert!(
       w.chunks[&ChunkCoord::new(0, 1)].has_competent,
-      "bootstrap must stamp rock so later ticks skip empty sky"
+      "set_cell stamps competent occupancy"
     );
     assert!(
       !w.chunks[&ChunkCoord::new(0, 0)].has_competent,

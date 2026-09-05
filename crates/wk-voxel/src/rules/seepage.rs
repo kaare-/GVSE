@@ -272,13 +272,6 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
     let cw = CHUNK_CELLS_W as i32;
     let mut touches: Vec<(i32, i32)> = Vec::new();
     let coords: Vec<_> = world.chunks.keys().copied().collect();
-    // Bootstrap: a legacy save with no occupancy stamps must still
-    // walk every seam. Once any chunk is flagged, dry/dry pairs are
-    // leftover — same gate as [`seam_coupled_span`] / contact seepage.
-    let any_water = world
-        .chunks
-        .values()
-        .any(|c| c.has_wet_air || c.has_wet_pores);
     for coord in coords {
         let above = ChunkCoord::new(coord.cx, coord.cy + 1);
         if !world.chunks.contains_key(&above) {
@@ -299,8 +292,7 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         // Same occupancy as [`seam_coupled_span`]: a dry/dry pair has
         // nothing to couple. Walking every loaded cy pair was leftover
         // on a tall sky (272 chunks, most seams empty).
-        if any_water
-            && !lo_chunk.has_wet_pores
+        if !lo_chunk.has_wet_pores
             && !lo_chunk.has_wet_air
             && !hi_chunk.has_wet_pores
             && !hi_chunk.has_wet_air
@@ -711,13 +703,8 @@ fn accumulate_seepage_xfers_ex(
     // Sticky occupancy: a chunk that has never held wet Air or a wet
     // pore has no face that can move water. The flow halo still includes
     // dry rock / empty sky from gravity and body writes; walking those
-    // was the leftover seepage cost on a tall world. Bootstrap (no flags
-    // set yet) keeps every region so a legacy save cannot skip a wet
-    // chunk whose flags were never stamped.
-    let any_water = world
-        .chunks
-        .values()
-        .any(|c| c.has_wet_air || c.has_wet_pores);
+    // was the leftover seepage cost on a tall world. Occupancy is the
+    // source of truth.
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         // Chunk-local reads — same pattern as water_flow (~10× vs HashMap).
@@ -728,9 +715,7 @@ fn accumulate_seepage_xfers_ex(
         // Dry loose *and* dry solid still scan — stone below a vertical
         // seam has not raised `has_wet_pores` yet, and skipping it
         // shelves sat at y=63|64.
-        // Bootstrap (no water flags anywhere) keeps every region.
-        if any_water
-            && !chunk.has_wet_pores
+        if !chunk.has_wet_pores
             && !chunk.has_unsaturated_pores
             && !chunk.has_loose
             && !chunk.has_solid

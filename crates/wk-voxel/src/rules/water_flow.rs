@@ -159,12 +159,12 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
     }
 }
 
-/// Highest standing-air row in the loaded world, or `None` when a
-/// standing chunk has no y band yet (old save / bootstrap — do not skip).
+/// Highest standing-air row in the loaded world.
 ///
 /// A film at or above this row cannot have a *higher-row* standing
 /// donor. Uncased films also cannot same-row finish, so their BFS is
 /// leftover. Walled wells at this row may still pull same-row sat.
+/// A standing flag with no y band does not contribute.
 fn max_standing_air_gy(world: &World) -> Option<i32> {
     let ch = CHUNK_CELLS_H as i32;
     let mut max_gy: Option<i32> = None;
@@ -173,7 +173,7 @@ fn max_standing_air_gy(world: &World) -> Option<i32> {
             continue;
         }
         if chunk.standing_air_y0 > chunk.standing_air_y1 {
-            return None;
+            continue;
         }
         let top = coord.cy * ch + i32::from(chunk.standing_air_y1);
         max_gy = Some(max_gy.map_or(top, |m| m.max(top)));
@@ -831,8 +831,7 @@ fn accumulate_water_flow_xfers(
     // wet Air in the Moore neighbourhood still walked the halo (leftover
     // as plants grow). Dry dest cells *own* the +x equalise edge against
     // a wet neighbour — skip only when this chunk *and* its neighbours
-    // have never held wet Air. Bootstrap (no flag yet) keeps every region.
-    let any_wet_air = world.chunks.values().any(|c| c.has_wet_air);
+    // have never held wet Air. Occupancy is the source of truth.
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         // Cache the source chunk once. Inner probes read chunk-local when
@@ -841,7 +840,7 @@ fn accumulate_water_flow_xfers(
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             return local;
         };
-        if any_wet_air && !chunk_or_moore_has_wet_air(world, ac.coord) {
+        if !chunk_or_moore_has_wet_air(world, ac.coord) {
             return local;
         };
         let base_gx = ac.coord.cx * cw;
