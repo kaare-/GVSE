@@ -277,7 +277,10 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   waterlog slower than bare litter. No separate sticky material.
 - Crude global **carbon buckets** (atmosphere + dissolved) live beside
   the water mass store: surface Organic can oxidize to Soil and credit
-  atm C; lakes exchange atm ↔ dissolved on a slow cadence. Set A algae
+  atm C; lakes exchange atm ↔ dissolved on a slow cadence. Oxidation
+  exact-skips `!has_organic` (mid-ocean / empty sky). Exchange samples
+  only `has_standing_air` chunks — rain-film sky is leftover. Occupancy
+  is the source of truth. Set A algae
   draw dissolved C (bloom harvest throttles when the pool empties);
   land plants lightly pull atmosphere on photo growth, with a photo floor
   so empty air never hard-zeros forests. Buckets persist in `.gvsesim`

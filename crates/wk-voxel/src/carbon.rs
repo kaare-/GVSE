@@ -198,6 +198,15 @@ fn oxidize_surface_organic(budget: &mut CarbonBudget, world: &mut World, cfg: &C
     let mut events = 0u32;
     let coords: Vec<_> = world.chunks.keys().copied().collect();
     for coord in coords {
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        // Surface litter. Mid-ocean / empty sky never held Organic —
+        // leftover 64×64 every oxidize pulse. Occupancy is the source
+        // of truth.
+        if !chunk.has_organic {
+            continue;
+        }
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 if events >= cfg.oxidize_max_events {
@@ -262,6 +271,16 @@ fn sample_standing_water_cells(world: &World) -> u32 {
     let mut n = 0u32;
     let coords: Vec<_> = world.chunks.keys().copied().collect();
     for coord in coords {
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        // Wetness dial is standing water. Rain-film sky and dry rock
+        // never raise the flag — leftover on the exchange pulse.
+        // An ocean free surface still samples. Occupancy is the
+        // source of truth.
+        if !chunk.has_standing_air {
+            continue;
+        }
         // Sparse sample — every 2nd cell — enough for a wetness dial.
         for ly in (0..CHUNK_CELLS_H).step_by(2) {
             for lx in (0..CHUNK_CELLS_W).step_by(2) {
@@ -442,5 +461,85 @@ mod tests {
             "empty atm must limp at photo floor (got {h})"
         );
         assert_eq!(budget.atmosphere, 0.0, "floor harvest must not mint atm C");
+    }
+
+    #[test]
+    fn oxidize_skips_water_only_chunks() {
+        let mut w = World::new(128);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..8 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        w.set_cell(68, 0, Cell::solid(MaterialId::Bedrock));
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(80);
+        w.set_cell(68, 1, org);
+        w.set_cell(68, 2, Cell::air());
+        assert!(
+            !w.chunks[&ChunkCoord::new(0, 0)].has_organic,
+            "precondition: mid-ocean did not raise has_organic"
+        );
+        assert!(
+            w.chunks[&ChunkCoord::new(1, 0)].has_organic,
+            "precondition: litter raised has_organic"
+        );
+        let mut budget = CarbonBudget {
+            atmosphere: 0.0,
+            dissolved: 0.0,
+        };
+        let cfg = CarbonConfig {
+            oxidize_period: 1,
+            oxidize_rate: 1.0,
+            oxidize_max_events: 8,
+            exchange_period: 0,
+            ..CarbonConfig::default()
+        };
+        w.tick = 0;
+        step_carbon_budget(&mut budget, &mut w, &cfg);
+        assert!(
+            budget.atmosphere > 0.0,
+            "litter beside ocean must still oxidize"
+        );
+        assert_eq!(
+            w.get_cell(68, 1).unwrap().material,
+            MaterialId::Soil
+        );
+    }
+
+    #[test]
+    fn standing_sample_skips_rain_film_sky() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        for x in 0..8 {
+            w.set_cell(
+                x,
+                70,
+                Cell {
+                    material: MaterialId::Air,
+                    sat: Sat(33),
+                    ..Cell::default()
+                },
+            );
+        }
+        let sky = &w.chunks[&ChunkCoord::new(0, 1)];
+        assert!(
+            sky.has_wet_air && !sky.has_standing_air,
+            "precondition: drizzle is rain-film, not standing"
+        );
+        assert_eq!(
+            sample_standing_water_cells(&w),
+            0,
+            "rain-film sky must not count as lake wetness"
+        );
+        for x in 0..8 {
+            w.set_cell(x, 1, Cell::water());
+            w.set_cell(x, 2, Cell::water());
+        }
+        assert!(
+            sample_standing_water_cells(&w) > 0,
+            "ocean / pond standing water still samples"
+        );
     }
 }
