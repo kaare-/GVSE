@@ -563,8 +563,10 @@ mod tests {
         w.set_cell(x, y, Cell::water());
       }
     }
+    // Slab must live in cy=1 (y≥64). A 25×10 block at y=40 sits in
+    // the same chunk as the water and would still be a legal seed.
     for x in 5..30 {
-      for y in 40..50 {
+      for y in 70..80 {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
     }
