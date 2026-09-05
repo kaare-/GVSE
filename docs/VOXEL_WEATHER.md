@@ -105,7 +105,9 @@ The honest version is a **second clock**, not a coarser sky:
    inland rock far from water. Dry sand and dry stone under a new
    puddle or seam still walk. Surface throughflow exact-skips
    mid-ocean wet Air and dry rock with no porous bed here or in
-   `cy-1`. F1/F2/F3 skip `!has_solid` chunks.
+   `cy-1`. Cascade / equalise exact-skip rain-film sky (no standing,
+   no bed here or in `cy-1`). An ocean free surface still walks so
+   rain can level. F1/F2/F3 skip `!has_solid` chunks.
 2. **Conservation-form integrators** (Δt = 1k–10k). Pore seepage and
    humidity/T diffusion can take an implicit step with a flux limiter
    so `sat` stays in `[0, cap]` and tile mass is a discrete divergence.
@@ -595,8 +597,10 @@ What is still leftover:
 6. Condensation lottery ~2.9 ms — do not skip it
 
 Flow throughflow (Priority 4) exact-skips mid-ocean wet Air and dry
-rock with no porous bed in this chunk or `cy-1`. That cut is inside
-the flow column above; surface cascade / equalise still walk wet Air.
+rock with no porous bed in this chunk or `cy-1`. Cascade / equalise
+exact-skip rain-film sky — mid-air drizzle is gravity's job. An
+ocean / lake free surface still walks so rain can level. Do not skip
+mid-ocean standing water.
 
 F1/F2/F3 exact-skip `!has_solid` (mid-ocean / empty sky) every
 `FAILURE_EVERY`. Cliffs and compactable beds still scan.
