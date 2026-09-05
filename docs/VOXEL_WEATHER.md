@@ -107,7 +107,9 @@ The honest version is a **second clock**, not a coarser sky:
    mid-ocean wet Air and dry rock with no porous bed here or in
    `cy-1`. Cascade / equalise exact-skip rain-film sky (no standing,
    no bed here or in `cy-1`). An ocean free surface still walks so
-   rain can level. F1/F2/F3 skip `!has_solid` chunks.
+   rain can level. F1/F2/F3 skip `!has_solid` chunks. Geotech
+   face rescan skips `!has_solid`; overburden still walks sky wet
+   Air.
 2. **Conservation-form integrators** (Δt = 1k–10k). Pore seepage and
    humidity/T diffusion can take an implicit step with a flux limiter
    so `sat` stays in `[0, cap]` and tile mass is a discrete divergence.
@@ -603,7 +605,9 @@ ocean / lake free surface still walks so rain can level. Do not skip
 mid-ocean standing water.
 
 F1/F2/F3 exact-skip `!has_solid` (mid-ocean / empty sky) every
-`FAILURE_EVERY`. Cliffs and compactable beds still scan.
+`FAILURE_EVERY`. Cliffs and compactable beds still scan. Geotech
+face rescan skips `!has_solid` the same way; overburden still
+walks sky wet Air so σᵥ on land below stays honest.
 
 `World.dissolved` and `Humidity::cells` stay `std::HashMap` (saved).
 Runtime slab / Fx dual is OK if serde still writes the HashMap.
