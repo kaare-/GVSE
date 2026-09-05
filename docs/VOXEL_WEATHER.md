@@ -580,7 +580,9 @@ What is still leftover:
 2. Wind rebuild ~4.1 ms — compose + field HashMap write + slip
 3. Seepage ~4.0 ms — lake-bed / apply exact-skip mid-ocean and
    wet-Air-only chunks. Dry stone under a seam still scans.
-4. Landscape bodies ~4.0 ms
+4. Landscape bodies ~4.0 ms — hanger-seed exact-skip of
+   water-only / empty-sky chunks (`has_competent`). Dry stone
+   and a hanging slab still scan. Bootstrap walks every coord.
 5. Equalized confined BFS ~3.0 ms — **Δt=1 persist is in**
    (`World.confined` lookup). Do not starve the wake. Δt>1 still parked.
 6. Condensation lottery ~2.9 ms — do not skip it
