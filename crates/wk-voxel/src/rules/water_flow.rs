@@ -843,6 +843,12 @@ fn accumulate_water_flow_xfers(
         if !chunk_or_moore_has_wet_air(world, ac.coord) {
             return local;
         };
+        // Mid-air rain-film sky is gravity's job. Cascade / equalise
+        // need a free surface (bed here, bed / standing seam in cy-1,
+        // standing water in this chunk, or a dry dest beside standing).
+        if !surface_flow_chunk_live(world, ac.coord, chunk) {
+            return local;
+        }
         // Throughflow needs a porous bed. Mid-ocean wet Air and dry
         // plant-halo rock have none — exact skip (same occupancy rule
         // as the interactive throughflow-only pass).
@@ -1119,6 +1125,39 @@ fn accumulate_water_flow_xfers(
     for mut v in local {
         xfers.append(&mut v);
     }
+}
+
+/// Whether cascade / equalise can fire in this chunk.
+///
+/// Mid-air rain-film sky (`has_wet_air`, no standing, no bed here or in
+/// `cy-1`) is gravity's job — walking those 64×64s was leftover on the
+/// drizzle halo. A lake / ocean free surface (`has_standing_air`) still
+/// walks so rain can level. A surface film over a sand bed in `cy-1`,
+/// a hill film on solid, and a dry dest chunk beside standing water
+/// still walk. Occupancy is the source of truth.
+fn surface_flow_chunk_live(world: &World, coord: ChunkCoord, chunk: &Chunk) -> bool {
+    if chunk.has_solid || chunk.has_loose || chunk.has_standing_air {
+        return true;
+    }
+    if let Some(below) = world.chunks.get(&ChunkCoord::new(coord.cx, coord.cy - 1)) {
+        if below.has_solid || below.has_loose {
+            return true;
+        }
+        if below.has_standing_air && below.standing_air_y1 == (CHUNK_CELLS_H - 1) as u8 {
+            return true;
+        }
+    }
+    // Dry dest owns the +x equalise edge when it is the left endpoint.
+    for dx in [-1_i32, 1] {
+        if world
+            .chunks
+            .get(&ChunkCoord::new(coord.cx + dx, coord.cy))
+            .is_some_and(|c| c.has_standing_air)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Wet Air in this chunk or a Moore neighbour — dry dest cells still
@@ -1625,6 +1664,100 @@ mod tests {
         assert!(
             throughflow_chunk_live(&w, ChunkCoord::new(0, 1), film),
             "wet Air over a sand bed in cy-1 must still throughflow"
+        );
+    }
+
+    #[test]
+    fn rain_film_sky_is_not_a_surface_flow_scan() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        for x in 0..8 {
+            w.set_cell(
+                x,
+                70,
+                Cell {
+                    material: MaterialId::Air,
+                    sat: Sat(33),
+                    ..Cell::default()
+                },
+            );
+        }
+        let sky = &w.chunks[&ChunkCoord::new(0, 1)];
+        assert!(
+            sky.has_wet_air && !sky.has_standing_air,
+            "precondition: drizzle raised has_wet_air, not standing"
+        );
+        assert!(
+            !surface_flow_chunk_live(&w, ChunkCoord::new(0, 1), sky),
+            "mid-air rain-film sky is gravity's job"
+        );
+    }
+
+    #[test]
+    fn ocean_free_surface_stays_on_the_surface_flow_walk() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        let ocean = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(
+            ocean.has_standing_air,
+            "precondition: standing water raised has_standing_air"
+        );
+        assert!(
+            surface_flow_chunk_live(&w, ChunkCoord::new(0, 0), ocean),
+            "ocean free surface must still equalise rain"
+        );
+    }
+
+    #[test]
+    fn surface_film_over_cy1_sand_stays_on_surface_flow() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        for x in 0..8 {
+            w.set_cell(x, 60, Cell::solid(MaterialId::Sand));
+            w.set_cell(
+                x,
+                66,
+                Cell {
+                    material: MaterialId::Air,
+                    sat: Sat(80),
+                    ..Cell::default()
+                },
+            );
+        }
+        let film = &w.chunks[&ChunkCoord::new(0, 1)];
+        assert!(
+            !film.has_standing_air,
+            "precondition: sat 80 is below STANDING_AIR_SAT"
+        );
+        assert!(
+            surface_flow_chunk_live(&w, ChunkCoord::new(0, 1), film),
+            "film over a sand bed in cy-1 must still cascade / equalise"
+        );
+    }
+
+    #[test]
+    fn dry_dest_chunk_left_of_lake_stays_on_the_walk() {
+        let mut w = World::new(128);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 64..72 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        let dry = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(
+            !dry.has_standing_air && !dry.has_wet_air,
+            "precondition: left chunk is dry dest"
+        );
+        assert!(
+            surface_flow_chunk_live(&w, ChunkCoord::new(0, 0), dry),
+            "dry dest owns the +x equalise edge against standing water"
         );
     }
 
