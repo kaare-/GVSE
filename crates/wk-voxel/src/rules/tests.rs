@@ -206,6 +206,51 @@ fn contact_skips_buried_wet_sand_deep_pass_still_percolates() {
 }
 
 #[test]
+fn contact_skips_full_sand_under_a_full_pond() {
+    // Full pore + full standing Air cannot drink or weep on the owned
+    // +y face. Lake / ocean beds paid head math every contact tick
+    // (leftover). The skip must not block a bed with room, or weep
+    // into Air that still has room.
+    use crate::active::ActiveChunk;
+    use crate::chunk::Rect;
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Sand);
+    for x in 3..=5 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(
+        4,
+        1,
+        Cell {
+            material: MaterialId::Sand,
+            sat: Sat(cap),
+            ..Cell::default()
+        },
+    );
+    w.set_cell(4, 2, Cell::water());
+    let regions = [ActiveChunk::new(
+        ChunkCoord::new(0, 0),
+        Rect {
+            x0: 3,
+            y0: 0,
+            x1: 5,
+            y1: 3,
+        },
+    )];
+    super::seepage::apply_seepage_contact_regions(&mut w, &regions);
+    let bed = w.get_cell(4, 1).unwrap();
+    let pond = w.get_cell(4, 2).unwrap();
+    assert_eq!(bed.sat.0, cap, "full bed under a full pond must stay full");
+    assert!(
+        pond.sat.is_full(),
+        "full pond over a full bed must stay full, sat={}",
+        pond.sat.0
+    );
+}
+
+#[test]
 fn droplet_falls_one_cell_per_pass() {
     let mut w = setup_column_world();
     w.set_cell(4, 10, Cell::water());
