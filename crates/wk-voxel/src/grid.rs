@@ -7,7 +7,6 @@
 //! iteration.
 
 use std::cell::Cell as StdCell;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};

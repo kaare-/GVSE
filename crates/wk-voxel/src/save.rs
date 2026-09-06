@@ -852,6 +852,13 @@ mod tests {
                 body: vec![],
             },
         );
+        world.mycelium_lineage.cells.insert(
+            (3, 4),
+            crate::fungi::MyceliumLineage {
+                genome: crate::blueprint::Genome::default(),
+                body: vec![],
+            },
+        );
         let (humidity, wind, mut temperature) = demo_climate(&params);
         // Runtime Fx dual — postcard must still round-trip °C cells.
         temperature.cells.insert((1, 2), 12.5);
@@ -897,6 +904,7 @@ mod tests {
             Some(3)
         );
         assert!(loaded.world.mycelium_strain_lineage.contains_key(&7));
+        assert!(loaded.world.mycelium_lineage.cells.contains_key(&(3, 4)));
         assert_eq!(loaded.temperature.cells.get(&(1, 2)), Some(&12.5));
     }
 
