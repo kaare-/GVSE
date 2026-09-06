@@ -1114,11 +1114,17 @@ fn build_components(
           }
           probe::bump(&probe::seed_candidates);
           // Cheap movability gate before any flood — buried / flat-seated rock
-          // whose only opening is the sky can never move.
+          // whose only opening is the sky can never move. Sleep it so cadence
+          // / neighbour wakes do not re-probe the same immobile seed every
+          // tick; solidity writes already clear settled via wake_around.
           if !body_can_seed(world, gx, gy, &cell) {
+            settle.push((gx, gy));
+            visited.insert((gx, gy));
             continue;
           }
           if !has_free_neighbor(world, gx, gy) {
+            settle.push((gx, gy));
+            visited.insert((gx, gy));
             continue;
           }
           probe::bump(&probe::seeds_passed);
