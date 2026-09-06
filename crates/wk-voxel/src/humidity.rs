@@ -143,8 +143,10 @@ pub struct Humidity {
     ///
     /// May lag the runtime slab after a dense tick. Readers should use
     /// [`Self::at_tile`] / [`Self::for_each_occupied`] / [`Self::total_mass`].
-    /// Serde still writes a HashMap.
-    pub cells: HashMap<(i32, i32), f32>,
+    /// Runtime Fx dual — dense ticks already skip SipHash sync; sparse
+    /// flush / write-through were still SipHash leftover. Serde still
+    /// writes a plain HashMap via [`HumidityDisk`].
+    pub cells: FxHashMap<(i32, i32), f32>,
     /// Optional hard clamp on tile keys. `None` leaves diffusion
     /// unbounded (unit-test convenience only — production worlds
     /// should always set this).
@@ -181,7 +183,7 @@ impl<'de> Deserialize<'de> for Humidity {
         let disk = HumidityDisk::deserialize(deserializer)?;
         Ok(Self {
             tile_cols: disk.tile_cols.max(1),
-            cells: disk.cells,
+            cells: disk.cells.into_iter().collect(),
             bounds: disk.bounds,
             wrap_x: disk.wrap_x,
             advect_rx: disk.advect_rx,
@@ -195,7 +197,7 @@ impl Humidity {
     pub fn new(tile_cols: i32) -> Self {
         Self {
             tile_cols: tile_cols.max(1),
-            cells: HashMap::new(),
+            cells: FxHashMap::default(),
             bounds: None,
             wrap_x: false,
             advect_rx: 0.0,
@@ -305,8 +307,9 @@ impl Humidity {
     }
 
     fn saved_cells(&self) -> HashMap<(i32, i32), f32> {
+        // Serde / postcard still want SipHash HashMap. Runtime cells are Fx.
         let Some(s) = &self.slab else {
-            return self.cells.clone();
+            return self.cells.iter().map(|(&k, &v)| (k, v)).collect();
         };
         let mut out = HashMap::with_capacity(s.occupied.saturating_add(self.cells.len()));
         for (&(hx, hy), &v) in &self.cells {
@@ -2847,5 +2850,28 @@ mod convection_tests {
                 "saved HashMap missed tile ({hx},{hy})"
             );
         });
+    }
+
+    #[test]
+    fn humidity_postcard_roundtrip_keeps_mass_without_slab() {
+        // Runtime cells are Fx; serde still writes SipHash HashMap and
+        // drops the slab. Load must restore mass, not a packed box.
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 32);
+        h.wrap_x = true;
+        h.add(4, 4, 100.0);
+        h.add(8, 8, 50.0);
+        let bytes = postcard::to_allocvec(&h).expect("encode humidity");
+        let loaded: Humidity = postcard::from_bytes(&bytes).expect("decode humidity");
+        assert!(
+            (loaded.total_mass() - 150.0).abs() < 1e-3,
+            "roundtrip mass drifted: {}",
+            loaded.total_mass()
+        );
+        assert!((loaded.at_cell(4, 4) - 100.0).abs() < 1e-3);
+        assert!((loaded.at_cell(8, 8) - 50.0).abs() < 1e-3);
+        assert!(
+            loaded.slab.is_none(),
+            "load must not resurrect the runtime slab"
+        );
     }
 }
