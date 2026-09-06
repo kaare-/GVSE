@@ -116,8 +116,11 @@ pub struct World {
     ///
     /// Sparse and saved: only cells whose water carries load appear, and losing
     /// it on load would silently destroy mineral mass.
+    ///
+    /// Runtime Fx dual — seepage / flow probe this map every transfer.
+    /// Serde still writes a plain map (same postcard shape).
     #[serde(default)]
-    pub dissolved: HashMap<(i32, i32), u16>,
+    pub dissolved: FxHashMap<(i32, i32), u16>,
     /// Suspended fine sediment carried by moving water, in the same units as
     /// [`Self::dissolved`] but a different species with different physics.
     ///
@@ -129,8 +132,9 @@ pub struct World {
     /// delta.
     ///
     /// Sparse and saved: losing it on load would silently destroy sediment mass.
+    /// Runtime Fx dual — same seepage / settle hot path as dissolved.
     #[serde(default)]
-    pub suspended: HashMap<(i32, i32), u16>,
+    pub suspended: FxHashMap<(i32, i32), u16>,
     /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
     /// Same strain keeps one book across spatial split / reconnect.
     #[serde(default)]
@@ -216,8 +220,8 @@ impl World {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
-            dissolved: HashMap::new(),
-            suspended: HashMap::new(),
+            dissolved: FxHashMap::default(),
+            suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),

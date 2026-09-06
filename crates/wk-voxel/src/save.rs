@@ -17,6 +17,7 @@ use wk_material::HydroOverrides;
 use crate::carbon::CarbonBudget;
 use crate::chunk::{Chunk, ChunkCoord};
 use crate::clouds::CloudStore;
+use crate::fasthash::FxHashMap;
 use crate::grid::{World, WorldSeed};
 use crate::humidity::Humidity;
 use crate::organism::OrganismStore;
@@ -96,8 +97,8 @@ impl WorldV5 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
-            dissolved: HashMap::new(),
-            suspended: HashMap::new(),
+            dissolved: FxHashMap::default(),
+            suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -144,8 +145,8 @@ impl WorldV6 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
-            dissolved: HashMap::new(),
-            suspended: HashMap::new(),
+            dissolved: FxHashMap::default(),
+            suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -197,8 +198,8 @@ impl WorldV7 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: HashMap::new(),
-            dissolved: HashMap::new(),
-            suspended: HashMap::new(),
+            dissolved: FxHashMap::default(),
+            suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -259,8 +260,8 @@ impl WorldV8 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: HashMap::new(),
-            dissolved: HashMap::new(),
-            suspended: HashMap::new(),
+            dissolved: FxHashMap::default(),
+            suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -315,8 +316,8 @@ impl WorldV11 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
-            dissolved: HashMap::new(),
-            suspended: HashMap::new(),
+            dissolved: FxHashMap::default(),
+            suspended: FxHashMap::default(),
             sym_net_flow: self.sym_net_flow,
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -412,8 +413,8 @@ impl WorldV10 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
-            dissolved: HashMap::new(),
-            suspended: HashMap::new(),
+            dissolved: FxHashMap::default(),
+            suspended: FxHashMap::default(),
             sym_net_flow: self
                 .sym_net_flow
                 .into_iter()
@@ -485,8 +486,8 @@ impl WorldV9 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
-            dissolved: HashMap::new(),
-            suspended: HashMap::new(),
+            dissolved: FxHashMap::default(),
+            suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -830,6 +831,9 @@ mod tests {
         world.set_cell(3, 5, Cell::water());
         world.tick = 42;
         world.hydro.set_porosity(MaterialId::Sand, 90);
+        // Runtime Fx dual — postcard must still round-trip load maps.
+        world.dissolved.insert((3, 5), 42);
+        world.suspended.insert((3, 5), 7);
         let (humidity, wind, temperature) = demo_climate(&params);
         let carbon = CarbonBudget {
             atmosphere: 777.0,
@@ -860,6 +864,8 @@ mod tests {
         );
         assert_eq!(loaded.carbon.atmosphere, 777.0);
         assert_eq!(loaded.carbon.dissolved, 88.0);
+        assert_eq!(loaded.world.dissolved.get(&(3, 5)), Some(&42));
+        assert_eq!(loaded.world.suspended.get(&(3, 5)), Some(&7));
     }
 
     #[test]
