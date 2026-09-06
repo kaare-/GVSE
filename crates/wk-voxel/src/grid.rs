@@ -145,12 +145,18 @@ pub struct World {
     pub suspended: FxHashMap<(i32, i32), u16>,
     /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
     /// Same strain keeps one book across spatial split / reconnect.
+    ///
+    /// Runtime Fx dual — symbiont pulse probes this every fungi tick.
+    /// Serde still writes a plain map (same postcard shape).
     #[serde(default)]
-    pub sym_net_flow: HashMap<u32, crate::symbiosis::SymNetFlow>,
+    pub sym_net_flow: FxHashMap<u32, crate::symbiosis::SymNetFlow>,
     /// Strain id → lineage (genome+body) for treaty match at strain frontiers.
     /// Stamped on inoculum; survives cream spread far from the spatial stamp.
+    ///
+    /// Runtime Fx dual — frontier treaty match looks this up hot.
+    /// Serde still writes a plain map (same postcard shape).
     #[serde(default)]
-    pub mycelium_strain_lineage: HashMap<u32, crate::fungi::MyceliumLineage>,
+    pub mycelium_strain_lineage: FxHashMap<u32, crate::fungi::MyceliumLineage>,
     /// Competent-fall cargo moves this tick — sync organisms after physics.
     #[serde(skip, default)]
     pub competent_cell_moves: Vec<(i32, i32, i32, i32)>,
@@ -230,8 +236,8 @@ impl World {
             mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
-            sym_net_flow: HashMap::new(),
-            mycelium_strain_lineage: HashMap::new(),
+            sym_net_flow: FxHashMap::default(),
+            mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
             competent_settled: FxHashMap::default(),
             competent_wake: Vec::new(),

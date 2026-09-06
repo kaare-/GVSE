@@ -99,8 +99,8 @@ impl WorldV5 {
             mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
-            sym_net_flow: HashMap::new(),
-            mycelium_strain_lineage: HashMap::new(),
+            sym_net_flow: FxHashMap::default(),
+            mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
             competent_level_vacated: Default::default(),
@@ -147,8 +147,8 @@ impl WorldV6 {
             mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
-            sym_net_flow: HashMap::new(),
-            mycelium_strain_lineage: HashMap::new(),
+            sym_net_flow: FxHashMap::default(),
+            mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
             competent_level_vacated: Default::default(),
@@ -200,8 +200,8 @@ impl WorldV7 {
             mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
-            sym_net_flow: HashMap::new(),
-            mycelium_strain_lineage: HashMap::new(),
+            sym_net_flow: FxHashMap::default(),
+            mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
             competent_level_vacated: Default::default(),
@@ -262,8 +262,8 @@ impl WorldV8 {
             mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
-            sym_net_flow: HashMap::new(),
-            mycelium_strain_lineage: HashMap::new(),
+            sym_net_flow: FxHashMap::default(),
+            mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
             competent_level_vacated: Default::default(),
@@ -318,8 +318,8 @@ impl WorldV11 {
             mycelium_energy: self.mycelium_energy.into_iter().collect(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
-            sym_net_flow: self.sym_net_flow,
-            mycelium_strain_lineage: HashMap::new(),
+            sym_net_flow: self.sym_net_flow.into_iter().collect(),
+            mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
             competent_level_vacated: Default::default(),
@@ -420,7 +420,7 @@ impl WorldV10 {
                 .into_iter()
                 .map(|(k, v)| (k, v.into_current()))
                 .collect(),
-            mycelium_strain_lineage: HashMap::new(),
+            mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
             competent_level_vacated: Default::default(),
@@ -488,8 +488,8 @@ impl WorldV9 {
             mycelium_energy: self.mycelium_energy.into_iter().collect(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
-            sym_net_flow: HashMap::new(),
-            mycelium_strain_lineage: HashMap::new(),
+            sym_net_flow: FxHashMap::default(),
+            mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
             competent_level_vacated: Default::default(),
@@ -837,6 +837,21 @@ mod tests {
         world.mycelium_strains.insert((3, 4), vec![(7, 40)]);
         world.mycelium_energy.insert((3, 4), 90);
         world.soft_litter.insert(3, 55);
+        world.sym_net_flow.insert(
+            7,
+            crate::symbiosis::SymNetFlow {
+                water_out_total: 3,
+                sugar_in_total: 2,
+                ..Default::default()
+            },
+        );
+        world.mycelium_strain_lineage.insert(
+            7,
+            crate::fungi::MyceliumLineage {
+                genome: crate::blueprint::Genome::default(),
+                body: vec![],
+            },
+        );
         let (humidity, wind, mut temperature) = demo_climate(&params);
         // Runtime Fx dual — postcard must still round-trip °C cells.
         temperature.cells.insert((1, 2), 12.5);
@@ -877,6 +892,11 @@ mod tests {
         );
         assert_eq!(loaded.world.mycelium_energy.get(&(3, 4)), Some(&90));
         assert_eq!(loaded.world.soft_litter.get(&3), Some(&55));
+        assert_eq!(
+            loaded.world.sym_net_flow.get(&7).map(|f| f.water_out_total),
+            Some(3)
+        );
+        assert!(loaded.world.mycelium_strain_lineage.contains_key(&7));
         assert_eq!(loaded.temperature.cells.get(&(1, 2)), Some(&12.5));
     }
 
