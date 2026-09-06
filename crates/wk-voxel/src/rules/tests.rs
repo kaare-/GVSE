@@ -1484,6 +1484,77 @@ fn neighbour_air_face_reenters_weep_wake() {
 }
 
 #[test]
+fn buried_quiet_full_weeps_only_on_neighbour_air_face() {
+    // Buried full crust (!open_air, !unsat) with Air only in a neighbour:
+    // perimeter path must dirty the shared face without a full occupancy
+    // rescan (sticky flags stay honest).
+    let mut w = World::new(97);
+    let center = ChunkCoord::new(0, 0);
+    let east = ChunkCoord::new(1, 0);
+    fill_chunk_saturated_stone(&mut w, center);
+    for (dx, dy) in [(-1, 0), (0, -1), (0, 1)] {
+        fill_chunk_saturated_stone(&mut w, ChunkCoord::new(dx, dy));
+    }
+    // East neighbour is solid except the shared face column → open Air.
+    fill_chunk_saturated_stone(&mut w, east);
+    let face_y = 32;
+    w.set_cell(CHUNK_CELLS_W as i32, face_y, Cell::air());
+    // Clear sticky unsat via sealed weep occupancy on fully sealed sides,
+    // then re-open the east face path: run weep once to clear unsat on
+    // centre while east still reports open Air after the carve.
+    // Force centre quiet-full flags (write sticky-raised unsat).
+    wake_pore_weep_into_air(&mut w);
+    // Centre may still see east open Air so it is not sealed — force the
+    // buried quiet-full occupancy state the perimeter path trusts.
+    if let Some(c) = w.chunks.get_mut(&center) {
+        c.has_open_air = false;
+        c.has_unsaturated_pores = false;
+        c.has_wet_pores = true;
+        c.has_solid = true;
+    }
+    clear_all_dirty(&mut w);
+    wake_pore_weep_into_air(&mut w);
+    let center_chunk = &w.chunks[&center];
+    assert!(
+        center_chunk
+            .dirty_bits
+            .get((CHUNK_CELLS_W - 1) as u8, face_y as u8),
+        "buried quiet-full must still dirty the shared face"
+    );
+    assert!(
+        w.chunks[&east].dirty_bits.get(0, face_y as u8),
+        "neighbour Air face must be dirtied"
+    );
+    // Occupancy must stay quiet-full (perimeter path does not rescan).
+    assert!(!w.chunks[&center].has_open_air);
+    assert!(!w.chunks[&center].has_unsaturated_pores);
+}
+
+#[test]
+fn buried_quiet_full_rescan_after_unsat_write() {
+    let mut w = World::new(98);
+    let center = ChunkCoord::new(0, 0);
+    fill_chunk_saturated_stone(&mut w, center);
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        fill_chunk_saturated_stone(&mut w, ChunkCoord::new(dx, dy));
+    }
+    wake_pore_weep_into_air(&mut w);
+    assert!(!w.chunks[&center].has_unsaturated_pores);
+    // Under-fill an interior pore — sticky unsat must force a full rescan
+    // path (sealed occupancy refresh clears or keeps it honestly).
+    let mut room = Cell::solid(MaterialId::Stone);
+    room.sat = Sat(1);
+    w.set_cell(16, 16, room);
+    assert!(w.chunks[&center].has_unsaturated_pores);
+    wake_pore_weep_into_air(&mut w);
+    assert!(
+        w.chunks[&center].has_unsaturated_pores,
+        "under-full pore must keep unsat after sealed occupancy refresh"
+    );
+}
+
+
+#[test]
 fn landed_snow_does_not_drift() {
     let mut w = setup_column_world();
     w.set_cell(2, 1, Cell::solid(MaterialId::Snow));
