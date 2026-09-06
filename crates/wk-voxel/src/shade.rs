@@ -14,9 +14,10 @@
 //! walks occupied foliage rows above the sample (not every empty Y up to
 //! a global max — that froze the frame loop / F2 editor on dense worlds).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::blueprint::Genome;
+use crate::fasthash::FxHashMap;
 use crate::organism::{Atom, ModuleId};
 
 fn atom_casts_canopy(atom: &Atom) -> bool {
@@ -42,7 +43,7 @@ pub const PEER_LATERAL_SCALE: f32 = 0.55;
 #[derive(Debug, Clone, Default)]
 pub struct CanopyIndex {
     /// `wx → (wy → absorb)`.
-    cols: HashMap<i32, BTreeMap<i32, f32>>,
+    cols: FxHashMap<i32, BTreeMap<i32, f32>>,
 }
 
 impl CanopyIndex {
@@ -270,7 +271,7 @@ pub fn effective_photo_light(
 /// [`shade_transmit`] memoized for one organism tick (`(wx, wy)` → transmit).
 pub fn cached_shade_transmit(
     index: &CanopyIndex,
-    cache: &mut HashMap<(i32, i32), f32>,
+    cache: &mut FxHashMap<(i32, i32), f32>,
     wx: i32,
     sample_y: i32,
 ) -> f32 {
@@ -285,7 +286,7 @@ pub fn cached_shade_transmit(
 /// [`effective_photo_light`] with a shared transmit cache for the tick.
 pub fn effective_photo_light_cached(
     index: &CanopyIndex,
-    cache: &mut HashMap<(i32, i32), f32>,
+    cache: &mut FxHashMap<(i32, i32), f32>,
     wx: i32,
     sample_y: i32,
     sky_l0: f32,
@@ -319,7 +320,7 @@ pub fn sum_posed_photo_light_of_cached(
     indices: &[usize],
     sky_at: &mut dyn FnMut(i32, i32) -> f32,
     genome: &Genome,
-    mut shade_cache: Option<&mut HashMap<(i32, i32), f32>>,
+    mut shade_cache: Option<&mut FxHashMap<(i32, i32), f32>>,
 ) -> f32 {
     let mut sum = 0.0_f32;
     let mut any = false;

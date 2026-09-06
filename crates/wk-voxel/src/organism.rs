@@ -39,6 +39,7 @@ use crate::fungi::{
 };
 use crate::spore_bank::{DispersalResult, SporeBankConfig};
 use crate::temperature::Temperature;
+use crate::fasthash::FxHashMap;
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::cell::is_competent_rock;
@@ -1441,8 +1442,8 @@ impl OrganismStore {
         let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
         let canopy = build_canopy_index_posed(&self.atoms, &posed);
         // Cache transmit per posed cell — many leaves share a flop pile cell.
-        let mut transmit_cache: std::collections::HashMap<(i32, i32), f32> =
-            std::collections::HashMap::with_capacity(posed.len());
+        let mut transmit_cache: FxHashMap<(i32, i32), f32> =
+            FxHashMap::with_capacity_and_hasher(posed.len(), Default::default());
         let mut out = Vec::with_capacity(posed.len() + self.corpses.len() * 2);
         for p in &posed {
             let rgb = if p.mid == ModuleId::Photosystem {
@@ -1766,8 +1767,8 @@ impl OrganismStore {
         };
         pass.float_cols = t0.elapsed();
         // Per-tick caches. Many leaves / plants share columns.
-        let mut lit_cache: HashMap<(i32, i32), f32> = HashMap::new();
-        let mut shade_cache: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut lit_cache: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        let mut shade_cache: FxHashMap<(i32, i32), f32> = FxHashMap::default();
 
         // Empty store: still allow mycelium field → fruiting body emergence
         // (and corpse settle). Spores need a living body afterward.
@@ -2554,8 +2555,8 @@ fn step_land_plant(
     canopy: &CanopyIndex,
     posed: &[PosedModule],
     posed_indices: &[usize],
-    lit_cache: &mut HashMap<(i32, i32), f32>,
-    shade_cache: &mut HashMap<(i32, i32), f32>,
+    lit_cache: &mut FxHashMap<(i32, i32), f32>,
+    shade_cache: &mut FxHashMap<(i32, i32), f32>,
     trunks: &std::collections::HashSet<(i32, i32)>,
     live_roots: &std::collections::HashSet<(i32, i32)>,
     live_photos: &std::collections::HashSet<(i32, i32)>,
@@ -4638,7 +4639,7 @@ fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
 
 /// Memoize [`lit_sky_at`] for one organism tick (`(wrap_x, gy)` → light).
 fn cached_lit_sky(
-    cache: &mut HashMap<(i32, i32), f32>,
+    cache: &mut FxHashMap<(i32, i32), f32>,
     world: &World,
     gx: i32,
     gy: i32,
