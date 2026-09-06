@@ -28,6 +28,7 @@ pub mod grid;
 pub mod heatmap;
 pub mod humidity;
 pub mod mineral;
+pub mod pore_ice;
 pub mod sediment;
 pub mod organism;
 pub mod parallel;
@@ -132,6 +133,10 @@ pub use landscape_body::{
     LANDSCAPE_GRAVITY_ONLY_MIN, MAX_LANDSCAPE_BODIES, MIN_LANDSCAPE_BODY_CELLS,
 };
 pub use grid::{ChunkMap, World};
+pub use pore_ice::{
+    apply_pore_ice, freeze_pores, is_frozen as pore_ice_is_frozen, pore_ice_at, thaw_pores,
+    PORE_ICE_EVERY,
+};
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{

@@ -153,7 +153,11 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
     if !world.dissolved.is_empty() {
         for &(from, to, amt) in xfers.iter() {
             if amt > 0 && to.1 > from.1 && world.dissolved.contains_key(&(to.0, to.1)) {
-                crate::mineral::precipitate_artesian(world, to.0, to.1);
+                let warmth = world
+                    .water_head
+                    .geothermal_warmth(from.0, from.1)
+                    .max(world.water_head.geothermal_warmth(to.0, to.1));
+                crate::mineral::precipitate_artesian_warm(world, to.0, to.1, warmth);
             }
         }
     }
@@ -447,8 +451,14 @@ fn allows_confined_rise(world: &World, gx: i32, gy: i32, donor_y: i32) -> bool {
 ///
 /// Partially saturated rock does not qualify: there is air in the pores, so
 /// there is no continuous column to push through.
+///
+/// Pore ice seals saturated rock in place without swapping material — frozen
+/// pores do not conduct until thaw ([`crate::pore_ice`]).
 #[inline]
-fn transmits_pressure(world: &World, cell: &Cell) -> bool {
+fn transmits_pressure(world: &World, cell: &Cell, gx: i32, gy: i32) -> bool {
+    if crate::pore_ice::is_frozen(world, gx, gy) {
+        return false;
+    }
     if cell.material == MaterialId::Air {
         return cell.sat.is_full();
     }
@@ -496,7 +506,7 @@ fn climb_full_air_column(
         let Some(c) = world.get_cell(x, y) else {
             break;
         };
-        if !transmits_pressure(world, &c) {
+        if !transmits_pressure(world, &c, x, y) {
             break;
         }
         if !visited.insert((x, y)) {
@@ -506,7 +516,7 @@ fn climb_full_air_column(
         for dx in [-1_i32, 1] {
             let nx = world.wrap_x(x + dx);
             if let Some(n) = world.get_cell(nx, y) {
-                if transmits_pressure(world, &n) {
+                if transmits_pressure(world, &n, nx, y) {
                     if !visited.contains(&(nx, y)) {
                         queue.push_back((nx, y));
                     }
@@ -542,7 +552,7 @@ fn body_from_stored_donor(
     cap: u8,
 ) -> Option<PressureBody> {
     let seed = world.get_cell(seed_x, seed_y)?;
-    if !transmits_pressure(world, &seed) {
+    if !transmits_pressure(world, &seed, seed_x, seed_y) {
         return None;
     }
     let (dx, dy) = donor;
@@ -598,7 +608,7 @@ fn pressure_body_from_full(
         }
     }
     let seed = world.get_cell(seed_x, seed_y)?;
-    if !transmits_pressure(world, &seed) {
+    if !transmits_pressure(world, &seed, seed_x, seed_y) {
         return None;
     }
     store.bfs_runs += 1;
@@ -625,7 +635,7 @@ fn pressure_body_from_full(
         let Some(c) = world.get_cell(x, y) else {
             continue;
         };
-        if !transmits_pressure(world, &c) {
+        if !transmits_pressure(world, &c, x, y) {
             continue;
         }
         // Climb this column for its free-surface head, then continue
@@ -642,7 +652,7 @@ fn pressure_body_from_full(
         );
         // Downward continuity (pipe floors / deeper basins).
         if let Some(below) = world.get_cell(x, y - 1) {
-            if transmits_pressure(world, &below) {
+            if transmits_pressure(world, &below, x, y - 1) {
                 if !visited.contains(&(x, y - 1)) {
                     queue.push_back((x, y - 1));
                 }
@@ -724,7 +734,7 @@ fn accumulate_confined_upward_xfers(
             // confined pressure — a flooded void *or* saturated pore space.
             // Requiring Air here meant a shaft bottomed on rock (every
             // hand-dug well) could never be fed by the aquifer it reached.
-            if !transmits_pressure(world, &below) {
+            if !transmits_pressure(world, &below, gx, gy - 1) {
                 return;
             }
             // Uncased film on wet ground: sitting on saturated pore, not
@@ -804,8 +814,12 @@ fn accumulate_confined_upward_xfers(
             }
             let free = cap as i32 - dst.sat.0 as i32;
             let dh_sat = ((body.max_head - dst_head) * cap as f32).floor() as i32;
-            let cap_rate =
-                ((CONFINED_HEAD_RATE as f32) * world.water_head_rate_scale(gx, gy)).round() as i32;
+            let warmth = world.water_head.geothermal_warmth(gx, gy - 1);
+            let geo = 1.0 + 0.25 * warmth;
+            let cap_rate = ((CONFINED_HEAD_RATE as f32)
+                * world.water_head_rate_scale(gx, gy)
+                * geo)
+                .round() as i32;
             let amt = cap_rate
                 .min(free)
                 .min(donor.sat.0 as i32)
@@ -1545,6 +1559,9 @@ fn plan_throughflow_from_cell(
         if !is_porous_cell(below1, hydro) {
             continue;
         }
+        if crate::pore_ice::is_frozen(world, nx, gy - 1) {
+            continue;
+        }
         let cap1 = water_capacity_cell(below1, hydro);
         if below1.sat.0 < cap1 {
             continue; // gravity + seepage handle unsaturated
@@ -1570,6 +1587,9 @@ fn plan_throughflow_from_cell(
                 break;
             }
             if !is_porous_cell(nb, hydro) {
+                break;
+            }
+            if crate::pore_ice::is_frozen(world, nx, ty) {
                 break;
             }
             let cap = water_capacity_cell(nb, hydro);

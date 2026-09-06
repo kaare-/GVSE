@@ -107,6 +107,19 @@ impl WaterHead {
         let over = (h - gy as f32).max(0.0);
         (1.0 + 0.012 * over.min(40.0)).min(1.40)
     }
+
+    /// Geothermal warmth proxy for confined / artesian bias (0..=1).
+    ///
+    /// Deeper under the regional table → warmer. No temperature field and
+    /// no world scan — reuses the same head samples as [`Self::rate_scale`].
+    /// Hot-spring P2 stacks this on confined rise and artesian precip.
+    pub fn geothermal_warmth(&self, gx: i32, gy: i32) -> f32 {
+        let Some(h) = self.head_at(gx) else {
+            return 0.0;
+        };
+        let over = (h - gy as f32).max(0.0);
+        (over / 40.0).clamp(0.0, 1.0)
+    }
 }
 
 fn column_table_y(world: &World, gx: i32) -> Option<i32> {
@@ -187,6 +200,12 @@ mod tests {
             "a lake at y=24 should over-pressure a spring at y=10 (scale={scale:.3})"
         );
         assert!(scale <= 1.40);
+        let warmth = head.geothermal_warmth(20, 10);
+        assert!(
+            warmth > 0.2,
+            "deep under the table must read warm (warmth={warmth:.3})"
+        );
+        assert!(head.geothermal_warmth(20, 24) < 0.05, "at the table warmth is cold");
         let sat_sum = |w: &World| {
             let mut n = 0i64;
             for x in 0..12 {

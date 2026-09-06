@@ -52,6 +52,7 @@ use crate::landscape_body::{apply_landscape_fall, LandscapeBodyStore};
 use crate::organism::{OrganismStepOutcome, OrganismStore};
 use crate::parallel::set_parallel_enabled;
 use crate::phase::{apply_phase, PhaseConfig};
+use crate::pore_ice::apply_pore_ice;
 use crate::plant::{collect_live_root_world_cells, sail_plants_on_wind_rafts_cfg};
 use crate::rules::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity_climate,
@@ -458,6 +459,7 @@ pub fn step_world(
     {
         let t0 = profile.then(Instant::now);
         apply_phase(world, temperature, cfg.phase);
+        apply_pore_ice(world, temperature, cfg.phase.freeze_point_c);
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
             t.phase += t0.elapsed();
         }
