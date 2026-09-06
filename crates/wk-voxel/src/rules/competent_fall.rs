@@ -1064,6 +1064,10 @@ fn build_components(
   let mut out: Vec<Component> = Vec::new();
   let mut hanging_count = 0usize;
   let mut settle: Vec<(i32, i32)> = Vec::new();
+  // Seeds that fail the movability gate. Only slept at the end if no
+  // successful flood absorbed them — inserting into `visited` here would
+  // punch holes in bodies whose edge seed comes later in scan order.
+  let mut immobile_seeds: Vec<(i32, i32)> = Vec::new();
   // Only incremental scans are capped; an explicit whole-world request must
   // stay exhaustive (tests, F3 close).
   let build_cap = if active.is_empty() {
@@ -1118,13 +1122,11 @@ fn build_components(
           // / neighbour wakes do not re-probe the same immobile seed every
           // tick; solidity writes already clear settled via wake_around.
           if !body_can_seed(world, gx, gy, &cell) {
-            settle.push((gx, gy));
-            visited.insert((gx, gy));
+            immobile_seeds.push((gx, gy));
             continue;
           }
           if !has_free_neighbor(world, gx, gy) {
-            settle.push((gx, gy));
-            visited.insert((gx, gy));
+            immobile_seeds.push((gx, gy));
             continue;
           }
           probe::bump(&probe::seeds_passed);
@@ -1314,6 +1316,11 @@ fn build_components(
     }
   }
   floating.append(&mut seated);
+  for (gx, gy) in immobile_seeds {
+    if !visited.contains(&(gx, gy)) {
+      settle.push((gx, gy));
+    }
+  }
   (floating, leftovers, settle)
 }
 
