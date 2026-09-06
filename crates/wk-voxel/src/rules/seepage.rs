@@ -8,7 +8,7 @@ use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::ActiveChunk;
 use crate::cell::{permeability_cell, water_capacity_cell, Cell, Sat};
-use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W, STANDING_AIR_SAT};
+use crate::chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W, STANDING_AIR_SAT};
 use crate::fasthash::FxHashSet;
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
@@ -343,6 +343,11 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         {
             continue;
         }
+        // Quiet sealed full crust cannot move water across the face —
+        // skip the per-column band dirty (same predicate as span).
+        if quiet_saturated_crust_pair(lo_chunk, hi_chunk) {
+            continue;
+        }
         for lx in 0..cw {
             let gx = world.wrap_x(base_gx + lx);
             let lo = lo_chunk.get(lx as usize, (ch - 1) as usize);
@@ -492,6 +497,25 @@ fn serve_best_faces_first(xfers: &mut [((i32, i32), (i32, i32), i32)]) {
     xfers.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)).then(a.1.cmp(&b.1)));
 }
 
+
+/// True when a vertical seam pair is quiet fully-saturated sealed crust.
+///
+/// Same spirit as [`ortho_neighbours_seal_weep`]: occupancy proves no face
+/// across the cy boundary can move water. Both sides must be solid terrain
+/// (default Air chunks keep sticky `has_open_air == false`), report no open
+/// Air / wet Air, and report no unsaturated pores. Digging Air or writing
+/// under-full pores re-enters on the next cadence.
+fn quiet_saturated_crust_pair(lo: &Chunk, hi: &Chunk) -> bool {
+    lo.has_solid
+        && hi.has_solid
+        && !lo.has_open_air
+        && !hi.has_open_air
+        && !lo.has_wet_air
+        && !hi.has_wet_air
+        && !lo.has_unsaturated_pores
+        && !hi.has_unsaturated_pores
+}
+
 /// Local `x` span of the columns where water could actually cross this seam,
 /// or `None` when the face is inert.
 ///
@@ -510,6 +534,12 @@ fn seam_coupled_span(world: &World, lower: ChunkCoord, upper: ChunkCoord) -> Opt
         || hi_chunk.has_wet_pores
         || hi_chunk.has_wet_air;
     if !any_water {
+        return None;
+    }
+    // Quiet sealed aquifers: both sides full, no Air — pore↔pore across the
+    // face cannot move. Sticky `has_unsaturated_pores` is cleared by weep /
+    // lake-bed occupancy refresh; until then we keep coupling.
+    if quiet_saturated_crust_pair(lo_chunk, hi_chunk) {
         return None;
     }
     let hydro = world.hydro;
@@ -1244,12 +1274,39 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         // an interior pore cannot face Air. Surface / cavity chunks keep
         // the full scan. Neighbour reads stay chunk-local when they can.
         let open_air = chunk.has_open_air;
-        // Exact skip: wet stone with no Air here and every ortho
-        // neighbour sealed solid without Air cannot weep on any face.
-        // Leave occupancy sticky; a later carve raises neighbour
-        // `has_open_air`. Missing / default-Air neighbours keep the scan
-        // so dry-pore occupancy can still clear.
+        // Exact skip of face dirties: wet stone with no Air here and every
+        // ortho neighbour sealed solid without Air cannot weep on any face.
+        // Still refresh occupancy — full-sat writes sticky-raise
+        // `has_unsaturated_pores`, and without a clear here sealed aquifers
+        // never drop it (seam / lake-bed leftovers). A later carve raises
+        // neighbour `has_open_air`. Missing / default-Air neighbours keep
+        // the full face scan so dry-pore occupancy can still clear.
         if !open_air && ortho_neighbours_seal_weep(world, coord) {
+            let mut still_wet = false;
+            let mut any_air = false;
+            let mut any_unsat = false;
+            for y in 0..CHUNK_CELLS_H {
+                for x in 0..CHUNK_CELLS_W {
+                    let cell = chunk.get(x, y);
+                    if cell.material == MaterialId::Air {
+                        any_air = true;
+                    }
+                    if is_porous_cell(cell, &hydro) {
+                        if cell.sat.0 > 0 {
+                            still_wet = true;
+                        }
+                        let cap = water_capacity_cell(cell, &hydro);
+                        if cap > 0 && cell.sat.0 < cap {
+                            any_unsat = true;
+                        }
+                    }
+                }
+            }
+            if !still_wet {
+                clear_pores.push(coord);
+            }
+            air_updates.push((coord, any_air));
+            unsat_updates.push((coord, any_unsat));
             continue;
         }
         let base_gx = coord.cx * cw;
