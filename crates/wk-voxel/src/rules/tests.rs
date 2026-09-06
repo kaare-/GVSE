@@ -1406,6 +1406,83 @@ fn pore_weep_clears_dry_chunks() {
     );
 }
 
+fn fill_chunk_saturated_stone(w: &mut World, coord: ChunkCoord) {
+    w.ensure_chunk(coord);
+    let cap = water_capacity(MaterialId::Stone);
+    let wet = Cell {
+        material: MaterialId::Stone,
+        sat: Sat(cap),
+        ..Cell::default()
+    };
+    let base_x = coord.cx * CHUNK_CELLS_W as i32;
+    let base_y = coord.cy * CHUNK_CELLS_H as i32;
+    for y in 0..CHUNK_CELLS_H as i32 {
+        for x in 0..CHUNK_CELLS_W as i32 {
+            w.set_cell(base_x + x, base_y + y, wet);
+        }
+    }
+}
+
+#[test]
+fn enclosed_wet_crust_skips_weep_dirty() {
+    // Saturated stone with no Air in self or ortho neighbours cannot
+    // weep on any face — the wake must leave dirty untouched.
+    let mut w = World::new(91);
+    let center = ChunkCoord::new(0, 0);
+    fill_chunk_saturated_stone(&mut w, center);
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        fill_chunk_saturated_stone(&mut w, ChunkCoord::new(dx, dy));
+    }
+    assert!(w.chunks[&center].has_wet_pores);
+    assert!(!w.chunks[&center].has_open_air);
+    clear_all_dirty(&mut w);
+    wake_pore_weep_into_air(&mut w);
+    assert!(
+        w.chunks[&center].dirty_bits.is_empty() && w.chunks[&center].dirty.is_none(),
+        "enclosed wet crust must not re-dirty itself"
+    );
+    assert!(
+        w.chunks[&center].has_wet_pores,
+        "skip must leave wet-pore occupancy sticky"
+    );
+}
+
+#[test]
+fn neighbour_air_face_reenters_weep_wake() {
+    // Enclosed aquifer stays quiet until Air is carved on a shared
+    // neighbour face — then the next weep must dirty the spring.
+    let mut w = World::new(92);
+    let center = ChunkCoord::new(0, 0);
+    let east = ChunkCoord::new(1, 0);
+    fill_chunk_saturated_stone(&mut w, center);
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        fill_chunk_saturated_stone(&mut w, ChunkCoord::new(dx, dy));
+    }
+    clear_all_dirty(&mut w);
+    wake_pore_weep_into_air(&mut w);
+    assert!(w.chunks[&center].dirty_bits.is_empty());
+
+    // Shared face: center right edge gx=63, east left edge gx=64.
+    let face_y = 32;
+    w.set_cell(CHUNK_CELLS_W as i32, face_y, Cell::air());
+    assert!(w.chunks[&east].has_open_air);
+    clear_all_dirty(&mut w);
+    wake_pore_weep_into_air(&mut w);
+    let center_chunk = &w.chunks[&center];
+    assert!(
+        center_chunk
+            .dirty_bits
+            .get((CHUNK_CELLS_W - 1) as u8, face_y as u8),
+        "weep must dirty the wet pore on the shared face"
+    );
+    assert!(
+        w.chunks[&east]
+            .dirty_bits
+            .get(0, face_y as u8),
+        "weep must dirty the Air cell that can still take water"
+    );
+}
+
 #[test]
 fn landed_snow_does_not_drift() {
     let mut w = setup_column_world();
