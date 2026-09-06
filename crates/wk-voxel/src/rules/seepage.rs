@@ -1249,8 +1249,12 @@ fn ortho_neighbours_seal_weep(world: &World, coord: ChunkCoord) -> bool {
 ///
 /// Fully enclosed wet crust (no Air in this chunk, and every orthogonal
 /// neighbour is solid without Air) is skipped — interior pores cannot
-/// face Air, and neither can the perimeter. A neighbour with
-/// `has_open_air` keeps the perimeter scan so a dug face still wakes.
+/// face Air, and neither can the perimeter. Buried quiet-full crust
+/// (`!has_open_air && !has_unsaturated_pores`) with a neighbour that may
+/// hold Air only probes the perimeter — occupancy is already honest.
+/// A neighbour with `has_open_air` keeps that perimeter path so a dug
+/// face still wakes; carving Air in-chunk raises `has_open_air` and
+/// returns to the full scan.
 pub fn wake_pore_weep_into_air(world: &mut World) {
     let hydro = world.hydro;
     let ch = CHUNK_CELLS_H as i32;
@@ -1274,14 +1278,17 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         // an interior pore cannot face Air. Surface / cavity chunks keep
         // the full scan. Neighbour reads stay chunk-local when they can.
         let open_air = chunk.has_open_air;
-        // Exact skip of face dirties: wet stone with no Air here and every
-        // ortho neighbour sealed solid without Air cannot weep on any face.
-        // Still refresh occupancy — full-sat writes sticky-raise
-        // `has_unsaturated_pores`, and without a clear here sealed aquifers
-        // never drop it (seam / lake-bed leftovers). A later carve raises
-        // neighbour `has_open_air`. Missing / default-Air neighbours keep
-        // the full face scan so dry-pore occupancy can still clear.
-        if !open_air && ortho_neighbours_seal_weep(world, coord) {
+        let unsat = chunk.has_unsaturated_pores;
+        let sealed = !open_air && ortho_neighbours_seal_weep(world, coord);
+        // Quiet sealed full crust: occupancy already honest (no Air, no
+        // room). Interior and perimeter cannot face Air — skip entirely.
+        if sealed && !unsat {
+            continue;
+        }
+        // Sealed but sticky-unsat (full-sat writes raise the flag): refresh
+        // occupancy only so seam / lake-bed can see a quiet aquifer. No
+        // face dirties — neighbours also lack open Air.
+        if sealed {
             let mut still_wet = false;
             let mut any_air = false;
             let mut any_unsat = false;
@@ -1311,6 +1318,69 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         }
         let base_gx = coord.cx * cw;
         let base_gy = coord.cy * ch;
+        // Buried quiet-full (!open_air, !unsat) with a neighbour that may
+        // hold Air: interior cells cannot face Air, and occupancy is
+        // already honest — only probe the perimeter for spring faces.
+        // Trust sticky flags until a write raises open_air / unsat.
+        if !open_air && !unsat {
+            for y in 0..CHUNK_CELLS_H {
+                for x in 0..CHUNK_CELLS_W {
+                    if x != 0 && x + 1 != CHUNK_CELLS_W && y != 0 && y + 1 != CHUNK_CELLS_H {
+                        continue;
+                    }
+                    let cell = chunk.get(x, y);
+                    if !is_porous_cell(cell, &hydro) {
+                        continue;
+                    }
+                    let cap = water_capacity_cell(cell, &hydro);
+                    if cap == 0 || cell.sat.0 <= 2 {
+                        continue;
+                    }
+                    let gx = world.wrap_x(base_gx + x as i32);
+                    let gy = base_gy + y as i32;
+                    let mut face = false;
+                    for (dx, dy) in DIRS {
+                        let lx = x as i32 + dx;
+                        let ly = y as i32 + dy;
+                        let nx = world.wrap_x(gx + dx);
+                        let ny = gy + dy;
+                        let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+                            Some(chunk.get(lx as usize, ly as usize))
+                        } else {
+                            world.get_cell(nx, ny)
+                        };
+                        let Some(n) = n else {
+                            continue;
+                        };
+                        if n.material == MaterialId::Air && !n.sat.is_full() {
+                            touches.push((nx, ny));
+                            face = true;
+                        }
+                    }
+                    if face {
+                        touches.push((gx, gy));
+                        for (dx, dy) in DIRS {
+                            let lx = x as i32 + dx;
+                            let ly = y as i32 + dy;
+                            let nx = world.wrap_x(gx + dx);
+                            let ny = gy + dy;
+                            let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+                                Some(chunk.get(lx as usize, ly as usize))
+                            } else {
+                                world.get_cell(nx, ny)
+                            };
+                            let Some(n) = n else {
+                                continue;
+                            };
+                            if is_porous_cell(n, &hydro) && n.sat.0 > 0 {
+                                touches.push((nx, ny));
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let mut still_wet = false;
         let mut any_air = false;
         let mut any_unsat = false;
