@@ -792,24 +792,28 @@ fn accumulate_seepage_xfers_ex(
                 }
             }
             // Contact pass is Air ↔ pore only. Infiltration from −x / −y
-            // is owned by those cells. A pore that does not own a +x / +y
-            // Air face cannot infiltrate or weep this pass — rain-wet
-            // halos are full of wet sand that paid the neighbour loop
-            // for faces it does not own (leftover every tick). Dry pores
-            // also need that Air to be wet (they cannot weep). Do not
-            // apply this skip on the deep pass.
+            // is owned by those cells. A pore works this pass only if an
+            // owned +x / +y Air face can transfer: wet Air into a pore
+            // with room, or a wet pore into Air with room. Buried wet
+            // sand (no Air face) and a full bed under a full pond paid
+            // head math every tick (leftover on lake / ocean shelves).
+            // Do not apply this skip on the deep pass.
             if contact_only && a_solid {
                 let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
                 let up = read(lx, ly + 1, gx, gy + 1);
-                let owns_contact = |c: Option<Cell>| match c {
+                let contact_live = |c: Option<Cell>| match c {
                     Some(n)
                         if n.material == MaterialId::Air && !is_porous_cell(n, &hydro) =>
                     {
-                        a.sat.0 > 0 || n.sat.0 > 0
+                        let air_wet = n.sat.0 > 0;
+                        let air_room = !n.sat.is_full();
+                        let pore_wet = a.sat.0 > 0;
+                        let pore_room = a.sat.0 < cap_a;
+                        (air_wet && pore_room) || (pore_wet && air_room)
                     }
                     _ => false,
                 };
-                if !owns_contact(right) && !owns_contact(up) {
+                if !contact_live(right) && !contact_live(up) {
                     return;
                 }
             }
