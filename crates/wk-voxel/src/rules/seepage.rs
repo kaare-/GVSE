@@ -866,6 +866,12 @@ fn accumulate_seepage_xfers_ex(
                     let Some(b) = read(lx + dx, ly + dy, nx, ny) else {
                         continue;
                     };
+                    // Pore ice seals liquid movement without changing host sat.
+                    if crate::pore_ice::is_frozen(world, gx, gy)
+                        || crate::pore_ice::is_frozen(world, nx, ny)
+                    {
+                        continue;
+                    }
                     let b_solid = is_porous_cell(b, &hydro);
                     if !a_solid && !b_solid {
                         continue;

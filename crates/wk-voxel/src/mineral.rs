@@ -79,6 +79,11 @@ pub const APERTURE_MIN_THROUGHPUT: u8 = 8;
 /// mineral away to wherever it eventually evaporates.
 const ARTESIAN_CEILING_DIVISOR: u16 = 4;
 
+/// Extra divisor span at full geothermal warmth (P2 hot spring).
+///
+/// Warmth 0 → divisor 4; warmth 1 → divisor 8 (half the cold ceiling).
+const ARTESIAN_WARM_DIVISOR_SPAN: f32 = 4.0;
+
 /// Dissolved load carried by the water in this cell.
 #[inline]
 pub fn dissolved_at(world: &World, gx: i32, gy: i32) -> u16 {
@@ -391,7 +396,18 @@ pub fn precipitate_at(world: &mut World, gx: i32, gy: i32) -> u16 {
 /// drops even though nothing evaporated. This is what puts a travertine mound
 /// at a rising spring rather than a flat stain where the water later dries.
 pub fn precipitate_artesian(world: &mut World, gx: i32, gy: i32) -> u16 {
-    let ceiling = carrying_capacity(world, gx, gy) / ARTESIAN_CEILING_DIVISOR;
+    precipitate_artesian_warm(world, gx, gy, 0.0)
+}
+
+/// Artesian precip with a geothermal warmth bias (0..=1).
+///
+/// Warmer outlets hold less in solution (lower ceiling) so Flowstone mounds
+/// grow faster — the steady hot-spring motor without a vapour CA.
+pub fn precipitate_artesian_warm(world: &mut World, gx: i32, gy: i32, warmth: f32) -> u16 {
+    let warmth = warmth.clamp(0.0, 1.0);
+    let base = carrying_capacity(world, gx, gy) as f32;
+    let div = ARTESIAN_CEILING_DIVISOR as f32 + warmth * ARTESIAN_WARM_DIVISOR_SPAN;
+    let ceiling = (base / div).floor() as u16;
     precipitate_over(world, gx, gy, ceiling)
 }
 
@@ -792,6 +808,65 @@ mod tests {
             crate::audit::mineral_total(&discharged),
             crate::audit::mineral_total(&confined),
             "artesian precipitation must conserve mineral"
+        );
+    }
+
+    #[test]
+    fn warm_artesian_outlet_drops_more_load_than_cold() {
+        // P2 hot spring: same load at the same outlet, warmth only changes
+        // how aggressively depressurisation sheds mineral into Flowstone.
+        let build = || {
+            let mut w = bed(21);
+            let mut floor = Cell::solid(MaterialId::Limestone);
+            floor.pore = 200;
+            w.set_cell(4, 1, floor);
+            let mut c = Cell::air();
+            c.sat = Sat(200);
+            w.set_cell(4, 2, c);
+            let ceiling = (200u16 * SOLUBILITY_PER_SAT) / 16;
+            add_dissolved(&mut w, 4, 2, ceiling);
+            w
+        };
+        let mut cold = build();
+        let mut warm = build();
+        let cold_used = precipitate_artesian_warm(&mut cold, 4, 2, 0.0);
+        let warm_used = precipitate_artesian_warm(&mut warm, 4, 2, 1.0);
+        assert!(cold_used > 0, "cold artesian still drops some load");
+        assert!(warm_used > 0, "warm artesian must drop load");
+        // One event is capped by PRECIPITATE_MAX_STEP; keep precipitating so
+        // the lower warm ceiling keeps shedding until the cold one stalls.
+        for _ in 0..32 {
+            precipitate_artesian_warm(&mut cold, 4, 2, 0.0);
+            precipitate_artesian_warm(&mut warm, 4, 2, 1.0);
+        }
+        assert!(
+            dissolved_at(&warm, 4, 2) < dissolved_at(&cold, 4, 2),
+            "warm spring must leave less load in solution (cold={} warm={})",
+            dissolved_at(&cold, 4, 2),
+            dissolved_at(&warm, 4, 2)
+        );
+        let cold_solid = crate::audit::mineral_total(&cold) - dissolved_at(&cold, 4, 2) as i64
+            - dissolved_at(&cold, 4, 1) as i64;
+        let warm_solid = crate::audit::mineral_total(&warm) - dissolved_at(&warm, 4, 2) as i64
+            - dissolved_at(&warm, 4, 1) as i64;
+        // Warm may mint Flowstone in the Air seat or occlude the floor —
+        // either way more of the ledger must leave solution into solid.
+        let cold_diss = dissolved_at(&cold, 4, 2) as i64 + dissolved_at(&cold, 4, 1) as i64;
+        let warm_diss = dissolved_at(&warm, 4, 2) as i64 + dissolved_at(&warm, 4, 1) as i64;
+        assert!(
+            warm_diss < cold_diss,
+            "warm mound path must bank more mineral out of solution (cold_diss={cold_diss} warm_diss={warm_diss} cold_solid={cold_solid} warm_solid={warm_solid})"
+        );
+        let baseline = crate::audit::mineral_total(&build());
+        assert_eq!(
+            crate::audit::mineral_total(&warm),
+            baseline,
+            "warmth bias must conserve mineral"
+        );
+        assert_eq!(
+            crate::audit::mineral_total(&cold),
+            baseline,
+            "cold artesian must conserve mineral"
         );
     }
 
