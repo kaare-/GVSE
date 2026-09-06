@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::compost_organic_to_soil;
 use crate::grid::World;
 use crate::rules::{hash_prob, is_standing_water};
@@ -281,8 +281,16 @@ fn sample_standing_water_cells(world: &World) -> u32 {
         if !chunk.has_standing_air {
             continue;
         }
+        // Dry sky above the free surface and buried rock below it
+        // paid every-2nd-cell probes on the exchange pulse (leftover
+        // inside standing chunks). Restrict to the standing y band.
+        let (y0, y1) = match chunk.standing_band_y(Rect::full()) {
+            Some((lo, hi)) => (lo as usize, hi as usize),
+            None => (0, CHUNK_CELLS_H - 1),
+        };
         // Sparse sample — every 2nd cell — enough for a wetness dial.
-        for ly in (0..CHUNK_CELLS_H).step_by(2) {
+        let y_start = y0 + (y0 % 2); // keep the even-row lattice
+        for ly in (y_start..=y1).step_by(2) {
             for lx in (0..CHUNK_CELLS_W).step_by(2) {
                 let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
                 let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
@@ -540,6 +548,39 @@ mod tests {
         assert!(
             sample_standing_water_cells(&w) > 0,
             "ocean / pond standing water still samples"
+        );
+    }
+
+    #[test]
+    fn standing_sample_stays_inside_the_standing_band() {
+        // Exchange used to probe every even row of a standing chunk
+        // (dry sky + buried rock leftover). After the band cut the
+        // sample range must match standing_band_y.
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::water());
+            w.set_cell(x, 2, Cell::water());
+            // Tall dry Air above — must not expand the standing band.
+            w.set_cell(x, 40, Cell::air());
+        }
+        let chunk = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(chunk.has_standing_air);
+        let (lo, hi) = chunk
+            .standing_band_y(Rect::full())
+            .expect("standing water must stamp a y band");
+        assert!(
+            hi < 40,
+            "dry sky above the pond must stay outside the band (hi={hi})"
+        );
+        assert!(
+            lo <= 2 && hi >= 1,
+            "pond rows must sit inside the band ({lo}..={hi})"
+        );
+        assert!(
+            sample_standing_water_cells(&w) > 0,
+            "banded sample must still see the pond"
         );
     }
 }
