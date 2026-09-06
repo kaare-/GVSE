@@ -80,8 +80,11 @@ pub struct World {
     pub wrap_width: Option<i32>,
     /// Soft labile litter (Set E) keyed by wrapped world-x column.
     /// Death deposits units here; fungi digest them before Organic cells.
+    ///
+    /// Runtime Fx dual — digest / forage probe this every fungi pulse.
+    /// Serde still writes a plain map (same postcard shape).
     #[serde(default)]
-    pub soft_litter: HashMap<i32, u16>,
+    pub soft_litter: FxHashMap<i32, u16>,
     /// Hibernating plant/fungus spores keyed by landing cell (Set E bank).
     #[serde(default)]
     pub spore_bank: crate::spore_bank::SporeBank,
@@ -218,7 +221,7 @@ impl World {
             chunks: FxHashMap::default(),
             tick: 0,
             wrap_width: None,
-            soft_litter: HashMap::new(),
+            soft_litter: FxHashMap::default(),
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),
             mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),

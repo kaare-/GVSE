@@ -90,7 +90,7 @@ impl WorldV5 {
             chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
-            soft_litter: self.soft_litter,
+            soft_litter: self.soft_litter.into_iter().collect(),
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
@@ -138,7 +138,7 @@ impl WorldV6 {
             chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
-            soft_litter: self.soft_litter,
+            soft_litter: self.soft_litter.into_iter().collect(),
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
@@ -191,7 +191,7 @@ impl WorldV7 {
             chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
-            soft_litter: self.soft_litter,
+            soft_litter: self.soft_litter.into_iter().collect(),
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
@@ -253,7 +253,7 @@ impl WorldV8 {
             chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
-            soft_litter: self.soft_litter,
+            soft_litter: self.soft_litter.into_iter().collect(),
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
@@ -309,7 +309,7 @@ impl WorldV11 {
             chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
-            soft_litter: self.soft_litter,
+            soft_litter: self.soft_litter.into_iter().collect(),
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
@@ -406,7 +406,7 @@ impl WorldV10 {
             chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
-            soft_litter: self.soft_litter,
+            soft_litter: self.soft_litter.into_iter().collect(),
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
@@ -479,7 +479,7 @@ impl WorldV9 {
             chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
-            soft_litter: self.soft_litter,
+            soft_litter: self.soft_litter.into_iter().collect(),
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
@@ -836,6 +836,7 @@ mod tests {
         world.suspended.insert((3, 5), 7);
         world.mycelium_strains.insert((3, 4), vec![(7, 40)]);
         world.mycelium_energy.insert((3, 4), 90);
+        world.soft_litter.insert(3, 55);
         let (humidity, wind, mut temperature) = demo_climate(&params);
         // Runtime Fx dual — postcard must still round-trip °C cells.
         temperature.cells.insert((1, 2), 12.5);
@@ -875,6 +876,7 @@ mod tests {
             Some(&vec![(7, 40)])
         );
         assert_eq!(loaded.world.mycelium_energy.get(&(3, 4)), Some(&90));
+        assert_eq!(loaded.world.soft_litter.get(&3), Some(&55));
         assert_eq!(loaded.temperature.cells.get(&(1, 2)), Some(&12.5));
     }
 
@@ -919,7 +921,7 @@ mod tests {
                 chunks: world.chunks.into_iter().collect(),
                 tick: world.tick,
                 wrap_width: world.wrap_width,
-                soft_litter: world.soft_litter,
+                soft_litter: world.soft_litter.into_iter().collect(),
                 spore_bank: world.spore_bank,
                 hydro: world.hydro,
             },
@@ -978,7 +980,7 @@ mod tests {
                 chunks: world.chunks.into_iter().collect(),
                 tick: world.tick,
                 wrap_width: world.wrap_width,
-                soft_litter: world.soft_litter,
+                soft_litter: world.soft_litter.into_iter().collect(),
                 spore_bank: world.spore_bank,
                 hydro: world.hydro,
             },
