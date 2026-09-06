@@ -63,12 +63,16 @@ const AIR_PROJECT_ITERS: u32 = 6;
 
 /// Per-column orographic numbers for one [`Wind::rebuild_field`].
 /// Compose used to recompute these on every tile of a tall sky.
+/// `surf_y` is the live skin cell at the column centre — slip reuses it
+/// so the post-project pass does not walk the world again per seat.
 #[derive(Clone, Copy)]
 struct ColOro {
     speed: f32,
     lift: f32,
     descent: f32,
     surf_hy: i32,
+    /// Cell Y of the live surface at this column's tile centre.
+    surf_y: i32,
 }
 
 impl ColOro {
@@ -484,7 +488,7 @@ impl Wind {
         // is not wired yet.
         self.project_incompressible(world, bounds, &mut blended);
         for (&(hx, hy), v) in blended.iter_mut() {
-            *v = self.deflect_along_surface(world, hx, hy, v.0, v.1);
+            *v = self.deflect_along_surface_cached(world, &col_oro, hx, hy, v.0, v.1);
         }
         self.field_slab = None;
         self.field = blended;
@@ -647,6 +651,8 @@ impl Wind {
             }
         }
         self.project_incompressible_slab(world, bounds, w, &mut vel, &live, &solid);
+        // Slip from packed ColOro skin — same math as vector_at misses,
+        // without re-walking the live surface per live seat.
         for iy in 0..h {
             for ix in 0..w {
                 let i = iy * w + ix;
@@ -655,7 +661,9 @@ impl Wind {
                 }
                 let hx = bounds.hx_min + ix as i32;
                 let hy = bounds.hy_min + iy as i32;
-                vel[i] = self.deflect_along_surface(world, hx, hy, vel[i].0, vel[i].1);
+                vel[i] = self.deflect_along_surface_cached(
+                    world, col_oro, hx, hy, vel[i].0, vel[i].1,
+                );
             }
         }
         self.field.clear();
@@ -1048,11 +1056,15 @@ impl Wind {
     }
 
     fn pack_col_oro(&self, world: Option<&World>, hx: i32) -> ColOro {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        let surf_y = self.surface_at(world, gx);
         ColOro {
             speed: self.orographic_speed_factor(world, hx),
             lift: self.orographic_lift(world, hx),
             descent: self.descent_cells(world, hx),
-            surf_hy: self.surface_tile_hy(world, hx),
+            surf_hy: surf_y.div_euclid(tc),
+            surf_y,
         }
     }
 
@@ -1169,6 +1181,9 @@ impl Wind {
     /// Slip along the ground and along a nearby face: no component into
     /// rock. A descent hits the skin and turns along it; a breeze that
     /// would stab into a hill turns up or down the face.
+    /// Slip along the ground and along a nearby face: no component into
+    /// rock. A descent hits the skin and turns along it; a breeze that
+    /// would stab into a hill turns up or down the face.
     fn deflect_along_surface(
         &self,
         world: Option<&World>,
@@ -1184,6 +1199,46 @@ impl Wind {
             return (vx, vy);
         }
         let m = self.surface_slope(world, hx);
+        self.deflect_along_surface_math(above, wall_l, wall_r, m, vx, vy)
+    }
+
+    /// Same slip as [`Self::deflect_along_surface`], but skin / neighbour
+    /// walls / slope come from the packed [`ColOro`] map already built for
+    /// this rebuild — no live-surface walk per seat.
+    fn deflect_along_surface_cached(
+        &self,
+        world: Option<&World>,
+        cols: &FxHashMap<i32, ColOro>,
+        hx: i32,
+        hy: i32,
+        vx: f32,
+        vy: f32,
+    ) -> (f32, f32) {
+        let here = self.col_oro_at(world, cols, hx);
+        let left = self.col_oro_at(world, cols, hx - 1);
+        let right = self.col_oro_at(world, cols, hx + 1);
+        let above = (hy - here.surf_hy) as f32;
+        let tc = self.tile_cols.max(1);
+        let y_mid = hy * tc + tc / 2;
+        let rise = tc.max(1);
+        let wall_l = left.surf_y > y_mid + rise;
+        let wall_r = right.surf_y > y_mid + rise;
+        if above > 4.0 && !wall_l && !wall_r {
+            return (vx, vy);
+        }
+        let m = ((right.surf_y - left.surf_y) as f32 / (2.0 * tc as f32)).clamp(-8.0, 8.0);
+        self.deflect_along_surface_math(above, wall_l, wall_r, m, vx, vy)
+    }
+
+    fn deflect_along_surface_math(
+        &self,
+        above: f32,
+        wall_l: bool,
+        wall_r: bool,
+        m: f32,
+        vx: f32,
+        vy: f32,
+    ) -> (f32, f32) {
         let h = (1.0 + m * m).sqrt();
         if h < 1e-6 {
             return (vx, vy);
