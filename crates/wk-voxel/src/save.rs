@@ -94,9 +94,9 @@ impl WorldV5 {
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
-            mycelium_strains: HashMap::new(),
+            mycelium_strains: FxHashMap::default(),
             next_mycelium_strain_id: 1,
-            mycelium_energy: HashMap::new(),
+            mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
@@ -142,9 +142,9 @@ impl WorldV6 {
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
-            mycelium_strains: HashMap::new(),
+            mycelium_strains: FxHashMap::default(),
             next_mycelium_strain_id: 1,
-            mycelium_energy: HashMap::new(),
+            mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
@@ -195,9 +195,9 @@ impl WorldV7 {
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
-            mycelium_strains: HashMap::new(),
+            mycelium_strains: FxHashMap::default(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
-            mycelium_energy: HashMap::new(),
+            mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
@@ -257,9 +257,9 @@ impl WorldV8 {
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
-            mycelium_strains: self.mycelium_strains,
+            mycelium_strains: self.mycelium_strains.into_iter().collect(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
-            mycelium_energy: HashMap::new(),
+            mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
@@ -313,9 +313,9 @@ impl WorldV11 {
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
-            mycelium_strains: self.mycelium_strains,
+            mycelium_strains: self.mycelium_strains.into_iter().collect(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
-            mycelium_energy: self.mycelium_energy,
+            mycelium_energy: self.mycelium_energy.into_iter().collect(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             sym_net_flow: self.sym_net_flow,
@@ -410,9 +410,9 @@ impl WorldV10 {
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
-            mycelium_strains: self.mycelium_strains,
+            mycelium_strains: self.mycelium_strains.into_iter().collect(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
-            mycelium_energy: self.mycelium_energy,
+            mycelium_energy: self.mycelium_energy.into_iter().collect(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             sym_net_flow: self
@@ -483,9 +483,9 @@ impl WorldV9 {
             spore_bank: self.spore_bank,
             hydro: self.hydro,
             mycelium_lineage: self.mycelium_lineage,
-            mycelium_strains: self.mycelium_strains,
+            mycelium_strains: self.mycelium_strains.into_iter().collect(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
-            mycelium_energy: self.mycelium_energy,
+            mycelium_energy: self.mycelium_energy.into_iter().collect(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
@@ -834,6 +834,8 @@ mod tests {
         // Runtime Fx dual — postcard must still round-trip load maps.
         world.dissolved.insert((3, 5), 42);
         world.suspended.insert((3, 5), 7);
+        world.mycelium_strains.insert((3, 4), vec![(7, 40)]);
+        world.mycelium_energy.insert((3, 4), 90);
         let (humidity, wind, mut temperature) = demo_climate(&params);
         // Runtime Fx dual — postcard must still round-trip °C cells.
         temperature.cells.insert((1, 2), 12.5);
@@ -868,6 +870,11 @@ mod tests {
         assert_eq!(loaded.carbon.dissolved, 88.0);
         assert_eq!(loaded.world.dissolved.get(&(3, 5)), Some(&42));
         assert_eq!(loaded.world.suspended.get(&(3, 5)), Some(&7));
+        assert_eq!(
+            loaded.world.mycelium_strains.get(&(3, 4)),
+            Some(&vec![(7, 40)])
+        );
+        assert_eq!(loaded.world.mycelium_energy.get(&(3, 4)), Some(&90));
         assert_eq!(loaded.temperature.cells.get(&(1, 2)), Some(&12.5));
     }
 
