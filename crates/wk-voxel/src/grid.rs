@@ -97,15 +97,20 @@ pub struct World {
     /// Per-cell mycelium strain shares for overlays / competing networks.
     /// Keyed by wrapped `(gx, gy)` → list of `(strain_id, intensity)`.
     /// Share intensities sum to [`Cell::mycelium`] (≤255); cleared at 0.
+    ///
+    /// Runtime Fx dual — fungi / symbiosis walk this map every pulse.
+    /// Serde still writes a plain map (same postcard shape).
     #[serde(default)]
-    pub mycelium_strains: HashMap<(i32, i32), Vec<(u32, u8)>>,
+    pub mycelium_strains: FxHashMap<(i32, i32), Vec<(u32, u8)>>,
     /// Next strain id to mint on inoculum (wraps; 0 reserved / unused).
     #[serde(default)]
     pub next_mycelium_strain_id: u32,
     /// Sparse network sugar / glucose analog on colonized cells (0..=255).
     /// Cleared when cream hits 0; migrates with grain/raft moves.
+    ///
+    /// Runtime Fx dual — same fungi hot path as strains.
     #[serde(default)]
-    pub mycelium_energy: HashMap<(i32, i32), u8>,
+    pub mycelium_energy: FxHashMap<(i32, i32), u8>,
     /// **Dissolved mineral load** carried by the water in a cell, in the same
     /// units as the rock removed to create it (see [`crate::mineral`]).
     ///
@@ -217,9 +222,9 @@ impl World {
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),
             mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
-            mycelium_strains: HashMap::new(),
+            mycelium_strains: FxHashMap::default(),
             next_mycelium_strain_id: 1,
-            mycelium_energy: HashMap::new(),
+            mycelium_energy: FxHashMap::default(),
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             sym_net_flow: HashMap::new(),
