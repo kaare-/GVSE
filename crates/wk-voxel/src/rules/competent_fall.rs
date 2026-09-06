@@ -5393,6 +5393,47 @@ mod tests {
   }
 
   #[test]
+  fn water_halo_seed_does_not_wake_settled_shore_hill() {
+    // Regression for the wet-hill treadmill: seeding the body pass from the
+    // water dirty / flow halo re-flooded seated shore rock every cadence even
+    // though sat cannot destabilise rock. Sleep must survive a wet neighbour.
+    let mut w = World::new(71);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=6 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cfg = CompetentFallConfig::default();
+    for _ in 0..16 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    assert!(
+      w.competent_is_settled(10, 3),
+      "precondition: shore hill sleeps"
+    );
+    // Standing water against the face — the old path handed this dirty rect
+    // to wake_competent_bodies_regions.
+    for y in 1..=4 {
+      w.set_cell(20, y, Cell::water());
+    }
+    w.competent_wake.clear();
+    let ac = ActiveChunk::new(ChunkCoord::new(0, 0), Rect::full());
+    wake_competent_bodies_regions(&mut w, &[ac]);
+    // Helper may still see *unsettled* seedable cells elsewhere; the slept
+    // shore cells themselves must stay asleep (sat did not change solidity).
+    assert!(
+      w.competent_is_settled(10, 3),
+      "water dirty halo must not clear sleep on seated rock"
+    );
+    assert!(
+      w.competent_is_settled(15, 4),
+      "mid-hill sleep must survive a wet neighbour rect"
+    );
+  }
+
+  #[test]
   fn carved_arch_slab_crashes() {
     let mut w = World::new(40);
     for cx in 0..3 {

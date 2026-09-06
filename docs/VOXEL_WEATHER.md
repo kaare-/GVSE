@@ -596,6 +596,10 @@ What is still leftover:
    `!has_competent` chunks; support rebuild skips `!has_solid`
    (empty sky / ocean). Occupancy is the source of truth —
    a false flag is a skip, not a full-world walk.
+   **Also:** do not re-seed the rock body pass from the water dirty /
+   flow halo (sloshing `sat` cannot destabilise rock; solidity wakes
+   already queue `World.competent_wake`). That wet-hill treadmill was
+   ~2.5k flood cells/tick on the body probe.
 5. Equalized confined BFS ~3.0 ms — **Δt=1 persist is in**
    (`World.confined` lookup). Do not starve the wake. Δt>1 still parked.
 6. Condensation lottery ~2.9 ms — do not skip it

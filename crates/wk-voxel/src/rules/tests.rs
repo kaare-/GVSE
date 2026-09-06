@@ -9247,3 +9247,78 @@ fn saturated_seam_band_does_not_shelf_above_dry_row_below() {
         "must not leave a full shelf over dry stone (s61={s61} s62={s62} s63={s63})"
     );
 }
+
+#[test]
+fn wet_shore_tick_does_not_cadence_seed_settled_hill() {
+    // After sleep, a lake against a stone hill must not re-enter the body pass
+    // via the water dirty halo. Cadence seed counter must stay at 0; floating
+    // wake + solidity wakes remain the only entry points.
+    let mut w = World::new(88);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..48 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    let cfg = CompetentFallConfig::default();
+    for _ in 0..16 {
+        apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    assert!(
+        w.competent_is_settled(12, 4),
+        "precondition: hill must sleep before the lake arrives"
+    );
+    for x in 24..40 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Water writes are Air/sat — solidity unchanged; sleep must hold.
+    assert!(
+        w.competent_is_settled(12, 4),
+        "filling a lake must not clear hill sleep"
+    );
+    crate::competent_probe::reset();
+    let perf = PerfConfig::default();
+    for _ in 0..48 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let p = crate::competent_probe::snapshot();
+    assert_eq!(
+        p.wake_from_cadence_seed, 0,
+        "water dirty must not cadence-seed the body pass (got {})",
+        p.wake_from_cadence_seed
+    );
+    assert!(
+        w.competent_is_settled(12, 4),
+        "wet shore must leave the dry hill asleep"
+    );
+}
+
+#[test]
+fn sky_boulder_still_falls_without_water_halo_seed() {
+    let mut w = World::new(89);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Mid-air stone above empty Air — floating wake must drop it.
+    w.set_cell(8, 40, Cell::solid(MaterialId::Stone));
+    let perf = PerfConfig::default();
+    for _ in 0..80 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let gy = (0..45)
+        .rev()
+        .find(|&y| {
+            w.get_cell(8, y)
+                .is_some_and(|c| c.material == MaterialId::Stone)
+        })
+        .expect("stone must still exist");
+    assert!(
+        gy < 10,
+        "floating boulder must fall without water-halo body seeding (gy={gy})"
+    );
+}
