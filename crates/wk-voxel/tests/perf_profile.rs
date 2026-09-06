@@ -535,7 +535,7 @@ fn run_profile(label: &str, params: WorldgenParams, plant_count: usize) -> f32 {
     let org_ms = ms_per(accum.organisms, MEASURE_TICKS);
     eprintln!(
         "  humidity tiles={}/{}  humidity_mass={:.1}  organisms={}  org_share={:.0}%",
-        scene.humidity.cells.len(),
+        scene.humidity.occupied_len(),
         cap,
         scene.humidity.total_mass(),
         scene.organisms.len(),
@@ -848,7 +848,7 @@ fn soak_age_inventory() {
             halo,
             aabb,
             scene.world.dissolved.len(),
-            scene.humidity.cells.len(),
+            scene.humidity.occupied_len(),
             hum_cap,
             buoy_ch,
             org_ch,
