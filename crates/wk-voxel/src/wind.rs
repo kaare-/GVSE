@@ -1360,6 +1360,22 @@ impl Wind {
         self.deflect_along_surface(world, hx, hy, vx, vy)
     }
 
+    /// When `bounds` matches the live dense field slab, return row-major
+    /// `(vel, live)` with the same indexing humidity's packed seats use.
+    /// Hits skip the HashMap probe + per-tile slab bounds check; callers
+    /// still fall back to [`Self::vector_at`] on `!live[i]` (near-surface
+    /// band / post-evap seats the rebuild never seated).
+    pub(crate) fn dense_slab_vectors(
+        &self,
+        bounds: TileBounds,
+    ) -> Option<(&[(f32, f32)], &[bool])> {
+        let s = self.field_slab.as_ref()?;
+        if s.bounds != bounds {
+            return None;
+        }
+        Some((s.vel.as_slice(), s.live.as_slice()))
+    }
+
     pub fn flow_at(
         &self,
         world: Option<&World>,
@@ -1945,6 +1961,63 @@ mod tests {
         assert!(
             vx2.abs() + vy2.abs() > 1e-4,
             "second rebuild must still seat the slab"
+        );
+    }
+
+    #[test]
+    fn dense_slab_vectors_match_vector_at_on_live_seats() {
+        use crate::cell::Cell;
+        use crate::humidity::TileBounds;
+        use wk_material::MaterialId;
+
+        let sea: i32 = 16;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
+        for x in 0..32 {
+            for y in 0..=sea {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, sea, 0, 80, false);
+        wind.variance = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        let occupied: Vec<(i32, i32)> = (1..7)
+            .flat_map(|hx| (6..10).map(move |hy| (hx, hy)))
+            .collect();
+        wind.rebuild_field(Some(&w), None, 8, &occupied, None);
+        let bounds = wind.bounds.expect("climate sets world tile bounds");
+        let (vel, live) = wind
+            .dense_slab_vectors(bounds)
+            .expect("dense rebuild must expose matching slab vectors");
+        let (bw, _) = bounds.dims();
+        assert!(bw > 0);
+        let mut live_hits = 0usize;
+        for (i, &is_live) in live.iter().enumerate() {
+            if !is_live {
+                continue;
+            }
+            live_hits += 1;
+            let (hx, hy) = bounds.coords(bw, i);
+            let (vx, vy) = wind.vector_at(Some(&w), hx, hy);
+            assert!(
+                (vel[i].0 - vx).abs() < 1e-6 && (vel[i].1 - vy).abs() < 1e-6,
+                "slab index {i} @({hx},{hy}) vel={:?} vector_at=({vx},{vy})",
+                vel[i]
+            );
+        }
+        assert!(live_hits > 0, "expected live slab seats");
+        let mismatch = TileBounds {
+            hx_min: bounds.hx_min,
+            hx_max: bounds.hx_max,
+            hy_min: bounds.hy_min,
+            hy_max: bounds.hy_max + 1,
+        };
+        assert!(
+            wind.dense_slab_vectors(mismatch).is_none(),
+            "mismatched humidity bounds must not claim the wind slab"
         );
     }
 }

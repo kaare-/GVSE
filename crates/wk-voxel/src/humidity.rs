@@ -1035,10 +1035,12 @@ impl Humidity {
     /// Free-air height is cached per occupied column so the flux pass
     /// does not walk the live surface once per seat (that was the
     /// humidity-advect FPS cliff). Wind samples are cached once per
-    /// seat before the two axis passes — `vector_at` misses walk the
-    /// world, and calling that twice per tile was the leftover cost
-    /// after the field rebuild. When the bound box is at least half
-    /// full, flux / lift / mix / oro share one packed slab and only
+    /// seat before the two axis passes. When humidity bounds match the
+    /// live wind field slab, those samples read `vel` by the same
+    /// row-major index (HashMap + per-tile slab bounds checks skipped);
+    /// seats the rebuild never seated still fall through to
+    /// [`crate::wind::Wind::vector_at`]. When the bound box is at least
+    /// half full, flux / lift / mix / oro share one packed slab and only
     /// tiles that moved are written back. The slab stays for the next
     /// dense tick (evap / rain write through) so we do not re-walk
     /// SipHash every frame. Sparse maps keep the HashMap walk (demo
@@ -1083,15 +1085,38 @@ impl Humidity {
         let snap = self.packed_mass(b);
         let mut work = snap.clone();
         let surface = Some((wind, world, &free_air));
-        // One sample per occupied seat — same leftover the sparse
-        // path already cut. Both axes donate from `snap`.
+        // One sample per occupied seat — both axes donate from `snap`.
+        // Matching wind slab: index into `vel` directly. Misses still
+        // walk via `vector_at` (slip / climate for unseated tiles).
         let mut vectors = vec![(0.0f32, 0.0f32); n];
-        for i in 0..n {
-            if snap[i].abs() < 1e-9 {
-                continue;
+        if let Some((vel, live)) = wind.dense_slab_vectors(b) {
+            let m = n.min(vel.len()).min(live.len());
+            for i in 0..m {
+                if snap[i].abs() < 1e-9 {
+                    continue;
+                }
+                if live[i] {
+                    vectors[i] = vel[i];
+                } else {
+                    let (hx, hy) = b.coords(w, i);
+                    vectors[i] = wind.vector_at(Some(world), hx, hy);
+                }
             }
-            let (hx, hy) = b.coords(w, i);
-            vectors[i] = wind.vector_at(Some(world), hx, hy);
+            for i in m..n {
+                if snap[i].abs() < 1e-9 {
+                    continue;
+                }
+                let (hx, hy) = b.coords(w, i);
+                vectors[i] = wind.vector_at(Some(world), hx, hy);
+            }
+        } else {
+            for i in 0..n {
+                if snap[i].abs() < 1e-9 {
+                    continue;
+                }
+                let (hx, hy) = b.coords(w, i);
+                vectors[i] = wind.vector_at(Some(world), hx, hy);
+            }
         }
         self.flux_axis_into(&snap, &mut work, vx, vy, surface, true, b, w, &vectors);
         self.flux_axis_into(&snap, &mut work, vx, vy, surface, false, b, w, &vectors);
