@@ -92,6 +92,54 @@ impl ColOro {
     }
 }
 
+/// Dense strip of packed [`ColOro`] for one rebuild. Compose / slip /
+/// downwind hit this by index instead of hashing every seat.
+struct ColOroTable {
+    hx0: i32,
+    cols: Vec<ColOro>,
+}
+
+impl ColOroTable {
+    fn empty() -> Self {
+        Self {
+            hx0: 0,
+            cols: Vec::new(),
+        }
+    }
+
+    fn build(wind: &Wind, world: Option<&World>, unique_hx: &FxHashSet<i32>) -> Self {
+        let mut lo = i32::MAX;
+        let mut hi = i32::MIN;
+        for &hx in unique_hx {
+            lo = lo.min(hx - 3);
+            hi = hi.max(hx + 3);
+        }
+        if lo > hi {
+            return Self {
+                hx0: 0,
+                cols: Vec::new(),
+            };
+        }
+        let mut cols = Vec::with_capacity((hi - lo + 1) as usize);
+        for hx in lo..=hi {
+            cols.push(wind.pack_col_oro(world, hx));
+        }
+        Self { hx0: lo, cols }
+    }
+
+    fn get(&self, wind: &Wind, world: Option<&World>, hx: i32) -> ColOro {
+        let i = hx - self.hx0;
+        if i >= 0 {
+            let i = i as usize;
+            if i < self.cols.len() {
+                return self.cols[i];
+            }
+        }
+        wind.pack_col_oro(world, hx)
+    }
+}
+
+
 /// Tab → Climate wind drivers.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct WindConfig {
@@ -415,18 +463,9 @@ impl Wind {
                 self.cache_surface(world, gx - step * tc);
             }
         }
-        // Same column math compose used to recompute per tile. Pack
-        // hx±3 so downwind blockage (1–3 tiles ahead) hits the map;
-        // slip only needs ±1. Edge samples stay unwrapped like before.
-        let mut col_oro: FxHashMap<i32, ColOro> = FxHashMap::default();
-        col_oro.reserve(unique_hx.len().saturating_mul(7));
-        for &hx in &unique_hx {
-            for dx in -3..=3 {
-                col_oro
-                    .entry(hx + dx)
-                    .or_insert_with(|| self.pack_col_oro(world, hx + dx));
-            }
-        }
+        // Dense strip covering unique_hx ±3 — compose downwind looks
+        // 1–3 tiles ahead; slip needs ±1. One pack per column, no HashMap.
+        let col_oro = ColOroTable::build(self, world, &unique_hx);
 
         if bounds.prefer_dense_walk(keys.len()) {
             self.rebuild_field_slab(
@@ -578,7 +617,7 @@ impl Wind {
         prev_slab: Option<&FieldSlab>,
         bounds: TileBounds,
         keys: &FxHashMap<(i32, i32), ()>,
-        col_oro: &FxHashMap<i32, ColOro>,
+        col_oro: &ColOroTable,
         drag: Option<&FxHashMap<(i32, i32), f32>>,
     ) {
         let (w, h) = bounds.dims();
@@ -1073,12 +1112,10 @@ impl Wind {
     fn col_oro_at(
         &self,
         world: Option<&World>,
-        cols: &FxHashMap<i32, ColOro>,
+        cols: &ColOroTable,
         hx: i32,
     ) -> ColOro {
-        cols.get(&hx)
-            .copied()
-            .unwrap_or_else(|| self.pack_col_oro(world, hx))
+        cols.get(self, world, hx)
     }
 
     fn compose_drivers(
@@ -1091,7 +1128,7 @@ impl Wind {
         evx: f32,
         evy: f32,
         cfg: &WindConfig,
-        cols: &FxHashMap<i32, ColOro>,
+        cols: &ColOroTable,
     ) -> (f32, f32) {
         let here = self.col_oro_at(world, cols, hx);
         let shear = here.height_shear(hy);
@@ -1164,7 +1201,7 @@ impl Wind {
     fn downwind_blockage_cached(
         &self,
         world: Option<&World>,
-        cols: &FxHashMap<i32, ColOro>,
+        cols: &ColOroTable,
         hx: i32,
         hy: i32,
         evx: f32,
@@ -1238,7 +1275,7 @@ impl Wind {
     fn deflect_along_surface_cached(
         &self,
         world: Option<&World>,
-        cols: &FxHashMap<i32, ColOro>,
+        cols: &ColOroTable,
         hx: i32,
         hy: i32,
         vx: f32,
@@ -1323,14 +1360,14 @@ impl Wind {
         hx: i32,
         hy: i32,
     ) -> (f32, f32, f32) {
-        let empty = FxHashMap::default();
+        let empty = ColOroTable::empty();
         self.orographic_soft_cached(world, &empty, hx, hy)
     }
 
     fn orographic_soft_cached(
         &self,
         world: Option<&World>,
-        cols: &FxHashMap<i32, ColOro>,
+        cols: &ColOroTable,
         hx: i32,
         hy: i32,
     ) -> (f32, f32, f32) {
@@ -1717,13 +1754,8 @@ mod tests {
             p.sky_ceiling_y,
             true,
         );
-        let mut cols = FxHashMap::default();
-        for hx in 0..24 {
-            for dx in -3..=3 {
-                cols.entry(hx + dx)
-                    .or_insert_with(|| wind.pack_col_oro(None, hx + dx));
-            }
-        }
+        let unique: FxHashSet<i32> = (0..24).collect();
+        let cols = ColOroTable::build(&wind, None, &unique);
         for hx in 0..24 {
             for hy in [8, 20, 40] {
                 let a = wind.orographic_soft(None, hx, hy);
@@ -1757,13 +1789,8 @@ mod tests {
         }
         let mut wind = Wind::climate(4, 0.20, 3, 48, sea, 0, 80, false);
         wind.variance = 0.0;
-        let mut cols = FxHashMap::default();
-        for hx in 0..12 {
-            for dx in -3..=3 {
-                cols.entry(hx + dx)
-                    .or_insert_with(|| wind.pack_col_oro(Some(&w), hx + dx));
-            }
-        }
+        let unique: FxHashSet<i32> = (0..12).collect();
+        let cols = ColOroTable::build(&wind, Some(&w), &unique);
         let surf_hy = sea.div_euclid(4);
         let mut any = 0usize;
         for hx in 3..6 {
