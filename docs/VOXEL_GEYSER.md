@@ -63,6 +63,11 @@ cargo test -p wk-voxel --test perf_profile --release -- --ignored --nocapture
 | Active vents / steam cells | Hard-capped (hundreds, not world-wide) |
 | Interactive wet FPS already &lt; ~30 | **Stop at P2**; cut water/confined cost first |
 
+**Gate check (2026-09-06, post-P2 tip):** demo wall ~14 ms/tick headless;
+soak ages to 150+ ms/tick. Rock bodies were ~3.4 ms on wet demo (water-halo
+body reseed). **P3/P4 stay blocked** until wet wall is cut — next lever is
+skipping water-dirty seeding of the competent body pass.
+
 P1 and P2 are allowed earlier: gates/bias on existing passes, not new world fields
 (beyond the sparse pore-ice map).
 

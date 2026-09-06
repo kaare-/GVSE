@@ -737,24 +737,18 @@ fn tick_with_life_inner(
     // Floating wake is mandatory — F1 defers competent rock to this pass, so
     // sky boulders hang forever if they are never re-dirtied.
     if failure.enable_competent_fall {
-        // Cadence-gated full wake. Truncated floaters stay dirty from the body
-        // cap so they keep moving between wakes; priority puts air-below first.
+        // Cadence-gated floating wake only. Do **not** re-seed from the water
+        // dirty / flow halo: sloshing `sat` cannot destabilise rock, and that
+        // path re-flooded wet hills every GRAIN_WAKE_EVERY (~2.5k flood cells
+        // /tick on the demo probe). Solidity changes already queue
+        // [`World::competent_wake`]; bodies in flight re-dirty below.
         if world.tick % GRAIN_WAKE_EVERY == 0 {
             super::competent_fall::wake_floating_competent(world);
-            let dirty = plan_active(world);
-            if dirty.is_empty() {
-                if !flow_active.is_empty() {
-                    super::competent_fall::wake_competent_bodies_regions(world, &flow_active);
-                }
-            } else {
-                super::competent_fall::wake_competent_bodies_regions(world, &dirty);
-            }
         }
         // Bodies in flight re-dirty themselves every tick (cheap, O(moves)),
         // so fall speed does not depend on the wake cadence above.
         super::competent_fall::wake_moved_competent(world);
-        // Rock's own wake list, not the water halo: sloshing `sat` cannot
-        // destabilise rock, and solidity changes already queue a wake.
+        // Rock's own wake list, not the water halo.
         let body_active =
             super::competent_fall::competent_wake_regions(
                 world,
