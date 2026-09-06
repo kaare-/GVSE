@@ -32,8 +32,6 @@
 //!
 //! Cadence: [`TEMP_STEP_PERIOD`] = 20 — not every physics tick.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use wk_material::{MaterialId, MaterialRegistry};
 
@@ -243,7 +241,11 @@ impl Default for TileThermal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Temperature {
     pub tile_cols: i32,
-    pub cells: HashMap<(i32, i32), f32>,
+    /// Runtime Fx dual — couple / diffuse / wind-mix poke this map on
+    /// sparse paths; SipHash was leftover after the humidity Fx cut.
+    /// Serde still writes a plain map (same postcard shape). Dense
+    /// ticks already prefer [`Self::slab`].
+    pub cells: FxHashMap<(i32, i32), f32>,
     pub bounds: Option<TileBounds>,
     pub wrap_x: bool,
     pub seed: u64,
@@ -294,7 +296,7 @@ impl Temperature {
         let tile_cols = tile_cols.max(1);
         let mut t = Self {
             tile_cols,
-            cells: HashMap::new(),
+            cells: FxHashMap::default(),
             bounds: Some(TileBounds::from_world_cells(tile_cols, x0, y0, x1, y1)),
             wrap_x,
             seed,
@@ -992,8 +994,9 @@ impl Temperature {
     }
 
     fn diffuse_sparse(&mut self, alpha: f32) {
-        // Snapshot as FxHash — leftover SipHash clone. Keys are unique
-        // so sort+dedup was leftover; +x/+y visits keep pairs commutative.
+        // Snapshot so mid-walk inserts do not disturb the read set.
+        // Keys are unique — sort+dedup was leftover; +x/+y visits keep
+        // pairs commutative.
         let snap: FxHashMap<(i32, i32), f32> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
         let sources: Vec<(i32, i32)> = snap.keys().copied().collect();
         let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();

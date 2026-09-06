@@ -834,7 +834,9 @@ mod tests {
         // Runtime Fx dual — postcard must still round-trip load maps.
         world.dissolved.insert((3, 5), 42);
         world.suspended.insert((3, 5), 7);
-        let (humidity, wind, temperature) = demo_climate(&params);
+        let (humidity, wind, mut temperature) = demo_climate(&params);
+        // Runtime Fx dual — postcard must still round-trip °C cells.
+        temperature.cells.insert((1, 2), 12.5);
         let carbon = CarbonBudget {
             atmosphere: 777.0,
             dissolved: 88.0,
@@ -866,6 +868,7 @@ mod tests {
         assert_eq!(loaded.carbon.dissolved, 88.0);
         assert_eq!(loaded.world.dissolved.get(&(3, 5)), Some(&42));
         assert_eq!(loaded.world.suspended.get(&(3, 5)), Some(&7));
+        assert_eq!(loaded.temperature.cells.get(&(1, 2)), Some(&12.5));
     }
 
     #[test]
