@@ -216,7 +216,10 @@ fn contact_skips_full_sand_under_a_full_pond() {
     let mut w = World::new(1);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     let cap = water_capacity(MaterialId::Sand);
-    w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+    for x in 3..=5 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
     w.set_cell(
         4,
         1,
