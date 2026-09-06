@@ -63,8 +63,9 @@ const AIR_PROJECT_ITERS: u32 = 6;
 
 /// Per-column orographic numbers for one [`Wind::rebuild_field`].
 /// Compose used to recompute these on every tile of a tall sky.
-/// `surf_y` is the live skin cell at the column centre — slip reuses it
-/// so the post-project pass does not walk the world again per seat.
+/// `surf_y` is the live skin cell at the column centre — slip and
+/// compose downwind blockage reuse it so rebuild seats do not walk
+/// the world again per sample.
 #[derive(Clone, Copy)]
 struct ColOro {
     speed: f32,
@@ -414,12 +415,13 @@ impl Wind {
                 self.cache_surface(world, gx - step * tc);
             }
         }
-        // Same column math compose used to recompute per tile. hx±1 is
-        // unwrapped so the ring-edge sample matches the old walk.
+        // Same column math compose used to recompute per tile. Pack
+        // hx±3 so downwind blockage (1–3 tiles ahead) hits the map;
+        // slip only needs ±1. Edge samples stay unwrapped like before.
         let mut col_oro: FxHashMap<i32, ColOro> = FxHashMap::default();
-        col_oro.reserve(unique_hx.len().saturating_mul(3));
+        col_oro.reserve(unique_hx.len().saturating_mul(7));
         for &hx in &unique_hx {
-            for dx in -1..=1 {
+            for dx in -3..=3 {
                 col_oro
                     .entry(hx + dx)
                     .or_insert_with(|| self.pack_col_oro(world, hx + dx));
@@ -1128,7 +1130,7 @@ impl Wind {
         }
         // After the aloft cap: a wall 2–3 tiles downwind must still
         // start a climb (the Jacobi step then spreads that).
-        let block = self.downwind_blockage(world, hx, hy, evx);
+        let block = self.downwind_blockage_cached(world, cols, hx, hy, evx);
         if block > 1e-4 {
             vy += block;
             vx *= 1.0 - (block * 0.4).min(0.35);
@@ -1156,6 +1158,34 @@ impl Wind {
         }
         (rise / (8.0 * tc as f32)).clamp(0.0, 0.22)
     }
+
+    /// Same climb cue as [`Self::downwind_blockage`], reading packed [`ColOro::surf_y`]
+    /// for the 1–3 tiles downwind instead of `surface_at` per step.
+    fn downwind_blockage_cached(
+        &self,
+        world: Option<&World>,
+        cols: &FxHashMap<i32, ColOro>,
+        hx: i32,
+        hy: i32,
+        evx: f32,
+    ) -> f32 {
+        if evx.abs() < 1e-4 {
+            return 0.0;
+        }
+        let tc = self.tile_cols.max(1);
+        let y_mid = hy * tc + tc / 2;
+        let sign = if evx >= 0.0 { 1 } else { -1 };
+        let mut ahead = i32::MIN;
+        for step in 1..=3 {
+            ahead = ahead.max(self.col_oro_at(world, cols, hx + sign * step).surf_y);
+        }
+        let rise = (ahead - y_mid) as f32;
+        if rise <= tc as f32 {
+            return 0.0;
+        }
+        (rise / (8.0 * tc as f32)).clamp(0.0, 0.22)
+    }
+
 
     /// Rise/run of the live skin across one tile on each side.
     fn surface_slope(&self, world: Option<&World>, hx: i32) -> f32 {
@@ -1689,7 +1719,7 @@ mod tests {
         );
         let mut cols = FxHashMap::default();
         for hx in 0..24 {
-            for dx in -1..=1 {
+            for dx in -3..=3 {
                 cols.entry(hx + dx)
                     .or_insert_with(|| wind.pack_col_oro(None, hx + dx));
             }
@@ -1705,6 +1735,53 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn downwind_blockage_cached_matches_live_surface_walk() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let sea: i32 = 16;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 48, 256);
+        for x in 0..48 {
+            for y in 0..=sea {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Steep face at x≈24–32 so a +x breeze at hx=3..5 sees it in 1–3 tiles.
+        for x in 24..32 {
+            for y in 0..=(sea + 12) {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.20, 3, 48, sea, 0, 80, false);
+        wind.variance = 0.0;
+        let mut cols = FxHashMap::default();
+        for hx in 0..12 {
+            for dx in -3..=3 {
+                cols.entry(hx + dx)
+                    .or_insert_with(|| wind.pack_col_oro(Some(&w), hx + dx));
+            }
+        }
+        let surf_hy = sea.div_euclid(4);
+        let mut any = 0usize;
+        for hx in 3..6 {
+            for hy in [surf_hy, surf_hy + 1, surf_hy + 2] {
+                let live = wind.downwind_blockage(Some(&w), hx, hy, 0.20);
+                let cached = wind.downwind_blockage_cached(Some(&w), &cols, hx, hy, 0.20);
+                assert!(
+                    (live - cached).abs() < 1e-6,
+                    "hx={hx} hy={hy} live={live} cached={cached}"
+                );
+                if live > 1e-4 {
+                    any += 1;
+                }
+            }
+        }
+        assert!(any > 0, "expected some positive downwind blockage against the face");
+    }
+
 
     #[test]
     fn rebuild_field_varies_spatially_with_swirl() {
