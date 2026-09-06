@@ -564,7 +564,7 @@ fn haze_view_seat_due(humidity: &Humidity, hx: i32, hy: i32) -> bool {
 /// Occupied + neighbour seats that can touch `box` — probe the view
 /// when it is smaller than the vapour map, otherwise walk keys.
 fn haze_paint_seats_in_box(humidity: &Humidity, box_: &ViewTileBox) -> Vec<(i32, i32)> {
-    if box_.tile_count() >= humidity.cells.len().max(1) {
+    if box_.tile_count() >= humidity.occupied_len().max(1) {
         return haze_paint_seats_where(humidity, |hx, hy| box_.contains(hx, hy));
     }
     let mut seats = Vec::new();
@@ -619,9 +619,9 @@ fn haze_paint_seats_where(
     mut keep: impl FnMut(i32, i32) -> bool,
 ) -> Vec<(i32, i32)> {
     let mut seats = std::collections::HashSet::new();
-    for (&(hx, hy), &mass) in &humidity.cells {
+    humidity.for_each_occupied(|(hx, hy), mass| {
         if mass <= 0.0 {
-            continue;
+            return;
         }
         if keep(hx, hy) {
             seats.insert((hx, hy));
@@ -640,7 +640,7 @@ fn haze_paint_seats_where(
                 seats.insert((nx, ny));
             }
         }
-    }
+    });
     let mut out: Vec<_> = seats.into_iter().collect();
     out.sort_unstable();
     out
@@ -789,13 +789,13 @@ fn sample_sky_weather(
     let humidity_mean = humidity_mean_norm(humidity, i32::MIN);
     let mut t_sum = 0.0f32;
     let mut t_n = 0u32;
-    for (&(hx, hy), &mass) in &humidity.cells {
+    humidity.for_each_occupied(|(hx, hy), mass| {
         if mass <= 0.0 {
-            continue;
+            return;
         }
         t_sum += temperature.at_tile(hx, hy);
         t_n += 1;
-    }
+    });
     let mean_t = if t_n > 0 {
         t_sum / t_n as f32
     } else {
@@ -1285,16 +1285,11 @@ pub fn draw_haze_and_wind(
     sw: f32,
     sh: f32,
 ) {
-    if humidity.cells.is_empty() || cell_px <= 0.0 {
+    if !humidity.has_mass() || cell_px <= 0.0 {
         return;
     }
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    let max_mass = humidity
-        .cells
-        .values()
-        .copied()
-        .fold(0.0f32, f32::max)
-        .max(1.0);
+    let max_mass = humidity.peak_mass().max(1.0);
     let min_mass = look.haze_min_mass.max(0.0);
     let resample = look.haze_resample;
     let _ = sea_level_y;
@@ -1612,7 +1607,7 @@ pub fn draw_canopy_air_dim(
     }
 
     // 3) Mild vapour dim on exposed surface (day + night).
-    if cloud_k > 0.02 && !humidity.cells.is_empty() {
+    if cloud_k > 0.02 && humidity.has_mass() {
         for x in 0..width_cols {
             let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) else {
                 continue;
@@ -2110,15 +2105,15 @@ pub fn sky_weather_for_scene(
 pub fn estimate_snow_bias(humidity: &Humidity, temperature: &Temperature, freeze_c: f32) -> f32 {
     let mut wet = 0u32;
     let mut snow = 0u32;
-    for (&(hx, hy), &mass) in &humidity.cells {
+    humidity.for_each_occupied(|(hx, hy), mass| {
         if mass <= 0.0 {
-            continue;
+            return;
         }
         wet += 1;
         if temperature.at_tile(hx, hy) <= freeze_c {
             snow += 1;
         }
-    }
+    });
     if wet == 0 {
         0.0
     } else {

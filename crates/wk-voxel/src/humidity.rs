@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::fasthash::{FxHashMap, FxHashSet};
 
@@ -115,18 +115,35 @@ pub fn humidity_diffuse_due(tick: u64) -> bool {
 struct HumiditySlab {
     bounds: TileBounds,
     mass: Vec<f32>,
+    occupied: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HumidityDisk {
+    tile_cols: i32,
+    cells: HashMap<(i32, i32), f32>,
+    bounds: Option<TileBounds>,
+    wrap_x: bool,
+    #[serde(default)]
+    advect_rx: f32,
+    #[serde(default)]
+    advect_ry: f32,
 }
 
 /// A sparse 2D heatmap keyed by tile coordinates. Each tile covers
 /// `tile_cols` × `tile_cols` world cells. Missing keys are implicit
 /// zero — a fresh atmosphere is dry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Humidity {
     /// World cells per tile side. Must be ≥ 1. Typical value: 4.
     pub tile_cols: i32,
     /// Water mass per tile. Same units as [`crate::cell::Sat`] (a `u8`
     /// on 0..255) but stored as `f32` so diffusion can accumulate
     /// fractional deltas without quantisation error.
+    ///
+    /// May lag the runtime slab after a dense tick. Readers should use
+    /// [`Self::at_tile`] / [`Self::for_each_occupied`] / [`Self::total_mass`].
+    /// Serde still writes a HashMap.
     pub cells: HashMap<(i32, i32), f32>,
     /// Optional hard clamp on tile keys. `None` leaves diffusion
     /// unbounded (unit-test convenience only — production worlds
@@ -137,15 +154,41 @@ pub struct Humidity {
     pub wrap_x: bool,
     /// Legacy residual from the integer-step advect path. Flux
     /// advection keeps these at zero; field stays for old saves.
-    #[serde(default)]
     pub advect_rx: f32,
-    #[serde(default)]
     pub advect_ry: f32,
     /// Last packed box. Reused when bounds match so dense advect /
     /// diffuse do not re-walk SipHash every tick. Evap / rain write
     /// through; serde still writes [`Self::cells`].
-    #[serde(skip)]
     slab: Option<HumiditySlab>,
+}
+
+impl Serialize for Humidity {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        HumidityDisk {
+            tile_cols: self.tile_cols,
+            cells: self.saved_cells(),
+            bounds: self.bounds,
+            wrap_x: self.wrap_x,
+            advect_rx: self.advect_rx,
+            advect_ry: self.advect_ry,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Humidity {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let disk = HumidityDisk::deserialize(deserializer)?;
+        Ok(Self {
+            tile_cols: disk.tile_cols.max(1),
+            cells: disk.cells,
+            bounds: disk.bounds,
+            wrap_x: disk.wrap_x,
+            advect_rx: disk.advect_rx,
+            advect_ry: disk.advect_ry,
+            slab: None,
+        })
+    }
 }
 
 impl Humidity {
@@ -179,7 +222,7 @@ impl Humidity {
     }
 
     fn use_dense_slab(&self, b: TileBounds) -> bool {
-        b.prefer_dense_walk(self.cells.len())
+        b.prefer_dense_walk(self.occupied_len())
     }
 
     fn pack_slab(&self, b: TileBounds) -> Vec<f32> {
@@ -216,11 +259,122 @@ impl Humidity {
                 if w > 0 {
                     let i = s.bounds.index(w, hx, hy);
                     if i < s.mass.len() {
+                        let was = s.mass[i] > 1e-6;
                         s.mass[i] = v.max(0.0);
+                        let now = s.mass[i] > 1e-6;
+                        if was != now {
+                            if now {
+                                s.occupied += 1;
+                            } else {
+                                s.occupied = s.occupied.saturating_sub(1);
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    fn adopt_work(&mut self, b: TileBounds, work: Vec<f32>) {
+        let occupied = work.iter().filter(|&&v| v > 1e-6).count();
+        self.slab = Some(HumiditySlab {
+            bounds: b,
+            mass: work,
+            occupied,
+        });
+    }
+
+    /// Flush the runtime slab into [`Self::cells`] so a sparse HashMap
+    /// walk (or a test) sees the same mass. Dense ticks skip this.
+    fn flush_slab_into_cells(&mut self) {
+        let Some(s) = self.slab.take() else {
+            return;
+        };
+        self.cells
+            .retain(|&(hx, hy), _| !s.bounds.contains(hx, hy));
+        let (w, _) = s.bounds.dims();
+        if w == 0 {
+            return;
+        }
+        for (i, &v) in s.mass.iter().enumerate() {
+            if v > 1e-6 {
+                let (hx, hy) = s.bounds.coords(w, i);
+                self.cells.insert((hx, hy), v);
+            }
+        }
+    }
+
+    fn saved_cells(&self) -> HashMap<(i32, i32), f32> {
+        let Some(s) = &self.slab else {
+            return self.cells.clone();
+        };
+        let mut out = HashMap::with_capacity(s.occupied.saturating_add(self.cells.len()));
+        for (&(hx, hy), &v) in &self.cells {
+            if v > 1e-6 && !s.bounds.contains(hx, hy) {
+                out.insert((hx, hy), v);
+            }
+        }
+        let (w, _) = s.bounds.dims();
+        if w == 0 {
+            return out;
+        }
+        for (i, &v) in s.mass.iter().enumerate() {
+            if v > 1e-6 {
+                out.insert(s.bounds.coords(w, i), v);
+            }
+        }
+        out
+    }
+
+    /// Occupied tiles, slab first. `cells` may lag a dense tick.
+    pub fn for_each_occupied(&self, mut f: impl FnMut((i32, i32), f32)) {
+        if let Some(s) = &self.slab {
+            let (w, _) = s.bounds.dims();
+            if w > 0 {
+                for (i, &v) in s.mass.iter().enumerate() {
+                    if v > 1e-6 {
+                        f(s.bounds.coords(w, i), v);
+                    }
+                }
+            }
+            for (&(hx, hy), &v) in &self.cells {
+                if v > 1e-6 && !s.bounds.contains(hx, hy) {
+                    f((hx, hy), v);
+                }
+            }
+            return;
+        }
+        for (&k, &v) in &self.cells {
+            if v > 1e-6 {
+                f(k, v);
+            }
+        }
+    }
+
+    pub fn occupied_len(&self) -> usize {
+        match &self.slab {
+            Some(s) if self.bounds == Some(s.bounds) => s.occupied,
+            Some(s) => {
+                let mut n = s.occupied;
+                for (&(hx, hy), &v) in &self.cells {
+                    if v > 1e-6 && !s.bounds.contains(hx, hy) {
+                        n += 1;
+                    }
+                }
+                n
+            }
+            None => self.cells.len(),
+        }
+    }
+
+    pub fn has_mass(&self) -> bool {
+        self.occupied_len() > 0
+    }
+
+    pub fn peak_mass(&self) -> f32 {
+        let mut peak = 0.0f32;
+        self.for_each_occupied(|_, v| peak = peak.max(v));
+        peak
     }
 
     fn apply_tile_delta(&mut self, hx: i32, hy: i32, d: f32) {
@@ -568,10 +722,10 @@ impl Humidity {
             None => {
                 let mut min_hx = i32::MAX;
                 let mut max_hx = i32::MIN;
-                for &(hx, _) in self.cells.keys() {
+                self.for_each_occupied(|(hx, _), _| {
                     min_hx = min_hx.min(hx);
                     max_hx = max_hx.max(hx);
-                }
+                });
                 if min_hx > max_hx {
                     return false;
                 }
@@ -607,7 +761,9 @@ impl Humidity {
     /// Total humidity mass across all tiles. Useful for
     /// mass-conservation assertions in tests and for HUD summaries.
     pub fn total_mass(&self) -> f32 {
-        self.cells.values().copied().sum()
+        let mut sum = 0.0f32;
+        self.for_each_occupied(|_, v| sum += v);
+        sum
     }
 
     /// Drop any sparse keys outside [`Self::bounds`].
@@ -615,10 +771,10 @@ impl Humidity {
         let Some(b) = self.bounds else {
             return;
         };
-        self.cells.retain(|&(hx, hy), _| b.contains(hx, hy));
         if self.slab.as_ref().is_some_and(|s| s.bounds != b) {
-            self.slab = None;
+            self.flush_slab_into_cells();
         }
+        self.cells.retain(|&(hx, hy), _| b.contains(hx, hy));
     }
 
     /// Explicit 4-neighbour diffusion step.
@@ -635,7 +791,7 @@ impl Humidity {
     /// and right tile edges join (ring atmosphere).
     pub fn diffuse(&mut self, alpha: f32) {
         let alpha = alpha.clamp(0.0, 0.25);
-        if alpha == 0.0 || self.cells.is_empty() {
+        if alpha == 0.0 || !self.has_mass() {
             return;
         }
         if let Some(b) = self.bounds {
@@ -644,6 +800,7 @@ impl Humidity {
                 return;
             }
         }
+        self.flush_slab_into_cells();
         // Snapshot the current state so we don't chase deltas across
         // the pass.
         let snap: FxHashMap<(i32, i32), f32> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
@@ -701,7 +858,7 @@ impl Humidity {
                 }
             }
         }
-        self.slab = None;
+        self.flush_slab_into_cells();
         for (k, d) in deltas {
             self.apply_tile_delta(k.0, k.1, d);
         }
@@ -757,8 +914,7 @@ impl Humidity {
                 work[i] = (work[i] + d).max(0.0);
             }
         }
-        self.sync_slab_changes(b, &snap, &work);
-        self.slab = Some(HumiditySlab { bounds: b, mass: work });
+        self.adopt_work(b, work);
         self.prune_near_zero();
     }
 
@@ -790,20 +946,20 @@ impl Humidity {
         mut temp: Option<&mut crate::temperature::Temperature>,
     ) {
         let fraction = fraction.clamp(0.0, 0.45);
-        if fraction == 0.0 || self.cells.is_empty() {
+        if fraction == 0.0 || !self.has_mass() {
             return;
         }
-        // Read `cells` in place — a full clone every tick was an FPS sink
-        // once loft filled more than a fog film. Deltas apply after.
+        // Walk the runtime slab when one is live — `cells` may lag a
+        // dense advect. Deltas apply after.
         //
         // Row means come from [`Temperature::row_mean_at`] (rebuilt on the
         // period-20 thermal step). Scanning every hx of every wet hy here
         // was the other cliff: more lofted rows → width × rows lookups.
         let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         let mut heat_lifts: Vec<(i32, i32, f32)> = Vec::new();
-        let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
-        for (hx, hy) in keys {
-            let mass = *self.cells.get(&(hx, hy)).unwrap_or(&0.0);
+        let mut keys: Vec<(i32, i32, f32)> = Vec::with_capacity(self.occupied_len());
+        self.for_each_occupied(|k, v| keys.push((k.0, k.1, v)));
+        for (hx, hy, mass) in keys {
             if mass <= 0.0 || hy >= max_hy {
                 continue;
             }
@@ -897,6 +1053,7 @@ impl Humidity {
                 return;
             }
         }
+        self.flush_slab_into_cells();
         let free_air = self.build_free_air_cache(wind, world);
         self.advect_inner(vx, vy, Some((wind, world, &free_air)));
         self.wind_mix(wind.mix_strength(vx, vy), Some((wind, world, &free_air)));
@@ -945,8 +1102,7 @@ impl Humidity {
             h,
         );
         self.oro_into(&mut work, wind, Some(world), b, w, h);
-        self.sync_slab_changes(b, &snap, &work);
-        self.slab = Some(HumiditySlab { bounds: b, mass: work });
+        self.adopt_work(b, work);
     }
 
     /// Donor-cell flux into `work`. Masses come from the pre-advect
@@ -1247,6 +1403,7 @@ impl Humidity {
         }
     }
 
+    #[cfg(test)]
     fn sync_slab_changes(&mut self, b: TileBounds, before: &[f32], after: &[f32]) {
         let (w, _) = b.dims();
         let n = before.len().min(after.len());
@@ -1273,11 +1430,11 @@ impl Humidity {
         }
         let mut seen = FxHashSet::default();
         let mut cols = Vec::new();
-        for &(hx, _) in self.cells.keys() {
+        self.for_each_occupied(|(hx, _), _| {
             if seen.insert(hx) {
                 cols.push(hx);
             }
-        }
+        });
         cols
     }
 
@@ -1325,7 +1482,7 @@ impl Humidity {
             &FxHashMap<i32, i32>,
         )>,
     ) {
-        if self.cells.is_empty() {
+        if !self.has_mass() {
             return;
         }
         if climate_vx == 0.0 && climate_vy == 0.0 && surface.is_none() {
@@ -1348,16 +1505,15 @@ impl Humidity {
                     self.flux_axis_into(
                         &snap, &mut work, climate_vx, climate_vy, None, false, b, w, &[],
                     );
-                    self.sync_slab_changes(b, &snap, &work);
-                    self.slab = Some(HumiditySlab { bounds: b, mass: work });
+                    self.adopt_work(b, work);
                     return;
                 }
             }
         }
 
-        // Sparse walk owns HashMap; drop a leftover dense pack so the
-        // next dense tick re-reads cells.
-        self.slab = None;
+        // Sparse walk owns HashMap; flush so cells match the last dense
+        // tick before we drop the slab.
+        self.flush_slab_into_cells();
         // Flux only iterates the snapshot — a Vec avoids rehashing the
         // saved SipHash map every tick (leftover as humidity fills).
         let snap: Vec<((i32, i32), f32)> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
@@ -1487,7 +1643,7 @@ impl Humidity {
         )>,
     ) {
         let mix = mix.clamp(0.0, 1.0);
-        if mix < 1e-4 || self.cells.is_empty() {
+        if mix < 1e-4 || !self.has_mass() {
             return;
         }
         let alpha = (0.04 + 0.14 * mix).clamp(0.0, 0.20);
@@ -1617,7 +1773,7 @@ impl Humidity {
         wind: &crate::wind::Wind,
         world: Option<&crate::grid::World>,
     ) {
-        if self.cells.is_empty() {
+        if !self.has_mass() {
             return;
         }
         let mut lift_by_hx: FxHashMap<i32, f32> = FxHashMap::default();
@@ -2622,7 +2778,7 @@ mod convection_tests {
         // in the slab or the next reuse would drop the new mass.
         live.add(12, gy + 4, 40.0);
         let mut fresh = live.clone();
-        fresh.slab = None;
+        fresh.flush_slab_into_cells();
         live.advect_with_surface(0.12, 0.0, &wind, &world);
         fresh.advect_with_surface(0.12, 0.0, &wind, &world);
         assert!(
@@ -2631,7 +2787,10 @@ mod convection_tests {
             live.total_mass(),
             fresh.total_mass()
         );
-        for key in live.cells.keys().chain(fresh.cells.keys()) {
+        let mut keys = Vec::new();
+        live.for_each_occupied(|k, _| keys.push(k));
+        fresh.for_each_occupied(|k, _| keys.push(k));
+        for key in keys {
             let a = live.at_tile(key.0, key.1);
             let b = fresh.at_tile(key.0, key.1);
             assert!(
@@ -2640,5 +2799,53 @@ mod convection_tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn dense_advect_skips_hashmap_sync() {
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.20,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.field_smooth = 0.0;
+        let world = World::new(p.seed);
+        let y0 = p.sea_level_y + 16;
+        let mut h = Humidity::with_world_bounds(4, 0, y0, 32, y0 + 32);
+        h.wrap_x = true;
+        let gy = y0 + 8;
+        h.add(8, gy, 100.0);
+        h.add(16, gy + 4, 80.0);
+        let cells_before = h.cells.len();
+        assert!(h.use_dense_slab(h.bounds.unwrap()));
+        h.advect_with_surface(0.15, 0.0, &wind, &world);
+        assert!(
+            h.cells.len() <= cells_before,
+            "dense advect must not dump the slab into SipHash (cells {} was {cells_before})",
+            h.cells.len()
+        );
+        assert!(h.occupied_len() >= 2);
+        assert!((h.total_mass() - 180.0).abs() < 0.5);
+        let saved = h.saved_cells();
+        assert!((saved.values().copied().sum::<f32>() - h.total_mass()).abs() < 1e-3);
+        h.for_each_occupied(|(hx, hy), mass| {
+            assert!(
+                (saved.get(&(hx, hy)).copied().unwrap_or(0.0) - mass).abs() < 1e-3,
+                "saved HashMap missed tile ({hx},{hy})"
+            );
+        });
     }
 }

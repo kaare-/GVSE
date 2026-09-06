@@ -169,13 +169,13 @@ pub fn precip_cover_fraction(humidity: &Humidity, x0: i32, x1: i32) -> f32 {
     let width = (x1 - x0).max(1);
     let tc = humidity.tile_cols.max(1);
     let mut peak = vec![0.0f32; width as usize];
-    for (&(hx, _), &mass) in &humidity.cells {
+    humidity.for_each_occupied(|(hx, _), mass| {
         let gx = hx * tc + tc / 2;
         if gx >= x0 && gx < x1 {
             let i = (gx - x0) as usize;
             peak[i] = peak[i].max(mass);
         }
-    }
+    });
     let mut sum = 0.0f32;
     for p in peak {
         let wet = (p / Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);
@@ -194,13 +194,13 @@ fn cloud_sky_transmit_from_wet(wet: f32) -> f32 {
 pub fn humidity_mean_norm(humidity: &Humidity, sky_hy_min: i32) -> f32 {
     let mut sum = 0.0f32;
     let mut n = 0u32;
-    for (&(_hx, hy), &mass) in &humidity.cells {
+    humidity.for_each_occupied(|(_hx, hy), mass| {
         if hy < sky_hy_min || mass <= 0.0 {
-            continue;
+            return;
         }
         sum += (mass / Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);
         n += 1;
-    }
+    });
     if n == 0 {
         0.0
     } else {

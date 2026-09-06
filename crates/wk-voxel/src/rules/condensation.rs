@@ -195,13 +195,13 @@ pub fn precipitate_thermal_surplus(
 ) {
     let tile_cols = humidity.tile_cols.max(1);
     let mut hits: Vec<(f32, i32, i32)> = Vec::new();
-    for (&(hx, hy), &mass) in &humidity.cells {
+    humidity.for_each_occupied(|(hx, hy), mass| {
         let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp.at_tile(hx, hy));
         let surplus = mass - sat;
         if surplus >= 1.0 {
             hits.push((surplus, hx, hy));
         }
-    }
+    });
     if hits.is_empty() {
         return;
     }
@@ -288,7 +288,8 @@ pub fn apply_condensation_rain_phased(
     // Snapshot tiles so we can mutate humidity as we go. A Vec of
     // (key, mass) avoids a second SipHash lookup per cell (leftover
     // as the sky fills). Lottery still walks every over-sat tile.
-    let tiles: Vec<((i32, i32), f32)> = humidity.cells.iter().map(|(&k, &v)| (k, v)).collect();
+    let mut tiles: Vec<((i32, i32), f32)> = Vec::with_capacity(humidity.occupied_len());
+    humidity.for_each_occupied(|k, v| tiles.push((k, v)));
     // Collect first, then apply the heaviest hits so a saturated sky
     // cannot walk every column every tick (~thousands → 7 FPS).
     let mut hits: Vec<(f32, i32, i32, f32)> = Vec::new(); // mass, hx, hy, take_mass
