@@ -8405,6 +8405,109 @@ fn bentonite_perches_water_that_clay_lets_through() {
     }
 }
 
+
+#[test]
+fn quiet_saturated_seam_emits_no_regions() {
+    // Two stacked full-sat sealed crust chunks: weep occupancy refresh
+    // clears sticky unsat, then seam coupling must emit nothing.
+    let mut w = World::new(93);
+    let lo = ChunkCoord::new(0, 0);
+    let hi = ChunkCoord::new(0, 1);
+    fill_chunk_saturated_stone(&mut w, lo);
+    fill_chunk_saturated_stone(&mut w, hi);
+    // Seal laterally so weep takes the occupancy-only path.
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 2)] {
+        fill_chunk_saturated_stone(&mut w, ChunkCoord::new(dx, dy));
+    }
+    assert!(w.chunks[&lo].has_unsaturated_pores, "write sticky-raises unsat");
+    wake_pore_weep_into_air(&mut w);
+    assert!(
+        !w.chunks[&lo].has_unsaturated_pores && !w.chunks[&hi].has_unsaturated_pores,
+        "sealed weep refresh must clear full-sat unsat sticky"
+    );
+    assert!(
+        super::seepage::seam_seepage_regions(&w).is_empty(),
+        "quiet saturated sealed seam must not emit coupling regions"
+    );
+}
+
+#[test]
+fn quiet_saturated_seam_couples_when_receiver_has_room() {
+    let mut w = World::new(94);
+    let lo = ChunkCoord::new(0, 0);
+    let hi = ChunkCoord::new(0, 1);
+    fill_chunk_saturated_stone(&mut w, lo);
+    fill_chunk_saturated_stone(&mut w, hi);
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 2)] {
+        fill_chunk_saturated_stone(&mut w, ChunkCoord::new(dx, dy));
+    }
+    // Under-fill one face cell in the lower chunk — room across the seam.
+    let mut dryish = Cell::solid(MaterialId::Stone);
+    dryish.sat = Sat(1);
+    w.set_cell(4, CHUNK_CELLS_H as i32 - 1, dryish);
+    wake_pore_weep_into_air(&mut w);
+    assert!(w.chunks[&lo].has_unsaturated_pores);
+    let regions = super::seepage::seam_seepage_regions(&w);
+    assert!(
+        !regions.is_empty(),
+        "under-full receiver must keep seam coupling"
+    );
+}
+
+#[test]
+fn quiet_saturated_seam_couples_with_open_air() {
+    let mut w = World::new(95);
+    let lo = ChunkCoord::new(0, 0);
+    let hi = ChunkCoord::new(0, 1);
+    fill_chunk_saturated_stone(&mut w, lo);
+    fill_chunk_saturated_stone(&mut w, hi);
+    w.set_cell(4, CHUNK_CELLS_H as i32, Cell::air()); // in hi, face row
+    assert!(w.chunks[&hi].has_open_air);
+    let regions = super::seepage::seam_seepage_regions(&w);
+    assert!(
+        !regions.is_empty(),
+        "open Air on the seam face must keep coupling"
+    );
+}
+
+#[test]
+fn default_air_chunk_above_wet_crust_still_couples() {
+    // Bootstrap trap: ensure_chunk leaves sticky has_open_air=false on
+    // default Air. Without has_solid on the upper chunk, must not skip.
+    let mut w = World::new(96);
+    let lo = ChunkCoord::new(0, 0);
+    let hi = ChunkCoord::new(0, 1);
+    fill_chunk_saturated_stone(&mut w, lo);
+    w.ensure_chunk(hi);
+    // Clear sticky unsat on lo via a direct flag write after a weep that
+    // cannot seal (hi is default Air, not solid neighbour seal for weep
+    // of lo — lo still has open? lo is full stone, neighbours missing
+    // except hi which is Air default without has_solid).
+    // Force the seam predicate inputs: lo full sealed flags, hi default.
+    if let Some(c) = w.chunks.get_mut(&lo) {
+        c.has_unsaturated_pores = false;
+        c.has_open_air = false;
+        c.has_wet_air = false;
+        c.has_solid = true;
+        c.has_wet_pores = true;
+    }
+    assert!(!w.chunks[&hi].has_solid);
+    assert!(
+        !super::seepage::seam_seepage_regions(&w).is_empty()
+            || {
+                // Face may be stone|Air with sat on lo — span should find it.
+                let lo_face = w.get_cell(0, CHUNK_CELLS_H as i32 - 1).unwrap();
+                lo_face.sat.0 > 0
+            },
+        "default Air above wet crust must not quiet-skip"
+    );
+    let regions = super::seepage::seam_seepage_regions(&w);
+    assert!(
+        !regions.is_empty(),
+        "default Air upper chunk must still couple (got empty regions)"
+    );
+}
+
 #[test]
 fn dry_seam_costs_nothing_but_a_wet_one_still_couples() {
     // The seam band used to be emitted for every chunk pair at full width,
