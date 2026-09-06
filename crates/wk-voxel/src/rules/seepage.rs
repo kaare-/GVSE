@@ -791,17 +791,25 @@ fn accumulate_seepage_xfers_ex(
                     return;
                 }
             }
-            // Contact pass is Air ↔ pore only. A dry pore cannot weep,
-            // and infiltration from −x / −y is owned by those cells.
-            // Rain-wet halos are full of dry sand that paid head math
-            // for faces it does not own (leftover every tick).
-            if contact_only && a_solid && a.sat.0 == 0 {
+            // Contact pass is Air ↔ pore only. Infiltration from −x / −y
+            // is owned by those cells. A pore that does not own a +x / +y
+            // Air face cannot infiltrate or weep this pass — rain-wet
+            // halos are full of wet sand that paid the neighbour loop
+            // for faces it does not own (leftover every tick). Dry pores
+            // also need that Air to be wet (they cannot weep). Do not
+            // apply this skip on the deep pass.
+            if contact_only && a_solid {
                 let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
                 let up = read(lx, ly + 1, gx, gy + 1);
-                let drinks = |c: Option<Cell>| {
-                    matches!(c, Some(n) if n.material == MaterialId::Air && n.sat.0 > 0)
+                let owns_contact = |c: Option<Cell>| match c {
+                    Some(n)
+                        if n.material == MaterialId::Air && !is_porous_cell(n, &hydro) =>
+                    {
+                        a.sat.0 > 0 || n.sat.0 > 0
+                    }
+                    _ => false,
                 };
-                if !drinks(right) && !drinks(up) {
+                if !owns_contact(right) && !owns_contact(up) {
                     return;
                 }
             }

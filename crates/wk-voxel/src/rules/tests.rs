@@ -114,6 +114,98 @@ fn contact_seepage_soaks_dry_sand_from_either_side() {
 }
 
 #[test]
+fn contact_wet_sand_weeps_into_owned_air() {
+    // Wet sand that owns a +y Air face must still weep on contact.
+    // The halo skip is only for pores that do not own that face.
+    use crate::active::ActiveChunk;
+    use crate::chunk::Rect;
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Sand);
+    w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(
+        4,
+        1,
+        Cell {
+            material: MaterialId::Sand,
+            sat: Sat(cap),
+            ..Cell::default()
+        },
+    );
+    w.set_cell(4, 2, Cell::air());
+    let regions = [ActiveChunk::new(
+        ChunkCoord::new(0, 0),
+        Rect {
+            x0: 3,
+            y0: 0,
+            x1: 5,
+            y1: 3,
+        },
+    )];
+    super::seepage::apply_seepage_contact_regions(&mut w, &regions);
+    let sand = w.get_cell(4, 1).unwrap();
+    let air = w.get_cell(4, 2).unwrap();
+    assert!(
+        sand.sat.0 < cap || air.sat.0 > 0,
+        "wet sand owning +y Air must weep on contact (sand={} air={})",
+        sand.sat.0,
+        air.sat.0
+    );
+}
+
+#[test]
+fn contact_skips_buried_wet_sand_deep_pass_still_percolates() {
+    // Buried wet sand has no +x / +y Air face. Contact must not
+    // pore-percolate (that is the deep pass). The skip is leftover
+    // neighbour-loop cost, not a physics change.
+    use crate::active::ActiveChunk;
+    use crate::chunk::Rect;
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Sand);
+    for x in 3..=5 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=3 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    w.set_cell(
+        4,
+        2,
+        Cell {
+            material: MaterialId::Sand,
+            sat: Sat(cap),
+            ..Cell::default()
+        },
+    );
+    let regions = [ActiveChunk::new(
+        ChunkCoord::new(0, 0),
+        Rect {
+            x0: 3,
+            y0: 0,
+            x1: 5,
+            y1: 4,
+        },
+    )];
+    super::seepage::apply_seepage_contact_regions(&mut w, &regions);
+    let buried = w.get_cell(4, 1).unwrap();
+    assert_eq!(
+        buried.sat.0, 0,
+        "contact must not percolate buried wet sand, sat={}",
+        buried.sat.0
+    );
+    for _ in 0..8 {
+        super::seepage::apply_seepage_regions(&mut w, &regions);
+    }
+    let drunk = w.get_cell(4, 1).unwrap();
+    assert!(
+        drunk.sat.0 > 0,
+        "deep pass must still percolate buried wet sand, sat={}",
+        drunk.sat.0
+    );
+}
+
+#[test]
 fn droplet_falls_one_cell_per_pass() {
     let mut w = setup_column_world();
     w.set_cell(4, 10, Cell::water());
