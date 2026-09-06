@@ -1176,10 +1176,48 @@ fn is_surface_sheet_air(
     air_has_dry_escape(world, read, gx, gy, lx, ly)
 }
 
+/// Chunk-column wrap matching [`crate::active`] halo planning.
+#[inline]
+fn wrap_chunk_cx(world: &World, cx: i32) -> i32 {
+    match world.wrap_width {
+        Some(w) if w > 0 => {
+            let span = (w + CHUNK_CELLS_W as i32 - 1) / CHUNK_CELLS_W as i32;
+            if span > 0 {
+                cx.rem_euclid(span)
+            } else {
+                cx
+            }
+        }
+        _ => cx,
+    }
+}
+
+/// True when an orthogonal neighbour chunk reports open Air.
+///
+/// Buried wet crust can only weep across a shared face. Diagonal Air
+/// does not touch this chunk's perimeter, so ortho is exact for the
+/// skip. Digging Air raises `has_open_air` on the carved chunk and the
+/// next weep cadence re-enters.
+fn ortho_neighbour_has_open_air(world: &World, coord: ChunkCoord) -> bool {
+    const ORTHO: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    for (dx, dy) in ORTHO {
+        let n = ChunkCoord::new(wrap_chunk_cx(world, coord.cx + dx), coord.cy + dy);
+        if world.chunks.get(&n).is_some_and(|c| c.has_open_air) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Re-dirty wet porous faces that can still weep into Air with room.
 ///
 /// Quiet groundwater next to a dug cavity otherwise drops out of dirty
 /// tracking and never fills the void (playtest: empty circle in blue sat).
+///
+/// Fully enclosed wet crust (no Air in this chunk or any orthogonal
+/// neighbour) is skipped — interior pores cannot face Air, and neither
+/// can the perimeter. A neighbour with `has_open_air` keeps the
+/// perimeter scan so a dug face still wakes.
 pub fn wake_pore_weep_into_air(world: &mut World) {
     let hydro = world.hydro;
     let ch = CHUNK_CELLS_H as i32;
@@ -1203,6 +1241,12 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         // an interior pore cannot face Air. Surface / cavity chunks keep
         // the full scan. Neighbour reads stay chunk-local when they can.
         let open_air = chunk.has_open_air;
+        // Exact skip: wet stone with no Air here and no Air in any
+        // ortho neighbour cannot weep on any face. Leave occupancy
+        // sticky; a later carve raises neighbour `has_open_air`.
+        if !open_air && !ortho_neighbour_has_open_air(world, coord) {
+            continue;
+        }
         let base_gx = coord.cx * cw;
         let base_gy = coord.cy * ch;
         let mut still_wet = false;
