@@ -22,12 +22,11 @@
 //! (never Sand), leaving a residual cream corridor. Spec:
 //! `docs/organism/FUNGI.md`, `docs/organism/VOXEL_PLANTS.md`.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::{ensure_symbiont_inherited, mutate_body, Genome};
+use crate::fasthash::FxHashMap;
 use crate::cell::{hosts_mycelium, water_capacity_cell, Cell, CellFlags};
 #[cfg(test)]
 use crate::cell::water_capacity;
@@ -232,10 +231,13 @@ pub struct MyceliumLineage {
 }
 
 /// Sparse `(gx, gy) → lineage` stamps on [`World::mycelium_lineage`].
+///
+/// Runtime Fx dual — stamp / nearest / move-cell probe this on the fungi pulse.
+/// Serde still writes a plain map (same postcard shape).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MyceliumLineageMap {
     #[serde(default)]
-    pub cells: HashMap<(i32, i32), MyceliumLineage>,
+    pub cells: FxHashMap<(i32, i32), MyceliumLineage>,
 }
 
 /// True when the body is a fruiting-body habit (Digest, no Root/Stem).
