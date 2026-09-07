@@ -391,38 +391,87 @@ impl World {
         // rock, so that (not every write) is what wakes sleeping bodies. Water
         // changing saturation inside an Air cell must not, or sloshing lakes
         // would wake the whole ridge every tick.
+        //
+        // Loose grain / litter / ice ↔ Air beside a cliff is also leftover:
+        // beach churn cannot undercut rock laterally, and waking ortho rock
+        // on every sand step re-flooded wet hills. Rock itself appearing /
+        // vanishing still wakes around; other solidity changes only wake
+        // competent rock **above** (true support loss).
         let track_sleep = !self.competent_settled.is_empty();
         if let Some(ptr) = self.cached_chunk(coord) {
             // SAFETY: exclusive `&mut self`; cached pointer matches this
             // world's current table generation.
             let chunk = unsafe { &mut *(ptr as *mut Chunk) };
-            let prev_solid = if track_sleep {
-                Some(chunk.get(lx, ly).material.is_solid())
+            let prev = if track_sleep {
+                Some(chunk.get(lx, ly))
             } else {
                 None
             };
             chunk.set(lx, ly, cell);
-            if track_sleep && prev_solid != Some(cell.material.is_solid()) {
-                self.competent_wake_around(gx, gy);
+            if let Some(prev) = prev {
+                self.maybe_wake_competent_for_solidity(gx, gy, prev.material, cell.material);
             }
             return;
         }
         if !self.chunks.contains_key(&coord) {
             self.invalidate_chunk_cache();
         }
-        let prev_solid = if track_sleep {
-            self.chunks
-                .get(&coord)
-                .map(|c| c.get(lx, ly).material.is_solid())
+        let prev = if track_sleep {
+            self.chunks.get(&coord).map(|c| c.get(lx, ly))
         } else {
             None
         };
         let chunk = self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord));
         chunk.set(lx, ly, cell);
         Self::remember_chunk_ptr(self.chunk_cache_id.0, coord, chunk);
-        if track_sleep && prev_solid != Some(cell.material.is_solid()) {
-            self.competent_wake_around(gx, gy);
+        if let Some(prev) = prev {
+            self.maybe_wake_competent_for_solidity(gx, gy, prev.material, cell.material);
         }
+    }
+
+    /// Decide whether a solidity rewrite should wake sleeping rock.
+    #[inline]
+    fn maybe_wake_competent_for_solidity(
+        &mut self,
+        gx: i32,
+        gy: i32,
+        prev: wk_material::MaterialId,
+        next: wk_material::MaterialId,
+    ) {
+        if prev.is_solid() == next.is_solid() {
+            return;
+        }
+        use crate::cell::is_competent_rock;
+        // Competent rock (or Bedrock footing) in the write itself → full ortho.
+        if is_competent_rock(prev)
+            || is_competent_rock(next)
+            || matches!(prev, wk_material::MaterialId::Bedrock)
+            || matches!(next, wk_material::MaterialId::Bedrock)
+        {
+            self.competent_wake_around(gx, gy);
+            return;
+        }
+        // Beach / litter / ice churn: only the cell resting on this seat.
+        self.competent_wake_support_above(gx, gy);
+    }
+
+    /// Wake competent rock sitting directly on `(gx, gy)` after a footing change.
+    #[inline]
+    fn competent_wake_support_above(&mut self, gx: i32, gy: i32) {
+        let wx = self.wrap_x(gx);
+        let wy = gy + 1;
+        let is_rock = self
+            .get_cell(wx, wy)
+            .is_some_and(|c| crate::cell::is_competent_rock(c.material));
+        if !is_rock {
+            return;
+        }
+        let (coord, lx, ly) = Self::split(wx, wy);
+        if let Some(m) = self.competent_settled.get_mut(&coord) {
+            m.unset(lx, ly);
+        }
+        crate::competent_probe::bump(&crate::competent_probe::wake_from_solidity);
+        self.competent_wake.push((wx, wy));
     }
 
     /// Wake sleeping competent rock at and around a cell whose support changed.
