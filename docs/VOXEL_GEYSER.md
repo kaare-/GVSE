@@ -147,8 +147,8 @@ Boil free **Air** sat and **pore** sat at/above 100 °C into sparse `World.steam
 | Cave under solid roof | Steam **flood-fills the connected void** (equal density); pressure assaults wet pores + widens/bursts soft lids into tubes |
 | Hot wet rock | Pore boil seats vapour (or opens a micro-void); **phase expansion** (`phase_expansion_drive` × boiled) reverse-seeps multi-hop (`reverse_seep_hops`) and cracks the host — even when sealed |
 
-Save schema **v17**. Cadence `STEAM_EVERY` (= 1 while tuning). Tab → Climate → Steam
-(phase expansion + reverse-seep hops knobs).
+Save schema **v17**. Cadence `STEAM_EVERY` (= 5). Tab → Climate → Steam
+(phase expansion + reverse-seep hops knobs). Flood/assault run on cadence only.
 
 **Acceptance:** hot free water loses sat to rising steam (mass-flat); cave steam
 piles under the roof and pressurizes; sealed wet limestone reverse-pushes pore
