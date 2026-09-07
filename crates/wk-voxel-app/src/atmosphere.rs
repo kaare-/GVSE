@@ -683,11 +683,13 @@ fn haze_resampled_cells(
         };
         for gy in col_y0..y1 {
             if cave && gy <= floor {
-                // Only wash actual Air in the cave tile — never through rock.
+                // Only wash vapour voids — never lake plugs or rock.
                 let Some(cell) = world.get_cell(wx, gy) else {
                     continue;
                 };
-                if cell.material != MaterialId::Air {
+                if cell.material != MaterialId::Air
+                    || cell.sat.0 > wk_voxel::STEAM_VOID_SAT_MAX
+                {
                     continue;
                 }
             }

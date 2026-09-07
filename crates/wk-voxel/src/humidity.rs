@@ -1771,7 +1771,13 @@ impl Humidity {
                 let gx = world.wrap_x(base_gx + lx);
                 let gy = base_gy + ly;
                 match world.get_cell(gx, gy) {
-                    Some(c) if c.material == MaterialId::Air => air = air.saturating_add(1),
+                    // Lake plugs are Air+FULL sat — not cave vapour seats.
+                    Some(c)
+                        if c.material == MaterialId::Air
+                            && c.sat.0 <= crate::steam::STEAM_VOID_SAT_MAX =>
+                    {
+                        air = air.saturating_add(1)
+                    }
                     Some(_) => solid = solid.saturating_add(1),
                     None => {}
                 }

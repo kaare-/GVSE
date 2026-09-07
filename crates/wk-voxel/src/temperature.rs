@@ -1065,7 +1065,8 @@ impl Temperature {
     }
 
     /// Vertical diffuse multiplier. Default 0.35; wet↔rock and cave↔rock
-    /// run hotter so water and rock actually exchange heat.
+    /// run hotter so water and rock exchange heat at contacts. Do **not**
+    /// boost watery↔watery — that collapses the deep-water lag.
     fn wet_rock_vert_factor(&self, hx: i32, hy: i32, n_hy: i32) -> f32 {
         let a = self.props_cache.get(&(hx, hy)).map(|p| p.layer);
         let b = self.props_cache.get(&(hx, n_hy)).map(|p| p.layer);
@@ -1081,8 +1082,6 @@ impl Temperature {
             1.05
         } else if (air(a) && rock(b)) || (air(b) && rock(a)) {
             0.80
-        } else if watery(a) || watery(b) {
-            0.70
         } else {
             0.35
         }
@@ -1310,7 +1309,12 @@ fn tile_is_mostly_air(world: &World, hx: i32, tile_mid_y: i32, tc: i32) -> bool 
             let gx = world.wrap_x(base_gx + lx);
             let gy = base_gy + ly;
             match world.get_cell(gx, gy) {
-                Some(c) if c.material == MaterialId::Air => air = air.saturating_add(1),
+                // Standing water is Air+FULL sat — not a cave vapour void.
+                Some(c)
+                    if c.material == MaterialId::Air && c.sat.0 <= crate::steam::STEAM_VOID_SAT_MAX =>
+                {
+                    air = air.saturating_add(1)
+                }
                 Some(_) => solid = solid.saturating_add(1),
                 None => {}
             }
