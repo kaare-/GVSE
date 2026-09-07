@@ -214,6 +214,25 @@ fn pair_diff_scale(ka: f32, kb: f32) -> f32 {
     (harm / REF_THERMAL_DIFFUSIVITY).clamp(0.35, 2.0)
 }
 
+/// Diffuse gate between free-water and rock/air tiles.
+///
+/// Geothermal paints horizontal isotherms into Buried rock. Un-gated
+/// diffuse then copies those bands into an adjacent lake (same-Y cliff
+/// face ↔ water), so cutting a hill "reveals" the lake's stratification.
+/// Bed heat still enters via a weak vertical path + water↔rock couple.
+fn diffuse_free_water_gate(fw_a: f32, fw_b: f32, vertical: bool) -> f32 {
+    let a = fw_a >= 0.5;
+    let b = fw_b >= 0.5;
+    if a == b {
+        return 1.0;
+    }
+    if vertical {
+        0.10
+    } else {
+        0.02
+    }
+}
+
 /// ΔT reference (°C) for water convection bias scales.
 const WATER_CONVECT_DT_REF: f32 = 20.0;
 
@@ -927,7 +946,7 @@ impl Temperature {
                     if props.free_water >= 0.5 {
                         t
                     } else {
-                        // Overburden from the live surface, every step.
+                        // Overburden from the live rock surface, every step.
                         // Cached depth would keep a deleted hill hot.
                         let geo = self.geothermal_at_depth(self.geothermal_overburden_cells(
                             world,
@@ -1438,6 +1457,11 @@ impl Temperature {
                 .get(&(hx, hy))
                 .map(|p| p.diffusivity)
                 .unwrap_or(REF_THERMAL_DIFFUSIVITY);
+            let fw_here = self
+                .props_cache
+                .get(&(hx, hy))
+                .map(|p| p.free_water)
+                .unwrap_or(0.0);
             if let Some(nx) = self.wrap_hx(hx + 1) {
                 if self.accepts(nx, hy) && nx != hx {
                     let n_val = *snap.get(&(nx, hy)).unwrap_or(&base);
@@ -1445,12 +1469,14 @@ impl Temperature {
                     if here_sky && free_sky(nx, hy) && (val - n_val).abs() < 0.35 {
                         // skip
                     } else {
-                        let k_n = self
-                            .props_cache
-                            .get(&(nx, hy))
+                        let props_n = self.props_cache.get(&(nx, hy));
+                        let k_n = props_n
                             .map(|p| p.diffusivity)
                             .unwrap_or(REF_THERMAL_DIFFUSIVITY);
-                        let flow = (val - n_val) * alpha * pair_diff_scale(k_here, k_n);
+                        let fw_n = props_n.map(|p| p.free_water).unwrap_or(0.0);
+                        let gate = diffuse_free_water_gate(fw_here, fw_n, false);
+                        let flow =
+                            (val - n_val) * alpha * pair_diff_scale(k_here, k_n) * gate;
                         if flow.abs() >= 1e-9 {
                             *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
                             *deltas.entry((nx, hy)).or_insert(0.0) += flow;
@@ -1464,13 +1490,21 @@ impl Temperature {
                     continue;
                 }
                 let n_val = *snap.get(&n_key).unwrap_or(&base);
-                let k_n = self
-                    .props_cache
-                    .get(&n_key)
+                let props_n = self.props_cache.get(&n_key);
+                let k_n = props_n
                     .map(|p| p.diffusivity)
                     .unwrap_or(REF_THERMAL_DIFFUSIVITY);
+                let fw_n = props_n.map(|p| p.free_water).unwrap_or(0.0);
+                let gate = diffuse_free_water_gate(fw_here, fw_n, true);
                 // Mild vertical conductivity — geothermal path upward.
-                let flow = (val - n_val) * alpha * 0.35 * pair_diff_scale(k_here, k_n);
+                // Free-water↔free-water gets a buoyancy-friendly boost.
+                let vert = if fw_here >= 0.5 && fw_n >= 0.5 {
+                    0.55
+                } else {
+                    0.35
+                };
+                let flow =
+                    (val - n_val) * alpha * vert * pair_diff_scale(k_here, k_n) * gate;
                 if flow.abs() >= 1e-9 {
                     *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
                     *deltas.entry(n_key).or_insert(0.0) += flow;
@@ -1533,6 +1567,11 @@ impl Temperature {
                     .get(&(hx, hy))
                     .map(|p| p.diffusivity)
                     .unwrap_or(REF_THERMAL_DIFFUSIVITY);
+                let fw_here = self
+                    .props_cache
+                    .get(&(hx, hy))
+                    .map(|p| p.free_water)
+                    .unwrap_or(0.0);
                 if let Some(nx) = self.wrap_hx(hx + 1) {
                     if b.contains(nx, hy) && nx != hx {
                         let ni = b.index(w, nx, hy);
@@ -1540,12 +1579,14 @@ impl Temperature {
                         if here_sky && self.tile_is_free_sky(nx, hy) && (val - n_val).abs() < 0.35 {
                             // skip
                         } else {
-                            let k_n = self
-                                .props_cache
-                                .get(&(nx, hy))
+                            let props_n = self.props_cache.get(&(nx, hy));
+                            let k_n = props_n
                                 .map(|p| p.diffusivity)
                                 .unwrap_or(REF_THERMAL_DIFFUSIVITY);
-                            let flow = (val - n_val) * alpha * pair_diff_scale(k_here, k_n);
+                            let fw_n = props_n.map(|p| p.free_water).unwrap_or(0.0);
+                            let gate = diffuse_free_water_gate(fw_here, fw_n, false);
+                            let flow =
+                                (val - n_val) * alpha * pair_diff_scale(k_here, k_n) * gate;
                             if flow.abs() >= 1e-9 {
                                 self.slab_deltas[i] -= flow;
                                 self.slab_deltas[ni] += flow;
@@ -1561,12 +1602,19 @@ impl Temperature {
                     }
                     let ni = b.index(w, hx, n_hy);
                     let n_val = self.slab[ni];
-                    let k_n = self
-                        .props_cache
-                        .get(&(hx, n_hy))
+                    let props_n = self.props_cache.get(&(hx, n_hy));
+                    let k_n = props_n
                         .map(|p| p.diffusivity)
                         .unwrap_or(REF_THERMAL_DIFFUSIVITY);
-                    let flow = (val - n_val) * alpha * 0.35 * pair_diff_scale(k_here, k_n);
+                    let fw_n = props_n.map(|p| p.free_water).unwrap_or(0.0);
+                    let gate = diffuse_free_water_gate(fw_here, fw_n, true);
+                    let vert = if fw_here >= 0.5 && fw_n >= 0.5 {
+                        0.55
+                    } else {
+                        0.35
+                    };
+                    let flow =
+                        (val - n_val) * alpha * vert * pair_diff_scale(k_here, k_n) * gate;
                     if flow.abs() >= 1e-9 {
                         self.slab_deltas[i] -= flow;
                         self.slab_deltas[ni] += flow;
@@ -2650,6 +2698,70 @@ mod tests {
             (after_cut - cut_geo).abs() < (after_cut - hill_geo).abs(),
             "closer to the new live overburden {cut_geo:.1} than the deleted crest {hill_geo:.1} \
              (got {after_cut:.1})"
+        );
+    }
+
+    #[test]
+    fn lake_does_not_inherit_cliff_geothermal_bands() {
+        // Same-Y rock↔water diffuse used to copy geo isotherms into the lake
+        // so a cut hill "revealed" the water's stratification.
+        let sea: i32 = 40;
+        let bed: i32 = 8;
+        let crest: i32 = 40;
+        let mut world = World::new(5);
+        for y in 0..=crest + 4 {
+            world.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+            world.ensure_chunk(ChunkCoord::new(
+                1,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+        }
+        // Lake columns x=0..7, cliff x=8..15.
+        for x in 0..8 {
+            for y in 0..=bed {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in (bed + 1)..=sea {
+                world.set_cell(x, y, Cell::water());
+            }
+        }
+        for x in 8..16 {
+            for y in 0..=crest {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 80, 1, 32, sea, false);
+        t.fill_initial(0);
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.near_surface_couple = 0.0;
+        t.config.water_rock_couple = 0.0;
+        t.config.air_water_skin_couple = 0.0;
+        t.config.pore_water_couple = 0.0;
+        t.config.water_convect_bias = 0.0;
+        t.config.diffuse_alpha = 0.20;
+        t.config.geothermal_relax = 0.25;
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 32, 80);
+        // Mid-column sample: lake tile vs cliff tile at the same hy.
+        let tc = t.tile_cols.max(1);
+        let sample_y = (bed + sea) / 2;
+        let hy = sample_y.div_euclid(tc);
+        let lake_hx = 1i32; // x~4
+        let cliff_hx = 3i32; // x~12
+        for i in 0..20 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let lake_t = t.at_tile(lake_hx, hy);
+        let cliff_t = t.at_tile(cliff_hx, hy);
+        assert!(
+            (cliff_t - lake_t).abs() > 4.0,
+            "lake must not lock to cliff geo isotherm (lake={lake_t:.1} cliff={cliff_t:.1} hy={hy})"
         );
     }
 

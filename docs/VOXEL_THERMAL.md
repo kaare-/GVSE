@@ -119,6 +119,8 @@ Acceptance sketches (tests / HUD, not photoreal):
 - Deep free-water tiles use water capacity (not rock geothermal).
 - Geothermal overburden is **rock surface only** — standing water does
   not count as crust cover (avoids painting lakes as a static hot bed).
+- Diffuse is gated at free-water ↔ rock faces so cliff geo isotherms are
+  not copied sideways into the lake (cut-hill banding ≠ lake T).
 - Tab: `TempConfig::water_convect_bias` (default 0.35).
 - Goal: **heat rides water toward the surface**; cooler return flow.
 
