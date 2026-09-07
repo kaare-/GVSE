@@ -65,8 +65,13 @@ cargo test -p wk-voxel --test perf_profile --release -- --ignored --nocapture
 
 **Gate check (2026-09-06, post-P2 tip):** demo wall ~14 ms/tick headless;
 soak ages to 150+ ms/tick. Rock bodies were ~3.4 ms on wet demo (water-halo
-body reseed). **P3/P4 stay blocked** until wet wall is cut — next lever is
-skipping water-dirty seeding of the competent body pass.
+body reseed). **P3/P4 stay blocked** until wet wall is cut — next levers:
+skip water-dirty body seeding, then stop beach-grain solidity from waking
+ortho settled rock (support-above only).
+
+**After body-halo skip (2026-09-07):** demo ~11.6 ms/tick headless; stress
+~20.6 ms. Rock bodies still ~2–4 ms on wet soaks (grain churn). Still short
+of a comfortable interactive wet budget for P3.
 
 P1 and P2 are allowed earlier: gates/bias on existing passes, not new world fields
 (beyond the sparse pore-ice map).

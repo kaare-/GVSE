@@ -600,6 +600,8 @@ What is still leftover:
    flow halo (sloshing `sat` cannot destabilise rock; solidity wakes
    already queue `World.competent_wake`). That wet-hill treadmill was
    ~2.5k flood cells/tick on the body probe.
+   Beach grain / litter / ice ↔ Air only wakes competent rock **above**
+   the changed cell (true footing loss) — not ortho cliff faces.
 5. Equalized confined BFS ~3.0 ms — **Δt=1 persist is in**
    (`World.confined` lookup). Do not starve the wake. Δt>1 still parked.
 6. Condensation lottery ~2.9 ms — do not skip it

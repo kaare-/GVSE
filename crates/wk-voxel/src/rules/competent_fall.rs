@@ -5434,6 +5434,63 @@ mod tests {
   }
 
   #[test]
+  fn beach_sand_churn_does_not_wake_settled_cliff() {
+    let mut w = World::new(72);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..24 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=6 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cfg = CompetentFallConfig::default();
+    for _ in 0..16 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    assert!(w.competent_is_settled(8, 3));
+    w.competent_wake.clear();
+    // Sand landing / leaving beside the cliff face — beach churn.
+    w.set_cell(12, 3, Cell::solid(MaterialId::Sand));
+    assert!(
+      w.competent_is_settled(8, 3),
+      "sand landing beside a cliff must not wake the hill"
+    );
+    assert!(
+      w.competent_is_settled(11, 3),
+      "ortho cliff face must stay asleep through beach churn"
+    );
+    w.set_cell(12, 3, Cell::air());
+    assert!(
+      w.competent_is_settled(11, 3),
+      "sand leaving beside a cliff must not wake the hill"
+    );
+  }
+
+  #[test]
+  fn sand_removed_under_rock_still_wakes_support() {
+    let mut w = World::new(73);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Pillar: sand footing under a stone block.
+    w.set_cell(8, 1, Cell::solid(MaterialId::Sand));
+    w.set_cell(8, 2, Cell::solid(MaterialId::Stone));
+    w.competent_set_settled(8, 2);
+    assert!(w.competent_is_settled(8, 2));
+    w.competent_wake.clear();
+    w.set_cell(8, 1, Cell::air());
+    assert!(
+      !w.competent_is_settled(8, 2),
+      "removing the footing under rock must wake it"
+    );
+    assert!(
+      w.competent_wake.iter().any(|&(x, y)| x == 8 && y == 2),
+      "support loss must queue the rock above"
+    );
+  }
+
+  #[test]
   fn carved_arch_slab_crashes() {
     let mut w = World::new(40);
     for cx in 0..3 {
