@@ -58,6 +58,10 @@ scales α by material. Voxel should:
 - **Risk:** low–medium. Cadence and determinism already exist; tune
   against current day/night feel.
 
+**Owns the larger story:** rock↔water couples, ΔT water currents, pore
+extension, and geyser gating live in [`VOXEL_THERMAL.md`](VOXEL_THERMAL.md)
+(T0 starts here).
+
 ### 3. Dissolved carbonate (slow field)
 
 Column pattern: wet Limestone injects solute; field advects/diffuses;

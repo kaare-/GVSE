@@ -13,6 +13,7 @@ notes intended to survive re-reads of the codebase.
 | [`archive/`](archive/README.md) | Cut-by-cut soak leftover ledger and other retired notes. |
 | [`VOXEL_PARALLEL.md`](VOXEL_PARALLEL.md) | Multithreading: what landed, next phases, what to avoid. |
 | [`VOXEL_FIELDS.md`](VOXEL_FIELDS.md) | Fields / heatmaps for richer material physics (future plan). |
+| [`VOXEL_THERMAL.md`](VOXEL_THERMAL.md) | Coarse thermal loop: rock↔water heat, water currents, then pore; gates geysers. |
 | [`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md) | Per-cell porosity / permeability within material ranges. |
 | [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md) | Why groundwater fronts stay uniform; field capacity, flux erosion, mineral deposition (plan). |
 | [`VOXEL_GEYSER.md`](VOXEL_GEYSER.md) | Constructive upward motor: pore ice → hot springs → (gated) steam/geysers. |
@@ -28,8 +29,10 @@ notes intended to survive re-reads of the codebase.
 | [`EVOLUTION.md`](EVOLUTION.md) | **Archive** — column grazer fission / mutation. |
 
 Read order for the **active voxel stack:** `VOXEL_WATER.md` →
-`VOXEL_FAILURE.md` / `VOXEL_GEOTECH_MAP.md` → `VOXEL_FIELDS.md`.
-Upward landforms (hot springs / geysers): `VOXEL_GEYSER.md` after water.
+`VOXEL_FAILURE.md` / `VOXEL_GEOTECH_MAP.md` → `VOXEL_FIELDS.md` /
+`VOXEL_THERMAL.md`.
+Upward landforms (hot springs / geysers): `VOXEL_THERMAL.md` then
+`VOXEL_GEYSER.md` after water.
 World shape: `WORLDGEN.md` → `STRATA.md`. Presentation / atmosphere:
 `SKY.md`. Life specs: `organism/` (studio in `wk-voxel-app`). Peer map
 (games + science ceilings): `COMPARISON.md` — useful after
