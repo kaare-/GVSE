@@ -1773,11 +1773,10 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
         return props;
     }
     let pore_wet = tile_pore_wet_frac(world, hx, hy, tc);
-    let free_water = if watery {
-        1.0
-    } else {
-        tile_free_water_frac(world, hx, hy, tc)
-    };
+    // Always scan this tile's cells — column `watery` is true for the
+    // whole surface band above a lake, but empty air tiles must not
+    // count as free-water for buoyancy.
+    let free_water = tile_free_water_frac(world, hx, hy, tc);
     TileThermal {
         layer: TileLayer::Surface { watery },
         capacity: cap * (1.0 + 0.25 * pore_wet),
@@ -2911,6 +2910,8 @@ mod tests {
         t.config.near_surface_couple = 0.0;
         t.config.water_rock_couple = 0.0;
         t.config.air_water_skin_couple = 0.4;
+        t.config.water_convect_bias = 0.0;
+        t.config.pore_water_couple = 0.0;
         t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
         let h = Humidity::with_world_bounds(4, 0, 0, 32, 64);
         let water0 = t.at_tile(hx, water_hy);
