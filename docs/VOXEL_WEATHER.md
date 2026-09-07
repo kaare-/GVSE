@@ -591,7 +591,10 @@ What is still leftover:
 2. Wind rebuild ~4.1 ms — compose + field HashMap write + slip
 3. Seepage ~4.0 ms — lake-bed / apply exact-skip mid-ocean,
    wet-Air-only, and dry inland rock whose Moore neighbourhood
-   has never held water. Dry stone under a wet seam still scans.
+   has never held water. Dry stone under a wet seam still scans,
+   but **Moore-only dry chunks face-clamp** to the wet-facing
+   row/col until a pore wets (then occupancy opens the full walk).
+   Dry stone deep in an inflated dirty hinterland is leftover.
 4. Landscape bodies ~4.0 ms — hanger-seed exact-skip of
    `!has_competent` chunks; support rebuild skips `!has_solid`
    (empty sky / ocean). Occupancy is the source of truth —

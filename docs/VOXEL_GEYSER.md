@@ -78,6 +78,11 @@ ortho settled rock (support-above only).
 ~20.6 ms. Rock bodies still ~2–4 ms on wet soaks (grain churn). Still short
 of a comfortable interactive wet budget for P3.
 
+**After Moore-face seepage clamp (stacked on ice-phase):** dry hinterland
+under wet seams no longer walks the full dirty rect — only the wet-facing
+row/col until pores wet. Recheck `perf_profile` / `soak_age_inventory`
+before promoting P3/P4.
+
 P1 and P2 are allowed earlier: gates/bias on existing passes, not new world fields
 (beyond the sparse pore-ice map).
 
