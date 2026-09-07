@@ -148,7 +148,10 @@ Save schema **v17**. Cadence `STEAM_EVERY` (= 5).
 
 **Acceptance:** surface water above 100 °C loses sat to steam (mass-flat);
 sealed cave keeps steam under the roof and pressurizes confined rise;
-cool steam recondenses to Air sat.
+cool steam recondenses to Air sat. **Play:** app draws pale mist on steam
+cells; Tab → Climate → Steam exposes enable / boil point / rates; inspector
+shows `steam=` / confined / pressure; HUD reports steam cell count. Open
+vents keep a surface mist residual so boil is visible while excess rises.
 
 ### P4 — Episodic geyser — **blocked on FPS gate**
 

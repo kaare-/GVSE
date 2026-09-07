@@ -53,7 +53,7 @@ use crate::organism::{OrganismStepOutcome, OrganismStore};
 use crate::parallel::set_parallel_enabled;
 use crate::phase::{apply_phase, PhaseConfig};
 use crate::pore_ice::apply_pore_ice;
-use crate::steam::{apply_steam, BOIL_POINT_C};
+use crate::steam::{apply_steam, SteamConfig};
 use crate::plant::{collect_live_root_world_cells, sail_plants_on_wind_rafts_cfg};
 use crate::rules::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity_climate,
@@ -93,6 +93,7 @@ pub struct WorldStepConfig<'a> {
     pub karst: &'a KarstConfig,
     pub cloud: &'a CloudConfig,
     pub phase: &'a PhaseConfig,
+    pub steam: &'a SteamConfig,
     pub climate: &'a ClimateConfig,
     pub carbon: &'a CarbonConfig,
     pub grain: &'a GrainConfig,
@@ -461,7 +462,7 @@ pub fn step_world(
         let t0 = profile.then(Instant::now);
         apply_phase(world, temperature, cfg.phase);
         apply_pore_ice(world, temperature, cfg.phase.freeze_point_c);
-        apply_steam(world, temperature, BOIL_POINT_C);
+        apply_steam(world, temperature, cfg.steam);
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
             t.phase += t0.elapsed();
         }
@@ -570,6 +571,7 @@ mod tests {
         karst: &'a KarstConfig,
         cloud: &'a CloudConfig,
         phase: &'a PhaseConfig,
+        steam: &'a SteamConfig,
         climate: &'a ClimateConfig,
         carbon: &'a CarbonConfig,
         grain: &'a GrainConfig,
@@ -585,6 +587,7 @@ mod tests {
             karst,
             cloud,
             phase,
+            steam,
             climate,
             carbon,
             grain,
@@ -621,6 +624,7 @@ mod tests {
         let karst = KarstConfig::default();
         let cloud = CloudConfig::default();
         let phase = PhaseConfig::default();
+        let steam = SteamConfig::default();
         let climate = ClimateConfig::default();
         let carbon_cfg = CarbonConfig::default();
         let grain = GrainConfig::default();
@@ -636,6 +640,7 @@ mod tests {
             &karst,
             &cloud,
             &phase,
+            &steam,
             &climate,
             &carbon_cfg,
             &grain,
@@ -685,6 +690,7 @@ mod tests {
             let karst = KarstConfig::default();
             let cloud = CloudConfig::default();
             let phase = PhaseConfig::default();
+            let steam = SteamConfig::default();
             let climate = ClimateConfig::default();
             let carbon_cfg = CarbonConfig::default();
             let grain = GrainConfig::default();
@@ -700,6 +706,7 @@ mod tests {
                 &karst,
                 &cloud,
                 &phase,
+                &steam,
                 &climate,
                 &carbon_cfg,
                 &grain,
@@ -758,6 +765,7 @@ mod tests {
         let karst = KarstConfig::default();
         let cloud = CloudConfig::default();
         let phase = PhaseConfig::default();
+        let steam = SteamConfig::default();
         let climate = ClimateConfig::default();
         let carbon_cfg = CarbonConfig::default();
         let grain = GrainConfig::default();
@@ -773,6 +781,7 @@ mod tests {
             &karst,
             &cloud,
             &phase,
+            &steam,
             &climate,
             &carbon_cfg,
             &grain,

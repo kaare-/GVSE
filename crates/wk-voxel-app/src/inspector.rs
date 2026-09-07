@@ -4,9 +4,9 @@
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    is_fungus, is_land_plant, permeability_cell, soft_litter_at, water_capacity_cell, Atom, Cell,
-    Corpse, GeotechMap, Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS,
+    is_fungus, is_land_plant, permeability_cell, soft_litter_at, steam_at, steam_pressure_norm,
+    void_is_confined, water_capacity_cell, Atom, Cell, Corpse, GeotechMap, Humidity, Temperature,
+    World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
 };
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -255,6 +255,19 @@ pub fn draw_block_inspector(
                 ));
             }
             lines.push(format!("flags=0x{:02X}", c.flags.0));
+            let steam = steam_at(world, gx, gy);
+            if steam > 0 || (c.material == MaterialId::Air && c.sat.0 > 0 && temp_c >= 95.0) {
+                let confined = if c.material == MaterialId::Air {
+                    void_is_confined(world, gx, gy)
+                } else {
+                    false
+                };
+                let press = steam_pressure_norm(world, gx, gy);
+                lines.push(format!(
+                    "steam={steam}/255  confined={}  pressure={press:.2}",
+                    if confined { "yes" } else { "no" }
+                ));
+            }
             if c.mycelium() > 0 {
                 let shares = wk_voxel::mycelium_shares_at(world, gx, gy);
                 if shares.is_empty() {

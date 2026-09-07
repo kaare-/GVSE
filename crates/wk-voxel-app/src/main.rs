@@ -25,6 +25,7 @@
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
 //! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
+//! - `Tab` → Climate → Steam — boil / mist knobs (steam draws as white mist)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
 //! - `F2` — creature editor (Atom / plant MS-Paint; `C` stays condensation)
 //! - `F3` — terrain editor (paint / erase block types; world stays visible)
@@ -191,6 +192,13 @@ fn sat_overlay_color(wet: f32) -> Color {
     };
     let a = (75.0 + t * 155.0) as u8;
     Color::from_rgba(r, g, b, a)
+}
+
+/// Sparse conduit steam as pale mist (always drawn when present).
+fn steam_mist_color(amt: u8) -> Color {
+    let t = (amt as f32 / 255.0).clamp(0.0, 1.0);
+    let a = (48.0 + 150.0 * t.sqrt()) as u8;
+    Color::from_rgba(236, 242, 250, a)
 }
 
 fn scale_color_alpha(c: Color, k: f32) -> Color {
@@ -564,6 +572,7 @@ async fn main() {
                     karst: &settings.karst,
                     cloud: &settings.cloud,
                     phase: &settings.phase,
+                    steam: &settings.steam,
                     climate: &settings.climate,
                     carbon: &settings.carbon,
                     grain: &settings.grain,
@@ -1103,6 +1112,32 @@ async fn main() {
                 sh,
             );
         }
+
+        // Sparse conduit steam mist (geyser P3) — always on when present.
+        if !scene.world.steam.is_empty() {
+            let bedrock_y = scene.params.bedrock_floor_y;
+            for (&(gx, gy), &amt) in &scene.world.steam {
+                if amt == 0 || gy < y_min_vis || gy >= y_max_vis {
+                    continue;
+                }
+                for &x_copy in x_copies {
+                    let x = scene.world.wrap_x(gx) + x_copy * scene.params.width_cols;
+                    let sx = origin_x + x as f32 * cell_px;
+                    let sy = origin_y - (gy - bedrock_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy + cell_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px,
+                        cell_px,
+                        steam_mist_color(amt),
+                    );
+                }
+            }
+        }
+
         if wind_streaks_overlay {
             draw_wind_streaks(
                 &scene.wind,
@@ -1575,7 +1610,7 @@ async fn main() {
                 "night"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C drizzle={} evap={} phase={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C drizzle={} evap={} phase={} steam={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1583,6 +1618,11 @@ async fn main() {
                 if settings.cond_rain_on { "on" } else { "off" },
                 if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
+                if settings.steam.enabled {
+                    format!("{}c", scene.world.steam.len())
+                } else {
+                    "off".into()
+                },
                 scene.humidity.total_mass(),
                 scene.carbon.atmosphere,
                 scene.carbon.dissolved,
