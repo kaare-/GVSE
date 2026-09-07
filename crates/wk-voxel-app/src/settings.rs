@@ -907,7 +907,7 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Geothermal gradient (live overburden)",
+                        "Geothermal gradient (rock overburden)",
                         0.0..1.0,
                         &mut self.temp.geothermal_gradient_c_per_cell,
                     );
