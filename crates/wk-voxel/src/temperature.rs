@@ -551,13 +551,14 @@ impl Temperature {
         (self.sea_level_y - y_cells).max(0) as f32
     }
 
-    /// Overburden cells below the live skin. Seed crest is only a hint
-    /// for the walk; a deleted hill must drop this depth.
+    /// Overburden cells of **solid rock** below the live rock surface.
+    /// Standing water is not crust — counting the waterline as cover made
+    /// deep lakes a static hot-bottom geothermal paint.
     pub fn geothermal_overburden_cells(&self, world: Option<&World>, hx: i32, y_cells: i32) -> f32 {
         match world {
             Some(_) => {
-                let surf = self.column_surface_y_estimate(world, hx);
-                (surf - y_cells).max(0) as f32
+                let rock = self.column_rock_y_estimate(world, hx);
+                (rock - y_cells).max(0) as f32
             }
             None => self.geothermal_depth_at_y(y_cells),
         }
@@ -628,7 +629,22 @@ impl Temperature {
                 .entry(hx)
                 .or_insert_with(|| self.column_rock_anchors(world, hx));
             let props = match props_early_from_anchor(hy, tc, rock_mid, alo, ahi) {
-                Some(p) => p,
+                Some(mut p) => {
+                    // Early buried skips the surface-band scan — still detect
+                    // flooded shafts / deep lakes so they are not rock-geo.
+                    if matches!(p.layer, TileLayer::Buried { .. }) {
+                        let fw = tile_free_water_frac(world, hx, hy, tc);
+                        if fw >= 0.5 {
+                            let water = MaterialRegistry::props(MaterialId::Water);
+                            p.free_water = fw;
+                            p.capacity = water.heat_capacity
+                                * (1.0 + self.config.water_stack_cap * fw);
+                            p.diffusivity = water.thermal_diffusivity;
+                            p.albedo = water.albedo;
+                        }
+                    }
+                    p
+                }
                 None => tile_thermal_props(self, Some(world), hx, hy),
             };
             self.props_cache.insert((hx, hy), props);
@@ -636,6 +652,18 @@ impl Temperature {
         self.props_cache_age = 0;
     }
 
+    /// Live rock crest (ignores standing water). Geothermal overburden.
+    fn column_rock_y_estimate(&self, world: Option<&World>, hx: i32) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        let hint = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
+        match world {
+            Some(w) => live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH),
+            None => hint,
+        }
+    }
+
+    /// Skin the air sits on (rock + standing water). Climate / couples.
     fn column_surface_y_estimate(&self, world: Option<&World>, hx: i32) -> i32 {
         let tc = self.tile_cols.max(1);
         let gx = hx * tc + tc / 2;
@@ -1306,8 +1334,8 @@ impl Temperature {
                 continue;
             }
             let strength = bias * (dt / WATER_CONVECT_DT_REF).clamp(0.0, 1.5);
-            let a = (0.55 * strength * pair_diff_scale(lo.diffusivity, hi.diffusivity))
-                .clamp(0.0, 0.9);
+            let a = (0.75 * strength * pair_diff_scale(lo.diffusivity, hi.diffusivity))
+                .clamp(0.0, 0.95);
             if a < 1e-5 {
                 continue;
             }
@@ -2622,6 +2650,43 @@ mod tests {
             (after_cut - cut_geo).abs() < (after_cut - hill_geo).abs(),
             "closer to the new live overburden {cut_geo:.1} than the deleted crest {hill_geo:.1} \
              (got {after_cut:.1})"
+        );
+    }
+
+    #[test]
+    fn lake_water_column_is_not_rock_overburden() {
+        // Standing water must not count as crust cover — otherwise deep
+        // lakes paint a static hot-bottom geothermal profile.
+        let sea: i32 = 80;
+        let bed: i32 = 20;
+        let water_top: i32 = 80;
+        let probe_y: i32 = 16;
+        let mut w = World::new(3);
+        for y in 0..=water_top + 4 {
+            w.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+        }
+        for x in 0..8 {
+            for y in 0..=bed {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in (bed + 1)..=water_top {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        let t = Temperature::with_world_bounds(4, 0, 0, 16, 160, 1, 16, sea, false);
+        let rock_depth = t.geothermal_overburden_cells(Some(&w), 0, probe_y);
+        let skin_depth = (water_top - probe_y) as f32;
+        assert!(
+            (rock_depth - (bed - probe_y) as f32).abs() < 4.0,
+            "overburden must stop at the rock bed (got {rock_depth}, bed-rel {})",
+            (bed - probe_y) as f32
+        );
+        assert!(
+            rock_depth < skin_depth * 0.35,
+            "water column must not inflate geothermal depth ({rock_depth} vs skin {skin_depth})"
         );
     }
 

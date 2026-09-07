@@ -117,6 +117,8 @@ Acceptance sketches (tests / HUD, not photoreal):
   colder free water (`couple_free_water_buoyancy`) — full columns do not
   move cells, so flow bias alone cannot overturn stratification.
 - Deep free-water tiles use water capacity (not rock geothermal).
+- Geothermal overburden is **rock surface only** — standing water does
+  not count as crust cover (avoids painting lakes as a static hot bed).
 - Tab: `TempConfig::water_convect_bias` (default 0.35).
 - Goal: **heat rides water toward the surface**; cooler return flow.
 
