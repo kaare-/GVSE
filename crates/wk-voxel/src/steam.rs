@@ -176,6 +176,53 @@ pub fn void_is_confined(world: &World, gx: i32, gy: i32) -> bool {
     false
 }
 
+/// Sky-connected Air (open shaft / cave vent) — weather Humidity may sit here.
+///
+/// Cheap path: upward probe ([`void_is_confined`]). If roofed, a short Air BFS
+/// looks for any neighbour that opens to sky (side entrance / skylight offset).
+/// Sealed pockets return false so they stay off the rain lottery.
+pub fn air_void_open_to_sky(world: &World, gx: i32, gy: i32) -> bool {
+    const BFS_BUDGET: usize = 96;
+    let gx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return true;
+    };
+    if cell.material != MaterialId::Air {
+        return false;
+    }
+    if !void_is_confined(world, gx, gy) {
+        return true;
+    }
+    let mut q: Vec<(i32, i32)> = vec![(gx, gy)];
+    let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
+    seen.insert((gx, gy));
+    let mut steps = 0usize;
+    while let Some((x, y)) = q.pop() {
+        steps += 1;
+        if steps > BFS_BUDGET {
+            return false;
+        }
+        for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+            let nx = world.wrap_x(x + dx);
+            let ny = y + dy;
+            if !seen.insert((nx, ny)) {
+                continue;
+            }
+            match world.get_cell(nx, ny) {
+                None => return true,
+                Some(c) if c.material == MaterialId::Air => {
+                    if !void_is_confined(world, nx, ny) {
+                        return true;
+                    }
+                    q.push((nx, ny));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    false
+}
+
 /// Air that counts as gas volume (not a standing-water lake cell).
 #[inline]
 fn is_steam_void(cell: Cell) -> bool {
