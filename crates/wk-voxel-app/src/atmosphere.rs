@@ -1461,6 +1461,9 @@ fn water_current_vector(
     let mut n_v = 0u8;
 
     let sample = |nhx: i32, nhy: i32| -> Option<f32> {
+        let Some(nhx) = temp.wrap_tile_x(nhx) else {
+            return None;
+        };
         if wind_tile_center_is_free_water(Some(world), tc, nhx, nhy) {
             Some(temp.at_tile_packed(nhx, nhy))
         } else {
@@ -1617,6 +1620,9 @@ pub fn draw_wind_streaks(
 /// Reuses the wind lattice stroke style in a teal tint so lakes show motion
 /// without pretending air is blowing through them. Neighbours are free water
 /// only — shore rock / cold air must not dominate the open lake readout.
+///
+/// Walks the **wrapped** camera tile box (same as H haze). A raw camera-x
+/// loop used to stop at the ring seam: one side kept teal, the other went blank.
 pub fn draw_water_current_streaks(
     temp: &Temperature,
     world: &World,
@@ -1634,7 +1640,7 @@ pub fn draw_water_current_streaks(
     }
     let tc = temp.tile_cols.max(1);
     let stride = wind_streak_stride(cell_px);
-    let view = view_tile_box(
+    let Some(view) = view_tile_box(
         tc,
         origin_x,
         origin_y,
@@ -1644,31 +1650,45 @@ pub fn draw_water_current_streaks(
         width_cols,
         sw,
         sh,
-    );
+    ) else {
+        return;
+    };
     let mut samples: Vec<(i32, i32, f32, f32)> = Vec::new();
-    let gx0 = ((-origin_x) / cell_px).floor() as i32 - tc;
-    let gx1 = gx0 + (sw / cell_px).ceil() as i32 + tc * 2;
-    let gy_hi = bedrock_floor_y + (origin_y / cell_px).ceil() as i32 + 2;
-    let gy_lo = gy_hi - (sh / cell_px).ceil() as i32 - 2;
-    let mut hx = gx0.div_euclid(tc);
-    let hx1 = gx1.div_euclid(tc);
-    while hx <= hx1 {
-        let mut hy = gy_lo.div_euclid(tc);
-        let hy1 = gy_hi.div_euclid(tc);
-        while hy <= hy1 {
-            if wind_streak_on_lattice(hx, hy, stride)
-                && view.as_ref().map(|b| b.contains(hx, hy)).unwrap_or(true)
-                && wind_tile_center_is_free_water(Some(world), tc, hx, hy)
-            {
-                let (vx, vy) = water_current_vector(temp, world, tc, hx, hy);
-                // ~0.25°C in-water ΔT still clears this after amplify.
-                if vx.abs() + vy.abs() >= 0.012 {
-                    samples.push((hx, hy, vx, vy));
-                }
-            }
-            hy += stride;
+    for hy in view.hy_lo..=view.hy_hi {
+        if hy.rem_euclid(stride.max(1)) != 0 {
+            continue;
         }
-        hx += stride;
+        view.for_each_hx(|hx| {
+            if !wind_streak_on_lattice(hx, hy, stride) {
+                return;
+            }
+            let Some(hx) = temp.wrap_tile_x(hx) else {
+                return;
+            };
+            if !humidity_tile_touches_view(
+                hx,
+                hy,
+                tc,
+                origin_x,
+                origin_y,
+                cell_px,
+                bedrock_floor_y,
+                wrap_x,
+                width_cols,
+                sw,
+                sh,
+            ) {
+                return;
+            }
+            if !wind_tile_center_is_free_water(Some(world), tc, hx, hy) {
+                return;
+            }
+            let (vx, vy) = water_current_vector(temp, world, tc, hx, hy);
+            // ~0.25°C in-water ΔT still clears this after amplify.
+            if vx.abs() + vy.abs() >= 0.012 {
+                samples.push((hx, hy, vx, vy));
+            }
+        });
     }
     let tile_px = tc as f32 * cell_px;
     // Teal — distinct from pale wind arrows.
@@ -2810,6 +2830,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn water_current_view_keeps_both_sides_of_the_ring_seam() {
+        // Camera straddles world x=0: left copy is high columns, right is low.
+        // The old raw gx→hx loop only kept one side against the wrapped view box.
+        let width = 256;
+        let tc = 4;
+        let cell = 4.0;
+        let sw = 200.0;
+        let sh = 120.0;
+        let origin_x = 40.0; // left edge looks at gx ≈ -10
+        let origin_y = 100.0;
+        let box_ =
+            view_tile_box(tc, origin_x, origin_y, cell, 0, true, width, sw, sh).expect("box");
+        assert_eq!(box_.n_hx, 2, "seam-straddling camera must yield two hx ranges");
+        let mut saw_low = false;
+        let mut saw_high = false;
+        let hx_span = width / tc;
+        box_.for_each_hx(|hx| {
+            if hx <= 4 {
+                saw_low = true;
+            }
+            if hx >= hx_span - 5 {
+                saw_high = true;
+            }
+        });
+        assert!(saw_low, "wrapped view must include the low-x side of the seam");
+        assert!(saw_high, "wrapped view must include the high-x side of the seam");
+
+        let mut t = wk_voxel::Temperature::with_world_bounds(
+            tc, 0, 0, width, 128, 1, width, 16, true,
+        );
+        assert_eq!(t.wrap_tile_x(-1), Some(hx_span - 1));
+        assert_eq!(t.wrap_tile_x(hx_span), Some(0));
+        t.cells.insert((0, 10), 18.0);
+        t.cells.insert((hx_span - 1, 10), 19.0);
+        assert!((t.at_tile_packed(-1, 10) - 19.0).abs() < 1e-5);
+        assert!((t.at_tile_packed(hx_span, 10) - 18.0).abs() < 1e-5);
     }
 
     #[test]

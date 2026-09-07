@@ -47,7 +47,7 @@ runs at full rate off-screen (ring + pan). Not a quadtree.
 | Humidity tiles | Vapour wash (`H`) — bilinear on 4×4 seats; a drop opens that column from itself downward |
 | Wet columns | Canopy / column shade via `cloud_sky_transmit` (humidity, not parcels) |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
-| Wind / currents | `V` — cyan wind above the waterline; teal in-water ΔT current hints (free-water neighbours only; mild mid-lake gradients still draw) |
+| Wind / currents | `V` — cyan wind above the waterline; teal in-water ΔT current hints (wrapped camera tile box so the ring seam does not blank one side) |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
 | Cast / celestial key | See prior plant/terrain lighting notes |
 
