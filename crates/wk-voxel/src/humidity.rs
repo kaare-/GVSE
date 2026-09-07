@@ -9,6 +9,11 @@
 //! routes removed cell saturation into this heatmap so the sim stays
 //! mass-conservative even when water leaves the ground.
 //!
+//! The field covers **sky and underground voids**. Buried seats inside
+//! solid rock are still hoisted to the crest (shore / hill bugs), but
+//! humidity in subsurface Air (caves, shafts, tubes) stays put — moist
+//! cave air is real vapour on the same 4×4 store.
+//!
 //! The heatmap is intentionally decoupled from the cell grid so it
 //! can run at its own resolution — coarser than cells, matching the
 //! design doc's "temperature/humidity/wind sampled at 4×4 tiles"
@@ -28,6 +33,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::fasthash::{FxHashMap, FxHashSet};
+use wk_material::MaterialId;
 
 /// Inclusive tile-coordinate rectangle.
 ///
@@ -1241,6 +1247,11 @@ impl Humidity {
                 if hy >= valley {
                     continue;
                 }
+                // Subsurface Air (caves / shafts) keeps its vapour — only
+                // hoist seats buried inside solid rock.
+                if Self::tile_has_subsurface_air(world, hx, hy, self.tile_cols) {
+                    continue;
+                }
                 if !self.accepts(hx, air) {
                     continue;
                 }
@@ -1609,7 +1620,12 @@ impl Humidity {
             let nhy = hy + dir;
             let mut dest_hy = nhy;
             if let Some((wind, world, cache)) = surface {
-                dest_hy = self.free_air_cached(wind, world, hx, cache).max(nhy);
+                let air = self.free_air_cached(wind, world, hx, cache);
+                // Vertical flux may move within a cave column; do not snap
+                // cave seats up to the crest (that emptied underground H).
+                if hy >= air || !Self::tile_has_subsurface_air(world, hx, hy, self.tile_cols) {
+                    dest_hy = air.max(nhy);
+                }
             }
             if !self.accepts(hx, dest_hy) {
                 return None;
@@ -1736,6 +1752,43 @@ impl Humidity {
         ((base + 1 - tc / 2).max(0) + tc - 1) / tc
     }
 
+    /// True when this humidity tile overlaps subsurface Air (cave / shaft /
+    /// tube). Used to keep underground vapour instead of hoisting it to the
+    /// crest. Solid-rock buried seats still lift (shore / hill hygiene).
+    pub fn tile_has_subsurface_air(
+        world: &crate::grid::World,
+        hx: i32,
+        hy: i32,
+        tile_cols: i32,
+    ) -> bool {
+        let tc = tile_cols.max(1);
+        let base_gx = hx * tc;
+        let base_gy = hy * tc;
+        let mut air = 0u8;
+        let mut solid = 0u8;
+        for ly in 0..tc {
+            for lx in 0..tc {
+                let gx = world.wrap_x(base_gx + lx);
+                let gy = base_gy + ly;
+                match world.get_cell(gx, gy) {
+                    Some(c) if c.material == MaterialId::Air => air = air.saturating_add(1),
+                    Some(_) => solid = solid.saturating_add(1),
+                    None => {}
+                }
+            }
+        }
+        // Mostly void → cave / shaft seat. Mostly rock → buried solid.
+        air >= 2 && air >= solid / 2
+    }
+
+    /// Public probe: humidity tile at `(gx,gy)` is a subsurface air seat.
+    pub fn cell_in_subsurface_air(world: &crate::grid::World, gx: i32, gy: i32, tile_cols: i32) -> bool {
+        let tc = tile_cols.max(1);
+        let hx = gx.div_euclid(tc);
+        let hy = gy.div_euclid(tc);
+        Self::tile_has_subsurface_air(world, hx, hy, tc)
+    }
+
     fn atmosphere_base_y(
         &self,
         world: &crate::grid::World,
@@ -1780,6 +1833,10 @@ impl Humidity {
                 valley = valley.min(self.free_air_cached(wind, world, r, cache));
             }
             if hy >= valley {
+                continue;
+            }
+            // Cave / shaft air keeps humidity underground.
+            if Self::tile_has_subsurface_air(world, hx, hy, self.tile_cols) {
                 continue;
             }
             if mass <= 1e-9 || !self.accepts(hx, air) {
@@ -2897,6 +2954,66 @@ mod convection_tests {
         assert!(
             loaded.slab.is_none(),
             "load must not resurrect the runtime slab"
+        );
+    }
+
+    #[test]
+    fn cave_humidity_is_not_hoisted_to_crest() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+
+        let p = WorldgenParams::default();
+        let mut world = World::new(p.seed);
+        world.ensure_chunk(ChunkCoord::new(0, 0));
+        // Surface skin around y=20, cave void at y=4..8 under stone roof.
+        for x in 0..16 {
+            world.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..12 {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            world.set_cell(x, 20, Cell::solid(MaterialId::Stone));
+            for y in 21..28 {
+                world.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 4..12 {
+            for y in 4..8 {
+                world.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            64,
+            p.sky_ceiling_y.max(64),
+        );
+        h.wrap_x = true;
+        h.add(6, 6, 400.0);
+        let (hx, hy) = h.tile_of(6, 6);
+        assert!(
+            Humidity::tile_has_subsurface_air(&world, hx, hy, 4),
+            "fixture must register as subsurface air"
+        );
+        let wind = Wind::climate(
+            4,
+            0.0,
+            p.seed,
+            64,
+            20,
+            0,
+            64,
+            true,
+        );
+        let before = h.at_tile(hx, hy);
+        h.advect_with_surface(0.0, 0.0, &wind, &world);
+        assert!(
+            h.at_tile(hx, hy) > before * 0.85,
+            "cave humidity must stay underground (was {before}, now {})",
+            h.at_tile(hx, hy)
         );
     }
 }

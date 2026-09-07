@@ -155,7 +155,7 @@ pub struct World {
     /// Sparse **conduit steam** from boiling free water (see [`crate::steam`]).
     ///
     /// Keyed by wrapped `(gx, gy)` → steam units (same mass scale as `sat`).
-    /// Air voids only; humidity stays the sky field. Confined caves keep
+    /// Air voids only. Confined caves keep
     /// steam and pressurize confined rise. Hard-capped at runtime.
     ///
     /// Sparse and saved. Runtime Fx dual — boil / rise / confined probe

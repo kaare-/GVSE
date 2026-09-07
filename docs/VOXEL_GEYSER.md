@@ -32,11 +32,11 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam | **Buoyant void vapour** (sparse `World.steam` mass). **Looks like humidity:** coarse 4×4 soft white haze; pressure/heat raise density & warmth. Humidity store stays sky — steam does **not** dump into H/rain. Pore boil + reverse seepage escape; cool → sinter. |
-| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
+| Steam | Sparse pressure residual + boil motor. **Vapour mass exchanges into Humidity** (sky + caves, 4×4). Humidity store is the shared moist-air field underground too. Pore boil + reverse seepage escape; cool → sinter / rain. |
+| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~48×), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
 | Pressure | **No continuum PDE.** Sparse steam charge + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |
-| Sky path | Do not couple geyser steam into humidity / rain. Steam *behaves* like warm vapour in voids only. |
+| Sky path | Humidity is shared (sky + underground voids). Geyser boil feeds H; sparse steam is pressure residual. Cave cool drip → speleothems is a later feature. |
 
 ### Hard no’s
 
@@ -138,13 +138,14 @@ mound faster than a cold control; `mineral_total` conserved.
 ### P3 — Sparse buoyant steam — **done** (void markers + escape)
 
 Boil free **Air** sat and **pore** sat at/above 100 °C into sparse `World.steam`
-(same mass units). Humidity untouched. Hard cap `MAX_STEAM_CELLS`.
+(pressure residual), then **exchange vapour mass into Humidity** (sky + cave
+tiles). Hard cap `MAX_STEAM_CELLS`. Phase expansion default ~48× (force).
 
 | Setting | Behaviour |
 |---------|-----------|
-| Open surface / vented shaft | Steam flood-pours to the top of the open Air column |
-| Cave under solid roof | Steam **flood-fills the connected void** (equal density); pressure assaults wet pores + widens/bursts soft lids into tubes |
-| Hot wet rock | Pore boil seats vapour (or opens a micro-void); **phase expansion** (`phase_expansion_drive` × boiled) reverse-seeps multi-hop (`reverse_seep_hops`) and cracks the host — even when sealed |
+| Open surface / vented shaft | Steam flood-pours; mass joins H; residual pressurizes escape |
+| Cave under solid roof | Humidity **stays underground** (no crest hoist); H haze paints cave Air |
+| Hot wet rock | Pore boil + phase expansion reverse-seeps / cracks; vapour → H |
 
 Save schema **v17**. Cadence `STEAM_EVERY` (= 1 while tuning). Tab → Climate → Steam
 (phase expansion + reverse-seep hops knobs).

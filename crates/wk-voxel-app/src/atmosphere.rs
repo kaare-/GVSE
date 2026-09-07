@@ -650,8 +650,11 @@ fn haze_paint_seats_where(
 ///
 /// Shaft is the mask (1-wide). Resample is alpha only. Per-column floor
 /// so the clip does not step 4-wide at a tile edge (the 127/128 shelf).
+/// Subsurface Air seats (caves) paint below `cloud_floor` — underground
+/// humidity is real vapour on the same store.
 fn haze_resampled_cells(
     humidity: &Humidity,
+    world: &World,
     hx: i32,
     hy: i32,
     drop_tops: &HashMap<i32, i32>,
@@ -664,14 +667,30 @@ fn haze_resampled_cells(
     let base_gy = hy * tc;
     let y1 = base_gy + tc;
     let tile_mass = humidity.at_tile(hx, hy);
+    let cave = tile_mass > 1e-6
+        && Humidity::tile_has_subsurface_air(world, hx, hy, tc);
     let mut out = Vec::new();
     for col in 0..tc {
         let wx = wrap_x(base_gx + col);
-        let y0 = (floor_y(wx) + 1).max(base_gy);
+        let floor = floor_y(wx);
+        let y0 = if cave {
+            base_gy
+        } else {
+            (floor + 1).max(base_gy)
+        };
         let Some(col_y0) = haze_column_y0(y0, y1, drop_tops.get(&wx).copied()) else {
             continue;
         };
         for gy in col_y0..y1 {
+            if cave && gy <= floor {
+                // Only wash actual Air in the cave tile — never through rock.
+                let Some(cell) = world.get_cell(wx, gy) else {
+                    continue;
+                };
+                if cell.material != MaterialId::Air {
+                    continue;
+                }
+            }
             let sampled = if resample {
                 humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5)
             } else {
@@ -1334,6 +1353,7 @@ pub fn draw_haze_and_wind(
     for (hx, hy) in seats {
         for (wx, gy, sampled) in haze_resampled_cells(
             humidity,
+            world,
             hx,
             hy,
             &drop_tops,
@@ -2290,7 +2310,8 @@ mod tests {
         h.cells.insert((1, 5), 200.0);
         h.cells.insert((2, 5), 800.0);
         let drop_tops = HashMap::new();
-        let cells = haze_resampled_cells(&h, 1, 5, &drop_tops, |x| x, |_| 0, false);
+        let w = wk_voxel::World::new(2);
+        let cells = haze_resampled_cells(&h, &w, 1, 5, &drop_tops, |x| x, |_| 0, false);
         assert!(!cells.is_empty());
         assert!(
             cells.iter().all(|&(_, _, m)| (m - 200.0).abs() < 1e-3),
@@ -2367,9 +2388,12 @@ mod tests {
 
         let mut drop_tops = HashMap::new();
         drop_tops.insert(2, 21);
+        let w = wk_voxel::World::new(2);
         let painted: std::collections::HashSet<_> = seats
             .iter()
-            .flat_map(|&(hx, hy)| haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0, true))
+            .flat_map(|&(hx, hy)| {
+                haze_resampled_cells(&h, &w, hx, hy, &drop_tops, |x| x, |_| 0, true)
+            })
             .filter(|&(_, _, m)| m > 0.0)
             .map(|(x, y, _)| (x, y))
             .collect();

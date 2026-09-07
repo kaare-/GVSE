@@ -1027,7 +1027,10 @@ impl Temperature {
                 }
                 let n_val = *snap.get(&n_key).unwrap_or(&base);
                 // Mild vertical conductivity — geothermal path upward.
-                let flow = (val - n_val) * alpha * 0.35;
+                // Wet surface ↔ rock / cave air ↔ rock couple harder so
+                // cold water cools hot rock and hot rock heats water.
+                let vert = self.wet_rock_vert_factor(hx, hy, n_key.1);
+                let flow = (val - n_val) * alpha * vert;
                 if flow.abs() >= 1e-9 {
                     *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
                     *deltas.entry(n_key).or_insert(0.0) += flow;
@@ -1059,6 +1062,30 @@ impl Temperature {
                 .unwrap_or(self.sea_level_y)
         };
         hy * self.tile_cols.max(1) + self.tile_cols.max(1) / 2 > surf + 16
+    }
+
+    /// Vertical diffuse multiplier. Default 0.35; wet↔rock and cave↔rock
+    /// run hotter so water and rock actually exchange heat.
+    fn wet_rock_vert_factor(&self, hx: i32, hy: i32, n_hy: i32) -> f32 {
+        let a = self.props_cache.get(&(hx, hy)).map(|p| p.layer);
+        let b = self.props_cache.get(&(hx, n_hy)).map(|p| p.layer);
+        let watery = |l: Option<TileLayer>| matches!(l, Some(TileLayer::Surface { watery: true }));
+        let rock = |l: Option<TileLayer>| {
+            matches!(
+                l,
+                Some(TileLayer::Buried { .. }) | Some(TileLayer::Surface { watery: false })
+            )
+        };
+        let air = |l: Option<TileLayer>| matches!(l, Some(TileLayer::Air));
+        if (watery(a) && rock(b)) || (watery(b) && rock(a)) {
+            1.05
+        } else if (air(a) && rock(b)) || (air(b) && rock(a)) {
+            0.80
+        } else if watery(a) || watery(b) {
+            0.70
+        } else {
+            0.35
+        }
     }
 
     fn diffuse_dense(&mut self, alpha: f32, b: TileBounds) {
@@ -1108,7 +1135,8 @@ impl Temperature {
                     }
                     let ni = b.index(w, hx, n_hy);
                     let n_val = self.slab[ni];
-                    let flow = (val - n_val) * alpha * 0.35;
+                    let vert = self.wet_rock_vert_factor(hx, hy, n_hy);
+                    let flow = (val - n_val) * alpha * vert;
                     if flow.abs() >= 1e-9 {
                         self.slab_deltas[i] -= flow;
                         self.slab_deltas[ni] += flow;
@@ -1256,6 +1284,11 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
         return air_thermal();
     }
     if tile_mid_y + tc < surf_y {
+        // Cave / shaft voids below the crest are air, not crust — otherwise
+        // underground vapour sits in a stiff Buried thermal layer.
+        if tile_is_mostly_air(world, hx, tile_mid_y, tc) {
+            return air_thermal();
+        }
         let depth = (surf_y - tile_mid_y).max(0) as f32;
         return buried_thermal(depth);
     }
@@ -1264,6 +1297,26 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
         capacity: cap,
         albedo,
     }
+}
+
+fn tile_is_mostly_air(world: &World, hx: i32, tile_mid_y: i32, tc: i32) -> bool {
+    let tc = tc.max(1);
+    let base_gx = hx * tc;
+    let base_gy = (tile_mid_y - tc / 2).max(0);
+    let mut air = 0u8;
+    let mut solid = 0u8;
+    for ly in 0..tc {
+        for lx in 0..tc {
+            let gx = world.wrap_x(base_gx + lx);
+            let gy = base_gy + ly;
+            match world.get_cell(gx, gy) {
+                Some(c) if c.material == MaterialId::Air => air = air.saturating_add(1),
+                Some(_) => solid = solid.saturating_add(1),
+                None => {}
+            }
+        }
+    }
+    air >= 2 && air >= solid
 }
 
 /// Scan a column for the surface stack: pack / water / ground.
