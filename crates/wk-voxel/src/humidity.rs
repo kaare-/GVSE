@@ -1241,6 +1241,9 @@ impl Humidity {
                 if hy >= valley {
                     continue;
                 }
+                if self.tile_open_to_sky(world, hx, hy) {
+                    continue;
+                }
                 if !self.accepts(hx, air) {
                     continue;
                 }
@@ -1609,7 +1612,11 @@ impl Humidity {
             let nhy = hy + dir;
             let mut dest_hy = nhy;
             if let Some((wind, world, cache)) = surface {
-                dest_hy = self.free_air_cached(wind, world, hx, cache).max(nhy);
+                let air = self.free_air_cached(wind, world, hx, cache);
+                // Sealedsnap-lift to crest; open shafts climb one tile at a time.
+                if nhy < air && !self.tile_open_to_sky(world, hx, hy) {
+                    dest_hy = air.max(nhy);
+                }
             }
             if !self.accepts(hx, dest_hy) {
                 return None;
@@ -1736,6 +1743,15 @@ impl Humidity {
         ((base + 1 - tc / 2).max(0) + tc - 1) / tc
     }
 
+    /// Tile-centre Air connected to free sky (open cave / shaft).
+    #[inline]
+    fn tile_open_to_sky(&self, world: &crate::grid::World, hx: i32, hy: i32) -> bool {
+        let tc = self.tile_cols.max(1);
+        let gx = world.wrap_x(hx * tc + tc / 2);
+        let gy = hy * tc + tc / 2;
+        crate::steam::air_void_open_to_sky(world, gx, gy)
+    }
+
     fn atmosphere_base_y(
         &self,
         world: &crate::grid::World,
@@ -1780,6 +1796,11 @@ impl Humidity {
                 valley = valley.min(self.free_air_cached(wind, world, r, cache));
             }
             if hy >= valley {
+                continue;
+            }
+            // Open caves / shafts connected to free air keep weather H
+            // (T5). Only sealed under-crest seats crest-hoist.
+            if self.tile_open_to_sky(world, hx, hy) {
                 continue;
             }
             if mass <= 1e-9 || !self.accepts(hx, air) {
@@ -2321,6 +2342,85 @@ mod tests {
             "leaked pond vapour should stay at the waterline (L={} R={})",
             h.at_tile(left.0, pond.1),
             h.at_tile(right.0, pond.1)
+        );
+    }
+
+    #[test]
+    fn open_shaft_humidity_does_not_crest_hoist() {
+        // T5: sky-connected cave air keeps weather H; sealed pocket still hoists.
+        use crate::cell::Cell;
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use wk_material::MaterialId;
+
+        let width: i32 = 32;
+        let hill_top: i32 = 24;
+        let cave_y: i32 = 12;
+        let mut world = World::new(1);
+        for x in 0..width {
+            for y in 0i32..=hill_top + 4 {
+                world.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(CHUNK_CELLS_W as i32),
+                    y.div_euclid(CHUNK_CELLS_H as i32),
+                ));
+            }
+            for y in 0..=hill_top {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Open shaft column x=10..11 from cave floor to sky.
+        for x in 10..12 {
+            for y in cave_y..=hill_top + 2 {
+                world.set_cell(x, y, Cell::air());
+            }
+        }
+        // Sealed pocket at x=20..21 (roofed, no side vent).
+        for x in 20..22 {
+            for y in cave_y..cave_y + 4 {
+                world.set_cell(x, y, Cell::air());
+            }
+        }
+
+        let mut wind = Wind::climate(4, 0.0, 1, width, 8, 0, 64, false);
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.variance = 0.0;
+
+        let mut h = Humidity::with_world_bounds(4, 0, 0, width, 64);
+        h.add(10, cave_y + 1, 60.0);
+        h.add(20, cave_y + 1, 60.0);
+        let open = h.tile_of(10, cave_y + 1);
+        let sealed = h.tile_of(20, cave_y + 1);
+        let crest_open = h.tile_of(10, hill_top).1;
+        let crest_sealed = h.tile_of(20, hill_top).1;
+        assert!(
+            open.1 < crest_open && sealed.1 < crest_sealed,
+            "fixture: cave seats must sit under the crest"
+        );
+
+        h.advect_with_surface(0.0, 0.0, &wind, &world);
+
+        assert!(
+            h.at_tile(open.0, open.1) > 30.0,
+            "open shaft must keep weather H ({})",
+            h.at_tile(open.0, open.1)
+        );
+        assert!(
+            h.at_tile(open.0, crest_open) < 10.0,
+            "open shaft must not crest-hoist ({})",
+            h.at_tile(open.0, crest_open)
+        );
+        assert!(
+            h.at_tile(sealed.0, sealed.1) < 10.0,
+            "sealed pocket must still crest-hoist away ({})",
+            h.at_tile(sealed.0, sealed.1)
+        );
+        assert!(
+            h.at_tile(sealed.0, crest_sealed) > 30.0,
+            "sealed mass should land on the crest ({})",
+            h.at_tile(sealed.0, crest_sealed)
         );
     }
 

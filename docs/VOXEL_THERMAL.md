@@ -1,9 +1,8 @@
 # Thermal loop — heat transport before pressurized vapour
 
-**Status:** T0–T4 landing (diffusivity, water↔rock, ΔT currents,
-air↔water skin, pore-water couples). T5+ still plan. Blocks richer
-geyser / “humidity under pressure” work until the loop moves heat with
-water.
+**Status:** T0–T5 landing (thermal couples + open-cave sky H). T6
+pressurized vapour / geysers still gated on FPS. Blocks richer geyser /
+“humidity under pressure” work until the loop moves heat with water.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
 pore water), so gradients can drive currents — not a detailed CFD heat
@@ -136,16 +135,17 @@ Acceptance sketches (tests / HUD, not photoreal):
 - Goal: geothermal heat reaches seepage paths; cold recharge cools
   aquifers.
 
-### T5 — Open-cave humidity continuity (weather, not pressure)
+### T5 — Open-cave humidity continuity (weather, not pressure) ✅
 
-- Fix: sky Humidity should occupy **open** caves / shafts connected to
-  free air (stop crest-hoisting those seats).
-- Sealed / roofed cavities remain outside the rain lottery (sparse
-  pressurized vapour when we return to geysers).
+- Crest-hoist / vertical flux snap skip seats whose tile-centre Air is
+  sky-connected (`air_void_open_to_sky`: upward probe + short Air BFS).
+- Open shafts / vented caves keep weather Humidity (rain lottery eligible).
+- Sealed / roofed cavities still hoist off the under-crest seat (stay
+  outside the lottery; sparse steam later).
 
 ### T6 — Return to pressurized vapour / geysers
 
-Only after T0–T4 (ideally T5) and FPS gate:
+Only after T0–T5 and FPS gate:
 
 - Evap continuum: contact with hot material → fast evaporization into
   **Humidity** when open to sky.
