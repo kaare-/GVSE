@@ -98,6 +98,10 @@ pub struct TempConfig {
     /// Base relax rate toward climate skin (air-like surfaces).
     pub sky_relax: f32,
     pub diffuse_alpha: f32,
+    /// Coarse free-water ↔ underlying rock heat exchange per thermal step
+    /// (0 = off). Capacity-weighted mix toward local equilibrium.
+    #[serde(default = "default_water_rock_couple")]
+    pub water_rock_couple: f32,
     /// Scales material heat capacity into surface inertia:
     /// `relax = sky_relax / (1 + capacity * inertia_scale)`.
     pub inertia_scale: f32,
@@ -174,6 +178,20 @@ fn lapse_drop(elev: f32, knee: f32, tropo_lapse: f32, strato_lapse: f32) -> f32 
 fn default_force_inertia() -> f32 {
     0.20
 }
+fn default_water_rock_couple() -> f32 {
+    0.12
+}
+
+/// Reference material κ so pair scales sit near 1 for typical rock/water.
+const REF_THERMAL_DIFFUSIVITY: f32 = 0.0015;
+
+/// Harmonic-mean κ relative to [`REF_THERMAL_DIFFUSIVITY`], clamped.
+fn pair_diff_scale(ka: f32, kb: f32) -> f32 {
+    let ka = ka.max(1e-6);
+    let kb = kb.max(1e-6);
+    let harm = 2.0 * ka * kb / (ka + kb);
+    (harm / REF_THERMAL_DIFFUSIVITY).clamp(0.35, 2.0)
+}
 
 /// Deep water only counts this many extra cells toward skin capacity.
 const WATER_STACK_CAP_CELLS: f32 = 12.0;
@@ -194,6 +212,7 @@ impl Default for TempConfig {
             hum_shade_ref: 80.0,
             sky_relax: 0.12,
             diffuse_alpha: 0.10,
+            water_rock_couple: default_water_rock_couple(),
             inertia_scale: 1.6,
             min_relax: 0.003,
             max_relax: 0.28,
@@ -225,6 +244,8 @@ struct TileThermal {
     layer: TileLayer,
     capacity: f32,
     albedo: f32,
+    /// Material `thermal_diffusivity` (game-tuned); weights tile diffusion.
+    diffusivity: f32,
 }
 
 impl Default for TileThermal {
@@ -233,6 +254,7 @@ impl Default for TileThermal {
             layer: TileLayer::Air,
             capacity: 1.0,
             albedo: 0.0,
+            diffusivity: REF_THERMAL_DIFFUSIVITY,
         }
     }
 }
@@ -815,7 +837,9 @@ impl Temperature {
                         hx,
                         self.tile_mid_y(hy),
                     ));
-                    let relax = (cfg.geothermal_relax
+                    let k_lag =
+                        (0.7 + 0.3 * (props.diffusivity / REF_THERMAL_DIFFUSIVITY)).clamp(0.55, 1.4);
+                    let relax = (cfg.geothermal_relax * k_lag
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale * 0.35))
                         .clamp(0.001, 0.08);
                     let mut n = t + (geo - t) * relax;
@@ -839,6 +863,8 @@ impl Temperature {
                 }
             }
         }
+        // Coarse free-water ↔ rock heat exchange before diffuse redistributes.
+        self.couple_water_rock(dense, bounds, slab_w);
         let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * climate_k)).clamp(0.0, 0.25);
         if dense {
             if let Some(b) = bounds {
@@ -974,8 +1000,99 @@ impl Temperature {
         }
     }
 
+    /// Coarse free-water ↔ underlying rock heat couple (T1).
+    ///
+    /// Watery surface tiles mix toward capacity-weighted equilibrium with
+    /// the tile below (buried or dry surface). °C only — cell mass unchanged.
+    fn couple_water_rock(&mut self, dense: bool, bounds: Option<TileBounds>, slab_w: usize) {
+        let rate = self.config.water_rock_couple.clamp(0.0, 0.5);
+        if rate < 1e-5 || self.props_cache.is_empty() {
+            return;
+        }
+        let watery: Vec<(i32, i32)> = self
+            .props_cache
+            .iter()
+            .filter(|(_, p)| matches!(p.layer, TileLayer::Surface { watery: true }))
+            .map(|(&k, _)| k)
+            .collect();
+        if watery.is_empty() {
+            return;
+        }
+        for (hx, hy) in watery {
+            let Some(water_props) = self.props_cache.get(&(hx, hy)).copied() else {
+                continue;
+            };
+            let rock_hy = hy - 1;
+            let Some(rock_props) = self.props_cache.get(&(hx, rock_hy)).copied() else {
+                continue;
+            };
+            match rock_props.layer {
+                TileLayer::Buried { .. } | TileLayer::Surface { watery: false } => {}
+                _ => continue,
+            }
+            let tw = if dense {
+                if let Some(b) = bounds {
+                    if b.contains(hx, hy) && self.slab.len() == b.tile_capacity() {
+                        self.slab[b.index(slab_w, hx, hy)]
+                    } else {
+                        self.at_tile(hx, hy)
+                    }
+                } else {
+                    self.at_tile(hx, hy)
+                }
+            } else {
+                self.at_tile(hx, hy)
+            };
+            let tr = if dense {
+                if let Some(b) = bounds {
+                    if b.contains(hx, rock_hy) && self.slab.len() == b.tile_capacity() {
+                        self.slab[b.index(slab_w, hx, rock_hy)]
+                    } else {
+                        self.at_tile(hx, rock_hy)
+                    }
+                } else {
+                    self.at_tile(hx, rock_hy)
+                }
+            } else {
+                self.at_tile(hx, rock_hy)
+            };
+            let cw = water_props.capacity.max(0.05);
+            let cr = rock_props.capacity.max(0.05);
+            let a = (rate
+                * pair_diff_scale(water_props.diffusivity, rock_props.diffusivity))
+            .clamp(0.0, 1.0);
+            if a < 1e-5 {
+                continue;
+            }
+            let teq = (tw * cw + tr * cr) / (cw + cr);
+            let nw = tw + (teq - tw) * a;
+            let nr = tr + (teq - tr) * a;
+            if (nw - tw).abs() >= 1e-5 {
+                self.cells.insert((hx, hy), nw);
+                if dense {
+                    if let Some(b) = bounds {
+                        if b.contains(hx, hy) && self.slab.len() == b.tile_capacity() {
+                            self.slab[b.index(slab_w, hx, hy)] = nw;
+                        }
+                    }
+                }
+            }
+            if (nr - tr).abs() >= 1e-5 {
+                self.cells.insert((hx, rock_hy), nr);
+                if dense {
+                    if let Some(b) = bounds {
+                        if b.contains(hx, rock_hy) && self.slab.len() == b.tile_capacity() {
+                            self.slab[b.index(slab_w, hx, rock_hy)] = nr;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Pairwise temperature diffusion. Vertical mix is gentle so night air
     /// cannot drain lakes, but warm bedrock still leaks heat upward.
+    /// Pair conductivity is weighted by material `thermal_diffusivity`.
     pub fn diffuse(&mut self, alpha: f32) {
         let alpha = alpha.clamp(0.0, 0.25);
         if alpha == 0.0 || self.cells.is_empty() {
@@ -1005,6 +1122,11 @@ impl Temperature {
         for &(hx, hy) in &sources {
             let val = *snap.get(&(hx, hy)).unwrap_or(&base);
             let here_sky = free_sky(hx, hy);
+            let k_here = self
+                .props_cache
+                .get(&(hx, hy))
+                .map(|p| p.diffusivity)
+                .unwrap_or(REF_THERMAL_DIFFUSIVITY);
             if let Some(nx) = self.wrap_hx(hx + 1) {
                 if self.accepts(nx, hy) && nx != hx {
                     let n_val = *snap.get(&(nx, hy)).unwrap_or(&base);
@@ -1012,7 +1134,12 @@ impl Temperature {
                     if here_sky && free_sky(nx, hy) && (val - n_val).abs() < 0.35 {
                         // skip
                     } else {
-                        let flow = (val - n_val) * alpha;
+                        let k_n = self
+                            .props_cache
+                            .get(&(nx, hy))
+                            .map(|p| p.diffusivity)
+                            .unwrap_or(REF_THERMAL_DIFFUSIVITY);
+                        let flow = (val - n_val) * alpha * pair_diff_scale(k_here, k_n);
                         if flow.abs() >= 1e-9 {
                             *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
                             *deltas.entry((nx, hy)).or_insert(0.0) += flow;
@@ -1026,8 +1153,13 @@ impl Temperature {
                     continue;
                 }
                 let n_val = *snap.get(&n_key).unwrap_or(&base);
+                let k_n = self
+                    .props_cache
+                    .get(&n_key)
+                    .map(|p| p.diffusivity)
+                    .unwrap_or(REF_THERMAL_DIFFUSIVITY);
                 // Mild vertical conductivity — geothermal path upward.
-                let flow = (val - n_val) * alpha * 0.35;
+                let flow = (val - n_val) * alpha * 0.35 * pair_diff_scale(k_here, k_n);
                 if flow.abs() >= 1e-9 {
                     *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
                     *deltas.entry(n_key).or_insert(0.0) += flow;
@@ -1085,6 +1217,11 @@ impl Temperature {
                 let i = b.index(w, hx, hy);
                 let val = self.slab[i];
                 let here_sky = self.tile_is_free_sky(hx, hy);
+                let k_here = self
+                    .props_cache
+                    .get(&(hx, hy))
+                    .map(|p| p.diffusivity)
+                    .unwrap_or(REF_THERMAL_DIFFUSIVITY);
                 if let Some(nx) = self.wrap_hx(hx + 1) {
                     if b.contains(nx, hy) && nx != hx {
                         let ni = b.index(w, nx, hy);
@@ -1092,7 +1229,12 @@ impl Temperature {
                         if here_sky && self.tile_is_free_sky(nx, hy) && (val - n_val).abs() < 0.35 {
                             // skip
                         } else {
-                            let flow = (val - n_val) * alpha;
+                            let k_n = self
+                                .props_cache
+                                .get(&(nx, hy))
+                                .map(|p| p.diffusivity)
+                                .unwrap_or(REF_THERMAL_DIFFUSIVITY);
+                            let flow = (val - n_val) * alpha * pair_diff_scale(k_here, k_n);
                             if flow.abs() >= 1e-9 {
                                 self.slab_deltas[i] -= flow;
                                 self.slab_deltas[ni] += flow;
@@ -1108,7 +1250,12 @@ impl Temperature {
                     }
                     let ni = b.index(w, hx, n_hy);
                     let n_val = self.slab[ni];
-                    let flow = (val - n_val) * alpha * 0.35;
+                    let k_n = self
+                        .props_cache
+                        .get(&(hx, n_hy))
+                        .map(|p| p.diffusivity)
+                        .unwrap_or(REF_THERMAL_DIFFUSIVITY);
+                    let flow = (val - n_val) * alpha * 0.35 * pair_diff_scale(k_here, k_n);
                     if flow.abs() >= 1e-9 {
                         self.slab_deltas[i] -= flow;
                         self.slab_deltas[ni] += flow;
@@ -1171,6 +1318,7 @@ fn air_thermal() -> TileThermal {
         layer: TileLayer::Air,
         capacity: air.heat_capacity,
         albedo: air.albedo,
+        diffusivity: air.thermal_diffusivity,
     }
 }
 
@@ -1180,6 +1328,7 @@ fn buried_thermal(depth_cells: f32) -> TileThermal {
         layer: TileLayer::Buried { depth_cells },
         capacity: bedrock.heat_capacity * 1.25,
         albedo: 0.0,
+        diffusivity: bedrock.thermal_diffusivity,
     }
 }
 
@@ -1226,6 +1375,7 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
     let y_hi = (anchor_hi + 64).min(bound_hi);
     let mut cap_sum = 0.0;
     let mut alb_sum = 0.0;
+    let mut diff_sum = 0.0;
     let mut surf_sum = 0.0;
     let mut water_cols = 0.0;
     let mut n = 0.0;
@@ -1234,10 +1384,11 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
         let rock = live_surface_at(world, temp.seed, gx, temp.sea_level_y, temp.width_cols);
         let col_lo = (rock.min(temp.sea_level_y) - 8).max(y_lo);
         let col_hi = (rock.max(temp.sea_level_y) + 64).min(y_hi);
-        let (surf_y, cap, albedo, watery) =
+        let (surf_y, cap, albedo, watery, diff) =
             column_surface_thermal(world, gx, col_lo, col_hi, rock, &temp.config);
         cap_sum += cap;
         alb_sum += albedo;
+        diff_sum += diff;
         surf_sum += surf_y as f32;
         if watery {
             water_cols += 1.0;
@@ -1250,6 +1401,7 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
     let surf_y = (surf_sum / n).round() as i32;
     let cap = cap_sum / n;
     let albedo = alb_sum / n;
+    let diffusivity = diff_sum / n;
     let watery = water_cols / n >= 0.5;
 
     if tile_mid_y > surf_y + tc {
@@ -1263,11 +1415,12 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
         layer: TileLayer::Surface { watery },
         capacity: cap,
         albedo,
+        diffusivity,
     }
 }
 
 /// Scan a column for the surface stack: pack / water / ground.
-/// Returns `(surface_y, heat_capacity, albedo, is_watery)`.
+/// Returns `(surface_y, heat_capacity, albedo, is_watery, diffusivity)`.
 fn column_surface_thermal(
     world: &World,
     gx: i32,
@@ -1275,7 +1428,7 @@ fn column_surface_thermal(
     y_hi: i32,
     fallback_y: i32,
     cfg: &TempConfig,
-) -> (i32, f32, f32, bool) {
+) -> (i32, f32, f32, bool, f32) {
     let gx = world.wrap_x(gx);
     let mut top_y = fallback_y;
     let mut top_cell: Option<Cell> = None;
@@ -1315,7 +1468,13 @@ fn column_surface_thermal(
         .min(WATER_STACK_CAP_CELLS);
     let cap = props.heat_capacity + stack * cfg.water_stack_cap;
     let watery = water_like > 0 || matches!(mat, MaterialId::Water | MaterialId::Ice);
-    (top_y, cap, props.albedo, watery)
+    (
+        top_y,
+        cap,
+        props.albedo,
+        watery,
+        props.thermal_diffusivity.max(1e-6),
+    )
 }
 
 #[cfg(test)]
@@ -2271,6 +2430,79 @@ mod tests {
         assert_eq!(
             t.props_cache.get(&(0, deep_hy)).map(|p| p.layer),
             Some(deep_full.layer)
+        );
+    }
+
+    #[test]
+    fn material_diffusivity_is_scanned_into_tile_props() {
+        let (world, mut t, _h, sea) = grounded_scene();
+        let tc = t.tile_cols.max(1);
+        let surf_hy = (sea + tc / 2).div_euclid(tc);
+        t.refresh_props_cache(Some(&world), &[(0, surf_hy), (0, 0)]);
+        let surf = t.props_cache.get(&(0, surf_hy)).expect("surface props");
+        let buried = t.props_cache.get(&(0, 0)).expect("buried props");
+        assert!(
+            surf.diffusivity > 0.0 && buried.diffusivity > 0.0,
+            "κ must be scanned (surf={}, buried={})",
+            surf.diffusivity,
+            buried.diffusivity
+        );
+        assert!(
+            (pair_diff_scale(0.004, 0.004) - pair_diff_scale(0.001, 0.001)).abs() > 0.2,
+            "air-like κ pairs must conduct faster than rock-like pairs"
+        );
+    }
+
+    #[test]
+    fn cold_pond_cools_hot_rock_underneath() {
+        // T1 acceptance: watery surface exchanges with buried/dry rock below.
+        let sea = 16;
+        let x0 = 4;
+        let mut world = World::new(11);
+        fill_tile_surface(&mut world, x0, sea, MaterialId::Water, 3);
+        fill_buried_rock(&mut world, x0, sea, 12);
+        // Standing water on stone (fill_tile_surface already set stone bed).
+        for x in x0..x0 + 4 {
+            for y in 1..=3 {
+                world.set_cell(x, sea + y, Cell::water());
+            }
+        }
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, sea, false);
+        t.fill_initial(0);
+        let tc = t.tile_cols.max(1);
+        let water_hy = ((sea + 2) / tc).max(1);
+        let rock_hy = water_hy - 1;
+        let hx = x0.div_euclid(tc);
+        for v in t.cells.values_mut() {
+            *v = 20.0;
+        }
+        t.cells.insert((hx, water_hy), 5.0);
+        t.cells.insert((hx, rock_hy), 80.0);
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.geothermal_relax = 0.0;
+        t.config.geothermal_flux_c = 0.0;
+        t.config.near_surface_couple = 0.0;
+        t.config.water_rock_couple = 0.35;
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 32, 64);
+        let rock0 = t.at_tile(hx, rock_hy);
+        let water0 = t.at_tile(hx, water_hy);
+        for i in 0..6 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let rock1 = t.at_tile(hx, rock_hy);
+        let water1 = t.at_tile(hx, water_hy);
+        assert!(
+            rock1 < rock0 - 2.0,
+            "cold pond must cool hot rock ({rock0:.1} → {rock1:.1})"
+        );
+        assert!(
+            water1 > water0 + 2.0,
+            "hot rock must warm the pond ({water0:.1} → {water1:.1})"
         );
     }
 }
