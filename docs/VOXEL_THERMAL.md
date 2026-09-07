@@ -1,8 +1,8 @@
 # Thermal loop — heat transport before pressurized vapour
 
-**Status:** T0–T5 landing (thermal couples + open-cave sky H). T6
-pressurized vapour / geysers still gated on FPS. Blocks richer geyser /
-“humidity under pressure” work until the loop moves heat with water.
+**Status:** T0–T5 + T2b lake circulation landing. T6 pressurized vapour /
+geysers still gated on FPS. Blocks richer geyser / “humidity under
+pressure” work until the loop moves heat with water.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
 pore water), so gradients can drive currents — not a detailed CFD heat
@@ -123,6 +123,24 @@ Acceptance sketches (tests / HUD, not photoreal):
   not copied sideways into the lake (cut-hill banding ≠ lake T).
 - Tab: `TempConfig::water_convect_bias` (default 0.35).
 - Goal: **heat rides water toward the surface**; cooler return flow.
+
+### T2b — Lake circulation loop (skin + wind + paired rise/sink) ✅
+
+Closes the open-water half of the thermal loop for play readability:
+
+- **Night quench:** warm lake under cold air couples harder
+  (`couple_air_water_skin`) so the skin cools enough to overturn.
+- **Buoyancy:** unstable free-water columns mix with a directed warm-up /
+  cold-down push (`couple_free_water_buoyancy`, slightly lower ΔT gate).
+- **Wind stress:** near-surface free-water heat drifts downwind
+  (`couple_free_water_wind_drift`, Tab `water_wind_drift`).
+- Day still heats watery surface tiles via solar × (1 − cloud shade);
+  night is sun off + radiate + air skin — same knobs as T0/T3.
+- **`V` overlay:** column-relative buoyancy (warm↑ cold↓) + skin wind
+  stress, free-water neighbours only, wrapped camera box.
+
+Not CFD: tile °C + existing CA bias. Return flow is the cold anomaly
+sinking while warm rises / skin drifts.
 
 ### T3 — Air ↔ water skin ✅
 

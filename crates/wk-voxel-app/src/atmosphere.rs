@@ -1441,25 +1441,20 @@ fn wind_tile_center_is_free_water(world: Option<&World>, tc: i32, hx: i32, hy: i
     }
 }
 
-/// Coarse buoyancy / ΔT current hint for a free-water tile (not wind).
+/// Coarse lake-current hint for a free-water tile (not wind).
 ///
-/// Only free-water neighbours count — sampling cold air / hot rock across
-/// the waterline used to light up the shore and leave the open lake blank
-/// once mid-water °C mixed. Mild in-water gradients are amplified for the
-/// overlay (not a CFD velocity).
+/// - Vertical: column-relative buoyancy — warm rises, cold sinks.
+/// - Horizontal: in-water ΔT plus near-surface wind stress.
+/// Free-water neighbours only (shore rock / cold air must not dominate).
 fn water_current_vector(
     temp: &Temperature,
     world: &World,
+    wind: Option<&Wind>,
     tc: i32,
     hx: i32,
     hy: i32,
 ) -> (f32, f32) {
     let t = temp.at_tile_packed(hx, hy);
-    let mut vx = 0.0f32;
-    let mut vy = 0.0f32;
-    let mut n_h = 0u8;
-    let mut n_v = 0u8;
-
     let sample = |nhx: i32, nhy: i32| -> Option<f32> {
         let Some(nhx) = temp.wrap_tile_x(nhx) else {
             return None;
@@ -1471,16 +1466,22 @@ fn water_current_vector(
         }
     };
 
+    let mut sum = t;
+    let mut n = 1u8;
     if let Some(below) = sample(hx, hy - 1) {
-        // Warm below this cell → rise.
-        vy += (below - t) / 8.0;
-        n_v += 1;
+        sum += below;
+        n += 1;
     }
     if let Some(above) = sample(hx, hy + 1) {
-        // Warm here vs colder above → rise.
-        vy += (t - above) / 8.0;
-        n_v += 1;
+        sum += above;
+        n += 1;
     }
+    let mean = sum / n as f32;
+    // Warm anomaly rises; cold anomaly sinks (return flow of the plume).
+    let vy = ((t - mean) / 5.5).clamp(-1.0, 1.0);
+
+    let mut vx = 0.0f32;
+    let mut n_h = 0u8;
     if let Some(left) = sample(hx - 1, hy) {
         vx += (left - t) / 10.0;
         n_h += 1;
@@ -1489,13 +1490,22 @@ fn water_current_vector(
         vx += (t - right) / 10.0;
         n_h += 1;
     }
-
-    if n_v > 0 {
-        vy /= n_v as f32;
-    }
     if n_h > 0 {
         vx /= n_h as f32;
     }
+
+    if let Some(wind) = wind {
+        let above_water = wind_tile_center_is_free_water(Some(world), tc, hx, hy + 1);
+        let above2_water = wind_tile_center_is_free_water(Some(world), tc, hx, hy + 2);
+        // Skin tile or one below — where wind can drag the free-water top.
+        let near_skin = !above_water || (above_water && !above2_water);
+        if near_skin {
+            let (wvx, _) = wind.vector_at(Some(world), hx, hy);
+            let depth_k = if above_water { 0.55 } else { 1.0 };
+            vx += wvx * 0.95 * depth_k;
+        }
+    }
+
     (
         (vx * 1.15).clamp(-1.0, 1.0),
         (vy * 1.35).clamp(-1.0, 1.0),
@@ -1615,7 +1625,7 @@ pub fn draw_wind_streaks(
     );
 }
 
-/// Underwater current arrows (`V` overlay) from coarse ΔT / buoyancy hints.
+/// Underwater current arrows (`V` overlay) from buoyancy + wind-stress hints.
 ///
 /// Reuses the wind lattice stroke style in a teal tint so lakes show motion
 /// without pretending air is blowing through them. Neighbours are free water
@@ -1626,6 +1636,7 @@ pub fn draw_wind_streaks(
 pub fn draw_water_current_streaks(
     temp: &Temperature,
     world: &World,
+    wind: Option<&Wind>,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
@@ -1683,7 +1694,7 @@ pub fn draw_water_current_streaks(
             if !wind_tile_center_is_free_water(Some(world), tc, hx, hy) {
                 return;
             }
-            let (vx, vy) = water_current_vector(temp, world, tc, hx, hy);
+            let (vx, vy) = water_current_vector(temp, world, wind, tc, hx, hy);
             // ~0.25°C in-water ΔT still clears this after amplify.
             if vx.abs() + vy.abs() >= 0.012 {
                 samples.push((hx, hy, vx, vy));
@@ -2672,7 +2683,7 @@ mod tests {
     }
 
     #[test]
-    fn water_current_vector_rises_when_warm_below() {
+    fn water_current_vector_rises_when_warm_anomaly() {
         use wk_voxel::{Cell, ChunkCoord, World};
 
         let mut w = World::new(2);
@@ -2682,12 +2693,29 @@ mod tests {
             w.set_cell(2, y, Cell::water());
         }
         let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
-        t.cells.insert((0, 1), 10.0);
-        t.cells.insert((0, 0), 30.0);
-        t.cells.insert((0, 2), 8.0);
-        let (vx, vy) = super::water_current_vector(&t, &w, 4, 0, 1);
-        assert!(vy > 0.2, "warm water below should hint upward (vy={vy})");
+        t.cells.insert((0, 1), 22.0); // warm anomaly mid
+        t.cells.insert((0, 0), 14.0);
+        t.cells.insert((0, 2), 14.0);
+        let (vx, vy) = super::water_current_vector(&t, &w, None, 4, 0, 1);
+        assert!(vy > 0.2, "warm anomaly should rise (vy={vy})");
         assert!(vx.abs() < 0.05, "no lateral ΔT → quiet vx (vx={vx})");
+    }
+
+    #[test]
+    fn water_current_vector_sinks_when_cold_anomaly() {
+        use wk_voxel::{Cell, ChunkCoord, World};
+
+        let mut w = World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..=12 {
+            w.set_cell(2, y, Cell::water());
+        }
+        let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
+        t.cells.insert((0, 1), 10.0); // cold anomaly mid
+        t.cells.insert((0, 0), 18.0);
+        t.cells.insert((0, 2), 18.0);
+        let (_, vy) = super::water_current_vector(&t, &w, None, 4, 0, 1);
+        assert!(vy < -0.2, "cold anomaly should sink (vy={vy})");
     }
 
     #[test]
@@ -2705,7 +2733,7 @@ mod tests {
         t.cells.insert((0, 1), 18.0);
         t.cells.insert((0, 0), 18.2);
         t.cells.insert((0, 2), -20.0); // cold air — must not invent a current
-        let (vx, vy) = super::water_current_vector(&t, &w, 4, 0, 1);
+        let (vx, vy) = super::water_current_vector(&t, &w, None, 4, 0, 1);
         assert!(
             vx.abs() + vy.abs() < 0.08,
             "air/rock neighbours must not light the shore (vx={vx} vy={vy})"
@@ -2722,17 +2750,42 @@ mod tests {
             w.set_cell(2, y, Cell::water());
         }
         let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
-        // ~1°C vertical span — common mid-lake residual after mixing.
-        t.cells.insert((0, 1), 16.0);
-        t.cells.insert((0, 0), 16.6);
-        t.cells.insert((0, 2), 15.5);
-        let (vx, vy) = super::water_current_vector(&t, &w, 4, 0, 1);
+        // ~0.5°C warm anomaly mid-column — common residual after mixing.
+        t.cells.insert((0, 1), 16.5);
+        t.cells.insert((0, 0), 16.0);
+        t.cells.insert((0, 2), 16.0);
+        let (vx, vy) = super::water_current_vector(&t, &w, None, 4, 0, 1);
         assert!(
             vy.abs() >= 0.012,
             "open-lake residual ΔT should clear the draw gate (vy={vy})"
         );
         let _ = vx;
         assert!(super::water_streak_geom(vx, vy, 16.0).is_some());
+    }
+
+    #[test]
+    fn surface_wind_stress_adds_horizontal_lake_current() {
+        use wk_voxel::{Cell, ChunkCoord, Wind, World};
+
+        let mut w = World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Water through y=8 so hy=1 is the skin (above is air).
+        for y in 0..=8 {
+            w.set_cell(2, y, Cell::water());
+        }
+        w.set_cell(2, 10, Cell::air());
+        let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
+        t.cells.insert((0, 1), 16.0);
+        t.cells.insert((0, 0), 16.0);
+        let mut wind = Wind::climate(4, 0.12, 2, 32, 16, 0, 64, false);
+        wind.config.field_smooth = 0.0;
+        wind.rebuild_field(Some(&w), None, 40, &[(0, 2), (0, 1)], None);
+        let (vx0, _) = super::water_current_vector(&t, &w, None, 4, 0, 1);
+        let (vx1, _) = super::water_current_vector(&t, &w, Some(&wind), 4, 0, 1);
+        assert!(
+            vx1 > vx0 + 0.02,
+            "skin wind stress should pull surface current downwind (vx0={vx0} vx1={vx1})"
+        );
     }
 
     #[test]

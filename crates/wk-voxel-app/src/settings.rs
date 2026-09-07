@@ -942,6 +942,13 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
+                        "Water surface wind drift / step",
+                        0.0..1.0,
+                        &mut self.temp.water_wind_drift,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
                         "Pore-water heat couple / step",
                         0.0..0.5,
                         &mut self.temp.pore_water_couple,
