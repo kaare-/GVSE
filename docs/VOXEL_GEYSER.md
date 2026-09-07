@@ -32,11 +32,11 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam | Sparse pressure residual + boil motor. **Vapour mass exchanges into Humidity** (sky + caves, 4×4). Humidity store is the shared moist-air field underground too. Pore boil + reverse seepage escape; cool → sinter / rain. |
+| Steam | Underground humidity **under pressure**. Boil mints a thin sparse charge; vapour mass lives in Humidity (sky + caves). Assault/escape read cave RH (+ residual). Below boil, pore sat ↔ cave H equalize. |
 | Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~48×), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
-| Pressure | **No continuum PDE.** Sparse steam charge + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
+| Pressure | **No continuum PDE.** Confined cave humidity density (RH) + episodic escape (widen / burst / reverse push). Sparse steam residual boosts tubes. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |
-| Sky path | Humidity is shared (sky + underground voids). Geyser boil feeds H; sparse steam is pressure residual. Cave cool drip → speleothems is a later feature. |
+| Sky path | Humidity is shared (sky + underground voids). Open-sky rain lottery unchanged; caves keep H. Cave cool drip → speleothems is a later feature. |
 
 ### Hard no’s
 

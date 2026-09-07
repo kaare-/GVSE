@@ -139,9 +139,10 @@ pub use pore_ice::{
     PORE_ICE_EVERY,
 };
 pub use steam::{
-    apply_steam, steam_at, steam_haze_wash, steam_pressure_norm, steam_pressure_rate_scale,
-    steam_total, steam_vapour_field, void_is_confined, SteamConfig, SteamHazeSample, BOIL_POINT_C,
-    MAX_STEAM_CELLS, STEAM_EVERY, STEAM_HAZE_TILE, STEAM_VOID_SAT_MAX,
+    apply_steam, cave_vapour_pressure_norm, cave_vapour_rate_scale, steam_at, steam_haze_wash,
+    steam_pressure_norm, steam_pressure_rate_scale, steam_total, steam_vapour_field,
+    void_is_confined, SteamConfig, SteamHazeSample, BOIL_POINT_C, MAX_STEAM_CELLS, STEAM_EVERY,
+    STEAM_HAZE_TILE, STEAM_VOID_SAT_MAX,
 };
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};

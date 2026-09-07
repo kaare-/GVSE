@@ -1078,6 +1078,11 @@ impl SimSettings {
                     ui.checkbox(hash!(), "Pore boil (wet rock)", &mut self.steam.enable_pore_boil);
                     ui.checkbox(
                         hash!(),
+                        "Pore ↔ cave vapour equalize",
+                        &mut self.steam.enable_pore_cave_eq,
+                    );
+                    ui.checkbox(
+                        hash!(),
                         "Pressure escape / steam tubes",
                         &mut self.steam.enable_escape,
                     );
@@ -1092,6 +1097,7 @@ impl SimSettings {
                     let mut pore_max = self.steam.pore_boil_max_per_cell as f32;
                     let mut phase_drive = self.steam.phase_expansion_drive as f32;
                     let mut reverse_hops = self.steam.reverse_seep_hops as f32;
+                    let mut pore_eq = self.steam.pore_cave_eq_max_per_cell as f32;
                     let mut rise_max = self.steam.rise_max_per_cell as f32;
                     let mut residual = self.steam.surface_residual as f32;
                     let mut max_cells = self.steam.max_steam_cells as f32;
@@ -1124,6 +1130,13 @@ impl SimSettings {
                         "Reverse seep hops",
                         1.0..8.0,
                         &mut reverse_hops,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pore↔cave eq / cell",
+                        0.0..32.0,
+                        &mut pore_eq,
                     );
                     labeled_slider(
                         ui,
@@ -1173,6 +1186,7 @@ impl SimSettings {
                     self.steam.pore_boil_max_per_cell = pore_max.round().clamp(0.0, 255.0) as u8;
                     self.steam.phase_expansion_drive = phase_drive.round().clamp(1.0, 128.0) as u8;
                     self.steam.reverse_seep_hops = reverse_hops.round().clamp(1.0, 16.0) as u8;
+                    self.steam.pore_cave_eq_max_per_cell = pore_eq.round().clamp(0.0, 64.0) as u8;
                     self.steam.rise_max_per_cell = rise_max.round().clamp(0.0, 255.0) as u8;
                     self.steam.surface_residual = residual.round().clamp(0.0, 255.0) as u8;
                     self.steam.max_escapes_per_tick = escapes.round().clamp(1.0, 64.0) as u8;
