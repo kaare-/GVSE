@@ -918,6 +918,13 @@ impl SimSettings {
                         0.0..0.3,
                         &mut self.temp.geothermal_flux_c,
                     );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Water↔rock heat couple / step",
+                        0.0..0.5,
+                        &mut self.temp.water_rock_couple,
+                    );
                 });
                 ui.separator();
 

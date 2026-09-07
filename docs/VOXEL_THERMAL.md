@@ -1,6 +1,8 @@
 # Thermal loop — heat transport before pressurized vapour
 
-**Status:** plan (blocks richer geyser / “humidity under pressure” work).
+**Status:** T0–T1 landing (diffusivity-weighted tile diffusion + coarse
+free-water ↔ rock heat couple). T2+ still plan. Blocks richer geyser /
+“humidity under pressure” work until the loop moves heat with water.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
 pore water), so gradients can drive currents — not a detailed CFD heat
@@ -91,19 +93,17 @@ Acceptance sketches (tests / HUD, not photoreal):
 
 ## Phased plan
 
-### T0 — Thermal honesty (tiles)
+### T0 — Thermal honesty (tiles) ✅
 
 - Weight Temperature diffusion / buried relax by scanned
   `thermal_diffusivity` (see [`VOXEL_FIELDS.md`](VOXEL_FIELDS.md) §2).
 - Keep cadence (`TEMP_STEP_PERIOD`) and determinism.
 - Prove day/night and geothermal still feel sane.
 
-### T1 — Coarse rock ↔ free-water couple
+### T1 — Coarse rock ↔ free-water couple ✅
 
-- On thermal step (or a matching cadence): for watery columns / wet Air
-  seats, exchange heat between water-bearing tiles and neighbouring /
-  underlying solid surface tiles using `heat_capacity` (and diffusivity
-  as a rate scale).
+- On thermal step: watery surface tiles mix toward capacity-weighted
+  equilibrium with the tile below (`TempConfig::water_rock_couple`).
 - Mass stays in cells; only °C moves.
 - Goal: **cold water cools hot rock**; hot rock warms water.
 
