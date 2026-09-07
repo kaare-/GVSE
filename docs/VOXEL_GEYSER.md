@@ -1,8 +1,7 @@
 # Geyser landscape motor
 
-**Status:** P0–P3 implemented on this track. **P4 and sealed “humidity under
-pressure” wait on [`VOXEL_THERMAL.md`](VOXEL_THERMAL.md)** (coarse heat
-transport + water currents) **and** the FPS gate below.
+**Status:** P0–P3 + **T6a** open-sky boil→Humidity split implemented.
+**P4** episodic jet still waits on the FPS gate below.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** native **upward** landscape builder (hot springs → geysers →
 sinter pipes/hills) that balances existing **downhill** erosion, without a
@@ -146,22 +145,25 @@ mound faster than a cold control; `mineral_total` conserved.
 
 ### P3 — Sparse buoyant steam — **done** (void markers + escape)
 
-Boil free **Air** sat and **pore** sat at/above 100 °C into sparse `World.steam`
-(same mass units). Humidity untouched. Hard cap `MAX_STEAM_CELLS`.
+Boil free **Air** sat and **pore** sat at/above 100 °C. **T6a:** unroofed
+hot free water flashes into sky [`Humidity`] (weather continuum). Roofed /
+confined seats still boil into sparse `World.steam` only (same mass units;
+never rain lottery). Hard cap `MAX_STEAM_CELLS`.
 
 | Setting | Behaviour |
 |---------|-----------|
-| Open surface / vented shaft | Steam flood-pours to the top of the open Air column |
+| Open surface (no roof) | Fast flash into **Humidity** — not sparse steam |
+| Open shaft with existing steam | Steam flood-pours toward the top of the open Air column |
 | Cave under solid roof | Steam **flood-fills the connected void** (equal density); pressure assaults wet pores + widens/bursts soft lids into tubes |
 | Hot wet rock | Pore boil seats vapour (or opens a micro-void); **phase expansion** (`phase_expansion_drive` × boiled) reverse-seeps multi-hop (`reverse_seep_hops`) and cracks the host — even when sealed |
 
 Save schema **v17**. Cadence `STEAM_EVERY` (= 5). Tab → Climate → Steam
 (phase expansion + reverse-seep hops knobs). Flood/assault run on cadence only.
 
-**Acceptance:** hot free water loses sat to rising steam (mass-flat); cave steam
-piles under the roof and pressurizes; sealed wet limestone reverse-pushes pore
-water upward / widens under flash boil; sand lids can burst into tubes; cool
-steam recondenses and sheds dissolved load.
+**Acceptance:** open hot free water loses sat into Humidity (mass-flat, no
+`World.steam`); roofed cave water boils to steam and pressurizes; sealed wet
+limestone reverse-pushes pore water upward / widens under flash boil; sand
+lids can burst into tubes; cool steam recondenses and sheds dissolved load.
 
 ### P4 — Episodic geyser jet — **next** (still FPS-aware)
 
