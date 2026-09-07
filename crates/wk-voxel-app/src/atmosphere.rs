@@ -1375,16 +1375,32 @@ pub fn draw_haze_and_wind(
 /// breeze still reads. Kept short so neighbouring lattice points do not
 /// overlap into a scribble.
 fn wind_streak_geom(vx: f32, vy: f32, tile_px: f32) -> Option<(f32, f32, f32, u8)> {
+    streak_geom(vx, vy, tile_px, 0.05, 0.40, 140.0)
+}
+
+/// Water-current strokes: weaker than climate wind, so a softer reference
+/// speed keeps mild lake ΔT readable without matching air arrow length.
+fn water_streak_geom(vx: f32, vy: f32, tile_px: f32) -> Option<(f32, f32, f32, u8)> {
+    streak_geom(vx, vy, tile_px, 0.025, 0.55, 165.0)
+}
+
+fn streak_geom(
+    vx: f32,
+    vy: f32,
+    tile_px: f32,
+    ref_speed: f32,
+    vis_floor: f32,
+    alpha_floor: f32,
+) -> Option<(f32, f32, f32, u8)> {
     let speed = vx.hypot(vy);
-    if speed < 0.0015 {
+    if speed < 0.001 {
         return None;
     }
     let ux = vx / speed;
     let uy = vy / speed;
-    // 0.05 (Tab default) → vis 1.0. About one tile at the breeze; gusts ~2.
-    let vis = (speed / 0.05).clamp(0.40, 3.2);
+    let vis = (speed / ref_speed.max(1e-4)).clamp(vis_floor, 3.2);
     let len = ((0.55 + 0.40 * vis) * tile_px).max(6.0);
-    let alpha = (140.0 + 80.0 * ((vis - 0.40) / 2.8).clamp(0.0, 1.0)) as u8;
+    let alpha = (alpha_floor + 70.0 * ((vis - vis_floor) / 2.8).clamp(0.0, 1.0)) as u8;
     Some((ux, uy, len, alpha))
 }
 
@@ -1426,17 +1442,61 @@ fn wind_tile_center_is_free_water(world: Option<&World>, tc: i32, hx: i32, hy: i
 }
 
 /// Coarse buoyancy / ΔT current hint for a free-water tile (not wind).
-fn water_current_vector(temp: &Temperature, hx: i32, hy: i32) -> (f32, f32) {
-    let t = temp.at_tile(hx, hy);
-    let below = temp.at_tile(hx, hy - 1);
-    let above = temp.at_tile(hx, hy + 1);
-    let left = temp.at_tile(hx - 1, hy);
-    let right = temp.at_tile(hx + 1, hy);
-    // Warm below cold → rise; cooler neighbor pulls a little sideways.
-    let vy = ((below - above) / 20.0).clamp(-1.0, 1.0);
-    let vx = ((left - right) / 24.0).clamp(-1.0, 1.0);
-    let _ = t;
-    (vx * 0.55, vy * 0.85)
+///
+/// Only free-water neighbours count — sampling cold air / hot rock across
+/// the waterline used to light up the shore and leave the open lake blank
+/// once mid-water °C mixed. Mild in-water gradients are amplified for the
+/// overlay (not a CFD velocity).
+fn water_current_vector(
+    temp: &Temperature,
+    world: &World,
+    tc: i32,
+    hx: i32,
+    hy: i32,
+) -> (f32, f32) {
+    let t = temp.at_tile_packed(hx, hy);
+    let mut vx = 0.0f32;
+    let mut vy = 0.0f32;
+    let mut n_h = 0u8;
+    let mut n_v = 0u8;
+
+    let sample = |nhx: i32, nhy: i32| -> Option<f32> {
+        if wind_tile_center_is_free_water(Some(world), tc, nhx, nhy) {
+            Some(temp.at_tile_packed(nhx, nhy))
+        } else {
+            None
+        }
+    };
+
+    if let Some(below) = sample(hx, hy - 1) {
+        // Warm below this cell → rise.
+        vy += (below - t) / 8.0;
+        n_v += 1;
+    }
+    if let Some(above) = sample(hx, hy + 1) {
+        // Warm here vs colder above → rise.
+        vy += (t - above) / 8.0;
+        n_v += 1;
+    }
+    if let Some(left) = sample(hx - 1, hy) {
+        vx += (left - t) / 10.0;
+        n_h += 1;
+    }
+    if let Some(right) = sample(hx + 1, hy) {
+        vx += (t - right) / 10.0;
+        n_h += 1;
+    }
+
+    if n_v > 0 {
+        vy /= n_v as f32;
+    }
+    if n_h > 0 {
+        vx /= n_h as f32;
+    }
+    (
+        (vx * 1.15).clamp(-1.0, 1.0),
+        (vy * 1.35).clamp(-1.0, 1.0),
+    )
 }
 
 /// World-space wind strokes (`V` overlay) from the local heatmap.
@@ -1548,13 +1608,15 @@ pub fn draw_wind_streaks(
         sw,
         sh,
         Color::from_rgba(220, 234, 248, 255),
+        wind_streak_geom,
     );
 }
 
 /// Underwater current arrows (`V` overlay) from coarse ΔT / buoyancy hints.
 ///
 /// Reuses the wind lattice stroke style in a teal tint so lakes show motion
-/// without pretending air is blowing through them.
+/// without pretending air is blowing through them. Neighbours are free water
+/// only — shore rock / cold air must not dominate the open lake readout.
 pub fn draw_water_current_streaks(
     temp: &Temperature,
     world: &World,
@@ -1598,8 +1660,9 @@ pub fn draw_water_current_streaks(
                 && view.as_ref().map(|b| b.contains(hx, hy)).unwrap_or(true)
                 && wind_tile_center_is_free_water(Some(world), tc, hx, hy)
             {
-                let (vx, vy) = water_current_vector(temp, hx, hy);
-                if vx.abs() + vy.abs() >= 0.04 {
+                let (vx, vy) = water_current_vector(temp, world, tc, hx, hy);
+                // ~0.25°C in-water ΔT still clears this after amplify.
+                if vx.abs() + vy.abs() >= 0.012 {
                     samples.push((hx, hy, vx, vy));
                 }
             }
@@ -1621,6 +1684,7 @@ pub fn draw_water_current_streaks(
         sw,
         sh,
         Color::from_rgba(72, 196, 210, 255),
+        water_streak_geom,
     );
 }
 
@@ -1636,13 +1700,14 @@ fn draw_streak_samples(
     sw: f32,
     sh: f32,
     base: Color,
+    geom: fn(f32, f32, f32) -> Option<(f32, f32, f32, u8)>,
 ) {
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
     let tc = (tile_px / cell_px).round().max(1.0) as i32;
     for &(hx, hy, vx, vy) in samples {
         let cx = hx * tc + tc / 2;
         let cy = hy * tc + tc / 2;
-        let Some((ux, uy, len, alpha)) = wind_streak_geom(vx, vy, tile_px) else {
+        let Some((ux, uy, len, alpha)) = geom(vx, vy, tile_px) else {
             continue;
         };
         let color = Color {
@@ -2588,13 +2653,66 @@ mod tests {
 
     #[test]
     fn water_current_vector_rises_when_warm_below() {
+        use wk_voxel::{Cell, ChunkCoord, World};
+
+        let mut w = World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Free-water column at tile centres (2,6), (2,10), (2,2) for hy 1,2,0.
+        for y in 0..=12 {
+            w.set_cell(2, y, Cell::water());
+        }
         let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
-        t.cells.insert((1, 5), 10.0);
-        t.cells.insert((1, 4), 30.0);
-        t.cells.insert((1, 6), 8.0);
-        let (vx, vy) = super::water_current_vector(&t, 1, 5);
+        t.cells.insert((0, 1), 10.0);
+        t.cells.insert((0, 0), 30.0);
+        t.cells.insert((0, 2), 8.0);
+        let (vx, vy) = super::water_current_vector(&t, &w, 4, 0, 1);
         assert!(vy > 0.2, "warm water below should hint upward (vy={vy})");
         assert!(vx.abs() < 0.05, "no lateral ΔT → quiet vx (vx={vx})");
+    }
+
+    #[test]
+    fn water_current_ignores_cold_air_above_the_lake() {
+        use wk_voxel::{Cell, ChunkCoord, World};
+
+        let mut w = World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // hy=1 centre y=6 is water; hy=2 centre y=10 is air.
+        for y in 0..=8 {
+            w.set_cell(2, y, Cell::water());
+        }
+        w.set_cell(2, 10, Cell::air());
+        let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
+        t.cells.insert((0, 1), 18.0);
+        t.cells.insert((0, 0), 18.2);
+        t.cells.insert((0, 2), -20.0); // cold air — must not invent a current
+        let (vx, vy) = super::water_current_vector(&t, &w, 4, 0, 1);
+        assert!(
+            vx.abs() + vy.abs() < 0.08,
+            "air/rock neighbours must not light the shore (vx={vx} vy={vy})"
+        );
+    }
+
+    #[test]
+    fn mild_in_water_delta_t_still_makes_a_readable_current() {
+        use wk_voxel::{Cell, ChunkCoord, World};
+
+        let mut w = World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..=12 {
+            w.set_cell(2, y, Cell::water());
+        }
+        let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
+        // ~1°C vertical span — common mid-lake residual after mixing.
+        t.cells.insert((0, 1), 16.0);
+        t.cells.insert((0, 0), 16.6);
+        t.cells.insert((0, 2), 15.5);
+        let (vx, vy) = super::water_current_vector(&t, &w, 4, 0, 1);
+        assert!(
+            vy.abs() >= 0.012,
+            "open-lake residual ΔT should clear the draw gate (vy={vy})"
+        );
+        let _ = vx;
+        assert!(super::water_streak_geom(vx, vy, 16.0).is_some());
     }
 
     #[test]

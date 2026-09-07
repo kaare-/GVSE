@@ -540,9 +540,9 @@ impl Temperature {
     }
 
     /// Packed-slab read when the last dense step filled the box.
-    /// Tests that mutate [`Self::cells`] without stepping still go
-    /// through [`Self::at_tile`].
-    pub(crate) fn at_tile_packed(&self, hx: i32, hy: i32) -> f32 {
+    /// Prefer this for overlays — [`Self::at_tile`] only hits the sparse map
+    /// and can miss live lake °C that still lives in the slab.
+    pub fn at_tile_packed(&self, hx: i32, hy: i32) -> f32 {
         if let Some(b) = self.bounds {
             let cap = b.tile_capacity();
             if cap > 0 && self.slab.len() == cap && b.contains(hx, hy) {
