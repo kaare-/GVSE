@@ -19,7 +19,7 @@
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity vapour wash (default on)
-//! - `V` — toggle wind streak overlay (local field arrows; default off)
+//! - `V` — toggle wind + water-current streak overlay (default off)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
@@ -67,7 +67,7 @@ use wk_voxel::{
 
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
-    draw_celestials, draw_haze_and_wind, draw_wind_streaks,
+    draw_celestials, draw_haze_and_wind, draw_wind_streaks, draw_water_current_streaks,
     draw_ridge_silhouettes, draw_sky, estimate_snow_bias, gx_in_ranges,
     is_organism_aboveground, organism_celestial_rim, sky_weather_for_scene,
     terrain_celestial_key_strength, toward_light_celestial, view_cell_x_ranges,
@@ -1150,6 +1150,18 @@ async fn main() {
                 &scene.wind,
                 Some(&scene.world),
                 scene.world.tick,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
+            draw_water_current_streaks(
+                &scene.temperature,
+                &scene.world,
                 origin_x,
                 origin_y,
                 cell_px,

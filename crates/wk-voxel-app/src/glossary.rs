@@ -296,7 +296,7 @@ const KEYS: &[(&str, LineKind)] = &[
     ("", LineKind::Blank),
     ("Overlays", LineKind::Head),
     ("H        humidity tile raster (default on; Tab: resample + min mass)", LineKind::Body),
-    ("V        wind — coarse local-field arrows on the terrain (default off)", LineKind::Body),
+    ("V        wind + water currents — air arrows above water, teal currents in lakes (default off)", LineKind::Body),
     ("T        temperature heatmap", LineKind::Body),
     ("U        ground saturation heatmap (pores + free water)", LineKind::Body),
     ("M        mycelium strain colors", LineKind::Body),

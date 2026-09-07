@@ -1412,10 +1412,38 @@ fn wind_tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -
     matches!(w.get_cell(gx, gy), Some(c) if c.material.is_solid())
 }
 
+fn wind_tile_center_is_free_water(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
+    let Some(w) = world else {
+        return false;
+    };
+    let gx = w.wrap_x(hx * tc + tc / 2);
+    let gy = hy * tc + tc / 2;
+    match w.get_cell(gx, gy) {
+        Some(c) if c.material == MaterialId::Water => true,
+        Some(c) if c.material == MaterialId::Air && c.sat.0 >= 200 => true,
+        _ => false,
+    }
+}
+
+/// Coarse buoyancy / ΔT current hint for a free-water tile (not wind).
+fn water_current_vector(temp: &Temperature, hx: i32, hy: i32) -> (f32, f32) {
+    let t = temp.at_tile(hx, hy);
+    let below = temp.at_tile(hx, hy - 1);
+    let above = temp.at_tile(hx, hy + 1);
+    let left = temp.at_tile(hx - 1, hy);
+    let right = temp.at_tile(hx + 1, hy);
+    // Warm below cold → rise; cooler neighbor pulls a little sideways.
+    let vy = ((below - above) / 20.0).clamp(-1.0, 1.0);
+    let vx = ((left - right) / 24.0).clamp(-1.0, 1.0);
+    let _ = t;
+    (vx * 0.55, vy * 0.85)
+}
+
 /// World-space wind strokes (`V` overlay) from the local heatmap.
 ///
 /// A coarse lattice of short arrows — not one stroke per rebuilt tile —
 /// so heading and force read on the terrain without a hair on every seat.
+/// Free-water tiles are skipped (see [`draw_water_current_streaks`]).
 pub fn draw_wind_streaks(
     wind: &Wind,
     world: Option<&World>,
@@ -1435,7 +1463,6 @@ pub fn draw_wind_streaks(
     let tc = wind.tile_cols.max(1);
     let evx = wind.effective_vx(tick);
     let evy = wind.effective_vy(tick);
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
 
     let stride = wind_streak_stride(cell_px);
     let view = view_tile_box(
@@ -1473,7 +1500,9 @@ pub fn draw_wind_streaks(
             ) {
                 return;
             }
-            if wind_tile_center_is_solid(world, tc, hx, hy) {
+            if wind_tile_center_is_solid(world, tc, hx, hy)
+                || wind_tile_center_is_free_water(world, tc, hx, hy)
+            {
                 return;
             }
             samples.push((hx, hy, vx, vy));
@@ -1495,6 +1524,7 @@ pub fn draw_wind_streaks(
             while hy <= hy1 {
                 if wind_streak_on_lattice(hx, hy, stride)
                     && !wind_tile_center_is_solid(world, tc, hx, hy)
+                    && !wind_tile_center_is_free_water(world, tc, hx, hy)
                 {
                     let (vx, vy) = wind.vector_at(world, hx, hy);
                     samples.push((hx, hy, vx, vy));
@@ -1506,13 +1536,121 @@ pub fn draw_wind_streaks(
     }
 
     let tile_px = tc as f32 * cell_px;
-    for (hx, hy, vx, vy) in samples {
+    draw_streak_samples(
+        &samples,
+        tile_px,
+        origin_x,
+        origin_y,
+        cell_px,
+        bedrock_floor_y,
+        wrap_x,
+        width_cols,
+        sw,
+        sh,
+        Color::from_rgba(220, 234, 248, 255),
+    );
+}
+
+/// Underwater current arrows (`V` overlay) from coarse ΔT / buoyancy hints.
+///
+/// Reuses the wind lattice stroke style in a teal tint so lakes show motion
+/// without pretending air is blowing through them.
+pub fn draw_water_current_streaks(
+    temp: &Temperature,
+    world: &World,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+) {
+    if cell_px <= 0.0 {
+        return;
+    }
+    let tc = temp.tile_cols.max(1);
+    let stride = wind_streak_stride(cell_px);
+    let view = view_tile_box(
+        tc,
+        origin_x,
+        origin_y,
+        cell_px,
+        bedrock_floor_y,
+        wrap_x,
+        width_cols,
+        sw,
+        sh,
+    );
+    let mut samples: Vec<(i32, i32, f32, f32)> = Vec::new();
+    let gx0 = ((-origin_x) / cell_px).floor() as i32 - tc;
+    let gx1 = gx0 + (sw / cell_px).ceil() as i32 + tc * 2;
+    let gy_hi = bedrock_floor_y + (origin_y / cell_px).ceil() as i32 + 2;
+    let gy_lo = gy_hi - (sh / cell_px).ceil() as i32 - 2;
+    let mut hx = gx0.div_euclid(tc);
+    let hx1 = gx1.div_euclid(tc);
+    while hx <= hx1 {
+        let mut hy = gy_lo.div_euclid(tc);
+        let hy1 = gy_hi.div_euclid(tc);
+        while hy <= hy1 {
+            if wind_streak_on_lattice(hx, hy, stride)
+                && view.as_ref().map(|b| b.contains(hx, hy)).unwrap_or(true)
+                && wind_tile_center_is_free_water(Some(world), tc, hx, hy)
+            {
+                let (vx, vy) = water_current_vector(temp, hx, hy);
+                if vx.abs() + vy.abs() >= 0.04 {
+                    samples.push((hx, hy, vx, vy));
+                }
+            }
+            hy += stride;
+        }
+        hx += stride;
+    }
+    let tile_px = tc as f32 * cell_px;
+    // Teal — distinct from pale wind arrows.
+    draw_streak_samples(
+        &samples,
+        tile_px,
+        origin_x,
+        origin_y,
+        cell_px,
+        bedrock_floor_y,
+        wrap_x,
+        width_cols,
+        sw,
+        sh,
+        Color::from_rgba(72, 196, 210, 255),
+    );
+}
+
+fn draw_streak_samples(
+    samples: &[(i32, i32, f32, f32)],
+    tile_px: f32,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+    base: Color,
+) {
+    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    let tc = (tile_px / cell_px).round().max(1.0) as i32;
+    for &(hx, hy, vx, vy) in samples {
         let cx = hx * tc + tc / 2;
         let cy = hy * tc + tc / 2;
         let Some((ux, uy, len, alpha)) = wind_streak_geom(vx, vy, tile_px) else {
             continue;
         };
-        let color = Color::from_rgba(220, 234, 248, alpha);
+        let color = Color {
+            r: base.r,
+            g: base.g,
+            b: base.b,
+            a: base.a * (alpha as f32 / 255.0),
+        };
         for &x_copy in x_copies {
             let sx = origin_x + (cx + x_copy * width_cols) as f32 * cell_px;
             let sy = origin_y - (cy as f32 + 0.5 - bedrock_floor_y as f32) * cell_px;
@@ -1521,8 +1659,6 @@ pub fn draw_wind_streaks(
             }
             let x2 = sx + ux * len;
             let y2 = sy - uy * len;
-            // One stroke + two barbs. The old dark/light pair was six
-            // draw_line calls per tile and read as a scribble once dense.
             draw_line(sx, sy, x2, y2, 1.35, color);
             let hx_n = ux * (0.22 * len).min(5.5);
             let hy_n = -uy * (0.22 * len).min(5.5);
@@ -2428,6 +2564,37 @@ mod tests {
         assert_eq!(keep, 16, "2×2 lattice keeps a quarter of a 8×8 block");
         assert!(super::wind_streak_on_lattice(-2, 0, 2));
         assert!(!super::wind_streak_on_lattice(-1, 0, 2));
+    }
+
+    #[test]
+    fn free_water_tile_centers_are_not_wind_streak_targets() {
+        use wk_material::MaterialId;
+        use wk_voxel::{Cell, ChunkCoord, World};
+
+        let mut w = World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Tile (0,1) centre is world (2,6) with tc=4.
+        for y in 0..=4 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+        }
+        for y in 5..=8 {
+            w.set_cell(2, y, Cell::water());
+        }
+        w.set_cell(2, 10, Cell::air());
+        assert!(super::wind_tile_center_is_free_water(Some(&w), 4, 0, 1));
+        assert!(!super::wind_tile_center_is_solid(Some(&w), 4, 0, 1));
+        assert!(!super::wind_tile_center_is_free_water(Some(&w), 4, 0, 2));
+    }
+
+    #[test]
+    fn water_current_vector_rises_when_warm_below() {
+        let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
+        t.cells.insert((1, 5), 10.0);
+        t.cells.insert((1, 4), 30.0);
+        t.cells.insert((1, 6), 8.0);
+        let (vx, vy) = super::water_current_vector(&t, 1, 5);
+        assert!(vy > 0.2, "warm water below should hint upward (vy={vy})");
+        assert!(vx.abs() < 0.05, "no lateral ΔT → quiet vx (vx={vx})");
     }
 
     #[test]
