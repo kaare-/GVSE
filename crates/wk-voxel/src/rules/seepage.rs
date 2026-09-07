@@ -64,23 +64,83 @@ fn seepage_chunk_live(
 }
 
 fn moore_neighbour_holds_water(world: &World, coord: ChunkCoord) -> bool {
+    seepage_moore_face_mask(world, coord).is_some()
+}
+
+/// Face mask for a **Moore-only** dry chunk (no local wet pores / wet Air).
+///
+/// Dry stone under a wet seam must stay on the walk, but the inflated dirty
+/// rect usually covers the whole hinterland — only the wet-facing row/col
+/// can drink this tick. Once a face cell wets, occupancy flips
+/// `has_wet_pores` and the next pass walks the full chunk again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SeepageFaceMask {
+    top: bool,
+    bottom: bool,
+    left: bool,
+    right: bool,
+}
+
+impl SeepageFaceMask {
+    fn any(self) -> bool {
+        self.top || self.bottom || self.left || self.right
+    }
+
+    #[inline]
+    fn contains(self, x: u8, y: u8) -> bool {
+        (self.top && y as usize == CHUNK_CELLS_H - 1)
+            || (self.bottom && y == 0)
+            || (self.left && x == 0)
+            || (self.right && x as usize == CHUNK_CELLS_W - 1)
+    }
+}
+
+/// `Some(mask)` when the chunk is live only via wet Moore neighbours.
+/// `None` when no wet Moore neighbour (exact-skip) — callers still use
+/// [`seepage_chunk_live`] for the full live test including local wetness.
+fn seepage_moore_face_mask(world: &World, coord: ChunkCoord) -> Option<SeepageFaceMask> {
+    let mut mask = SeepageFaceMask::default();
     for dy in -1..=1 {
         for dx in -1..=1 {
             if dx == 0 && dy == 0 {
                 continue;
             }
-            if world
+            if !world
                 .chunks
                 .get(&ChunkCoord::new(coord.cx + dx, coord.cy + dy))
                 .is_some_and(|c| {
                     c.has_wet_air || c.has_wet_pores || c.has_unsaturated_pores
                 })
             {
-                return true;
+                continue;
+            }
+            if dy > 0 {
+                mask.top = true;
+            }
+            if dy < 0 {
+                mask.bottom = true;
+            }
+            if dx > 0 {
+                mask.right = true;
+            }
+            if dx < 0 {
+                mask.left = true;
             }
         }
     }
-    false
+    mask.any().then_some(mask)
+}
+
+/// Clamp to wet-facing faces when the chunk itself is dry.
+fn seepage_face_clamp(
+    world: &World,
+    coord: ChunkCoord,
+    chunk: &crate::chunk::Chunk,
+) -> Option<SeepageFaceMask> {
+    if chunk.has_wet_pores || chunk.has_unsaturated_pores || chunk.has_wet_air {
+        return None;
+    }
+    seepage_moore_face_mask(world, coord)
 }
 
 /// Walk down a porous column from `start_y` through saturated cells and
@@ -776,7 +836,9 @@ fn accumulate_seepage_xfers_ex(
     let ch = CHUNK_CELLS_H as i32;
     // Sticky occupancy: mid-ocean / empty sky and dry inland rock far
     // from water are leftover on the plant/rain halo. Dry stone under
-    // a wet seam still walks. Occupancy is the source of truth.
+    // a wet seam still walks — but only the wet-facing faces until a
+    // pore wets (then occupancy opens the full chunk). Occupancy is
+    // the source of truth.
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         // Chunk-local reads — same pattern as water_flow (~10× vs HashMap).
@@ -786,6 +848,7 @@ fn accumulate_seepage_xfers_ex(
         if !seepage_chunk_live(world, ac.coord, chunk) {
             return local;
         }
+        let face_clamp = seepage_face_clamp(world, ac.coord, chunk);
         let base_gx = ac.coord.cx * cw;
         let base_gy = ac.coord.cy * ch;
         let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {
@@ -796,6 +859,11 @@ fn accumulate_seepage_xfers_ex(
             }
         };
         ac.for_each_cell(|x, y| {
+            if let Some(mask) = face_clamp {
+                if !mask.contains(x, y) {
+                    return;
+                }
+            }
             let ly = y as i32;
             let gy = base_gy + ly;
             let lx = x as i32;
@@ -1586,6 +1654,83 @@ mod tests {
         assert!(
             seepage_chunk_live(&w, ChunkCoord::new(0, 0), stone),
             "dry stone under cy+1 water must still scan"
+        );
+        let mask = seepage_face_clamp(&w, ChunkCoord::new(0, 0), stone)
+            .expect("Moore-only dry under water must face-clamp");
+        assert!(mask.top, "cy+1 water owns the top face");
+        assert!(!mask.bottom && !mask.left && !mask.right);
+        assert!(mask.contains(3, (CHUNK_CELLS_H - 1) as u8));
+        assert!(!mask.contains(3, 32), "interior dry stone is leftover");
+    }
+
+    #[test]
+    fn west_wet_moore_neighbour_clamps_to_left_face() {
+        let mut w = World::new(128);
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..8 {
+            w.set_cell(70, y, Cell::solid(MaterialId::Stone));
+            w.set_cell(60, y, Cell::water());
+        }
+        let stone = &w.chunks[&ChunkCoord::new(1, 0)];
+        assert!(seepage_chunk_live(&w, ChunkCoord::new(1, 0), stone));
+        let mask = seepage_face_clamp(&w, ChunkCoord::new(1, 0), stone)
+            .expect("Moore-only dry beside water must face-clamp");
+        assert!(mask.left, "cx-1 water owns the left face");
+        assert!(!mask.top && !mask.bottom && !mask.right);
+        assert!(mask.contains(0, 3));
+        assert!(!mask.contains(32, 3), "interior dry stone is leftover");
+    }
+
+    #[test]
+    fn moore_only_dry_bed_wets_top_then_opens_full_walk() {
+        use crate::active::ActiveChunk;
+        use crate::chunk::Rect;
+
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        // Full dry sand column under a standing pond in cy+1.
+        for x in 0..8 {
+            for y in 0..CHUNK_CELLS_H as i32 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+            w.set_cell(x, 64, Cell::water());
+        }
+        let stone = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(
+            seepage_face_clamp(&w, ChunkCoord::new(0, 0), stone).is_some(),
+            "pre-wet bed must be Moore-face-clamped"
+        );
+        let regions = [ActiveChunk::new(
+            ChunkCoord::new(0, 0),
+            Rect {
+                x0: 0,
+                y0: 0,
+                x1: 7,
+                y1: (CHUNK_CELLS_H - 1) as u8,
+            },
+        )];
+        // Contact: only the wet-facing top can drink; interior is leftover.
+        apply_seepage_contact_regions(&mut w, &regions);
+        let top = w.get_cell(3, 63).unwrap();
+        assert!(
+            top.sat.0 > 0,
+            "top face under standing water must wet, sat={}",
+            top.sat.0
+        );
+        let mid = w.get_cell(3, 32).unwrap();
+        assert_eq!(mid.sat.0, 0, "interior must stay dry until pores open");
+        // After the top wets, occupancy clears the face clamp so deep
+        // percolation can walk the full chunk (covered by lake-bed tests).
+        let stone = &w.chunks[&ChunkCoord::new(0, 0)];
+        assert!(
+            stone.has_wet_pores || stone.has_unsaturated_pores,
+            "wetting the face must flip pore occupancy"
+        );
+        assert!(
+            seepage_face_clamp(&w, ChunkCoord::new(0, 0), stone).is_none(),
+            "once pores wet, the full chunk walks again"
         );
     }
 }
