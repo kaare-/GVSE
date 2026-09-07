@@ -9,10 +9,9 @@ use wk_voxel::{
     list_all_presets, load_preset, sanitize_preset_name, save_preset, CarbonBudget, CarbonConfig,
     ClimateConfig, CloudConfig, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
     FungiConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig,
-    PlantGenePreset, PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, WindConfig,
-    World,
-    WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
-    MAX_STEM_MODULES, PRESET_DIR,
+    PlantGenePreset, PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, SteamConfig,
+    TempConfig, WindConfig, World, WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES,
+    MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES, PRESET_DIR,
 };
 
 use crate::atmosphere::AtmosphereLookConfig;
@@ -126,6 +125,8 @@ pub struct SimSettings {
     pub wet_darken: f32,
     pub temp: TempConfig,
     pub phase: PhaseConfig,
+    /// Sparse conduit steam / boil (Tab → Climate → Steam).
+    pub steam: SteamConfig,
     pub grain: GrainConfig,
     /// Mycelium compost knobs (Tab → Life → Fungi / compost).
     pub fungi: FungiConfig,
@@ -267,6 +268,7 @@ impl SimSettings {
             wet_darken: crate::palette::WET_DARKEN_DEFAULT,
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
+            steam: SteamConfig::default(),
             grain: GrainConfig::default(),
             fungi: FungiConfig {
                 // Slower than crate default so Organic cream beds linger
@@ -330,6 +332,7 @@ impl SimSettings {
             climate: self.climate,
             temp: self.temp,
             phase: self.phase,
+            steam: self.steam,
             grain: self.grain.clone(),
             fungi: self.fungi,
             carbon: self.carbon,
@@ -381,6 +384,7 @@ impl SimSettings {
         self.climate = p.climate;
         self.temp = p.temp;
         self.phase = p.phase;
+        self.steam = p.steam;
         self.grain = p.grain.clone();
         self.fungi = p.fungi;
         self.carbon = p.carbon;
@@ -1064,6 +1068,59 @@ impl SimSettings {
                     self.phase.period_ticks = period.round().clamp(1.0, 120.0) as u64;
                     self.phase.min_budget_to_snow =
                         self.phase.min_budget_to_snow.clamp(1.0, 255.0);
+                });
+                ui.tree_node(hash!(), "Steam / boil", |ui| {
+                    ui.label(
+                        None,
+                        "Boils free Air water (lakes / wet air) above the boil point into sparse conduit steam. Humidity / rain stay separate. White mist draws over steam cells.",
+                    );
+                    ui.checkbox(hash!(), "Steam enabled", &mut self.steam.enabled);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Boil point (C)",
+                        60.0..200.0,
+                        &mut self.steam.boil_point_c,
+                    );
+                    let mut boil_max = self.steam.boil_max_per_cell as f32;
+                    let mut rise_max = self.steam.rise_max_per_cell as f32;
+                    let mut residual = self.steam.surface_residual as f32;
+                    let mut max_cells = self.steam.max_steam_cells as f32;
+                    let mut period = self.steam.period_ticks as f32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Boil rate / cell / cadence",
+                        1.0..128.0,
+                        &mut boil_max,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Rise rate / cell / cadence",
+                        0.0..64.0,
+                        &mut rise_max,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Surface mist residual",
+                        0.0..120.0,
+                        &mut residual,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max steam cells",
+                        32.0..1024.0,
+                        &mut max_cells,
+                    );
+                    labeled_slider(ui, hash!(), "Steam period (ticks)", 1.0..30.0, &mut period);
+                    self.steam.boil_max_per_cell = boil_max.round().clamp(1.0, 255.0) as u8;
+                    self.steam.rise_max_per_cell = rise_max.round().clamp(0.0, 255.0) as u8;
+                    self.steam.surface_residual = residual.round().clamp(0.0, 255.0) as u8;
+                    self.steam.max_steam_cells = max_cells.round().clamp(32.0, 2048.0) as u16;
+                    self.steam.period_ticks = period.round().clamp(1.0, 60.0) as u64;
                 });
                 } // Climate (day + ice)
                 if self.page == SettingsPage::Physics {

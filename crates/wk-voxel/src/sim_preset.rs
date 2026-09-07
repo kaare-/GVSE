@@ -21,6 +21,7 @@ use crate::clouds::CloudConfig;
 use crate::failure::FailureConfig;
 use crate::fungi::FungiConfig;
 use crate::phase::PhaseConfig;
+use crate::steam::SteamConfig;
 use crate::rules::{
     CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig, PerfConfig,
     RainConfig,
@@ -81,6 +82,8 @@ pub struct SimPreset {
     pub climate: ClimateConfig,
     pub temp: TempConfig,
     pub phase: PhaseConfig,
+    #[serde(default)]
+    pub steam: SteamConfig,
     pub grain: GrainConfig,
     pub fungi: FungiConfig,
     pub carbon: CarbonConfig,
@@ -187,6 +190,7 @@ impl SimPreset {
             climate: ClimateConfig::default(),
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
+            steam: SteamConfig::default(),
             grain: GrainConfig::default(),
             fungi: FungiConfig {
                 soil_mycelium_threshold: 160,

@@ -23,9 +23,8 @@ use wk_voxel::{
     CarbonConfig, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig,
     EvapConfig, FailureConfig, FungiConfig, Genome, GrainConfig, Humidity, KarstConfig,
     OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, PhysicsTimings,
-    RainConfig,
-    Temperature, Wind, World, WorldStep, WorldStepConfig, WorldStepTimings, WorldgenParams,
-    CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_SUBSTEPS,
+    RainConfig, SteamConfig, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldStepTimings,
+    WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_SUBSTEPS,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -119,6 +118,7 @@ struct Scene {
     cloud: CloudConfig,
     oro: OrographicConfig,
     phase: PhaseConfig,
+    steam: SteamConfig,
     climate: ClimateConfig,
     perf: PerfConfig,
     failure: FailureConfig,
@@ -216,6 +216,7 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
         cloud: CloudConfig::default(),
         oro,
         phase: PhaseConfig::default(),
+        steam: SteamConfig::default(),
         climate: ClimateConfig::default(),
         perf: PerfConfig::default(),
         failure: FailureConfig::default(),
@@ -340,6 +341,7 @@ fn one_stack_tick(
             karst: &scene.karst,
             cloud: &scene.cloud,
             phase: &scene.phase,
+            steam: &scene.steam,
             climate: &scene.climate,
             carbon: &scene.carbon_cfg,
             grain: &scene.grain,

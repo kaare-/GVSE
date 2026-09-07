@@ -7,7 +7,9 @@
 //! motor. Open surface steam rises and recondenses when cool.
 //!
 //! Hard-capped. No world-wide vapour CA. See docs/VOXEL_GEYSER.md § P3.
+//! Play visibility lives in the app (mist draw + Tab / inspector).
 
+use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::{Cell, Sat};
@@ -15,7 +17,7 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::temperature::Temperature;
 
-/// Cadence for boil / rise / recondense.
+/// Cadence for boil / rise / recondense (default [`SteamConfig::period_ticks`]).
 pub const STEAM_EVERY: u64 = 5;
 
 /// Default boil point (°C). Free Air sat at or above this may flash to steam.
@@ -27,11 +29,14 @@ pub const RECONDENSE_MARGIN_C: f32 = 5.0;
 /// Hard cap on cells that may hold steam. Hundreds, not world-wide.
 pub const MAX_STEAM_CELLS: usize = 512;
 
-/// Max sat→steam units boiled in one cell per cadence tick.
-pub const BOIL_MAX_PER_CELL: u8 = 24;
+/// Max sat→steam units boiled in one cell per cadence tick (play default).
+pub const BOIL_MAX_PER_CELL: u8 = 48;
 
 /// Max steam units that may rise one cell per cadence tick.
-pub const RISE_MAX_PER_CELL: u8 = 32;
+pub const RISE_MAX_PER_CELL: u8 = 16;
+
+/// Steam left at a still-wet boil site so open vents keep a mist plume.
+pub const SURFACE_STEAM_RESIDUAL: u8 = 40;
 
 /// How far up we walk to decide "open sky" vs solid roof.
 const ROOF_PROBE: i32 = 48;
@@ -41,6 +46,39 @@ const PRESSURE_DEPTH: i32 = 16;
 
 /// Confined-rise multiplier span at full steam pressure (stacks with geo).
 pub const STEAM_PRESSURE_RATE_SPAN: f32 = 0.55;
+
+/// Tab / world-step knobs for sparse conduit steam.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SteamConfig {
+    /// Master switch (Tab → Climate → Steam).
+    pub enabled: bool,
+    /// Free Air sat at/above this (°C) may boil to steam.
+    pub boil_point_c: f32,
+    /// Max sat→steam per cell per cadence tick.
+    pub boil_max_per_cell: u8,
+    /// Max steam that may rise one cell per cadence tick (open vents).
+    pub rise_max_per_cell: u8,
+    /// Leave this much steam on still-wet open cells so plumes stay visible.
+    pub surface_residual: u8,
+    /// Hard cap on cells that may hold steam.
+    pub max_steam_cells: u16,
+    /// Cadence: run when `world.tick % period_ticks == 0`.
+    pub period_ticks: u64,
+}
+
+impl Default for SteamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            boil_point_c: BOIL_POINT_C,
+            boil_max_per_cell: BOIL_MAX_PER_CELL,
+            rise_max_per_cell: RISE_MAX_PER_CELL,
+            surface_residual: SURFACE_STEAM_RESIDUAL,
+            max_steam_cells: MAX_STEAM_CELLS as u16,
+            period_ticks: STEAM_EVERY,
+        }
+    }
+}
 
 /// Steam units at `(gx, gy)`, or 0.
 #[inline]
@@ -114,23 +152,28 @@ pub fn steam_pressure_rate_scale(world: &World, gx: i32, gy: i32) -> f32 {
     1.0 + STEAM_PRESSURE_RATE_SPAN * steam_pressure_norm(world, gx, gy)
 }
 
-fn can_admit_new_steam_cell(world: &World, gx: i32, gy: i32) -> bool {
+fn can_admit_new_steam_cell(world: &World, gx: i32, gy: i32, max_cells: usize) -> bool {
     if world.steam.contains_key(&(world.wrap_x(gx), gy)) {
         return true;
     }
-    world.steam.len() < MAX_STEAM_CELLS
+    world.steam.len() < max_cells
 }
 
 /// Boil / rise / recondense free-water steam.
 ///
 /// Only walks wet-Air chunks (boil) and existing steam keys (rise /
 /// recondense). Humidity is untouched.
-pub fn apply_steam(world: &mut World, temp: &Temperature, boil_point_c: f32) {
-    if world.tick % STEAM_EVERY != 0 {
+pub fn apply_steam(world: &mut World, temp: &Temperature, cfg: &SteamConfig) {
+    if !cfg.enabled {
         return;
     }
-    let boil = boil_point_c;
+    let period = cfg.period_ticks.max(1);
+    if world.tick % period != 0 {
+        return;
+    }
+    let boil = cfg.boil_point_c;
     let recondense_below = boil - RECONDENSE_MARGIN_C;
+    let max_cells = cfg.max_steam_cells.max(1) as usize;
 
     // 1) Recondense cool steam → Air sat (mass-flat).
     if !world.steam.is_empty() {
@@ -149,7 +192,13 @@ pub fn apply_steam(world: &mut World, temp: &Temperature, boil_point_c: f32) {
                 if let Some(up) = world.get_cell(gx, gy + 1) {
                     if up.material == MaterialId::Air {
                         let moved = take_steam(world, gx, gy, steam_at(world, gx, gy));
-                        add_steam(world, gx, gy + 1, moved);
+                        if can_admit_new_steam_cell(world, gx, gy + 1, max_cells)
+                            || steam_at(world, gx, gy + 1) > 0
+                        {
+                            add_steam(world, gx, gy + 1, moved);
+                        } else {
+                            add_steam(world, gx, gy, moved);
+                        }
                     }
                 }
                 continue;
@@ -171,6 +220,7 @@ pub fn apply_steam(world: &mut World, temp: &Temperature, boil_point_c: f32) {
     }
 
     // 2) Rise open (unconfined) steam one cell when the cell above is Air.
+    // Wet boil sites keep a residual so open vents still show a plume.
     if !world.steam.is_empty() {
         let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
         // Bottom-up so a bubble can climb multiple cells across cadences.
@@ -180,7 +230,15 @@ pub fn apply_steam(world: &mut World, temp: &Temperature, boil_point_c: f32) {
             if void_is_confined(world, gx, gy) {
                 continue; // pressurized pocket stays put
             }
-            let amt = steam_at(world, gx, gy).min(RISE_MAX_PER_CELL);
+            let here = steam_at(world, gx, gy);
+            if here == 0 {
+                continue;
+            }
+            let residual = match world.get_cell(gx, gy) {
+                Some(c) if c.material == MaterialId::Air && c.sat.0 > 0 => cfg.surface_residual,
+                _ => 0,
+            };
+            let amt = here.saturating_sub(residual).min(cfg.rise_max_per_cell);
             if amt == 0 {
                 continue;
             }
@@ -192,7 +250,9 @@ pub fn apply_steam(world: &mut World, temp: &Temperature, boil_point_c: f32) {
             if above.material != MaterialId::Air {
                 continue;
             }
-            if !can_admit_new_steam_cell(world, gx, gy + 1) && steam_at(world, gx, gy + 1) == 0 {
+            if !can_admit_new_steam_cell(world, gx, gy + 1, max_cells)
+                && steam_at(world, gx, gy + 1) == 0
+            {
                 continue;
             }
             let took = take_steam(world, gx, gy, amt);
@@ -201,13 +261,14 @@ pub fn apply_steam(world: &mut World, temp: &Temperature, boil_point_c: f32) {
     }
 
     // 3) Boil hot free water (Air sat) → steam.
-    boil_hot_air(world, temp, boil);
+    boil_hot_air(world, temp, cfg, max_cells);
 }
 
-fn boil_hot_air(world: &mut World, temp: &Temperature, boil: f32) {
+fn boil_hot_air(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_cells: usize) {
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
-    let prefer_confined = world.steam.len() + 32 >= MAX_STEAM_CELLS;
+    let boil = cfg.boil_point_c;
+    let prefer_confined = world.steam.len() + 32 >= max_cells;
     let mut jobs: Vec<(i32, i32, u8)> = Vec::new();
     let coords: Vec<ChunkCoord> = world
         .chunks
@@ -229,17 +290,23 @@ fn boil_hot_air(world: &mut World, temp: &Temperature, boil: f32) {
                 }
                 let gx = world.wrap_x(base_gx + lx as i32);
                 let gy = base_gy + ly as i32;
-                if temp.at_cell(gx, gy) < boil {
+                let t_c = temp.at_cell(gx, gy);
+                if t_c < boil {
                     continue;
                 }
                 let confined = void_is_confined(world, gx, gy);
                 if prefer_confined && !confined && steam_at(world, gx, gy) == 0 {
                     continue;
                 }
-                if !can_admit_new_steam_cell(world, gx, gy) {
+                if !can_admit_new_steam_cell(world, gx, gy, max_cells) {
                     continue;
                 }
-                let boil_amt = cell.sat.0.min(BOIL_MAX_PER_CELL);
+                // Hotter → faster flash (caps at 3× boil_max).
+                let heat = ((t_c - boil) / 50.0).clamp(0.0, 2.0);
+                let cap = ((cfg.boil_max_per_cell as f32) * (1.0 + heat))
+                    .round()
+                    .clamp(1.0, 255.0) as u8;
+                let boil_amt = cell.sat.0.min(cap);
                 if boil_amt > 0 {
                     jobs.push((gx, gy, boil_amt));
                 }
@@ -253,7 +320,7 @@ fn boil_hot_air(world: &mut World, temp: &Temperature, boil: f32) {
         cb.cmp(&ca).then(b.2.cmp(&a.2))
     });
     for (gx, gy, amt) in jobs {
-        if !can_admit_new_steam_cell(world, gx, gy) {
+        if !can_admit_new_steam_cell(world, gx, gy, max_cells) {
             continue;
         }
         let Some(cell) = world.get_cell(gx, gy) else {
@@ -316,7 +383,7 @@ mod tests {
         let hot = temp_fill(&w, 110.0);
         w.tick = STEAM_EVERY;
         let before = sat_totals(&w).cell_total;
-        apply_steam(&mut w, &hot, BOIL_POINT_C);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0, "hot surface water must boil to steam");
         assert!(
             w.get_cell(4, 1).unwrap().sat.0 < 255,
@@ -342,13 +409,13 @@ mod tests {
         assert!(void_is_confined(&w, 4, 2), "pocket under stone is confined");
         let hot = temp_fill(&w, 120.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, BOIL_POINT_C);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         let steam = steam_at(&w, 4, 2) + steam_at(&w, 4, 3);
         assert!(steam > 0, "cave water must boil");
         // Another cadence: confined steam must not rise out through rock.
         w.tick = STEAM_EVERY * 2;
         let before = steam_total(&w);
-        apply_steam(&mut w, &hot, BOIL_POINT_C);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert!(
             steam_at(&w, 4, 6) == 0 && steam_at(&w, 4, 7) == 0,
             "steam must not pass the stone roof"
@@ -372,7 +439,7 @@ mod tests {
         let before = sat_totals(&w).cell_total;
         let cool = temp_fill(&w, 20.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &cool, BOIL_POINT_C);
+        apply_steam(&mut w, &cool, &SteamConfig::default());
         assert_eq!(steam_at(&w, 3, 1), 0, "cool steam must recondense");
         assert_eq!(w.get_cell(3, 1).unwrap().sat.0, 80);
         assert_eq!(sat_totals(&w).cell_total, before);
@@ -440,7 +507,7 @@ mod tests {
         assert!(!void_is_confined(&w, 5, 2));
         let hot = temp_fill(&w, 110.0); // keep from recondensing
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, BOIL_POINT_C);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert!(
             steam_at(&w, 5, 2) < 40,
             "open steam should leave the lower cell (left={})",
@@ -449,6 +516,36 @@ mod tests {
         assert!(
             steam_at(&w, 5, 3) > 0,
             "open steam must rise into the cell above"
+        );
+    }
+
+    #[test]
+    fn wet_boil_site_keeps_surface_mist() {
+        let mut w = World::new(13);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(4, 1, Cell::water());
+        for y in 2..16 {
+            w.set_cell(4, y, Cell::air());
+        }
+        let hot = temp_fill(&w, 150.0);
+        w.tick = STEAM_EVERY;
+        apply_steam(&mut w, &hot, &SteamConfig::default());
+        assert!(
+            steam_at(&w, 4, 1) >= SURFACE_STEAM_RESIDUAL.min(40),
+            "hot wet surface must keep a mist residual (steam={})",
+            steam_at(&w, 4, 1)
+        );
+        // Second cadence: residual must still sit on the wet cell while plume rises.
+        w.tick = STEAM_EVERY * 2;
+        apply_steam(&mut w, &hot, &SteamConfig::default());
+        assert!(
+            steam_at(&w, 4, 1) > 0,
+            "wet boil site must not fully vent every cadence"
+        );
+        assert!(
+            steam_total(&w) > steam_at(&w, 4, 1) as i64,
+            "excess steam should rise into the plume"
         );
     }
 }
