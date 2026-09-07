@@ -141,9 +141,9 @@ Boil free **Air** sat and **pore** sat at/above 100 °C into sparse `World.steam
 
 | Setting | Behaviour |
 |---------|-----------|
-| Open surface / vented shaft | Steam rises into Air above; soft mist residual on wet vents; recondenses when cool (+ sinter) |
-| Cave under solid roof | Steam **rises to the roof** (not a liquid plug); pressure charges; escape reverse-seeps / widens / bursts soft rock into tubes |
-| Hot wet rock | Pore boil injects vapour into nearby Air and presses leftover liquid upward |
+| Open surface / vented shaft | Steam flood-pours to the top of the open Air column |
+| Cave under solid roof | Steam **flood-fills the connected void** (equal density); pressure assaults wet pores + widens/bursts soft lids into tubes |
+| Hot wet rock | Pore boil + reverse push; steam walls grow apertures fast |
 
 Save schema **v17**. Cadence `STEAM_EVERY` (= 5). Tab → Climate → Steam.
 
