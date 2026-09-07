@@ -1162,6 +1162,7 @@ async fn main() {
             draw_water_current_streaks(
                 &scene.temperature,
                 &scene.world,
+                Some(&scene.wind),
                 origin_x,
                 origin_y,
                 cell_px,

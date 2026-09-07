@@ -110,6 +110,10 @@ pub struct TempConfig {
     /// step (0 = off). Cold air cools the water skin; warm water warms air.
     #[serde(default = "default_air_water_skin_couple")]
     pub air_water_skin_couple: f32,
+    /// Lateral heat drift on near-surface free water along local wind
+    /// (0 = off). Imparts surface current energy without a CFD solver.
+    #[serde(default = "default_water_wind_drift")]
+    pub water_wind_drift: f32,
     /// Wet porous solids ↔ neighbour rock tiles per thermal step (0 = off).
     /// Scaled by mean pore wetness × diffusivity (reduced vs free-water couple).
     #[serde(default = "default_pore_water_couple")]
@@ -198,6 +202,9 @@ fn default_water_convect_bias() -> f32 {
 }
 fn default_air_water_skin_couple() -> f32 {
     0.18
+}
+fn default_water_wind_drift() -> f32 {
+    0.28
 }
 fn default_pore_water_couple() -> f32 {
     0.06
@@ -290,6 +297,7 @@ impl Default for TempConfig {
             water_rock_couple: default_water_rock_couple(),
             water_convect_bias: default_water_convect_bias(),
             air_water_skin_couple: default_air_water_skin_couple(),
+            water_wind_drift: default_water_wind_drift(),
             pore_water_couple: default_pore_water_couple(),
             inertia_scale: 1.6,
             min_relax: 0.003,
@@ -993,6 +1001,7 @@ impl Temperature {
         self.couple_air_water_skin(dense, bounds, slab_w);
         self.couple_pore_water(dense, bounds, slab_w);
         self.couple_free_water_buoyancy(dense, bounds, slab_w);
+        self.couple_free_water_wind_drift(world, wind, dense, bounds, slab_w);
         let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * climate_k)).clamp(0.0, 0.25);
         if dense {
             if let Some(b) = bounds {
@@ -1264,8 +1273,17 @@ impl Temperature {
             let cw = water_props.capacity.max(0.05);
             // Air capacity is small — keep a floor so water does not dump all heat in one step.
             let ca = air_props.capacity.max(0.15);
-            let a = (rate * pair_diff_scale(water_props.diffusivity, air_props.diffusivity))
-                .clamp(0.0, 1.0);
+            // Night quench: warm lake under cold air couples harder so the
+            // skin cools fast enough to overturn (cold sinks / warm rises).
+            let quench = if tw > ta + 2.5 {
+                (1.0 + 0.55 * ((tw - ta - 2.5) / 12.0).clamp(0.0, 1.0)).min(1.65)
+            } else {
+                1.0
+            };
+            let a = (rate
+                * quench
+                * pair_diff_scale(water_props.diffusivity, air_props.diffusivity))
+            .clamp(0.0, 1.0);
             if a < 1e-5 {
                 continue;
             }
@@ -1327,7 +1345,8 @@ impl Temperature {
     ///
     /// T2 flow bias only touches confined rise + gravity into empty Air —
     /// a full lake never moves cells, and tile °C is not carried with sat.
-    /// When warm sits under colder free water, mix heat upward here.
+    /// When warm sits under colder free water (unstable), mix heat upward
+    /// here — the cold anomaly sinks as the warm anomaly rises.
     fn couple_free_water_buoyancy(
         &mut self,
         dense: bool,
@@ -1356,11 +1375,11 @@ impl Temperature {
             let t0 = self.read_tile_temp(hx, hy, dense, bounds, slab_w);
             let t1 = self.read_tile_temp(hx, above_hy, dense, bounds, slab_w);
             let dt = t0 - t1; // >0 ⇒ warm below cold (unstable)
-            if dt <= 0.5 {
+            if dt <= 0.35 {
                 continue;
             }
             let strength = bias * (dt / WATER_CONVECT_DT_REF).clamp(0.0, 1.5);
-            let a = (0.75 * strength * pair_diff_scale(lo.diffusivity, hi.diffusivity))
+            let a = (0.85 * strength * pair_diff_scale(lo.diffusivity, hi.diffusivity))
                 .clamp(0.0, 0.95);
             if a < 1e-5 {
                 continue;
@@ -1368,10 +1387,110 @@ impl Temperature {
             let c0 = lo.capacity.max(0.05);
             let c1 = hi.capacity.max(0.05);
             let teq = (t0 * c0 + t1 * c1) / (c0 + c1);
-            let n0 = t0 + (teq - t0) * a;
-            let n1 = t1 + (teq - t1) * a;
+            // Directed: push the warm anomaly up and the cold anomaly down
+            // a touch harder than a pure capacity mix (return flow).
+            let n0 = t0 + (teq - t0) * a * 1.05;
+            let n1 = t1 + (teq - t1) * a * 1.05;
             self.write_tile_temp(hx, hy, t0, n0, dense, bounds, slab_w);
             self.write_tile_temp(hx, above_hy, t1, n1, dense, bounds, slab_w);
+        }
+    }
+
+    /// Near-surface free-water heat drift along local wind (lake skin).
+    ///
+    /// Open lakes do not move cells, so wind cannot push sat. Advect tile
+    /// °C downwind on the top free-water band so surface currents and
+    /// day/night skin gradients can close a horizontal loop.
+    fn couple_free_water_wind_drift(
+        &mut self,
+        world: Option<&World>,
+        wind: Option<&crate::wind::Wind>,
+        dense: bool,
+        bounds: Option<TileBounds>,
+        slab_w: usize,
+    ) {
+        let rate = self.config.water_wind_drift.clamp(0.0, 1.0);
+        let Some(wind) = wind else {
+            return;
+        };
+        if rate < 1e-5 || self.props_cache.is_empty() {
+            return;
+        }
+        let tc = self.tile_cols.max(1);
+        let keys: Vec<(i32, i32)> = self.props_cache.keys().copied().collect();
+        let mut moves: Vec<(i32, i32, i32, f32)> = Vec::new();
+        for (hx, hy) in keys {
+            let Some(props) = self.props_cache.get(&(hx, hy)).copied() else {
+                continue;
+            };
+            let watery_surface = matches!(props.layer, TileLayer::Surface { watery: true });
+            let fw = if props.free_water >= 0.5 {
+                props.free_water
+            } else if watery_surface {
+                world
+                    .map(|w| tile_free_water_frac(w, hx, hy, tc))
+                    .unwrap_or(0.0)
+            } else {
+                props.free_water
+            };
+            if fw < 0.5 {
+                continue;
+            }
+            let surf = *self.surf_cache.get(&hx).unwrap_or(&self.sea_level_y);
+            let mid = hy * tc + tc / 2;
+            // Top few free-water tiles under the skin.
+            if mid + tc < surf - 3 * tc {
+                continue;
+            }
+            let (mut vx, _) = wind.vector_at(world, hx, hy);
+            if vx.abs() < 0.008 {
+                vx = wind.climate_vx;
+            }
+            if vx.abs() < 0.008 {
+                continue;
+            }
+            let dir = if vx >= 0.0 { 1 } else { -1 };
+            let Some(up_hx) = self.wrap_hx(hx - dir) else {
+                continue;
+            };
+            let Some(up) = self.props_cache.get(&(up_hx, hy)).copied() else {
+                continue;
+            };
+            let up_fw = if up.free_water >= 0.5 {
+                up.free_water
+            } else if matches!(up.layer, TileLayer::Surface { watery: true }) {
+                world
+                    .map(|w| tile_free_water_frac(w, up_hx, hy, tc))
+                    .unwrap_or(0.0)
+            } else {
+                up.free_water
+            };
+            if up_fw < 0.5 {
+                continue;
+            }
+            let depth_falloff = if mid + tc / 2 >= surf { 1.0 } else { 0.55 };
+            let a = ((vx.abs() / 0.05) * 0.22 * rate * depth_falloff).clamp(0.0, 0.55);
+            if a < 1e-5 {
+                continue;
+            }
+            moves.push((up_hx, hx, hy, a));
+        }
+        if moves.is_empty() {
+            return;
+        }
+        // Snapshot sources so a chain does not see already-updated temps.
+        let mut snap: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        for &(up_hx, hx, hy, _) in &moves {
+            snap.entry((up_hx, hy))
+                .or_insert_with(|| self.read_tile_temp(up_hx, hy, dense, bounds, slab_w));
+            snap.entry((hx, hy))
+                .or_insert_with(|| self.read_tile_temp(hx, hy, dense, bounds, slab_w));
+        }
+        for (up_hx, hx, hy, a) in moves {
+            let t_up = *snap.get(&(up_hx, hy)).unwrap_or(&self.config.base_temp_c);
+            let t0 = *snap.get(&(hx, hy)).unwrap_or(&self.config.base_temp_c);
+            let n = t0 + (t_up - t0) * a;
+            self.write_tile_temp(hx, hy, t0, n, dense, bounds, slab_w);
         }
     }
 
@@ -3301,6 +3420,63 @@ mod tests {
         assert!(
             top1 > top_off + 2.0,
             "heat must reach the cold lake top (on={top1:.1} off={top_off:.1})"
+        );
+    }
+
+    #[test]
+    fn lake_skin_wind_drifts_heat_downwind() {
+        use crate::wind::Wind;
+
+        let sea = 24;
+        let mut world = World::new(11);
+        // Two adjacent free-water tiles at hy=5 (y 20..23), air above.
+        for x in 0i32..12 {
+            for y in 0i32..=20 {
+                world.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                    y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+                ));
+            }
+            for y in 0i32..=16 {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 17i32..=23 {
+                world.set_cell(x, y, Cell::water());
+            }
+        }
+        // Sparse field — only the skin row we care about.
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, sea, false);
+        t.cells.clear();
+        let skin_hy = 5;
+        t.cells.insert((1, skin_hy), 30.0);
+        t.cells.insert((2, skin_hy), 10.0);
+        t.cells.insert((1, skin_hy - 1), 10.0);
+        t.cells.insert((2, skin_hy - 1), 10.0);
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.geothermal_relax = 0.0;
+        t.config.geothermal_flux_c = 0.0;
+        t.config.near_surface_couple = 0.0;
+        t.config.water_rock_couple = 0.0;
+        t.config.air_water_skin_couple = 0.0;
+        t.config.pore_water_couple = 0.0;
+        t.config.water_convect_bias = 0.0;
+        t.config.water_wind_drift = 1.0;
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 32, 64);
+        let mut wind = Wind::climate(4, 0.20, 11, 32, sea, 0, 64, false);
+        wind.variance = 0.0;
+        let down0 = t.at_tile(2, skin_hy);
+        for i in 0..6 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, Some(&wind));
+        }
+        let down1 = t.at_tile(2, skin_hy);
+        assert!(
+            down1 > down0 + 1.0,
+            "downwind skin must warm from wind drift ({down0:.1} → {down1:.1})"
         );
     }
 
