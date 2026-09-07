@@ -264,7 +264,7 @@ pub fn draw_block_inspector(
                 };
                 let press = steam_pressure_norm(world, gx, gy);
                 lines.push(format!(
-                    "steam={steam}/255  confined={}  pressure={press:.2}",
+                    "steam={steam}/255  confined={}  pressure={press:.2} (void vapour; not H)",
                     if confined { "yes" } else { "no" }
                 ));
             }

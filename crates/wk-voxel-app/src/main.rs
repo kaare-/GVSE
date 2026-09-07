@@ -197,8 +197,9 @@ fn sat_overlay_color(wet: f32) -> Color {
 /// Sparse conduit steam as pale mist (always drawn when present).
 fn steam_mist_color(amt: u8) -> Color {
     let t = (amt as f32 / 255.0).clamp(0.0, 1.0);
-    let a = (48.0 + 150.0 * t.sqrt()) as u8;
-    Color::from_rgba(236, 242, 250, a)
+    // Soft vapour wash — must not read as opaque liquid replacing water.
+    let a = (18.0 + 72.0 * t.sqrt()) as u8;
+    Color::from_rgba(245, 248, 252, a)
 }
 
 fn scale_color_alpha(c: Color, k: f32) -> Color {
