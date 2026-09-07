@@ -939,6 +939,13 @@ impl SimSettings {
                         0.0..0.5,
                         &mut self.temp.air_water_skin_couple,
                     );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pore-water heat couple / step",
+                        0.0..0.5,
+                        &mut self.temp.pore_water_couple,
+                    );
                 });
                 ui.separator();
 
