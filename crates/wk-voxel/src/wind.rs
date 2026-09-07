@@ -26,7 +26,9 @@ use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::humidity::TileBounds;
 use crate::temperature::Temperature;
-use crate::worldgen::{continental_surface_y, live_surface_y, LIVE_SURFACE_SEARCH};
+use crate::worldgen::{
+    continental_surface_y, live_skin_y, live_surface_y, LIVE_SURFACE_SEARCH,
+};
 
 fn default_variance() -> f32 {
     0.55
@@ -369,7 +371,11 @@ impl Wind {
         }
         let hint = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
         match world {
-            Some(w) => live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH),
+            Some(w) => {
+                let rock = live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH);
+                // Air slips on the waterline, not the excavated lake bed.
+                live_skin_y(w, gx, rock)
+            }
             None => hint,
         }
     }
@@ -378,13 +384,7 @@ impl Wind {
         if let Some(&y) = self.surf_cache.get(&gx) {
             return y;
         }
-        let y = {
-            let hint = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
-            match world {
-                Some(w) => live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH),
-                None => hint,
-            }
-        };
+        let y = self.surface_at(world, gx);
         self.surf_cache.insert(gx, y);
         y
     }
@@ -489,10 +489,9 @@ impl Wind {
         let mut next = FxHashMap::default();
         next.reserve(keys.len());
         for &(hx, hy) in keys.keys() {
-            // Tile-centre in rock is not a breeze. A capped live-surface
-            // climb used to seat the near-surface band inside an F3 tower
-            // (wind tunnel around y=250–260).
-            if tile_center_is_solid(world, tc, hx, hy) {
+            // Tile-centre in rock is not a breeze. Free water is not air —
+            // lake interiors were seating wind arrows underwater.
+            if tile_center_blocks_wind(world, tc, hx, hy) {
                 continue;
             }
             let (mut vx, mut vy) =
@@ -642,7 +641,9 @@ impl Wind {
                 for ix in 0..w {
                     let hx = bounds.hx_min + ix as i32;
                     let hy = bounds.hy_min + iy as i32;
-                    solid[iy * w + ix] = tile_center_is_solid(world, tc, hx, hy);
+                    // Treat free water like solid for wind seating / projection:
+                    // air does not blow through the lake.
+                    solid[iy * w + ix] = tile_center_blocks_wind(world, tc, hx, hy);
                 }
             }
         }
@@ -922,7 +923,7 @@ impl Wind {
             if solid[bounds.index(w, nhx, nhy)] {
                 return true;
             }
-        } else if tile_center_is_solid(world, self.tile_cols.max(1), nhx, nhy) {
+        } else if tile_center_blocks_wind(world, self.tile_cols.max(1), nhx, nhy) {
             return true;
         }
         if dx != 0 {
@@ -968,7 +969,7 @@ impl Wind {
         let nhx = self.wrap_tile_hx(hx + dx, bounds);
         let nhy = hy + dy;
         let tc = self.tile_cols.max(1);
-        if tile_center_is_solid(world, tc, nhx, nhy) {
+        if tile_center_blocks_wind(world, tc, nhx, nhy) {
             return true;
         }
         if dx != 0 {
@@ -1595,6 +1596,23 @@ fn tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> boo
     matches!(w.get_cell(gx, gy), Some(c) if c.material.is_solid())
 }
 
+/// Rock or standing free water — neither is a wind seat.
+fn tile_center_blocks_wind(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
+    if tile_center_is_solid(world, tc, hx, hy) {
+        return true;
+    }
+    let Some(w) = world else {
+        return false;
+    };
+    let gx = w.wrap_x(hx * tc + tc / 2);
+    let gy = hy * tc + tc / 2;
+    match w.get_cell(gx, gy) {
+        Some(c) if c.material == wk_material::MaterialId::Water => true,
+        Some(c) if c.material == wk_material::MaterialId::Air && c.sat.0 >= 200 => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1871,6 +1889,67 @@ mod tests {
         );
         let surf = crate::worldgen::live_surface_y(&w, 2, hint, crate::worldgen::LIVE_SURFACE_SEARCH);
         assert_eq!(surf, crest, "live surface must reach the F3 crest");
+    }
+
+    #[test]
+    fn rebuild_field_does_not_seat_wind_under_a_lake() {
+        use crate::cell::Cell;
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        use wk_material::MaterialId;
+
+        // Pond: stone bed at y=8, free water through y=20, air above.
+        // Old surface_at used the rock bed, so the near-surface band sat
+        // mid-column and drew wind arrows underwater.
+        let bed = 8i32;
+        let waterline = 20i32;
+        let mut w = crate::grid::World::new(3);
+        let cw = CHUNK_CELLS_W as i32;
+        let ch = CHUNK_CELLS_H as i32;
+        for x in 0i32..32 {
+            for y in 0i32..=(waterline + 8) {
+                w.ensure_chunk(ChunkCoord::new(x.div_euclid(cw), y.div_euclid(ch)));
+            }
+            for y in 0i32..=bed {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in (bed + 1)..=waterline {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        let rock = crate::worldgen::live_surface_y(
+            &w,
+            2,
+            bed,
+            crate::worldgen::LIVE_SURFACE_SEARCH,
+        );
+        assert_eq!(rock, bed);
+        assert_eq!(
+            crate::worldgen::live_skin_y(&w, 2, rock),
+            waterline,
+            "wind surface must be the waterline"
+        );
+
+        let mut wind = Wind::climate(4, 0.12, 3, 32, 16, 0, 64, false);
+        wind.config.field_smooth = 0.0;
+        // Occupied mid-lake + surface so rebuild would seat both if allowed.
+        let mid_hy = ((bed + waterline) / 2).div_euclid(4);
+        let skin_hy = waterline.div_euclid(4);
+        wind.rebuild_field(Some(&w), None, 40, &[(0, mid_hy), (0, skin_hy)], None);
+
+        assert!(
+            !wind.field_has(0, mid_hy),
+            "no wind seat in free water at hy={mid_hy}"
+        );
+        // Tile centre for hy just below skin is still underwater.
+        let under_hy = (waterline - 2).div_euclid(4);
+        assert!(
+            !wind.field_has(0, under_hy),
+            "no wind seat just under the waterline (hy={under_hy})"
+        );
+        assert!(
+            wind.field_has(0, skin_hy + 1) || wind.field_has(0, skin_hy + 2),
+            "breeze should seat in Air above the lake skin"
+        );
     }
 
     fn load_sky_so_live_surface_can_walk(w: &mut crate::grid::World, x1: i32, y_hi: i32) {

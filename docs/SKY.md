@@ -15,6 +15,7 @@ terrain + standing water         night: deep cool darken + weak moon ambient
 day canopy shade                 humidity column dim + sun cast
 humidity vapour wash             H overlay (default on; the sky water look)
 wind lattice arrows               V overlay (off by default; coarse, short)
+                                  underwater → teal ΔT current arrows instead
 debug overlays → organisms
 night moon cast                  after organisms
 HUD
@@ -27,7 +28,7 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 | Key | What |
 |-----|------|
 | **H** | Humidity **tile raster** — the vapour look. Tab → Climate → Wind + humidity: resample button (bilinear vs 4×4 tiles) and min-mass slider. |
-| **V** | Wind lattice — coarse local-field arrows (default off) |
+| **V** | Wind lattice above water + teal water-current arrows in free water (default off) |
 | **F6** | Glossary — keys, water/sky words, HUD tags |
 
 Humidity **is** the weather store, now with temperature/wind:
@@ -46,7 +47,7 @@ runs at full rate off-screen (ring + pan). Not a quadtree.
 | Humidity tiles | Vapour wash (`H`) — bilinear on 4×4 seats; a drop opens that column from itself downward |
 | Wet columns | Canopy / column shade via `cloud_sky_transmit` (humidity, not parcels) |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
-| Wind | `V` overlay — coarse local-field arrows (default off) |
+| Wind / currents | `V` — cyan wind above the waterline; teal in-water ΔT current hints (wrapped camera tile box so the ring seam does not blank one side) |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
 | Cast / celestial key | See prior plant/terrain lighting notes |
 
