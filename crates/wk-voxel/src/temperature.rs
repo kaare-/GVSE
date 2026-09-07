@@ -110,6 +110,10 @@ pub struct TempConfig {
     /// step (0 = off). Cold air cools the water skin; warm water warms air.
     #[serde(default = "default_air_water_skin_couple")]
     pub air_water_skin_couple: f32,
+    /// Wet porous solids ↔ neighbour rock tiles per thermal step (0 = off).
+    /// Scaled by mean pore wetness × diffusivity (reduced vs free-water couple).
+    #[serde(default = "default_pore_water_couple")]
+    pub pore_water_couple: f32,
     /// Scales material heat capacity into surface inertia:
     /// `relax = sky_relax / (1 + capacity * inertia_scale)`.
     pub inertia_scale: f32,
@@ -195,6 +199,9 @@ fn default_water_convect_bias() -> f32 {
 fn default_air_water_skin_couple() -> f32 {
     0.18
 }
+fn default_pore_water_couple() -> f32 {
+    0.06
+}
 
 /// Reference material κ so pair scales sit near 1 for typical rock/water.
 const REF_THERMAL_DIFFUSIVITY: f32 = 0.0015;
@@ -264,6 +271,7 @@ impl Default for TempConfig {
             water_rock_couple: default_water_rock_couple(),
             water_convect_bias: default_water_convect_bias(),
             air_water_skin_couple: default_air_water_skin_couple(),
+            pore_water_couple: default_pore_water_couple(),
             inertia_scale: 1.6,
             min_relax: 0.003,
             max_relax: 0.28,
@@ -297,6 +305,8 @@ struct TileThermal {
     albedo: f32,
     /// Material `thermal_diffusivity` (game-tuned); weights tile diffusion.
     diffusivity: f32,
+    /// Mean `sat / capacity` over porous solids in the tile (0..1).
+    pore_wet: f32,
 }
 
 impl Default for TileThermal {
@@ -306,6 +316,7 @@ impl Default for TileThermal {
             capacity: 1.0,
             albedo: 0.0,
             diffusivity: REF_THERMAL_DIFFUSIVITY,
+            pore_wet: 0.0,
         }
     }
 }
@@ -917,6 +928,7 @@ impl Temperature {
         // Coarse free-water ↔ rock / air skin exchange before diffuse.
         self.couple_water_rock(dense, bounds, slab_w);
         self.couple_air_water_skin(dense, bounds, slab_w);
+        self.couple_pore_water(dense, bounds, slab_w);
         let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * climate_k)).clamp(0.0, 0.25);
         if dense {
             if let Some(b) = bounds {
@@ -1201,6 +1213,61 @@ impl Temperature {
         }
     }
 
+    /// Coarse wet-pore ↔ neighbour rock heat couple (T4).
+    ///
+    /// Tiles with mean pore wetness exchange with the rock/surface tile
+    /// above (one directed edge per vertical pair). Rate scales with
+    /// `pore_water_couple × max(wet) × diffusivity`. Free-water surfaces
+    /// stay on the T1 path.
+    fn couple_pore_water(&mut self, dense: bool, bounds: Option<TileBounds>, slab_w: usize) {
+        let rate = self.config.pore_water_couple.clamp(0.0, 0.5);
+        if rate < 1e-5 || self.props_cache.is_empty() {
+            return;
+        }
+        let keys: Vec<(i32, i32)> = self.props_cache.keys().copied().collect();
+        for (hx, hy) in keys {
+            let Some(lo) = self.props_cache.get(&(hx, hy)).copied() else {
+                continue;
+            };
+            if !Self::pore_couple_host(lo.layer) {
+                continue;
+            }
+            let above_hy = hy + 1;
+            let Some(hi) = self.props_cache.get(&(hx, above_hy)).copied() else {
+                continue;
+            };
+            if !Self::pore_couple_host(hi.layer) {
+                continue;
+            }
+            let wet = lo.pore_wet.max(hi.pore_wet);
+            if wet < 1e-3 {
+                continue;
+            }
+            let t0 = self.read_tile_temp(hx, hy, dense, bounds, slab_w);
+            let t1 = self.read_tile_temp(hx, above_hy, dense, bounds, slab_w);
+            let c0 = lo.capacity.max(0.05);
+            let c1 = hi.capacity.max(0.05);
+            let a = (rate * wet * pair_diff_scale(lo.diffusivity, hi.diffusivity)).clamp(0.0, 1.0);
+            if a < 1e-5 {
+                continue;
+            }
+            let teq = (t0 * c0 + t1 * c1) / (c0 + c1);
+            let n0 = t0 + (teq - t0) * a;
+            let n1 = t1 + (teq - t1) * a;
+            self.write_tile_temp(hx, hy, t0, n0, dense, bounds, slab_w);
+            self.write_tile_temp(hx, above_hy, t1, n1, dense, bounds, slab_w);
+        }
+    }
+
+    #[inline]
+    fn pore_couple_host(layer: TileLayer) -> bool {
+        match layer {
+            TileLayer::Buried { .. } => true,
+            TileLayer::Surface { watery: false } => true,
+            TileLayer::Surface { watery: true } | TileLayer::Air => false,
+        }
+    }
+
     #[inline]
     fn read_tile_temp(
         &self,
@@ -1473,6 +1540,7 @@ fn air_thermal() -> TileThermal {
         capacity: air.heat_capacity,
         albedo: air.albedo,
         diffusivity: air.thermal_diffusivity,
+        pore_wet: 0.0,
     }
 }
 
@@ -1483,6 +1551,43 @@ fn buried_thermal(depth_cells: f32) -> TileThermal {
         capacity: bedrock.heat_capacity * 1.25,
         albedo: 0.0,
         diffusivity: bedrock.thermal_diffusivity,
+        pore_wet: 0.0,
+    }
+}
+
+/// Mean pore wetness (`sat / capacity`) over porous solids in a tile.
+fn tile_pore_wet_frac(world: &World, hx: i32, hy: i32, tile_cols: i32) -> f32 {
+    let tc = tile_cols.max(1);
+    let x0 = hx * tc;
+    let y0 = hy * tc;
+    let mut wet_sum = 0.0f32;
+    let mut n = 0.0f32;
+    for ly in 0..tc {
+        for lx in 0..tc {
+            let gx = world.wrap_x(x0 + lx);
+            let gy = y0 + ly;
+            let Some(cell) = world.get_cell(gx, gy) else {
+                continue;
+            };
+            // Free water / air / ice are not pore-host media (T1 / T3 cover those).
+            if matches!(
+                cell.material,
+                MaterialId::Air | MaterialId::Water | MaterialId::Ice | MaterialId::Snow
+            ) {
+                continue;
+            }
+            let cap = crate::cell::water_capacity(cell.material);
+            if cap == 0 {
+                continue;
+            }
+            wet_sum += (cell.sat.0 as f32) / (cap as f32);
+            n += 1.0;
+        }
+    }
+    if n < 1.0 {
+        0.0
+    } else {
+        (wet_sum / n).clamp(0.0, 1.0)
     }
 }
 
@@ -1563,13 +1668,19 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
     }
     if tile_mid_y + tc < surf_y {
         let depth = (surf_y - tile_mid_y).max(0) as f32;
-        return buried_thermal(depth);
+        let mut props = buried_thermal(depth);
+        props.pore_wet = tile_pore_wet_frac(world, hx, hy, tc);
+        // Pore water adds a little thermal mass (still tile °C, not cell enthalpy).
+        props.capacity *= 1.0 + 0.35 * props.pore_wet;
+        return props;
     }
+    let pore_wet = tile_pore_wet_frac(world, hx, hy, tc);
     TileThermal {
         layer: TileLayer::Surface { watery },
-        capacity: cap,
+        capacity: cap * (1.0 + 0.25 * pore_wet),
         albedo,
         diffusivity,
+        pore_wet,
     }
 }
 
@@ -2734,6 +2845,85 @@ mod tests {
         assert!(
             (water_off - 35.0).abs() < 0.5,
             "insulated control must keep warm skin ({water_off:.1})"
+        );
+    }
+
+    #[test]
+    fn cold_wet_pores_cool_hot_rock_neighbour() {
+        // T4 acceptance: wet sand above hot dry rock exchanges at pore rate.
+        let sea = 16;
+        let x0 = 4;
+        let mut world = World::new(11);
+        fill_tile_surface(&mut world, x0, sea, MaterialId::Sand, 0);
+        fill_buried_rock(&mut world, x0, sea, 12);
+        let tc = 4;
+        let wet_hy = ((sea - 2) / tc).max(1); // just under surface → buried band
+        let rock_hy = wet_hy - 1;
+        let y_wet0 = wet_hy * tc;
+        let y_rock0 = rock_hy * tc;
+        for x in x0..x0 + 4 {
+            for y in y_wet0..y_wet0 + tc {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = crate::cell::Sat::FULL;
+                sand.pore = 200;
+                world.set_cell(x, y, sand);
+            }
+            for y in y_rock0..y_rock0 + tc {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, sea, false);
+        t.fill_initial(0);
+        let hx = x0.div_euclid(tc);
+        for v in t.cells.values_mut() {
+            *v = 20.0;
+        }
+        t.cells.insert((hx, wet_hy), 5.0);
+        t.cells.insert((hx, rock_hy), 80.0);
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.geothermal_relax = 0.0;
+        t.config.geothermal_flux_c = 0.0;
+        t.config.near_surface_couple = 0.0;
+        t.config.water_rock_couple = 0.0;
+        t.config.air_water_skin_couple = 0.0;
+        t.config.pore_water_couple = 0.4;
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 32, 64);
+        let rock0 = t.at_tile(hx, rock_hy);
+        let wet0 = t.at_tile(hx, wet_hy);
+        for i in 0..8 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let rock1 = t.at_tile(hx, rock_hy);
+        let wet1 = t.at_tile(hx, wet_hy);
+
+        // Control: pore couple off (geo floor can still drift slightly).
+        let mut t_off = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, sea, false);
+        t_off.fill_initial(0);
+        for v in t_off.cells.values_mut() {
+            *v = 20.0;
+        }
+        t_off.cells.insert((hx, wet_hy), 5.0);
+        t_off.cells.insert((hx, rock_hy), 80.0);
+        t_off.config = t.config.clone();
+        t_off.config.pore_water_couple = 0.0;
+        t_off.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        for i in 0..8 {
+            t_off.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let rock_off = t_off.at_tile(hx, rock_hy);
+        let wet_off = t_off.at_tile(hx, wet_hy);
+        assert!(
+            rock1 < rock_off - 1.5,
+            "wet pores must cool hot rock more than control (on={rock1:.1} off={rock_off:.1}; start={rock0:.1})"
+        );
+        assert!(
+            wet1 > wet_off + 1.5,
+            "hot rock must warm wet pores more than control (on={wet1:.1} off={wet_off:.1}; start={wet0:.1})"
         );
     }
 

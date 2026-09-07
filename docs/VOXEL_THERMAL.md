@@ -1,8 +1,9 @@
 # Thermal loop — heat transport before pressurized vapour
 
-**Status:** T0–T3 landing (diffusivity, water↔rock, ΔT currents,
-air↔water skin). T4+ still plan. Blocks richer geyser / “humidity under
-pressure” work until the loop moves heat with water.
+**Status:** T0–T4 landing (diffusivity, water↔rock, ΔT currents,
+air↔water skin, pore-water couples). T5+ still plan. Blocks richer
+geyser / “humidity under pressure” work until the loop moves heat with
+water.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
 pore water), so gradients can drive currents — not a detailed CFD heat
@@ -87,7 +88,7 @@ Acceptance sketches (tests / HUD, not photoreal):
 1. Hot buried column + cold pond above → pond warms; rock under it cools over thermal steps.
 2. Stratified lake / shaft → warm free water tends upward, cold downward (bias visible vs control).
 3. Night / cold air over a warm lake → surface tile cools faster than an insulated control.
-4. Later: wet pore column shows the same rock↔water couple at lower rate.
+4. Wet pore column shows the same rock↔water couple at lower rate.
 
 ---
 
@@ -125,12 +126,13 @@ Acceptance sketches (tests / HUD, not photoreal):
 - Closes the surface half of the loop with weather already in
   [`VOXEL_WEATHER.md`](VOXEL_WEATHER.md).
 
-### T4 — Extend couples to pore water
+### T4 — Extend couples to pore water ✅
 
-- Wet porous solids exchange with host/neighbour rock tiles at a reduced
-  rate (pore fraction × diffusivity).
-- Seepage can optionally carry a tiny heat bias with mass (still tile T,
-  not per-cell enthalpy).
+- Wet porous solids exchange with neighbour rock/surface tiles
+  (`TempConfig::pore_water_couple`, default 0.06).
+- Rate scales by mean pore wetness × diffusivity; free-water surfaces
+  stay on the T1 path.
+- Props scan stores `pore_wet` and a small capacity bump from wet pores.
 - Goal: geothermal heat reaches seepage paths; cold recharge cools
   aquifers.
 
@@ -143,7 +145,7 @@ Acceptance sketches (tests / HUD, not photoreal):
 
 ### T6 — Return to pressurized vapour / geysers
 
-Only after T0–T2 (ideally T3–T4) and FPS gate:
+Only after T0–T4 (ideally T5) and FPS gate:
 
 - Evap continuum: contact with hot material → fast evaporization into
   **Humidity** when open to sky.
