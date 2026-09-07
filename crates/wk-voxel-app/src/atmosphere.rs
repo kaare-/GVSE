@@ -2750,10 +2750,10 @@ mod tests {
             w.set_cell(2, y, Cell::water());
         }
         let mut t = wk_voxel::Temperature::with_world_bounds(4, 0, 0, 32, 128, 1, 32, 16, false);
-        // ~1°C vertical span — common mid-lake residual after mixing.
-        t.cells.insert((0, 1), 16.0);
-        t.cells.insert((0, 0), 16.6);
-        t.cells.insert((0, 2), 15.5);
+        // ~0.5°C warm anomaly mid-column — common residual after mixing.
+        t.cells.insert((0, 1), 16.5);
+        t.cells.insert((0, 0), 16.0);
+        t.cells.insert((0, 2), 16.0);
         let (vx, vy) = super::water_current_vector(&t, &w, None, 4, 0, 1);
         assert!(
             vy.abs() >= 0.012,
