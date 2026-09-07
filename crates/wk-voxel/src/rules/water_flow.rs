@@ -100,7 +100,7 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_water_flow_xfers(world, active, &mut xfers, true);
     let mut store = std::mem::take(&mut world.confined);
-    accumulate_confined_upward_xfers(world, active, &mut xfers, &mut store);
+    accumulate_confined_upward_xfers(world, active, &mut xfers, &mut store, None);
     world.confined = store;
     commit_air_sat_xfers(world, &mut xfers);
 }
@@ -136,14 +136,18 @@ pub(crate) fn apply_throughflow_regions(world: &mut World, active: &[ActiveChunk
 }
 
 /// Confined upward equalisation for a planned active set (once/tick).
-pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveChunk]) {
+pub(crate) fn apply_confined_upward_regions(
+    world: &mut World,
+    active: &[ActiveChunk],
+    temp: Option<&crate::temperature::Temperature>,
+) {
     if active.is_empty() {
         return;
     }
     world.refresh_water_head();
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     let mut store = std::mem::take(&mut world.confined);
-    accumulate_confined_upward_xfers(world, active, &mut xfers, &mut store);
+    accumulate_confined_upward_xfers(world, active, &mut xfers, &mut store, temp);
     world.confined = store;
     commit_air_sat_xfers(world, &mut xfers);
     // Artesian discharge: water that just *rose* against gravity arrived under
@@ -192,7 +196,10 @@ fn max_standing_air_gy(world: &World) -> Option<i32> {
 /// cells dirty forever and would starve a quiet pipe shaft. Equalized
 /// vessels persist on [`World::confined`]; this still **runs** every
 /// period so a far well can rise. The BFS is the leftover we skip.
-pub fn wake_confined_head(world: &mut World) {
+pub fn wake_confined_head(
+    world: &mut World,
+    temp: Option<&crate::temperature::Temperature>,
+) {
     if world.tick % CONFINED_HEAD_WAKE_EVERY != 0 {
         return;
     }
@@ -202,7 +209,7 @@ pub fn wake_confined_head(world: &mut World) {
     // scans only its standing-air y band (+1 for the rising film) so
     // dry sky in shore chunks is leftover.
     let regions = regions_confined_loaded(world);
-    apply_confined_upward_regions(world, &regions);
+    apply_confined_upward_regions(world, &regions, temp);
 }
 
 fn commit_air_sat_xfers(world: &mut World, xfers: &mut [((i32, i32), (i32, i32), i32)]) {
@@ -695,6 +702,7 @@ fn accumulate_confined_upward_xfers(
     active: &[ActiveChunk],
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
     store: &mut ConfinedStore,
+    temp: Option<&crate::temperature::Temperature>,
 ) {
     let mut cache: FxHashMap<(i32, i32), PressureBody> = FxHashMap::default();
     let mut scratch = ConfinedBfsScratch::new();
@@ -818,10 +826,16 @@ fn accumulate_confined_upward_xfers(
             let warmth = world.water_head.geothermal_warmth(gx, gy - 1);
             let geo = 1.0 + 0.25 * warmth;
             let steam = crate::steam::steam_pressure_rate_scale(world, gx, gy - 1);
+            let conv = temp
+                .map(|t| {
+                    crate::temperature::water_convect_rise_scale(t, dx, dy, gx, gy)
+                })
+                .unwrap_or(1.0);
             let cap_rate = ((CONFINED_HEAD_RATE as f32)
                 * world.water_head_rate_scale(gx, gy)
                 * geo
-                * steam)
+                * steam
+                * conv)
                 .round() as i32;
             let amt = cap_rate
                 .min(free)

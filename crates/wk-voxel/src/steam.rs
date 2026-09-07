@@ -1544,7 +1544,7 @@ mod tests {
         assert!(boost > 1.05, "boost={boost:.3}");
         let before = w.get_cell(2, 1).unwrap().sat.0;
         w.tick = 16;
-        wake_confined_head(&mut w);
+        wake_confined_head(&mut w, None);
         let after = w.get_cell(2, 1).unwrap().sat.0;
         assert!(after >= before);
     }

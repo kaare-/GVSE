@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
+use crate::temperature::Temperature;
 
 use super::grain::{
     active_has_unsupported_grain, settle_loose_grains_regions_ex, GRAIN_SETTLE_PASSES,
@@ -278,7 +279,7 @@ pub fn tick_with_configs_and_geotech(
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
-    let _ = tick_with_life(world, perf, failure, geotech, None, None, None, None);
+    let _ = tick_with_life(world, perf, failure, geotech, None, None, None, None, None);
 }
 
 /// [`tick_with_configs_and_geotech`] plus optional living-root cells for
@@ -297,8 +298,9 @@ pub fn tick_with_life(
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
     competent: Option<&super::competent_fall::CompetentFallConfig>,
+    temp: Option<&Temperature>,
 ) -> crate::failure::FailureStats {
-    tick_with_life_inner(world, perf, failure, geotech, rooted, grain, fungi, competent, None)
+    tick_with_life_inner(world, perf, failure, geotech, rooted, grain, fungi, competent, temp, None)
 }
 
 /// [`tick_with_life`] while accumulating [`PhysicsTimings`].
@@ -311,6 +313,7 @@ pub fn tick_with_life_profiled(
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
     competent: Option<&super::competent_fall::CompetentFallConfig>,
+    temp: Option<&Temperature>,
     timings: &mut PhysicsTimings,
 ) -> crate::failure::FailureStats {
     tick_with_life_inner(
@@ -322,6 +325,7 @@ pub fn tick_with_life_profiled(
         grain,
         fungi,
         competent,
+        temp,
         Some(timings),
     )
 }
@@ -336,6 +340,7 @@ pub fn tick_with_perf_profiled(
         world,
         perf,
         &crate::failure::FailureConfig::default(),
+        None,
         None,
         None,
         None,
@@ -394,6 +399,7 @@ fn tick_with_life_inner(
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
     competent: Option<&super::competent_fall::CompetentFallConfig>,
+    temp: Option<&Temperature>,
     mut timings: Option<&mut PhysicsTimings>,
 ) -> crate::failure::FailureStats {
     // Opt-in cell-sat inventory (debug only). Atmosphere stores are
@@ -465,7 +471,7 @@ fn tick_with_life_inner(
         let passes = partition_checkerboard(&active);
         let t0 = profile.then(Instant::now);
         for pass in &passes {
-            apply_gravity_fall_regions_loaded(world, pass, &gravity_load);
+            apply_gravity_fall_regions_loaded(world, pass, &gravity_load, temp);
         }
         if let (true, Some(t0)) = (profile, t0) {
             local.gravity += t0.elapsed();
@@ -523,7 +529,7 @@ fn tick_with_life_inner(
         // after inflate (+1 x / +2 y) and still rises this tick.
         if active_cell_area(&flow_halo) <= CONFINED_HALO_MAX_AREA {
             let t0 = profile.then(Instant::now);
-            apply_confined_upward_regions(world, &flow_halo);
+            apply_confined_upward_regions(world, &flow_halo, temp);
             if let (true, Some(t0)) = (profile, t0) {
                 local.confined += t0.elapsed();
             }
@@ -533,7 +539,7 @@ fn tick_with_life_inner(
     // reservoir head is still higher. Periodic full-chunk confined scan.
     {
         let t0 = profile.then(Instant::now);
-        super::water_flow::wake_confined_head(world);
+        super::water_flow::wake_confined_head(world, temp);
         if let (true, Some(t0)) = (profile, t0) {
             local.confined += t0.elapsed();
         }

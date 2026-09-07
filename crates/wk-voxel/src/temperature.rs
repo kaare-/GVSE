@@ -102,6 +102,10 @@ pub struct TempConfig {
     /// (0 = off). Capacity-weighted mix toward local equilibrium.
     #[serde(default = "default_water_rock_couple")]
     pub water_rock_couple: f32,
+    /// Bias free-water vertical exchange by ΔT (0 = off). Warm prefers
+    /// rise (confined); warm-over-cold throttles gravity fall.
+    #[serde(default = "default_water_convect_bias")]
+    pub water_convect_bias: f32,
     /// Scales material heat capacity into surface inertia:
     /// `relax = sky_relax / (1 + capacity * inertia_scale)`.
     pub inertia_scale: f32,
@@ -181,6 +185,9 @@ fn default_force_inertia() -> f32 {
 fn default_water_rock_couple() -> f32 {
     0.12
 }
+fn default_water_convect_bias() -> f32 {
+    0.35
+}
 
 /// Reference material κ so pair scales sit near 1 for typical rock/water.
 const REF_THERMAL_DIFFUSIVITY: f32 = 0.0015;
@@ -191,6 +198,41 @@ fn pair_diff_scale(ka: f32, kb: f32) -> f32 {
     let kb = kb.max(1e-6);
     let harm = 2.0 * ka * kb / (ka + kb);
     (harm / REF_THERMAL_DIFFUSIVITY).clamp(0.35, 2.0)
+}
+
+/// ΔT reference (°C) for water convection bias scales.
+const WATER_CONVECT_DT_REF: f32 = 20.0;
+
+/// Confined-rise rate scale: warm donor under cooler destination → &gt;1.
+pub fn water_convect_rise_scale(
+    temp: &Temperature,
+    donor_gx: i32,
+    donor_gy: i32,
+    dst_gx: i32,
+    dst_gy: i32,
+) -> f32 {
+    let bias = temp.config.water_convect_bias.clamp(0.0, 1.0);
+    if bias < 1e-5 {
+        return 1.0;
+    }
+    let dt = temp.at_cell(donor_gx, donor_gy) - temp.at_cell(dst_gx, dst_gy);
+    (1.0 + bias * (dt / WATER_CONVECT_DT_REF).clamp(-1.0, 1.0)).clamp(0.35, 1.65)
+}
+
+/// Gravity fall scale for Air→Air: warm-over-cold throttles dump (stable).
+pub fn water_convect_fall_scale(
+    temp: &Temperature,
+    above_gx: i32,
+    above_gy: i32,
+    below_gx: i32,
+    below_gy: i32,
+) -> f32 {
+    let bias = temp.config.water_convect_bias.clamp(0.0, 1.0);
+    if bias < 1e-5 {
+        return 1.0;
+    }
+    let dt = temp.at_cell(above_gx, above_gy) - temp.at_cell(below_gx, below_gy);
+    (1.0 - 0.75 * bias * (dt / WATER_CONVECT_DT_REF).clamp(0.0, 1.0)).clamp(0.25, 1.0)
 }
 
 /// Deep water only counts this many extra cells toward skin capacity.
@@ -213,6 +255,7 @@ impl Default for TempConfig {
             sky_relax: 0.12,
             diffuse_alpha: 0.10,
             water_rock_couple: default_water_rock_couple(),
+            water_convect_bias: default_water_convect_bias(),
             inertia_scale: 1.6,
             min_relax: 0.003,
             max_relax: 0.28,
@@ -2504,5 +2547,34 @@ mod tests {
             water1 > water0 + 2.0,
             "hot rock must warm the pond ({water0:.1} → {water1:.1})"
         );
+    }
+
+    #[test]
+    fn water_convect_scales_prefer_warm_up_and_throttle_warm_over_cold() {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, 16, false);
+        t.fill_initial(0);
+        t.config.water_convect_bias = 1.0;
+        // Tile (0,0) warm, (0,4) cold — cell coords map through tile_cols=4.
+        for v in t.cells.values_mut() {
+            *v = 10.0;
+        }
+        t.cells.insert((0, 0), 40.0); // low tile warm
+        t.cells.insert((0, 4), 0.0); // high tile cold
+        let rise_warm_below = water_convect_rise_scale(&t, 1, 1, 1, 17);
+        let rise_cold_below = water_convect_rise_scale(&t, 1, 17, 1, 1);
+        assert!(
+            rise_warm_below > 1.0 && rise_cold_below < 1.0,
+            "warm donor should boost rise ({rise_warm_below:.2}), cold donor throttle ({rise_cold_below:.2})"
+        );
+        let fall_stable = water_convect_fall_scale(&t, 1, 17, 1, 1); // cold above? wait 17 is hy=4 cold, 1 is hy=0 warm — cold above warm is unstable
+        // Warm above cold: put warm at high cell
+        t.cells.insert((0, 4), 40.0);
+        t.cells.insert((0, 0), 0.0);
+        let fall_warm_over_cold = water_convect_fall_scale(&t, 1, 17, 1, 1);
+        assert!(
+            fall_warm_over_cold < 1.0,
+            "warm-over-cold must throttle gravity fall ({fall_warm_over_cold:.2})"
+        );
+        let _ = fall_stable;
     }
 }

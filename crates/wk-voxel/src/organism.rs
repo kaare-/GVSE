@@ -6323,7 +6323,7 @@ mod tests {
         let perf = PerfConfig::default();
         let fail = FailureConfig::default();
         for _ in 0..120 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None, None);
             let tick = w.tick;
             store.step(&mut w, tick);
         }
@@ -6332,7 +6332,7 @@ mod tests {
         let myc0 = crate::fungi::max_mycelium_near(&w, 4, 2);
         assert!(myc0 >= 40, "need an established network before death");
         for _ in 0..200 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None, None);
         }
         let myc1 = crate::fungi::max_mycelium_near(&w, 4, 2);
         assert!(
@@ -6389,7 +6389,7 @@ mod tests {
         let perf = PerfConfig::default();
         let fail = FailureConfig::default();
         for _ in 0..400 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None, None);
             let tick = w.tick;
             store.step(&mut w, tick);
         }
