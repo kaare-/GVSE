@@ -113,6 +113,10 @@ Acceptance sketches (tests / HUD, not photoreal):
   cooler destination → faster).
 - Soft-throttle Air→Air gravity fall when warm sits over cold
   (`water_convect_fall_scale`).
+- **Open lakes:** tile °C buoyancy mix when warm free water sits under
+  colder free water (`couple_free_water_buoyancy`) — full columns do not
+  move cells, so flow bias alone cannot overturn stratification.
+- Deep free-water tiles use water capacity (not rock geothermal).
 - Tab: `TempConfig::water_convect_bias` (default 0.35).
 - Goal: **heat rides water toward the surface**; cooler return flow.
 
