@@ -307,6 +307,8 @@ struct TileThermal {
     diffusivity: f32,
     /// Mean `sat / capacity` over porous solids in the tile (0..1).
     pore_wet: f32,
+    /// Fraction of tile cells that are free standing water (0..1).
+    free_water: f32,
 }
 
 impl Default for TileThermal {
@@ -317,6 +319,7 @@ impl Default for TileThermal {
             albedo: 0.0,
             diffusivity: REF_THERMAL_DIFFUSIVITY,
             pore_wet: 0.0,
+            free_water: 0.0,
         }
     }
 }
@@ -892,24 +895,30 @@ impl Temperature {
                     n + (skin - n) * relax
                 }
                 TileLayer::Buried { .. } => {
-                    // Overburden from the live surface, every step.
-                    // Cached depth would keep a deleted hill hot.
-                    let geo = self.geothermal_at_depth(self.geothermal_overburden_cells(
-                        world,
-                        hx,
-                        self.tile_mid_y(hy),
-                    ));
-                    let k_lag =
-                        (0.7 + 0.3 * (props.diffusivity / REF_THERMAL_DIFFUSIVITY)).clamp(0.55, 1.4);
-                    let relax = (cfg.geothermal_relax * k_lag
-                        / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale * 0.35))
-                        .clamp(0.001, 0.08);
-                    let mut n = t + (geo - t) * relax;
-                    // Deepest band gets a small constant flux (mantle leak).
-                    if hy <= deepest_hy + 1 {
-                        n += cfg.geothermal_flux_c;
+                    // Free-water column (deep lake) is not rock — skip geothermal.
+                    if props.free_water >= 0.5 {
+                        t
+                    } else {
+                        // Overburden from the live surface, every step.
+                        // Cached depth would keep a deleted hill hot.
+                        let geo = self.geothermal_at_depth(self.geothermal_overburden_cells(
+                            world,
+                            hx,
+                            self.tile_mid_y(hy),
+                        ));
+                        let k_lag = (0.7
+                            + 0.3 * (props.diffusivity / REF_THERMAL_DIFFUSIVITY))
+                            .clamp(0.55, 1.4);
+                        let relax = (cfg.geothermal_relax * k_lag
+                            / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale * 0.35))
+                            .clamp(0.001, 0.08);
+                        let mut n = t + (geo - t) * relax;
+                        // Deepest band gets a small constant flux (mantle leak).
+                        if hy <= deepest_hy + 1 {
+                            n += cfg.geothermal_flux_c;
+                        }
+                        n
                     }
-                    n
                 }
             };
             // Far sky already on the lapse keeps `next == t`. Rewriting
@@ -929,6 +938,7 @@ impl Temperature {
         self.couple_water_rock(dense, bounds, slab_w);
         self.couple_air_water_skin(dense, bounds, slab_w);
         self.couple_pore_water(dense, bounds, slab_w);
+        self.couple_free_water_buoyancy(dense, bounds, slab_w);
         let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * climate_k)).clamp(0.0, 0.25);
         if dense {
             if let Some(b) = bounds {
@@ -1259,6 +1269,58 @@ impl Temperature {
         }
     }
 
+    /// Open free-water buoyancy heat mix (lake / shaft columns).
+    ///
+    /// T2 flow bias only touches confined rise + gravity into empty Air —
+    /// a full lake never moves cells, and tile °C is not carried with sat.
+    /// When warm sits under colder free water, mix heat upward here.
+    fn couple_free_water_buoyancy(
+        &mut self,
+        dense: bool,
+        bounds: Option<TileBounds>,
+        slab_w: usize,
+    ) {
+        let bias = self.config.water_convect_bias.clamp(0.0, 1.0);
+        if bias < 1e-5 || self.props_cache.is_empty() {
+            return;
+        }
+        let keys: Vec<(i32, i32)> = self.props_cache.keys().copied().collect();
+        for (hx, hy) in keys {
+            let Some(lo) = self.props_cache.get(&(hx, hy)).copied() else {
+                continue;
+            };
+            if lo.free_water < 0.5 {
+                continue;
+            }
+            let above_hy = hy + 1;
+            let Some(hi) = self.props_cache.get(&(hx, above_hy)).copied() else {
+                continue;
+            };
+            if hi.free_water < 0.5 {
+                continue;
+            }
+            let t0 = self.read_tile_temp(hx, hy, dense, bounds, slab_w);
+            let t1 = self.read_tile_temp(hx, above_hy, dense, bounds, slab_w);
+            let dt = t0 - t1; // >0 ⇒ warm below cold (unstable)
+            if dt <= 0.5 {
+                continue;
+            }
+            let strength = bias * (dt / WATER_CONVECT_DT_REF).clamp(0.0, 1.5);
+            let a = (0.55 * strength * pair_diff_scale(lo.diffusivity, hi.diffusivity))
+                .clamp(0.0, 0.9);
+            if a < 1e-5 {
+                continue;
+            }
+            let c0 = lo.capacity.max(0.05);
+            let c1 = hi.capacity.max(0.05);
+            let teq = (t0 * c0 + t1 * c1) / (c0 + c1);
+            let n0 = t0 + (teq - t0) * a;
+            let n1 = t1 + (teq - t1) * a;
+            self.write_tile_temp(hx, hy, t0, n0, dense, bounds, slab_w);
+            self.write_tile_temp(hx, above_hy, t1, n1, dense, bounds, slab_w);
+        }
+    }
+
     #[inline]
     fn pore_couple_host(layer: TileLayer) -> bool {
         match layer {
@@ -1541,6 +1603,7 @@ fn air_thermal() -> TileThermal {
         albedo: air.albedo,
         diffusivity: air.thermal_diffusivity,
         pore_wet: 0.0,
+        free_water: 0.0,
     }
 }
 
@@ -1552,7 +1615,32 @@ fn buried_thermal(depth_cells: f32) -> TileThermal {
         albedo: 0.0,
         diffusivity: bedrock.thermal_diffusivity,
         pore_wet: 0.0,
+        free_water: 0.0,
     }
+}
+
+/// Fraction of tile cells that are free standing water (Water or full wet Air).
+fn tile_free_water_frac(world: &World, hx: i32, hy: i32, tile_cols: i32) -> f32 {
+    let tc = tile_cols.max(1);
+    let x0 = hx * tc;
+    let y0 = hy * tc;
+    let mut wet = 0.0f32;
+    let n = (tc * tc) as f32;
+    for ly in 0..tc {
+        for lx in 0..tc {
+            let gx = world.wrap_x(x0 + lx);
+            let gy = y0 + ly;
+            let Some(cell) = world.get_cell(gx, gy) else {
+                continue;
+            };
+            if cell.material == MaterialId::Water
+                || (cell.material == MaterialId::Air && cell.sat.0 >= 200)
+            {
+                wet += 1.0;
+            }
+        }
+    }
+    (wet / n.max(1.0)).clamp(0.0, 1.0)
 }
 
 /// Mean pore wetness (`sat / capacity`) over porous solids in a tile.
@@ -1668,19 +1756,34 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
     }
     if tile_mid_y + tc < surf_y {
         let depth = (surf_y - tile_mid_y).max(0) as f32;
+        let free_water = tile_free_water_frac(world, hx, hy, tc);
         let mut props = buried_thermal(depth);
-        props.pore_wet = tile_pore_wet_frac(world, hx, hy, tc);
-        // Pore water adds a little thermal mass (still tile °C, not cell enthalpy).
-        props.capacity *= 1.0 + 0.35 * props.pore_wet;
+        props.free_water = free_water;
+        if free_water >= 0.5 {
+            // Deep lake / flooded shaft — water thermal mass, not rock geo.
+            let water = MaterialRegistry::props(MaterialId::Water);
+            props.capacity = water.heat_capacity
+                * (1.0 + temp.config.water_stack_cap * free_water);
+            props.diffusivity = water.thermal_diffusivity;
+            props.albedo = water.albedo;
+        } else {
+            props.pore_wet = tile_pore_wet_frac(world, hx, hy, tc);
+            props.capacity *= 1.0 + 0.35 * props.pore_wet;
+        }
         return props;
     }
     let pore_wet = tile_pore_wet_frac(world, hx, hy, tc);
+    // Always scan this tile's cells — column `watery` is true for the
+    // whole surface band above a lake, but empty air tiles must not
+    // count as free-water for buoyancy.
+    let free_water = tile_free_water_frac(world, hx, hy, tc);
     TileThermal {
         layer: TileLayer::Surface { watery },
         capacity: cap * (1.0 + 0.25 * pore_wet),
         albedo,
         diffusivity,
         pore_wet,
+        free_water,
     }
 }
 
@@ -2807,6 +2910,8 @@ mod tests {
         t.config.near_surface_couple = 0.0;
         t.config.water_rock_couple = 0.0;
         t.config.air_water_skin_couple = 0.4;
+        t.config.water_convect_bias = 0.0;
+        t.config.pore_water_couple = 0.0;
         t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
         let h = Humidity::with_world_bounds(4, 0, 0, 32, 64);
         let water0 = t.at_tile(hx, water_hy);
@@ -2924,6 +3029,94 @@ mod tests {
         assert!(
             wet1 > wet_off + 1.5,
             "hot rock must warm wet pores more than control (on={wet1:.1} off={wet_off:.1}; start={wet0:.1})"
+        );
+    }
+
+    #[test]
+    fn unstable_lake_column_mixes_heat_upward() {
+        // Open-lake convection: warm bottom under cold top must mix when
+        // water_convect_bias > 0 (full columns never move cells).
+        let sea = 24;
+        let x0 = 4;
+        let mut world = World::new(11);
+        fill_tile_surface(&mut world, x0, sea, MaterialId::Water, 0);
+        fill_buried_rock(&mut world, x0, sea, 20);
+        // Tall free-water column from y=4..sea.
+        for x in x0..x0 + 4 {
+            for y in 4..=sea {
+                world.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                    y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+                ));
+                world.set_cell(x, y, Cell::water());
+            }
+        }
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, sea, false);
+        t.fill_initial(0);
+        let tc = t.tile_cols.max(1);
+        let bot_hy = 8i32 / tc; // y~8–11
+        let top_hy = 20i32 / tc; // y~20–23, still under sea=24 surface
+        let hx = x0.div_euclid(tc);
+        assert!(
+            top_hy > bot_hy,
+            "fixture: need stacked free-water tiles ({bot_hy}..{top_hy})"
+        );
+        for v in t.cells.values_mut() {
+            *v = 10.0;
+        }
+        t.cells.insert((hx, bot_hy), 40.0);
+        t.cells.insert((hx, top_hy), 2.0);
+        // Seed intermediates cold so buoyancy must climb the stack.
+        for hy in (bot_hy + 1)..top_hy {
+            t.cells.insert((hx, hy), 5.0);
+        }
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.geothermal_relax = 0.0;
+        t.config.geothermal_flux_c = 0.0;
+        t.config.near_surface_couple = 0.0;
+        t.config.water_rock_couple = 0.0;
+        t.config.air_water_skin_couple = 0.0;
+        t.config.pore_water_couple = 0.0;
+        t.config.water_convect_bias = 1.0;
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 32, 64);
+        for i in 0..10 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let bot1 = t.at_tile(hx, bot_hy);
+        let top1 = t.at_tile(hx, top_hy);
+
+        let mut t_off = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, sea, false);
+        t_off.fill_initial(0);
+        for v in t_off.cells.values_mut() {
+            *v = 10.0;
+        }
+        t_off.cells.insert((hx, bot_hy), 40.0);
+        t_off.cells.insert((hx, top_hy), 2.0);
+        for hy in (bot_hy + 1)..top_hy {
+            t_off.cells.insert((hx, hy), 5.0);
+        }
+        t_off.config = t.config.clone();
+        t_off.config.water_convect_bias = 0.0;
+        t_off.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        for i in 0..10 {
+            t_off.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let bot_off = t_off.at_tile(hx, bot_hy);
+        let top_off = t_off.at_tile(hx, top_hy);
+        let gap_on = bot1 - top1;
+        let gap_off = bot_off - top_off;
+        assert!(
+            gap_on < gap_off - 5.0,
+            "unstable lake must shrink ΔT vs bias-off (on={gap_on:.1} off={gap_off:.1}; bot={bot1:.1}/{bot_off:.1} top={top1:.1}/{top_off:.1})"
+        );
+        assert!(
+            top1 > top_off + 2.0,
+            "heat must reach the cold lake top (on={top1:.1} off={top_off:.1})"
         );
     }
 
