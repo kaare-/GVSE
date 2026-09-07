@@ -106,6 +106,10 @@ pub struct TempConfig {
     /// rise (confined); warm-over-cold throttles gravity fall.
     #[serde(default = "default_water_convect_bias")]
     pub water_convect_bias: f32,
+    /// Coarse open-water ↔ near-surface air heat exchange per thermal
+    /// step (0 = off). Cold air cools the water skin; warm water warms air.
+    #[serde(default = "default_air_water_skin_couple")]
+    pub air_water_skin_couple: f32,
     /// Scales material heat capacity into surface inertia:
     /// `relax = sky_relax / (1 + capacity * inertia_scale)`.
     pub inertia_scale: f32,
@@ -188,6 +192,9 @@ fn default_water_rock_couple() -> f32 {
 fn default_water_convect_bias() -> f32 {
     0.35
 }
+fn default_air_water_skin_couple() -> f32 {
+    0.18
+}
 
 /// Reference material κ so pair scales sit near 1 for typical rock/water.
 const REF_THERMAL_DIFFUSIVITY: f32 = 0.0015;
@@ -256,6 +263,7 @@ impl Default for TempConfig {
             diffuse_alpha: 0.10,
             water_rock_couple: default_water_rock_couple(),
             water_convect_bias: default_water_convect_bias(),
+            air_water_skin_couple: default_air_water_skin_couple(),
             inertia_scale: 1.6,
             min_relax: 0.003,
             max_relax: 0.28,
@@ -906,8 +914,9 @@ impl Temperature {
                 }
             }
         }
-        // Coarse free-water ↔ rock heat exchange before diffuse redistributes.
+        // Coarse free-water ↔ rock / air skin exchange before diffuse.
         self.couple_water_rock(dense, bounds, slab_w);
+        self.couple_air_water_skin(dense, bounds, slab_w);
         let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * climate_k)).clamp(0.0, 0.25);
         if dense {
             if let Some(b) = bounds {
@@ -1128,6 +1137,108 @@ impl Temperature {
                             self.slab[b.index(slab_w, hx, rock_hy)] = nr;
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Coarse open-water ↔ near-surface air heat couple (T3).
+    ///
+    /// Watery surface tiles mix with the air tile above. Cold air cools
+    /// the water skin; warm water warms a thin air band. Complements the
+    /// existing one-way air→ground near-surface couple.
+    fn couple_air_water_skin(&mut self, dense: bool, bounds: Option<TileBounds>, slab_w: usize) {
+        let rate = self.config.air_water_skin_couple.clamp(0.0, 0.5);
+        if rate < 1e-5 || self.props_cache.is_empty() {
+            return;
+        }
+        let watery: Vec<(i32, i32)> = self
+            .props_cache
+            .iter()
+            .filter(|(_, p)| matches!(p.layer, TileLayer::Surface { watery: true }))
+            .map(|(&k, _)| k)
+            .collect();
+        if watery.is_empty() {
+            return;
+        }
+        for (hx, hy) in watery {
+            let Some(water_props) = self.props_cache.get(&(hx, hy)).copied() else {
+                continue;
+            };
+            // Surface-band tiles just above open water are still `Surface`
+            // (wide mid-y window). Walk up a few tiles to the first Air.
+            let mut air_hy = None;
+            let mut air_props = None;
+            for d in 1..=4 {
+                let try_hy = hy + d;
+                let Some(p) = self.props_cache.get(&(hx, try_hy)).copied() else {
+                    continue;
+                };
+                if matches!(p.layer, TileLayer::Air) {
+                    air_hy = Some(try_hy);
+                    air_props = Some(p);
+                    break;
+                }
+            }
+            let (Some(air_hy), Some(air_props)) = (air_hy, air_props) else {
+                continue;
+            };
+            let tw = self.read_tile_temp(hx, hy, dense, bounds, slab_w);
+            let ta = self.read_tile_temp(hx, air_hy, dense, bounds, slab_w);
+            let cw = water_props.capacity.max(0.05);
+            // Air capacity is small — keep a floor so water does not dump all heat in one step.
+            let ca = air_props.capacity.max(0.15);
+            let a = (rate * pair_diff_scale(water_props.diffusivity, air_props.diffusivity))
+                .clamp(0.0, 1.0);
+            if a < 1e-5 {
+                continue;
+            }
+            let teq = (tw * cw + ta * ca) / (cw + ca);
+            let nw = tw + (teq - tw) * a;
+            let na = ta + (teq - ta) * a;
+            self.write_tile_temp(hx, hy, tw, nw, dense, bounds, slab_w);
+            self.write_tile_temp(hx, air_hy, ta, na, dense, bounds, slab_w);
+        }
+    }
+
+    #[inline]
+    fn read_tile_temp(
+        &self,
+        hx: i32,
+        hy: i32,
+        dense: bool,
+        bounds: Option<TileBounds>,
+        slab_w: usize,
+    ) -> f32 {
+        if dense {
+            if let Some(b) = bounds {
+                if b.contains(hx, hy) && self.slab.len() == b.tile_capacity() {
+                    return self.slab[b.index(slab_w, hx, hy)];
+                }
+            }
+        }
+        self.at_tile(hx, hy)
+    }
+
+    #[inline]
+    fn write_tile_temp(
+        &mut self,
+        hx: i32,
+        hy: i32,
+        before: f32,
+        after: f32,
+        dense: bool,
+        bounds: Option<TileBounds>,
+        slab_w: usize,
+    ) {
+        if (after - before).abs() < 1e-5 {
+            return;
+        }
+        self.cells.insert((hx, hy), after);
+        if dense {
+            if let Some(b) = bounds {
+                if b.contains(hx, hy) && self.slab.len() == b.tile_capacity() {
+                    self.slab[b.index(slab_w, hx, hy)] = after;
                 }
             }
         }
@@ -2546,6 +2657,83 @@ mod tests {
         assert!(
             water1 > water0 + 2.0,
             "hot rock must warm the pond ({water0:.1} → {water1:.1})"
+        );
+    }
+
+    #[test]
+    fn cold_air_cools_warm_water_skin() {
+        // T3 acceptance: open water under cold air loses heat vs insulated control.
+        let sea = 16;
+        let x0 = 4;
+        let mut world = World::new(11);
+        fill_tile_surface(&mut world, x0, sea, MaterialId::Water, 3);
+        fill_buried_rock(&mut world, x0, sea, 12);
+        for x in x0..x0 + 4 {
+            for y in 1..=3 {
+                world.set_cell(x, sea + y, Cell::water());
+            }
+        }
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, sea, false);
+        t.fill_initial(0);
+        let tc = t.tile_cols.max(1);
+        let water_hy = ((sea + 2) / tc).max(1);
+        let hx = x0.div_euclid(tc);
+        for v in t.cells.values_mut() {
+            *v = 20.0;
+        }
+        t.cells.insert((hx, water_hy), 35.0);
+        // Cold free-air band above the surface window (hy+1 may still be Surface).
+        for d in 1..=4 {
+            t.cells.insert((hx, water_hy + d), 0.0);
+        }
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.geothermal_relax = 0.0;
+        t.config.geothermal_flux_c = 0.0;
+        t.config.near_surface_couple = 0.0;
+        t.config.water_rock_couple = 0.0;
+        t.config.air_water_skin_couple = 0.4;
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 32, 64);
+        let water0 = t.at_tile(hx, water_hy);
+        for i in 0..6 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let water1 = t.at_tile(hx, water_hy);
+        assert!(
+            water1 < water0 - 1.5,
+            "cold air must cool warm water skin ({water0:.1} → {water1:.1})"
+        );
+        // At least one free-air tile above should have warmed.
+        let air_warmed = (1..=4).any(|d| t.at_tile(hx, water_hy + d) > 0.5);
+        assert!(
+            air_warmed,
+            "warm water must warm the free-air band above the skin"
+        );
+
+        // Control: couple off → water stays warm.
+        let mut t_off = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, sea, false);
+        t_off.fill_initial(0);
+        for v in t_off.cells.values_mut() {
+            *v = 20.0;
+        }
+        t_off.cells.insert((hx, water_hy), 35.0);
+        for d in 1..=4 {
+            t_off.cells.insert((hx, water_hy + d), 0.0);
+        }
+        t_off.config = t.config.clone();
+        t_off.config.air_water_skin_couple = 0.0;
+        t_off.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        for i in 0..6 {
+            t_off.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let water_off = t_off.at_tile(hx, water_hy);
+        assert!(
+            (water_off - 35.0).abs() < 0.5,
+            "insulated control must keep warm skin ({water_off:.1})"
         );
     }
 

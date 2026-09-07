@@ -932,6 +932,13 @@ impl SimSettings {
                         0.0..1.0,
                         &mut self.temp.water_convect_bias,
                     );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Air↔water skin couple / step",
+                        0.0..0.5,
+                        &mut self.temp.air_water_skin_couple,
+                    );
                 });
                 ui.separator();
 
