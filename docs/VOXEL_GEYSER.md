@@ -32,7 +32,7 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam | Underground humidity **under pressure**. Boil mints a thin sparse charge; vapour mass lives in Humidity (sky + caves). Assault/escape read cave RH (+ residual). Below boil, pore sat ↔ cave H equalize (cadence-capped). Seats from sparse steam + wet-pore neighbours only — never a full humidity occupied walk. |
+| Steam | Underground humidity **under pressure** (no separate gas CA). Boil moves sat → Humidity; pressure = confined cave RH. Overpressure equalizes by reverse pore seepage + aperture work; cool/depressurized H condenses to liquid. Sparse `World.steam` is legacy residual only. Cadence-capped; hot-chunk + wet-stride seats — never a full humidity walk. |
 | Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~48×), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
 | Pressure | **No continuum PDE.** Confined cave humidity density (RH) + episodic escape (widen / burst / reverse push). Sparse steam residual boosts tubes. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |

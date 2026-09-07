@@ -1074,8 +1074,8 @@ impl SimSettings {
                         None,
                         "Buoyant pressurized gas (not sky humidity). Pore liquid→gas expansion drives reverse seepage + aperture growth. Flood-fills cave voids; cool → drip/sinter.",
                     );
-                    ui.checkbox(hash!(), "Steam enabled", &mut self.steam.enabled);
-                    ui.checkbox(hash!(), "Pore boil (wet rock)", &mut self.steam.enable_pore_boil);
+                    ui.checkbox(hash!(), "Cave vapour (humidity under pressure)", &mut self.steam.enabled);
+                    ui.checkbox(hash!(), "Pore boil → humidity", &mut self.steam.enable_pore_boil);
                     ui.checkbox(
                         hash!(),
                         "Pore ↔ cave vapour equalize",

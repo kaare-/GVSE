@@ -1,20 +1,18 @@
-//! Sparse pressurized steam — boil free + pore water above ~100 °C.
+//! Cave vapour = Humidity under pressure (not a second gas CA).
 //!
-//! **Model:** underground vapour *is* Humidity under pressure. Boil and
-//! pore flash mint a thin sparse steam charge for tube escape; mass
-//! exchanges into the shared 4×4 Humidity store (sky + caves). Pressure
-//! for assault / escape reads confined cave humidity density (RH) with
-//! steam residual as a boost. Below boil, wet rock vaporizes into /
-//! absorbs from empty cave air (pore↔cave equalization).
+//! **Model:** boil / pore flash move sat → the shared 4×4 Humidity store.
+//! Pressure is confined-cave RH. Overpressure equalizes by reverse pore
+//! seepage (up and out) and aperture work; cool / depressurized vapour
+//! condenses back to liquid. Sparse `World.steam` is legacy residual only
+//! (save compat / drain) — new mass never mints steam cells.
 //!
-//! **Pore phase change** is the motor: liquid→gas expansion (~1000× in
-//! nature, capped `phase_expansion_drive` here) budgets reverse seepage
-//! and aperture work far beyond the boiled sat mass. Mass stays flat
-//! (sat ↔ steam/humidity); the expansion factor is *force*, not minted water.
+//! **Pore phase change** budgets reverse seepage + cracking via
+//! `phase_expansion_drive` (force, not minted water). Mass stays flat
+//! (sat ↔ humidity).
 //!
-//! **Perf:** assault / escape / pore↔cave eq never walk the full sky
-//! humidity map — seats come from sparse steam + wet-pore neighbours.
-//! Pore↔cave eq runs every [`PORE_CAVE_EQ_EVERY`] ticks.
+//! **Perf:** no full humidity occupied walks; boil only touches hot wet
+//! chunks; assault/escape/eq seed from wet-pore void neighbours on a
+//! strided cadence ([`STEAM_EVERY`]).
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -31,8 +29,11 @@ use crate::mineral::{
 };
 use crate::temperature::Temperature;
 
-/// Cadence for boil / flood / assault / recondense.
-pub const STEAM_EVERY: u64 = 1;
+/// Cadence for boil / assault / escape / recondense (match seepage-ish).
+pub const STEAM_EVERY: u64 = 5;
+
+/// Process 1/`WET_CHUNK_STRIDE` of wet-pore chunks per vapour cadence.
+const WET_CHUNK_STRIDE: u64 = 4;
 
 /// Default boil point (°C).
 pub const BOIL_POINT_C: f32 = 100.0;
@@ -59,13 +60,13 @@ pub const PORE_BOIL_MAX_PER_CELL: u8 = 40;
 pub const PHASE_EXPANSION_DRIVE: u8 = 48;
 
 /// Steam left in the sparse map after exchanging vapour into Humidity
-/// (pressure / escape tubes still need a charge).
-pub const STEAM_PRESSURE_RESIDUAL: u8 = 10;
+/// (legacy residual drain only — new boil goes straight to H).
+pub const STEAM_PRESSURE_RESIDUAL: u8 = 4;
 
 /// How many reverse-seepage hops a phase-expansion pulse may travel.
 pub const REVERSE_SEEP_HOPS: u8 = 4;
 
-/// Cadence for pore↔cave vapour eq (cheaper than every steam tick).
+/// Cadence for pore↔cave vapour eq (aligned with [`STEAM_EVERY`] by default).
 pub const PORE_CAVE_EQ_EVERY: u64 = 5;
 
 /// Max pore sat ↔ cave humidity exchanged per rock cell per cadence.
@@ -295,7 +296,58 @@ fn try_place_steam(world: &mut World, gx: i32, gy: i32, amt: u8, max_cells: usiz
     amt
 }
 
+/// Prefer injecting boiled vapour into Humidity at void Air above / beside.
+fn inject_vapour_near(
+    world: &World,
+    humidity: &mut Humidity,
+    temp: &Temperature,
+    gx: i32,
+    gy: i32,
+    amt: u8,
+) -> u8 {
+    if amt == 0 {
+        return 0;
+    }
+    const DELTAS: [(i32, i32); 7] = [
+        (0, 0),
+        (0, 1),
+        (0, 2),
+        (-1, 1),
+        (1, 1),
+        (-1, 0),
+        (1, 0),
+    ];
+    let mut left = amt;
+    for (dx, dy) in DELTAS {
+        if left == 0 {
+            break;
+        }
+        let tx = world.wrap_x(gx + dx);
+        let ty = gy + dy;
+        let Some(c) = world.get_cell(tx, ty) else {
+            continue;
+        };
+        if c.material != MaterialId::Air {
+            continue;
+        }
+        // Standing lake plugs are not vapour seats (except in-place boil of wet Air).
+        if (dx != 0 || dy != 0) && !is_steam_void(c) {
+            continue;
+        }
+        let t_c = temp.at_cell(tx, ty);
+        let accepted = humidity.try_add_at_temp(tx, ty, left as f32, t_c);
+        let mut took = accepted.floor() as u8;
+        if took < left && t_c >= BOIL_POINT_C - 20.0 {
+            let more = humidity.try_add(tx, ty, (left - took) as f32);
+            took = took.saturating_add(more.floor() as u8);
+        }
+        left = left.saturating_sub(took);
+    }
+    amt.saturating_sub(left)
+}
+
 /// Prefer injecting boiled steam into void Air above / beside the source.
+/// Legacy helper for residual steam placement (escape / flood tests).
 fn inject_steam_near(
     world: &mut World,
     gx: i32,
@@ -331,8 +383,8 @@ fn inject_steam_near(
     0
 }
 
-/// Boil / flood / assault / escape / recondense, exchange into Humidity,
-/// then pore↔cave vapour equalization below boil.
+/// Boil / assault / escape / cool-condense on cadence; drain legacy steam
+/// residual into Humidity; pore↔cave vapour eq below boil.
 pub fn apply_steam(
     world: &mut World,
     temp: &Temperature,
@@ -349,28 +401,25 @@ pub fn apply_steam(
     let recondense_below = boil - RECONDENSE_MARGIN_C;
 
     if due {
+        // Legacy sparse residual: cool → liquid, then equalize leftover gas.
         recondense_cool(world, temp, recondense_below);
-        boil_hot_air(world, temp, cfg, max_cells);
+        if !world.steam.is_empty() {
+            flood_equalize_steam(world, cfg, max_cells);
+        }
+        // New vapour mass goes straight into Humidity (pressure = RH).
+        boil_hot_air(world, humidity, temp, cfg);
         if cfg.enable_pore_boil {
-            boil_hot_pores(world, temp, cfg, max_cells);
+            boil_hot_pores(world, humidity, temp, cfg);
         }
-    }
-    // Equalize every tick while steam exists — vapour fields don't wait on cadence.
-    if !world.steam.is_empty() {
-        flood_equalize_steam(world, cfg, max_cells);
-    }
-    if due {
-        assault_pressurized_vapour(world, humidity, temp, cfg);
+        let seats = collect_local_vapour_seats(world, humidity, temp);
+        assault_pressurized_vapour(world, humidity, temp, cfg, &seats);
         if cfg.enable_escape {
-            escape_pressurized(world, humidity, temp, cfg, max_cells);
-            if !world.steam.is_empty() {
-                flood_equalize_steam(world, cfg, max_cells);
-            }
+            escape_pressurized(world, humidity, temp, cfg, max_cells, &seats);
         }
+        condense_cool_humidity(world, humidity, temp, recondense_below, &seats);
     }
-    // Void vapour joins the humidity store (including underground caves).
+    // Drain any leftover sparse residual into H.
     exchange_steam_into_humidity(world, humidity, temp);
-    // Pore↔cave eq is dirtier than boil — keep it off the every-tick path.
     if cfg.enable_pore_cave_eq && world.tick % PORE_CAVE_EQ_EVERY == 0 {
         equalize_pore_cave_vapour(world, humidity, temp, cfg);
     }
@@ -838,24 +887,62 @@ fn sample_steam_tile_bilinear(
     a + (b - a) * ty
 }
 
-/// Local vapour seats: sparse steam + void Air next to wet pores.
-///
-/// Do **not** walk the whole humidity map — sky H is huge and was crushing
-/// FPS when assault/escape/eq scanned every occupied tile each cadence.
-fn collect_local_vapour_seats(world: &World) -> FxHashSet<(i32, i32)> {
+/// True when any temperature tile covering this chunk is near/above `min_c`.
+fn chunk_overlaps_hot(temp: &Temperature, coord: ChunkCoord, min_c: f32) -> bool {
+    let tc = temp.tile_cols.max(1);
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
+    let x0 = coord.cx * cw;
+    let y0 = coord.cy * ch;
+    let hx0 = x0.div_euclid(tc);
+    let hy0 = y0.div_euclid(tc);
+    let hx1 = (x0 + cw - 1).div_euclid(tc);
+    let hy1 = (y0 + ch - 1).div_euclid(tc);
+    for hy in hy0..=hy1 {
+        for hx in hx0..=hx1 {
+            if temp.at_tile(hx, hy) >= min_c {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Stride wet-pore chunks so soaked worlds don't full-scan every cadence.
+fn select_wet_pore_chunks(world: &World, tick: u64) -> Vec<ChunkCoord> {
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_wet_pores)
+        .map(|(k, _)| *k)
+        .collect();
+    coords.sort_by_key(|c| (c.cy, c.cx));
+    if coords.len() <= 4 || WET_CHUNK_STRIDE <= 1 {
+        return coords;
+    }
+    let phase = tick % WET_CHUNK_STRIDE;
+    coords
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| (*i as u64) % WET_CHUNK_STRIDE == phase)
+        .map(|(_, c)| c)
+        .collect()
+}
+
+/// Local vapour seats: legacy steam keys + void Air next to wet pores
+/// (strided). Skip voids with no humidity and no steam residual.
+fn collect_local_vapour_seats(
+    world: &World,
+    humidity: &Humidity,
+    _temp: &Temperature,
+) -> Vec<(i32, i32)> {
     let mut seats: FxHashSet<(i32, i32)> = FxHashSet::default();
     for &(gx, gy) in world.steam.keys() {
         seats.insert((world.wrap_x(gx), gy));
     }
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
-    let coords: Vec<ChunkCoord> = world
-        .chunks
-        .iter()
-        .filter(|(_, c)| c.has_wet_pores)
-        .map(|(k, _)| *k)
-        .collect();
-    for coord in coords {
+    for coord in select_wet_pore_chunks(world, world.tick) {
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
@@ -875,34 +962,103 @@ fn collect_local_vapour_seats(world: &World) -> FxHashSet<(i32, i32)> {
                 for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0)] {
                     let vx = world.wrap_x(gx + dx);
                     let vy = gy + dy;
-                    if world.get_cell(vx, vy).is_some_and(is_steam_void) {
-                        seats.insert((vx, vy));
+                    if !world.get_cell(vx, vy).is_some_and(is_steam_void) {
+                        continue;
                     }
+                    // Cheap gate: ignore dry empty voids (no pressure work).
+                    if humidity.at_cell(vx, vy) <= 0.05 && steam_at(world, vx, vy) == 0 {
+                        continue;
+                    }
+                    seats.insert((vx, vy));
                 }
             }
         }
     }
-    seats
+    let mut keys: Vec<(i32, i32)> = seats.into_iter().collect();
+    keys.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    // Hard cap — soaked worlds can still mint many seats.
+    const MAX_SEATS: usize = 96;
+    if keys.len() > MAX_SEATS {
+        keys.truncate(MAX_SEATS);
+    }
+    keys
 }
 
-/// Pressurized cave vapour (humidity RH and/or steam residual) assaults
-/// neighbouring wet rock: reverse push + aperture growth.
+/// Cool / depressurized humidity → liquid sat in void seats (mass-flat).
+fn condense_cool_humidity(
+    world: &mut World,
+    humidity: &mut Humidity,
+    temp: &Temperature,
+    recondense_below: f32,
+    seats: &[(i32, i32)],
+) {
+    let mut work = 0u8;
+    let max_work = 24u8;
+    for &(gx, gy) in seats {
+        if work >= max_work {
+            break;
+        }
+        let t_c = temp.at_cell(gx, gy);
+        if t_c >= recondense_below {
+            continue;
+        }
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if !is_steam_void(cell) {
+            continue;
+        }
+        let sat_mass = Humidity::saturation_mass_at_temp(t_c).max(1.0);
+        let mass = humidity.at_cell(gx, gy);
+        if mass <= 0.05 {
+            continue;
+        }
+        // Prefer dumping oversaturated RH; colder air also sheds a fraction.
+        let want = if mass > sat_mass {
+            (mass - sat_mass).min(48.0)
+        } else if t_c < recondense_below - 15.0 {
+            (mass * 0.12).min(24.0)
+        } else {
+            0.0
+        };
+        if want < 0.5 {
+            continue;
+        }
+        let room = u8::MAX.saturating_sub(cell.sat.0) as f32;
+        let put_f = want.min(room);
+        if put_f < 0.5 {
+            continue;
+        }
+        let took = humidity.take(gx, gy, put_f);
+        let put = took.floor() as u8;
+        if put == 0 {
+            continue;
+        }
+        let mut next = cell;
+        next.sat = Sat(cell.sat.0.saturating_add(put));
+        world.set_cell(gx, gy, next);
+        let warmth = ((recondense_below - t_c) / 40.0).clamp(0.0, 1.0);
+        precipitate_artesian_warm(world, gx, gy, warmth);
+        work = work.saturating_add(1);
+    }
+}
+
+/// Pressurized cave vapour (humidity RH) assaults neighbouring wet rock:
+/// reverse push (seepage in reverse) + aperture growth.
 fn assault_pressurized_vapour(
     world: &mut World,
     humidity: &Humidity,
     temp: &Temperature,
     cfg: &SteamConfig,
+    seats: &[(i32, i32)],
 ) {
     let min_p = (cfg.escape_pressure_min * 0.45).clamp(0.02, 0.5);
-    let seats = collect_local_vapour_seats(world);
     if seats.is_empty() {
         return;
     }
-    let mut keys: Vec<(i32, i32)> = seats.into_iter().collect();
-    keys.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut assaults = 0u8;
     let max_a = cfg.max_escapes_per_tick.saturating_mul(2).max(8);
-    for (gx, gy) in keys {
+    for &(gx, gy) in seats {
         if assaults >= max_a {
             break;
         }
@@ -926,6 +1082,7 @@ fn assault_pressurized_vapour(
                 continue;
             }
             if wall.sat.0 > 0 && permeability_cell(wall, &world.hydro) > 0 {
+                // Overpressure equalizes by shoving pore water up/out.
                 reverse_push_pore_water(world, tx, ty, drive_base.max(4));
                 assaults = assaults.saturating_add(1);
             }
@@ -943,7 +1100,7 @@ fn assault_pressurized_vapour(
 
 /// Below boil: wet rock vapour wants to equalize with empty cave air.
 /// Pore sat → cave H when the void is undersaturated; cave H → pore when
-/// cool/oversaturated. Local to wet-pore neighborhoods (no sky-H walk).
+/// cool/oversaturated. Local to wet-pore neighborhoods (strided).
 fn equalize_pore_cave_vapour(
     world: &mut World,
     humidity: &mut Humidity,
@@ -954,14 +1111,8 @@ fn equalize_pore_cave_vapour(
     let max_move = cfg.pore_cave_eq_max_per_cell.max(1);
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
-    let coords: Vec<ChunkCoord> = world
-        .chunks
-        .iter()
-        .filter(|(_, c)| c.has_wet_pores)
-        .map(|(k, _)| *k)
-        .collect();
     let mut jobs: Vec<(i32, i32, i32, i32, i8)> = Vec::new();
-    for coord in coords {
+    for coord in select_wet_pore_chunks(world, world.tick) {
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
@@ -1051,16 +1202,22 @@ fn equalize_pore_cave_vapour(
     }
 }
 
-fn boil_hot_air(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_cells: usize) {
+fn boil_hot_air(
+    world: &mut World,
+    humidity: &mut Humidity,
+    temp: &Temperature,
+    cfg: &SteamConfig,
+) {
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     let boil = cfg.boil_point_c;
-    let prefer_confined = world.steam.len() + 32 >= max_cells;
     let mut jobs: Vec<(i32, i32, u8)> = Vec::new();
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_air || c.has_standing_air)
+        .filter(|(coord, c)| {
+            (c.has_wet_air || c.has_standing_air) && chunk_overlaps_hot(temp, **coord, boil)
+        })
         .map(|(k, _)| *k)
         .collect();
     for coord in coords {
@@ -1081,10 +1238,6 @@ fn boil_hot_air(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_ce
                 if t_c < boil {
                     continue;
                 }
-                let confined = void_is_confined(world, gx, gy);
-                if prefer_confined && !confined && steam_at(world, gx, gy) == 0 {
-                    continue;
-                }
                 let heat = ((t_c - boil) / 50.0).clamp(0.0, 2.0);
                 let cap = ((cfg.boil_max_per_cell as f32) * (1.0 + heat))
                     .round()
@@ -1096,12 +1249,13 @@ fn boil_hot_air(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_ce
             }
         }
     }
-    jobs.sort_by(|a, b| {
-        let ca = void_is_confined(world, a.0, a.1);
-        let cb = void_is_confined(world, b.0, b.1);
-        cb.cmp(&ca).then(b.2.cmp(&a.2))
-    });
+    jobs.sort_by(|a, b| b.2.cmp(&a.2));
+    let mut work = 0u8;
+    let max_work = cfg.max_escapes_per_tick.saturating_mul(4).max(24);
     for (gx, gy, amt) in jobs {
+        if work >= max_work {
+            break;
+        }
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
         };
@@ -1112,17 +1266,23 @@ fn boil_hot_air(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_ce
         if take == 0 {
             continue;
         }
-        let placed = inject_steam_near(world, gx, gy, take, max_cells);
+        let placed = inject_vapour_near(world, humidity, temp, gx, gy, take);
         if placed == 0 {
             continue;
         }
         let mut next = cell;
         next.sat = Sat(cell.sat.0 - placed);
         world.set_cell(gx, gy, next);
+        work = work.saturating_add(1);
     }
 }
 
-fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_cells: usize) {
+fn boil_hot_pores(
+    world: &mut World,
+    humidity: &mut Humidity,
+    temp: &Temperature,
+    cfg: &SteamConfig,
+) {
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     let boil = cfg.boil_point_c;
@@ -1132,7 +1292,7 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_pores)
+        .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
         .map(|(k, _)| *k)
         .collect();
     for coord in coords {
@@ -1185,19 +1345,15 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
             continue;
         }
 
-        // 1) Find or open a seat for the vapour mass (mass-flat).
-        let seat = find_steam_seat(world, gx, gy, max_cells)
-            .or_else(|| open_pore_steam_seat(world, gx, gy, max_cells, expand))
+        // 1) Find or open a void seat; vapour mass goes into Humidity.
+        let seat = find_vapour_seat(world, gx, gy)
+            .or_else(|| open_pore_vapour_seat(world, gx, gy, expand))
             .or_else(|| {
-                // Fully sealed impermeable neighbourhood: spend expansion on
-                // aperture growth, then retry for a newly opened seat.
                 phase_crack_host(world, gx, gy, take, expand);
-                find_steam_seat(world, gx, gy, max_cells)
-                    .or_else(|| open_pore_steam_seat(world, gx, gy, max_cells, expand))
+                find_vapour_seat(world, gx, gy)
+                    .or_else(|| open_pore_vapour_seat(world, gx, gy, expand))
             });
         let Some((sx, sy)) = seat else {
-            // Still no vapour seat: expansion still shoves remaining pore water
-            // upward (seepage in reverse) so the tube keeps growing.
             let drive = (take as u16)
                 .saturating_mul(expand as u16)
                 .min(255) as u8;
@@ -1210,28 +1366,65 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
         let mut next = cell;
         next.sat = Sat(before - take);
         world.set_cell(gx, gy, next);
-        if try_place_steam(world, sx, sy, take, max_cells) == 0 {
-            // Cap: put sat back.
+        let placed = inject_vapour_near(world, humidity, temp, sx, sy, take);
+        if placed == 0 {
             let mut back = world.get_cell(gx, gy).unwrap_or(next);
             back.sat = Sat(back.sat.0.saturating_add(take));
             world.set_cell(gx, gy, back);
             continue;
         }
-        carry_with_water(world, (gx, gy), (sx, sy), take, before);
+        if placed < take {
+            let mut back = world.get_cell(gx, gy).unwrap_or(next);
+            back.sat = Sat(back.sat.0.saturating_add(take - placed));
+            world.set_cell(gx, gy, back);
+        }
+        carry_with_water(world, (gx, gy), (sx, sy), placed, before);
 
-        // 2) Phase-change pressure: expansion drive ≫ boiled mass.
-        //    Remaining liquid is shoved out of the rock (seepage in reverse).
-        let drive = (take as u16)
+        let drive = (placed as u16)
             .saturating_mul(expand as u16)
             .min(255) as u8;
         reverse_seep_chain(world, gx, gy, drive, hops);
-        // Host cell itself also widens under flash expansion.
-        phase_crack_host(world, gx, gy, take, expand);
+        phase_crack_host(world, gx, gy, placed, expand);
         work = work.saturating_add(1);
     }
 }
 
+/// Nearby void Air for freshly boiled pore vapour (no sparse steam mint).
+fn find_vapour_seat(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
+    const DELTAS: [(i32, i32); 10] = [
+        (0, 1),
+        (0, 2),
+        (-1, 1),
+        (1, 1),
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (-1, 2),
+        (1, 2),
+        (0, 3),
+    ];
+    for (dx, dy) in DELTAS {
+        let tx = world.wrap_x(gx + dx);
+        let ty = gy + dy;
+        if world.get_cell(tx, ty).is_some_and(is_steam_void) {
+            return Some((tx, ty));
+        }
+    }
+    None
+}
+
+/// Crack / burst toward a void seat for pore vapour (humidity path).
+fn open_pore_vapour_seat(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    expand: u8,
+) -> Option<(i32, i32)> {
+    open_pore_steam_seat(world, gx, gy, usize::MAX, expand)
+}
+
 /// Prefer nearby Air (especially above) for freshly boiled pore steam.
+/// Legacy residual path (escape / flood).
 fn find_steam_seat(
     world: &World,
     gx: i32,
@@ -1406,17 +1599,15 @@ fn escape_pressurized(
     temp: &Temperature,
     cfg: &SteamConfig,
     max_cells: usize,
+    seats: &[(i32, i32)],
 ) {
     let min_p = cfg.escape_pressure_min.clamp(0.02, 0.95);
-    let seats = collect_local_vapour_seats(world);
     if seats.is_empty() {
         return;
     }
-    let mut keys: Vec<(i32, i32)> = seats.into_iter().collect();
-    keys.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut escapes = 0u8;
     let max_esc = cfg.max_escapes_per_tick.max(1);
-    for (gx, gy) in keys {
+    for &(gx, gy) in seats {
         if escapes >= max_esc {
             break;
         }
@@ -1668,7 +1859,7 @@ mod tests {
         add_steam(&mut w, 3, 2, 180);
         assert!(void_is_confined(&w, 3, 2));
         let hot = temp_fill(&w, 120.0);
-        w.tick = 1;
+        w.tick = STEAM_EVERY;
         apply_steam(&mut w, &hot, &mut Humidity::new(4), &SteamConfig::default());
         let chamber = steam_at(&w, 3, 3) + steam_at(&w, 4, 3) + steam_at(&w, 6, 3);
         assert!(
@@ -1699,7 +1890,7 @@ mod tests {
         add_steam(&mut w, 4, 3, 180);
         add_steam(&mut w, 5, 4, 180);
         let hot = temp_fill(&w, 140.0);
-        w.tick = 1;
+        w.tick = STEAM_EVERY;
         apply_steam(&mut w, &hot, &mut Humidity::new(4), &SteamConfig::default());
         let haze = steam_haze_wash(&w, Some(&hot));
         assert!(!haze.is_empty(), "steam must produce a haze wash");
@@ -1737,19 +1928,29 @@ mod tests {
         w.set_cell(5, 3, Cell::air());
         assert!(void_is_confined(&w, 4, 2));
         let hot = temp_fill(&w, 120.0);
+        let mut hum = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &mut Humidity::new(4), &SteamConfig::default());
+        apply_steam(&mut w, &hot, &mut hum, &SteamConfig::default());
         assert!(
-            steam_at(&w, 4, 3) + steam_at(&w, 5, 3) + steam_at(&w, 5, 2) > 0,
-            "confined steam must occupy the void, not only the water seat"
+            hum.total_mass() > 0.0,
+            "confined boil must put vapour into humidity"
+        );
+        assert!(
+            w.get_cell(4, 2).unwrap().sat.0 < 255,
+            "boil must consume free water sat"
+        );
+        let press = cave_vapour_pressure_norm(&w, &hum, &hot, 4, 3)
+            .max(cave_vapour_pressure_norm(&w, &hum, &hot, 5, 3));
+        assert!(
+            press > 0.0,
+            "cave humidity must pressurize the void (press={press:.3})"
         );
         w.tick = STEAM_EVERY * 2;
-        apply_steam(&mut w, &hot, &mut Humidity::new(4), &SteamConfig::default());
+        apply_steam(&mut w, &hot, &mut hum, &SteamConfig::default());
         assert!(
             steam_at(&w, 4, 6) == 0 && steam_at(&w, 4, 7) == 0,
-            "steam must not pass an intact stone roof in two cadences"
+            "vapour must not mint steam above an intact stone roof"
         );
-        assert!(steam_pressure_norm(&w, 4, 3) > 0.0);
     }
 
     #[test]
@@ -1851,12 +2052,20 @@ mod tests {
             w.set_cell(4, y, Cell::air());
         }
         let hot = temp_fill(&w, 150.0);
+        let mut hum = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &mut Humidity::new(4), &SteamConfig::default());
-        assert!(steam_total(&w) > 0);
+        apply_steam(&mut w, &hot, &mut hum, &SteamConfig::default());
+        assert!(
+            hum.total_mass() > 0.0,
+            "hot wet vent must boil into humidity"
+        );
+        let mass0 = hum.total_mass();
         w.tick = STEAM_EVERY * 2;
-        apply_steam(&mut w, &hot, &mut Humidity::new(4), &SteamConfig::default());
-        assert!(steam_total(&w) > 0);
+        apply_steam(&mut w, &hot, &mut hum, &SteamConfig::default());
+        assert!(
+            hum.total_mass() >= mass0,
+            "continued boil must keep or grow humidity plume"
+        );
     }
 
     #[test]
