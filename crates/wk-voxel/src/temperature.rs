@@ -957,8 +957,12 @@ impl Temperature {
                     n + (skin - n) * relax
                 }
                 TileLayer::Buried { .. } => {
-                    // Free-water column (deep lake) is not rock — skip geothermal.
-                    if props.free_water >= 0.5 {
+                    // Free-water / ice column is not rock — skip geothermal.
+                    // Geothermal on bed ice left warm packs inside cold lakes.
+                    let icy = world
+                        .map(|w| tile_ice_frac(w, hx, hy, self.tile_cols.max(1)) >= 0.5)
+                        .unwrap_or(false);
+                    if props.free_water >= 0.5 || icy {
                         t
                     } else {
                         // Overburden from the live rock surface, every step.
@@ -1843,6 +1847,28 @@ fn tile_free_water_frac(world: &World, hx: i32, hy: i32, tile_cols: i32) -> f32 
         }
     }
     (wet / n.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// Fraction of a tile that is Ice/Snow (lake pack / bed ice).
+fn tile_ice_frac(world: &World, hx: i32, hy: i32, tile_cols: i32) -> f32 {
+    let tc = tile_cols.max(1);
+    let x0 = hx * tc;
+    let y0 = hy * tc;
+    let mut icy = 0.0f32;
+    let n = (tc * tc) as f32;
+    for ly in 0..tc {
+        for lx in 0..tc {
+            let gx = world.wrap_x(x0 + lx);
+            let gy = y0 + ly;
+            let Some(cell) = world.get_cell(gx, gy) else {
+                continue;
+            };
+            if matches!(cell.material, MaterialId::Ice | MaterialId::Snow) {
+                icy += 1.0;
+            }
+        }
+    }
+    (icy / n.max(1.0)).clamp(0.0, 1.0)
 }
 
 /// Mean pore wetness (`sat / capacity`) over porous solids in a tile.

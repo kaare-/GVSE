@@ -190,6 +190,9 @@ pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
 
 /// Cheap column gate: skip warm dry columns with no ice/snow near the
 /// free surface. Cold wet columns and any frozen band still run.
+///
+/// Frozen material is probed deeper than freezable water — warm ice under
+/// a thick lake used to sit past the 12-cell band and never thaw.
 fn column_may_phase(world: &World, gx: i32, temp: &Temperature, cfg: &PhaseConfig) -> bool {
     let Some((y0, y1)) = y_bounds(world) else {
         return false;
@@ -199,6 +202,7 @@ fn column_may_phase(world: &World, gx: i32, temp: &Temperature, cfg: &PhaseConfi
     // Start near rock∪sea (+margin), not world y_hi — Super-Server stress
     // paid ~4 ms walking empty sky from the ceiling.
     const BAND: i32 = 12;
+    const FROZEN_PROBE: i32 = 96;
     const SKY_SLACK: i32 = 32;
     let rock = live_surface_at(world, temp.seed, gx, temp.sea_level_y, temp.width_cols);
     let start = rock
@@ -217,14 +221,18 @@ fn column_may_phase(world: &World, gx: i32, temp: &Temperature, cfg: &PhaseConfi
         let mut has_freezable = cell.material == MaterialId::Air
             && cell.sat.0 >= cfg.min_sat_to_freeze;
         let band_lo = (y - BAND + 1).max(y0);
-        for yy in band_lo..y {
+        let frozen_lo = (y - FROZEN_PROBE + 1).max(y0);
+        for yy in frozen_lo..y {
             let Some(c) = world.get_cell(gx, yy) else {
                 continue;
             };
             if is_frozen_solid(c.material) {
                 has_frozen = true;
             }
-            if c.material == MaterialId::Air && c.sat.0 >= cfg.min_sat_to_freeze {
+            if yy >= band_lo
+                && c.material == MaterialId::Air
+                && c.sat.0 >= cfg.min_sat_to_freeze
+            {
                 has_freezable = true;
             }
             if has_frozen && has_freezable {
@@ -883,7 +891,7 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         let open_surface = is_standing_water(world, gx, y)
             && open_sky_above(world, gx, y)
             && !below_is_frozen(world, gx, y)
-            && !frozen_anywhere_below(world, gx, y, y0);
+            && !frozen_with_water_gap_below(world, gx, y, y0);
         if !under_lid && !open_surface {
             continue;
         }
@@ -897,14 +905,28 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
     }
 }
 
-/// True when any Ice/Snow sits strictly below `gy` in this column.
-fn frozen_anywhere_below(world: &World, gx: i32, gy: i32, y0: i32) -> bool {
-    for y in y0..gy {
-        if matches!(
-            world.get_cell(gx, y).map(|c| c.material),
-            Some(MaterialId::Ice) | Some(MaterialId::Snow)
-        ) {
-            return true;
+/// True when Ice/Snow sits below `gy` with free water in between.
+///
+/// That is the shore-pump case: a submerged flake leaves a water gap and
+/// a second open skin must not freeze above it. A contiguous ice pack
+/// (no gap) is handled by under-lid thickening, not this gate.
+fn frozen_with_water_gap_below(world: &World, gx: i32, gy: i32, y0: i32) -> bool {
+    let mut saw_water_gap = false;
+    for y in ((y0)..gy).rev() {
+        let Some(c) = world.get_cell(gx, y) else {
+            continue;
+        };
+        if is_frozen_solid(c.material) {
+            return saw_water_gap;
+        }
+        if c.material.is_solid() {
+            // Hit rock/soil with no ice above it in this walk.
+            return false;
+        }
+        if c.material == MaterialId::Air
+            && (c.sat.0 >= 200 || is_standing_water(world, gx, y))
+        {
+            saw_water_gap = true;
         }
     }
     false
@@ -986,10 +1008,14 @@ fn snow_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
 ///
 /// Top-down, rate-limited — a sudden warm snap cannot dump a whole
 /// ice cliff into the basin in one tick (mass stays one cell at a time).
+///
+/// Pack albedo can keep the frozen tile itself cold while air above or
+/// free water beside it is warm — contact temperatures also thaw.
 fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
     };
+    let freeze = cfg.freeze_point_c;
     let mut thaws_left = cfg.max_thaw_cells_per_column_per_tick.max(1) as i32;
     for y in (y0..=y1).rev() {
         if thaws_left <= 0 {
@@ -1012,13 +1038,43 @@ fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig
             continue;
         }
         let t_c = temp.at_cell(gx, y);
-        if t_c <= cfg.freeze_point_c {
+        let contact_warm = frozen_contact_is_warm(world, gx, y, temp, freeze);
+        if t_c <= freeze && !contact_warm {
             continue;
         }
         // Whole-cell thaw → one full water cell. No fractional sat minting.
         world.set_cell(gx, y, Cell::water());
         thaws_left -= 1;
     }
+}
+
+/// Air above or free water above/below the pack is warmer than freeze.
+fn frozen_contact_is_warm(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    temp: &Temperature,
+    freeze: f32,
+) -> bool {
+    if let Some(above) = world.get_cell(gx, gy + 1) {
+        if !is_frozen_solid(above.material)
+            && (above.material == MaterialId::Air || above.material == MaterialId::Water)
+            && temp.at_cell(gx, gy + 1) > freeze
+        {
+            return true;
+        }
+    }
+    if let Some(below) = world.get_cell(gx, gy - 1) {
+        if below.material == MaterialId::Air && is_standing_water(world, gx, gy - 1)
+            && temp.at_cell(gx, gy - 1) > freeze
+        {
+            return true;
+        }
+        if below.material == MaterialId::Water && temp.at_cell(gx, gy - 1) > freeze {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -2015,6 +2071,93 @@ mod tests {
                 "must not skin a second lid above submerged ice at y={y}"
             );
         }
+    }
+
+    #[test]
+    fn deep_warm_ice_under_lake_still_thaws() {
+        // Ice deeper than the old 12-cell column_may_phase band must still melt
+        // when the lake is warm (inspector showed 11°C ice that never thawed).
+        let mut w = World::new(51);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::solid(MaterialId::Ice)); // deep pack
+        for y in 2..=40 {
+            w.set_cell(3, y, Cell::water());
+        }
+        let temp = cold_temp(16, 64, 12.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            max_thaw_cells_per_column_per_tick: 4,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..8 {
+            w.tick = tick;
+            apply_phase(&mut w, &temp, &cfg);
+        }
+        assert_ne!(
+            w.get_cell(3, 1).map(|c| c.material),
+            Some(MaterialId::Ice),
+            "warm deep ice under a thick lake must thaw"
+        );
+    }
+
+    #[test]
+    fn cold_snow_pack_melts_when_water_below_is_warm() {
+        // Albedo-cold snow tile with warm lake contact must still melt.
+        let mut w = World::new(52);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::water());
+        w.set_cell(3, 2, Cell::water());
+        w.set_cell(3, 3, Cell::solid(MaterialId::Snow));
+        let mut temp = cold_temp(16, 16, 10.0);
+        // Snow tile itself stays "cold" (albedo pack); water below is warm.
+        temp.cells.insert((0, 0), 10.0);
+        let tc = temp.tile_cols.max(1);
+        let snow_hy = 3i32.div_euclid(tc);
+        let water_hy = 2i32.div_euclid(tc);
+        temp.cells.insert((0, snow_hy), -2.0);
+        temp.cells.insert((0, water_hy), 10.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..4 {
+            w.tick = tick;
+            apply_phase(&mut w, &temp, &cfg);
+        }
+        assert_ne!(
+            w.get_cell(3, 3).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "snow on warm water must melt even if the snow tile reads cold"
+        );
+    }
+
+    #[test]
+    fn open_cold_lake_freezes_a_skin() {
+        let mut w = World::new(53);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..=5 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=4 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        let temp = cold_temp(16, 16, -9.5);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..4 {
+            w.tick = tick;
+            apply_phase(&mut w, &temp, &cfg);
+        }
+        assert_eq!(
+            w.get_cell(3, 4).unwrap().material,
+            MaterialId::Ice,
+            "cold open lake must form a surface skin"
+        );
     }
 
     #[test]
