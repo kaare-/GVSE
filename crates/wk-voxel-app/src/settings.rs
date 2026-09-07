@@ -1072,7 +1072,7 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Steam / boil", |ui| {
                     ui.label(
                         None,
-                        "Buoyant vapour (not sky humidity). Hot free water + pore water flash to steam that rises; confined pressure escapes through rock (reverse seepage / tubes) and drops sinter on cool.",
+                        "Buoyant pressurized gas (not sky humidity). Flood-fills cave voids, assaults wet pores, escapes through soft rock. Cool → drip/sinter.",
                     );
                     ui.checkbox(hash!(), "Steam enabled", &mut self.steam.enabled);
                     ui.checkbox(hash!(), "Pore boil (wet rock)", &mut self.steam.enable_pore_boil);
@@ -1137,6 +1137,14 @@ impl SimSettings {
                         1.0..32.0,
                         &mut escapes,
                     );
+                    let mut flood = self.steam.void_flood_budget as f32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Void flood budget (cells)",
+                        16.0..256.0,
+                        &mut flood,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
@@ -1150,6 +1158,7 @@ impl SimSettings {
                     self.steam.rise_max_per_cell = rise_max.round().clamp(0.0, 255.0) as u8;
                     self.steam.surface_residual = residual.round().clamp(0.0, 255.0) as u8;
                     self.steam.max_escapes_per_tick = escapes.round().clamp(1.0, 64.0) as u8;
+                    self.steam.void_flood_budget = flood.round().clamp(8.0, 512.0) as u16;
                     self.steam.max_steam_cells = max_cells.round().clamp(32.0, 2048.0) as u16;
                     self.steam.period_ticks = period.round().clamp(1.0, 60.0) as u64;
                 });
