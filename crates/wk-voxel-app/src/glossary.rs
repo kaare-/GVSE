@@ -425,7 +425,7 @@ const HUD: &[(&str, LineKind)] = &[
     ("drizzle   C condensation: on / off (rain or snow)", LineKind::Body),
     ("evap      E pump: on / off", LineKind::Body),
     ("phase     I ice/snow pass: on / off", LineKind::Body),
-    ("steam     soft humidity-like haze (4×4); pressure/heat tint; HUD cell count", LineKind::Body),
+    ("steam     underground vapour (sparse); soft haze look; never writes sky H", LineKind::Body),
     ("hum       humidity vapor mass (the sky water store)", LineKind::Body),
     ("C=        carbon atmosphere / dissolved (not the C key)", LineKind::Body),
     ("spores    hibernating genomes in the bank", LineKind::Body),

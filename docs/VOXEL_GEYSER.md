@@ -32,16 +32,17 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam | **Buoyant void vapour** (sparse `World.steam` mass). **Looks like humidity:** coarse 4×4 soft white haze; pressure/heat raise density & warmth. Humidity store stays sky — steam does **not** dump into H/rain. Pore boil + reverse seepage escape; cool → sinter. |
-| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
-| Pressure | **No continuum PDE.** Sparse steam charge + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
+| Steam / underground vapour | **Sparse void vapour** (`World.steam`). Separate from sky [`Humidity`]. Looks like soft 4×4 haze; **never** dumps into H/rain. Overpressure equalizes by reverse pore seepage + aperture/escape. Cool → liquid + sinter. Cadence `STEAM_EVERY` (= 5). |
+| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~32×), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
+| Pressure | **No continuum PDE.** Sparse underground vapour density + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |
-| Sky path | Do not couple geyser steam into humidity / rain. Steam *behaves* like warm vapour in voids only. |
+| Sky path | **Hard split.** Geyser vapour must not write sky humidity / rain lottery. Do not retain cave mass in the weather H store. |
 
 ### Hard no’s
 
 - No world-wide vapour or pressure grids.
 - No second full-world confined/pressure BFS.
+- **No writing underground boil / pressure into the sky Humidity store.**
 - No frost heave (P5) until P1–P4 are proven and someone asks.
 - Do not skip the condensation lottery to “make steam.”
 - Do not apply the contact dry-pore skip on the deep seepage pass.
@@ -146,8 +147,8 @@ Boil free **Air** sat and **pore** sat at/above 100 °C into sparse `World.steam
 | Cave under solid roof | Steam **flood-fills the connected void** (equal density); pressure assaults wet pores + widens/bursts soft lids into tubes |
 | Hot wet rock | Pore boil seats vapour (or opens a micro-void); **phase expansion** (`phase_expansion_drive` × boiled) reverse-seeps multi-hop (`reverse_seep_hops`) and cracks the host — even when sealed |
 
-Save schema **v17**. Cadence `STEAM_EVERY` (= 1 while tuning). Tab → Climate → Steam
-(phase expansion + reverse-seep hops knobs).
+Save schema **v17**. Cadence `STEAM_EVERY` (= 5). Tab → Climate → Steam
+(phase expansion + reverse-seep hops knobs). Flood/assault run on cadence only.
 
 **Acceptance:** hot free water loses sat to rising steam (mass-flat); cave steam
 piles under the roof and pressurizes; sealed wet limestone reverse-pushes pore

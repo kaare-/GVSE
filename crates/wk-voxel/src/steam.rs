@@ -1,18 +1,16 @@
-//! Sparse pressurized steam — boil free + pore water above ~100 °C.
+//! Underground vapour / pressure — sparse, sky Humidity untouched.
 //!
-//! Steam is a **gas in voids**, not a liquid blob. On each cadence it
-//! flood-fills connected Air and equalizes (confined) or piles at the
-//! open top (vented). Pressure assaults wet pores (reverse seepage +
-//! fast aperture growth) and bursts soft lids into tubes.
+//! **Store:** `World.steam` is a capped sparse map of void vapour mass in
+//! caves / conduits. It is **not** the sky humidity field and never writes
+//! into rain / H lottery ([`Humidity`] stays weather-only).
 //!
-//! **Pore phase change** is the motor: liquid→gas expansion (~1000× in
-//! nature, capped `phase_expansion_drive` here) budgets reverse seepage
-//! and aperture work far beyond the boiled sat mass. Mass stays flat
-//! (sat ↔ steam); the expansion factor is *force*, not minted water.
+//! **Motor:** boil free + pore water above ~100 °C → sparse vapour. Liquid→gas
+//! expansion (`phase_expansion_drive`) budgets reverse pore seepage + aperture
+//! work (force, not minted mass). Confined pockets flood-equalize; overpressure
+//! assaults wet rock upward and bursts soft lids. Cool → liquid + sinter.
 //!
-//! **Look:** steam draws like sky humidity — coarse 4×4 tiles, soft white
-//! wash; pressure/heat only raise density and warmth. It does **not** dump
-//! into the rain lottery. See docs/VOXEL_GEYSER.md.
+//! **Look:** draws like soft haze (4×4 tiles) so it *reads* as vapour without
+//! joining the humidity store. See docs/VOXEL_GEYSER.md.
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -28,8 +26,8 @@ use crate::mineral::{
 };
 use crate::temperature::Temperature;
 
-/// Cadence for boil / flood / assault / recondense.
-pub const STEAM_EVERY: u64 = 1;
+/// Cadence for boil / flood / assault / recondense (FPS: not every tick).
+pub const STEAM_EVERY: u64 = 5;
 
 /// Default boil point (°C).
 pub const BOIL_POINT_C: f32 = 100.0;
@@ -50,9 +48,10 @@ pub const PORE_BOIL_MAX_PER_CELL: u8 = 40;
 ///
 /// Real steam is ~1000× liquid volume; we use a capped sim factor so each
 /// boiled sat unit budgets this many units of reverse seepage + aperture
-/// work. Mass stays flat (boiled sat ↔ steam); the factor is *force*, not
-/// minted water.
-pub const PHASE_EXPANSION_DRIVE: u8 = 12;
+/// work. Mass stays flat (boiled sat ↔ sparse vapour); the factor is *force*,
+/// not minted water. Low values feel inert; dozens read as flash without
+/// pretending full 1700×.
+pub const PHASE_EXPANSION_DRIVE: u8 = 32;
 
 /// How many reverse-seepage hops a phase-expansion pulse may travel.
 pub const REVERSE_SEEP_HOPS: u8 = 4;
@@ -268,33 +267,37 @@ fn inject_steam_near(
     0
 }
 
-/// Boil / flood / assault / escape / recondense. Humidity (sky) untouched.
+/// Boil / flood / assault / escape / recondense.
+///
+/// **Hard rule:** never reads or writes [`crate::humidity::Humidity`].
+/// Sky weather / rain lottery stay independent of underground vapour.
 pub fn apply_steam(world: &mut World, temp: &Temperature, cfg: &SteamConfig) {
     if !cfg.enabled {
         return;
     }
     let period = cfg.period_ticks.max(1);
     let due = world.tick % period == 0;
+    if !due {
+        return;
+    }
     let max_cells = cfg.max_steam_cells.max(1) as usize;
     let boil = cfg.boil_point_c;
     let recondense_below = boil - RECONDENSE_MARGIN_C;
 
-    if due {
-        recondense_cool(world, temp, recondense_below);
-        boil_hot_air(world, temp, cfg, max_cells);
-        if cfg.enable_pore_boil {
-            boil_hot_pores(world, temp, cfg, max_cells);
-        }
+    recondense_cool(world, temp, recondense_below);
+    boil_hot_air(world, temp, cfg, max_cells);
+    if cfg.enable_pore_boil {
+        boil_hot_pores(world, temp, cfg, max_cells);
     }
-    // Equalize every tick while steam exists — vapour fields don't wait on cadence.
+    // Flood + assault only on cadence (every-tick flood crushed FPS).
     if !world.steam.is_empty() {
         flood_equalize_steam(world, cfg, max_cells);
-    }
-    if due && !world.steam.is_empty() {
         assault_steam_walls(world, cfg);
         if cfg.enable_escape {
             escape_pressurized(world, temp, cfg, max_cells);
-            flood_equalize_steam(world, cfg, max_cells);
+            if !world.steam.is_empty() {
+                flood_equalize_steam(world, cfg, max_cells);
+            }
         }
     }
 }
@@ -774,6 +777,27 @@ fn assault_steam_walls(world: &mut World, cfg: &SteamConfig) {
     }
 }
 
+/// True when any temperature tile covering this chunk is near/above `min_c`.
+fn chunk_overlaps_hot(temp: &Temperature, coord: ChunkCoord, min_c: f32) -> bool {
+    let tc = temp.tile_cols.max(1);
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
+    let x0 = coord.cx * cw;
+    let y0 = coord.cy * ch;
+    let hx0 = x0.div_euclid(tc);
+    let hy0 = y0.div_euclid(tc);
+    let hx1 = (x0 + cw - 1).div_euclid(tc);
+    let hy1 = (y0 + ch - 1).div_euclid(tc);
+    for hy in hy0..=hy1 {
+        for hx in hx0..=hx1 {
+            if temp.at_tile(hx, hy) >= min_c {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn boil_hot_air(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_cells: usize) {
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
@@ -783,7 +807,9 @@ fn boil_hot_air(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_ce
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_air || c.has_standing_air)
+        .filter(|(coord, c)| {
+            (c.has_wet_air || c.has_standing_air) && chunk_overlaps_hot(temp, **coord, boil)
+        })
         .map(|(k, _)| *k)
         .collect();
     for coord in coords {
@@ -855,7 +881,7 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_pores)
+        .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
         .map(|(k, _)| *k)
         .collect();
     for coord in coords {
@@ -1382,7 +1408,7 @@ mod tests {
         add_steam(&mut w, 3, 2, 180);
         assert!(void_is_confined(&w, 3, 2));
         let hot = temp_fill(&w, 120.0);
-        w.tick = 1;
+        w.tick = STEAM_EVERY;
         apply_steam(&mut w, &hot, &SteamConfig::default());
         let chamber = steam_at(&w, 3, 3) + steam_at(&w, 4, 3) + steam_at(&w, 6, 3);
         assert!(
@@ -1413,7 +1439,7 @@ mod tests {
         add_steam(&mut w, 4, 3, 180);
         add_steam(&mut w, 5, 4, 180);
         let hot = temp_fill(&w, 140.0);
-        w.tick = 1;
+        w.tick = STEAM_EVERY;
         apply_steam(&mut w, &hot, &SteamConfig::default());
         let haze = steam_haze_wash(&w, Some(&hot));
         assert!(!haze.is_empty(), "steam must produce a haze wash");
