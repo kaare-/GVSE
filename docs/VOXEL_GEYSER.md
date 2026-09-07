@@ -32,7 +32,7 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam | **Buoyant void vapour** (sparse `World.steam`). Wants to rise. Humidity stays sky — steam does **not** dump into H/rain. Pore water also boils. Confined pressure escapes (reverse seepage / soft-rock tubes) and cools to sinter. |
+| Steam | **Buoyant void vapour** (sparse `World.steam` mass). **Looks like humidity:** coarse 4×4 soft white haze; pressure/heat raise density & warmth. Humidity store stays sky — steam does **not** dump into H/rain. Pore boil + reverse seepage escape; cool → sinter. |
 | Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
 | Pressure | **No continuum PDE.** Sparse steam charge + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |

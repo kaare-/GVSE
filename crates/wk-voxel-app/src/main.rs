@@ -194,11 +194,17 @@ fn sat_overlay_color(wet: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
-/// Sparse conduit steam as a vapour wash (pocket density, not speckles).
-fn steam_mist_color(density: u8) -> Color {
+/// Sparse conduit steam as soft humidity-like haze (4×4 tiles).
+/// Pressure/heat raise alpha and warmth; never an opaque blue plug.
+fn steam_haze_color(density: u8, warmth: u8) -> Color {
     let t = (density as f32 / 255.0).clamp(0.0, 1.0);
-    let a = (55.0 + 100.0 * t.sqrt()) as u8;
-    Color::from_rgba(232, 240, 248, a)
+    let w = (warmth as f32 / 255.0).clamp(0.0, 1.0);
+    // Match humidity haze range (~18–70), with a little headroom when pressurized.
+    let a = (18.0 + t * 48.0 + w * 22.0).min(88.0) as u8;
+    let r = (255.0 - w * 8.0) as u8;
+    let g = (255.0 - w * 22.0) as u8;
+    let b = (255.0 - w * 4.0) as u8;
+    Color::from_rgba(r, g, b, a)
 }
 
 fn scale_color_alpha(c: Color, k: f32) -> Color {
@@ -1113,26 +1119,27 @@ async fn main() {
             );
         }
 
-        // Steam vapour field — continuous wash over the pocket, not speckles.
+        // Steam as humidity-shaped haze (4×4 tiles, soft white; pressure/heat tint).
+        // Sparse steam mass stays the conduit store — not dumped into sky H/rain.
         if !scene.world.steam.is_empty() {
             let bedrock_y = scene.params.bedrock_floor_y;
-            for (gx, gy, density) in wk_voxel::steam_vapour_field(&scene.world) {
-                if density == 0 || gy < y_min_vis || gy >= y_max_vis {
+            for sample in wk_voxel::steam_haze_wash(&scene.world, Some(&scene.temperature)) {
+                if sample.density == 0 || sample.gy < y_min_vis || sample.gy >= y_max_vis {
                     continue;
                 }
                 for &x_copy in x_copies {
-                    let x = scene.world.wrap_x(gx) + x_copy * scene.params.width_cols;
+                    let x = scene.world.wrap_x(sample.gx) + x_copy * scene.params.width_cols;
                     let sx = origin_x + x as f32 * cell_px;
-                    let sy = origin_y - (gy - bedrock_y) as f32 * cell_px;
+                    let sy = origin_y - (sample.gy - bedrock_y) as f32 * cell_px;
                     if sx + cell_px < 0.0 || sx > sw || sy + cell_px < 0.0 || sy > sh {
                         continue;
                     }
                     draw_rectangle(
                         sx,
                         sy - cell_px,
-                        cell_px,
-                        cell_px,
-                        steam_mist_color(density),
+                        cell_px + 0.5,
+                        cell_px + 0.5,
+                        steam_haze_color(sample.density, sample.warmth),
                     );
                 }
             }

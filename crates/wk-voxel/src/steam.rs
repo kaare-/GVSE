@@ -10,8 +10,9 @@
 //! and aperture work far beyond the boiled sat mass. Mass stays flat
 //! (sat ↔ steam); the expansion factor is *force*, not minted water.
 //!
-//! Humidity stays the coarse **sky** field — steam does not dump into
-//! rain. See docs/VOXEL_GEYSER.md.
+//! **Look:** steam draws like sky humidity — coarse 4×4 tiles, soft white
+//! wash; pressure/heat only raise density and warmth. It does **not** dump
+//! into the rain lottery. See docs/VOXEL_GEYSER.md.
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -20,7 +21,7 @@ use crate::cell::{
     is_flow_erodible, is_grain, permeability_cell, water_capacity_cell, Cell, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
-use crate::fasthash::FxHashSet;
+use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::mineral::{
     carry_with_water, dissolved_at, precipitate_artesian_warm, widen_aperture,
@@ -513,14 +514,56 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
 /// Returns `(gx, gy, density_u8)` with a visibility floor so thin steam still
 /// reads as a filled field.
 pub fn steam_vapour_field(world: &World) -> Vec<(i32, i32, u8)> {
+    steam_haze_wash(world, None)
+        .into_iter()
+        .map(|s| (s.gx, s.gy, s.density))
+        .collect()
+}
+
+/// Soft humidity-like steam wash sample (cell resolution, from 4×4 tiles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SteamHazeSample {
+    pub gx: i32,
+    pub gy: i32,
+    /// Visual density 0..=255 (maps to soft haze alpha, not opaque fill).
+    pub density: u8,
+    /// Warmth 0..=255 from temperature + pressure (slight warm tint).
+    pub warmth: u8,
+}
+
+/// Coarse tile side for steam haze — same grain as sky [`crate::humidity::Humidity`].
+pub const STEAM_HAZE_TILE: i32 = 4;
+
+/// Build a humidity-shaped wash: steam mass lives on 4×4 tiles, then each Air
+/// void cell bilinear-samples that field. Pressure and heat raise density /
+/// warmth; the look stays soft white vapour, not a solid blue plug.
+pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHazeSample> {
     if world.steam.is_empty() {
         return Vec::new();
     }
+    let tc = STEAM_HAZE_TILE.max(1);
+    let mut tile_mass: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+    let mut tile_press: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+
+    // 1) Bin sparse steam markers onto coarse tiles.
+    for (&(gx, gy), &amt) in world.steam.iter() {
+        if amt == 0 {
+            continue;
+        }
+        let gx = world.wrap_x(gx);
+        let hx = gx.div_euclid(tc);
+        let hy = gy.div_euclid(tc);
+        *tile_mass.entry((hx, hy)).or_insert(0.0) += amt as f32;
+        let p = steam_pressure_norm(world, gx, gy).max(amt as f32 / 255.0);
+        let slot = tile_press.entry((hx, hy)).or_insert(0.0);
+        *slot = (*slot).max(p);
+    }
+
+    // 2) Confined / connected voids: ensure the whole pocket's tiles carry
+    //    the equalized mass so a cave washes as one vapour field at 4×4.
     let budget = VOID_FLOOD_BUDGET;
     let seeds: Vec<(i32, i32)> = world.steam.keys().copied().collect();
     let mut visited: FxHashSet<(i32, i32)> = FxHashSet::default();
-    let mut out: Vec<(i32, i32, u8)> = Vec::new();
-
     for (sx, sy) in seeds {
         let sx = world.wrap_x(sx);
         if !visited.insert((sx, sy)) {
@@ -528,18 +571,18 @@ pub fn steam_vapour_field(world: &World) -> Vec<(i32, i32, u8)> {
         }
         let seed_confined = void_is_confined(world, sx, sy);
         let mut queue = vec![(sx, sy)];
-        let mut component: Vec<(i32, i32)> = Vec::new();
+        let mut voids: Vec<(i32, i32)> = Vec::new();
         let mut qi = 0;
-        while qi < queue.len() && component.len() < budget {
+        while qi < queue.len() && voids.len() < budget {
             let (cx, cy) = queue[qi];
             qi += 1;
             let Some(cell) = world.get_cell(cx, cy) else {
                 continue;
             };
-            if cell.material != MaterialId::Air {
+            if cell.material != MaterialId::Air || !is_steam_void(cell) {
                 continue;
             }
-            component.push((cx, cy));
+            voids.push((cx, cy));
             let here_confined = void_is_confined(world, cx, cy);
             for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0)] {
                 if !seed_confined {
@@ -565,26 +608,119 @@ pub fn steam_vapour_field(world: &World) -> Vec<(i32, i32, u8)> {
                 }
             }
         }
-        let voids: Vec<(i32, i32)> = component
-            .iter()
-            .copied()
-            .filter(|&(x, y)| world.get_cell(x, y).is_some_and(is_steam_void))
-            .collect();
         if voids.is_empty() {
             continue;
         }
-        let total: u32 = voids.iter().map(|&(x, y)| steam_at(world, x, y) as u32).sum();
-        if total == 0 {
+        let total: f32 = voids
+            .iter()
+            .map(|&(x, y)| steam_at(world, x, y) as f32)
+            .sum();
+        if total <= 0.0 {
             continue;
         }
-        let mean = (total / voids.len() as u32).min(255) as u8;
-        // Visibility floor: thin steam still washes the whole pocket.
-        let density = mean.max(36).min(220);
-        for (x, y) in voids {
-            out.push((x, y, density));
+        let press = voids
+            .iter()
+            .map(|&(x, y)| steam_pressure_norm(world, x, y))
+            .fold(0.0_f32, f32::max)
+            .max((total / voids.len() as f32) / 255.0);
+        // Equalized pocket → each tile covering voids gets its share of mass
+        // (humidity-shaped: coarse tiles, not per-cell plugs).
+        let mut tile_void_n: FxHashMap<(i32, i32), u32> = FxHashMap::default();
+        for &(x, y) in &voids {
+            let hx = x.div_euclid(tc);
+            let hy = y.div_euclid(tc);
+            *tile_void_n.entry((hx, hy)).or_insert(0) += 1;
+            let p = tile_press.entry((hx, hy)).or_insert(0.0);
+            *p = (*p).max(press);
+        }
+        let n_voids = voids.len() as f32;
+        for ((hx, hy), n) in tile_void_n {
+            let share = total * (n as f32 / n_voids);
+            let m = tile_mass.entry((hx, hy)).or_insert(0.0);
+            *m = (*m).max(share);
+        }
+    }
+
+    if tile_mass.is_empty() {
+        return Vec::new();
+    }
+
+    // Peak for normalization (humidity-style).
+    let peak = tile_mass.values().copied().fold(0.0_f32, f32::max).max(1.0);
+
+    // Paint seats: occupied tiles + one-tile halo (soft edges like H haze).
+    let mut seats: FxHashSet<(i32, i32)> = tile_mass.keys().copied().collect();
+    let occupied: Vec<(i32, i32)> = seats.iter().copied().collect();
+    for (hx, hy) in occupied {
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+            seats.insert((hx + dx, hy + dy));
+        }
+    }
+
+    let mut out: Vec<SteamHazeSample> = Vec::new();
+    for (hx, hy) in seats {
+        for ly in 0..tc {
+            for lx in 0..tc {
+                let gx = world.wrap_x(hx * tc + lx);
+                let gy = hy * tc + ly;
+                let Some(cell) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                // Humidity of the conduit: only Air vapour volume, not rock / lake plugs.
+                if cell.material != MaterialId::Air || !is_steam_void(cell) {
+                    continue;
+                }
+                let mass = sample_steam_tile_bilinear(&tile_mass, tc, gx as f32 + 0.5, gy as f32 + 0.5);
+                if mass <= 0.05 {
+                    continue;
+                }
+                let press = sample_steam_tile_bilinear(&tile_press, tc, gx as f32 + 0.5, gy as f32 + 0.5)
+                    .clamp(0.0, 1.0);
+                // Pressure acts like denser humidity — raises visual mass, not opacity ceiling.
+                let boosted = mass * (1.0 + press * 1.25);
+                let norm = (boosted / peak).clamp(0.0, 1.0);
+                // Soft floor so thin steam still reads; stay well below opaque fill.
+                let density = ((28.0 + norm.sqrt() * 180.0).round() as u8).min(200);
+
+                let mut warmth = (press * 120.0) as u8;
+                if let Some(t) = temp {
+                    let c = t.at_cell(gx, gy);
+                    let heat = ((c - 40.0) / 100.0).clamp(0.0, 1.0);
+                    warmth = warmth.saturating_add((heat * 140.0) as u8);
+                }
+                out.push(SteamHazeSample {
+                    gx,
+                    gy,
+                    density,
+                    warmth,
+                });
+            }
         }
     }
     out
+}
+
+fn sample_steam_tile_bilinear(
+    tiles: &FxHashMap<(i32, i32), f32>,
+    tile_cols: i32,
+    gx: f32,
+    gy: f32,
+) -> f32 {
+    let tc = tile_cols.max(1) as f32;
+    // Tile centres at (h+0.5)*tc — same convention as Humidity::sample_bilinear.
+    let fx = gx / tc - 0.5;
+    let fy = gy / tc - 0.5;
+    let x0 = fx.floor() as i32;
+    let y0 = fy.floor() as i32;
+    let tx = fx - x0 as f32;
+    let ty = fy - y0 as f32;
+    let v00 = tiles.get(&(x0, y0)).copied().unwrap_or(0.0);
+    let v10 = tiles.get(&(x0 + 1, y0)).copied().unwrap_or(0.0);
+    let v01 = tiles.get(&(x0, y0 + 1)).copied().unwrap_or(0.0);
+    let v11 = tiles.get(&(x0 + 1, y0 + 1)).copied().unwrap_or(0.0);
+    let a = v00 + (v10 - v00) * tx;
+    let b = v01 + (v11 - v01) * tx;
+    a + (b - a) * ty
 }
 
 /// Steam pressure assaults neighbouring wet rock: reverse push + fast widen.
@@ -1211,11 +1347,16 @@ mod tests {
         let field = steam_vapour_field(&w);
         let painted = field
             .iter()
-            .filter(|&&(x, y, d)| (3..7).contains(&x) && (2..5).contains(&y) && d >= 36)
+            .filter(|&&(x, y, d)| (3..7).contains(&x) && (2..5).contains(&y) && d >= 28)
             .count();
         assert!(
             painted >= 10,
-            "vapour field must wash the whole pocket (painted={painted})"
+            "humidity-like haze must wash the pocket (painted={painted})"
+        );
+        let haze = steam_haze_wash(&w, Some(&hot));
+        assert!(
+            haze.iter().any(|s| s.warmth > 0),
+            "hot confined steam haze must carry warmth"
         );
     }
 
@@ -1250,8 +1391,48 @@ mod tests {
         );
         let field = steam_vapour_field(&w);
         assert!(
-            field.iter().any(|&(x, y, d)| y <= 4 && (3..7).contains(&x) && d >= 36),
+            field.iter().any(|&(x, y, d)| y <= 4 && (3..7).contains(&x) && d >= 28),
             "vapour wash must cover the chamber"
+        );
+    }
+
+    #[test]
+    fn steam_haze_is_coarse_humidity_shaped() {
+        let mut w = World::new(41);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..10 {
+            for y in 1..9 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..9 {
+            for y in 2..8 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        add_steam(&mut w, 4, 3, 180);
+        add_steam(&mut w, 5, 4, 180);
+        let hot = temp_fill(&w, 140.0);
+        w.tick = 1;
+        apply_steam(&mut w, &hot, &SteamConfig::default());
+        let haze = steam_haze_wash(&w, Some(&hot));
+        assert!(!haze.is_empty(), "steam must produce a haze wash");
+        // Samples live on the cell grid but mass is 4×4 — neighbouring cells in
+        // a tile should share similar density (not speckled markers).
+        let mut by_tile: std::collections::HashMap<(i32, i32), Vec<u8>> =
+            std::collections::HashMap::new();
+        for s in &haze {
+            let key = (s.gx.div_euclid(STEAM_HAZE_TILE), s.gy.div_euclid(STEAM_HAZE_TILE));
+            by_tile.entry(key).or_default().push(s.density);
+        }
+        assert!(
+            by_tile.len() >= 1,
+            "haze must occupy coarse tiles"
+        );
+        let max_density = haze.iter().map(|s| s.density).max().unwrap_or(0);
+        assert!(
+            max_density <= 200,
+            "haze must stay soft (max density {max_density}), not an opaque plug"
         );
     }
 
