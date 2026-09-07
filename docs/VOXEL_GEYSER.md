@@ -33,6 +33,7 @@ karst opens conduits that feed confined rise
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
 | Steam | **Buoyant void vapour** (sparse `World.steam`). Wants to rise. Humidity stays sky — steam does **not** dump into H/rain. Pore water also boils. Confined pressure escapes (reverse seepage / soft-rock tubes) and cools to sinter. |
+| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
 | Pressure | **No continuum PDE.** Sparse steam charge + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |
 | Sky path | Do not couple geyser steam into humidity / rain. Steam *behaves* like warm vapour in voids only. |
@@ -137,19 +138,21 @@ mound faster than a cold control; `mineral_total` conserved.
 ### P3 — Sparse buoyant steam — **done** (void markers + escape)
 
 Boil free **Air** sat and **pore** sat at/above 100 °C into sparse `World.steam`
-(same mass units). Humidity untouched. Hard cap `MAX_STEAM_CELLS` (512).
+(same mass units). Humidity untouched. Hard cap `MAX_STEAM_CELLS`.
 
 | Setting | Behaviour |
 |---------|-----------|
 | Open surface / vented shaft | Steam flood-pours to the top of the open Air column |
 | Cave under solid roof | Steam **flood-fills the connected void** (equal density); pressure assaults wet pores + widens/bursts soft lids into tubes |
-| Hot wet rock | Pore boil + reverse push; steam walls grow apertures fast |
+| Hot wet rock | Pore boil seats vapour (or opens a micro-void); **phase expansion** (`phase_expansion_drive` × boiled) reverse-seeps multi-hop (`reverse_seep_hops`) and cracks the host — even when sealed |
 
-Save schema **v17**. Cadence `STEAM_EVERY` (= 5). Tab → Climate → Steam.
+Save schema **v17**. Cadence `STEAM_EVERY` (= 1 while tuning). Tab → Climate → Steam
+(phase expansion + reverse-seep hops knobs).
 
 **Acceptance:** hot free water loses sat to rising steam (mass-flat); cave steam
-piles under the roof and pressurizes; pore boil consumes rock sat; sand lids
-can burst into tubes; cool steam recondenses and sheds dissolved load.
+piles under the roof and pressurizes; sealed wet limestone reverse-pushes pore
+water upward / widens under flash boil; sand lids can burst into tubes; cool
+steam recondenses and sheds dissolved load.
 
 ### P4 — Episodic geyser jet — **next** (still FPS-aware)
 

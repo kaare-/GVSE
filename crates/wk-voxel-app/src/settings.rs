@@ -1072,7 +1072,7 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Steam / boil", |ui| {
                     ui.label(
                         None,
-                        "Buoyant pressurized gas (not sky humidity). Flood-fills cave voids, assaults wet pores, escapes through soft rock. Cool → drip/sinter.",
+                        "Buoyant pressurized gas (not sky humidity). Pore liquid→gas expansion drives reverse seepage + aperture growth. Flood-fills cave voids; cool → drip/sinter.",
                     );
                     ui.checkbox(hash!(), "Steam enabled", &mut self.steam.enabled);
                     ui.checkbox(hash!(), "Pore boil (wet rock)", &mut self.steam.enable_pore_boil);
@@ -1090,6 +1090,8 @@ impl SimSettings {
                     );
                     let mut boil_max = self.steam.boil_max_per_cell as f32;
                     let mut pore_max = self.steam.pore_boil_max_per_cell as f32;
+                    let mut phase_drive = self.steam.phase_expansion_drive as f32;
+                    let mut reverse_hops = self.steam.reverse_seep_hops as f32;
                     let mut rise_max = self.steam.rise_max_per_cell as f32;
                     let mut residual = self.steam.surface_residual as f32;
                     let mut max_cells = self.steam.max_steam_cells as f32;
@@ -1106,8 +1108,22 @@ impl SimSettings {
                         ui,
                         hash!(),
                         "Pore boil / cell / cadence",
-                        0.0..64.0,
+                        0.0..96.0,
                         &mut pore_max,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Phase expansion drive (force)",
+                        1.0..32.0,
+                        &mut phase_drive,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Reverse seep hops",
+                        1.0..8.0,
+                        &mut reverse_hops,
                     );
                     labeled_slider(
                         ui,
@@ -1155,6 +1171,8 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Steam period (ticks)", 1.0..30.0, &mut period);
                     self.steam.boil_max_per_cell = boil_max.round().clamp(1.0, 255.0) as u8;
                     self.steam.pore_boil_max_per_cell = pore_max.round().clamp(0.0, 255.0) as u8;
+                    self.steam.phase_expansion_drive = phase_drive.round().clamp(1.0, 64.0) as u8;
+                    self.steam.reverse_seep_hops = reverse_hops.round().clamp(1.0, 16.0) as u8;
                     self.steam.rise_max_per_cell = rise_max.round().clamp(0.0, 255.0) as u8;
                     self.steam.surface_residual = residual.round().clamp(0.0, 255.0) as u8;
                     self.steam.max_escapes_per_tick = escapes.round().clamp(1.0, 64.0) as u8;

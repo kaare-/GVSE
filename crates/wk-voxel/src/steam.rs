@@ -5,6 +5,11 @@
 //! open top (vented). Pressure assaults wet pores (reverse seepage +
 //! fast aperture growth) and bursts soft lids into tubes.
 //!
+//! **Pore phase change** is the motor: liquid→gas expansion (~1000× in
+//! nature, capped `phase_expansion_drive` here) budgets reverse seepage
+//! and aperture work far beyond the boiled sat mass. Mass stays flat
+//! (sat ↔ steam); the expansion factor is *force*, not minted water.
+//!
 //! Humidity stays the coarse **sky** field — steam does not dump into
 //! rain. See docs/VOXEL_GEYSER.md.
 
@@ -38,7 +43,18 @@ pub const MAX_STEAM_CELLS: usize = 768;
 pub const BOIL_MAX_PER_CELL: u8 = 64;
 
 /// Max pore sat→steam per solid cell per cadence.
-pub const PORE_BOIL_MAX_PER_CELL: u8 = 32;
+pub const PORE_BOIL_MAX_PER_CELL: u8 = 40;
+
+/// Liquid→gas expansion stand-in for pore boil drive.
+///
+/// Real steam is ~1000× liquid volume; we use a capped sim factor so each
+/// boiled sat unit budgets this many units of reverse seepage + aperture
+/// work. Mass stays flat (boiled sat ↔ steam); the factor is *force*, not
+/// minted water.
+pub const PHASE_EXPANSION_DRIVE: u8 = 12;
+
+/// How many reverse-seepage hops a phase-expansion pulse may travel.
+pub const REVERSE_SEEP_HOPS: u8 = 4;
 
 /// Legacy rise knob (open vents still use buoyant pour after flood).
 pub const RISE_MAX_PER_CELL: u8 = 64;
@@ -75,6 +91,10 @@ pub struct SteamConfig {
     pub boil_point_c: f32,
     pub boil_max_per_cell: u8,
     pub pore_boil_max_per_cell: u8,
+    /// Force multiplier from liquid→gas expansion (not minted mass).
+    pub phase_expansion_drive: u8,
+    /// Max hops for reverse seepage driven by phase expansion.
+    pub reverse_seep_hops: u8,
     pub rise_max_per_cell: u8,
     pub surface_residual: u8,
     pub max_steam_cells: u16,
@@ -94,6 +114,8 @@ impl Default for SteamConfig {
             boil_point_c: BOIL_POINT_C,
             boil_max_per_cell: BOIL_MAX_PER_CELL,
             pore_boil_max_per_cell: PORE_BOIL_MAX_PER_CELL,
+            phase_expansion_drive: PHASE_EXPANSION_DRIVE,
+            reverse_seep_hops: REVERSE_SEEP_HOPS,
             rise_max_per_cell: RISE_MAX_PER_CELL,
             surface_residual: SURFACE_STEAM_RESIDUAL,
             max_steam_cells: MAX_STEAM_CELLS as u16,
@@ -691,6 +713,8 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     let boil = cfg.boil_point_c;
+    let expand = cfg.phase_expansion_drive.max(1);
+    let hops = cfg.reverse_seep_hops.max(1);
     let mut jobs: Vec<(i32, i32, u8)> = Vec::new();
     let coords: Vec<ChunkCoord> = world
         .chunks
@@ -719,9 +743,6 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
                 if t_c < boil {
                     continue;
                 }
-                if !has_air_neighbor(world, gx, gy) {
-                    continue;
-                }
                 let heat = ((t_c - boil) / 50.0).clamp(0.0, 2.0);
                 let cap = ((cfg.pore_boil_max_per_cell as f32) * (1.0 + heat))
                     .round()
@@ -734,7 +755,12 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
         }
     }
     jobs.sort_by(|a, b| b.2.cmp(&a.2));
+    let mut work = 0u8;
+    let max_work = cfg.max_escapes_per_tick.saturating_mul(3).max(16);
     for (gx, gy, amt) in jobs {
+        if work >= max_work {
+            break;
+        }
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
         };
@@ -742,53 +768,192 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
             continue;
         }
         let take = amt.min(cell.sat.0);
-        let placed = inject_steam_near(world, gx, gy, take, max_cells);
-        if placed == 0 {
+        if take == 0 {
             continue;
         }
+
+        // 1) Find or open a seat for the vapour mass (mass-flat).
+        let seat = find_steam_seat(world, gx, gy, max_cells)
+            .or_else(|| open_pore_steam_seat(world, gx, gy, max_cells, expand))
+            .or_else(|| {
+                // Fully sealed impermeable neighbourhood: spend expansion on
+                // aperture growth, then retry for a newly opened seat.
+                phase_crack_host(world, gx, gy, take, expand);
+                find_steam_seat(world, gx, gy, max_cells)
+                    .or_else(|| open_pore_steam_seat(world, gx, gy, max_cells, expand))
+            });
+        let Some((sx, sy)) = seat else {
+            // Still no vapour seat: expansion still shoves remaining pore water
+            // upward (seepage in reverse) so the tube keeps growing.
+            let drive = (take as u16)
+                .saturating_mul(expand as u16)
+                .min(255) as u8;
+            reverse_seep_chain(world, gx, gy, drive, hops);
+            work = work.saturating_add(1);
+            continue;
+        };
+
         let before = cell.sat.0;
         let mut next = cell;
-        next.sat = Sat(before - placed);
+        next.sat = Sat(before - take);
         world.set_cell(gx, gy, next);
-        if let Some((tx, ty)) = nearest_steam_air(world, gx, gy) {
-            carry_with_water(world, (gx, gy), (tx, ty), placed, before);
+        if try_place_steam(world, sx, sy, take, max_cells) == 0 {
+            // Cap: put sat back.
+            let mut back = world.get_cell(gx, gy).unwrap_or(next);
+            back.sat = Sat(back.sat.0.saturating_add(take));
+            world.set_cell(gx, gy, back);
+            continue;
         }
-        reverse_push_pore_water(world, gx, gy, placed.saturating_mul(2).max(placed));
+        carry_with_water(world, (gx, gy), (sx, sy), take, before);
+
+        // 2) Phase-change pressure: expansion drive ≫ boiled mass.
+        //    Remaining liquid is shoved out of the rock (seepage in reverse).
+        let drive = (take as u16)
+            .saturating_mul(expand as u16)
+            .min(255) as u8;
+        reverse_seep_chain(world, gx, gy, drive, hops);
+        // Host cell itself also widens under flash expansion.
+        phase_crack_host(world, gx, gy, take, expand);
+        work = work.saturating_add(1);
     }
 }
 
-fn has_air_neighbor(world: &World, gx: i32, gy: i32) -> bool {
-    for (dx, dy) in [(0, 1), (0, 2), (-1, 0), (1, 0), (-1, 1), (1, 1), (0, -1)] {
-        if world
-            .get_cell(world.wrap_x(gx + dx), gy + dy)
-            .is_some_and(|c| c.material == MaterialId::Air)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn nearest_steam_air(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
-    for (dx, dy) in [(0, 1), (0, 2), (-1, 1), (1, 1), (-1, 0), (1, 0)] {
+/// Prefer nearby Air (especially above) for freshly boiled pore steam.
+fn find_steam_seat(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    max_cells: usize,
+) -> Option<(i32, i32)> {
+    const DELTAS: [(i32, i32); 10] = [
+        (0, 1),
+        (0, 2),
+        (-1, 1),
+        (1, 1),
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (-1, 2),
+        (1, 2),
+        (0, 3),
+    ];
+    for (dx, dy) in DELTAS {
         let tx = world.wrap_x(gx + dx);
         let ty = gy + dy;
-        if steam_at(world, tx, ty) > 0 {
+        let Some(c) = world.get_cell(tx, ty) else {
+            continue;
+        };
+        if c.material != MaterialId::Air {
+            continue;
+        }
+        if can_admit_new_steam_cell(world, tx, ty, max_cells) || steam_at(world, tx, ty) > 0 {
             return Some((tx, ty));
         }
     }
     None
 }
 
-fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) {
-    if drive == 0 {
-        return;
+/// Expansion work opens a micro-void (widen / burst) so steam has somewhere to go.
+fn open_pore_steam_seat(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    max_cells: usize,
+    expand: u8,
+) -> Option<(i32, i32)> {
+    // Prefer the cell above the boiling pore.
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2)] {
+        let tx = world.wrap_x(gx + dx);
+        let ty = gy + dy;
+        let Some(wall) = world.get_cell(tx, ty) else {
+            continue;
+        };
+        if wall.material == MaterialId::Air || wall.material == MaterialId::Bedrock {
+            continue;
+        }
+        if is_grain(wall.material) || is_flow_erodible(wall.material) {
+            if burst_grain_tube(world, gx, gy, tx, ty, max_cells) {
+                return Some((tx, ty));
+            }
+        }
+        if crate::cell::is_competent_rock(wall.material) {
+            let throughput = (160u16).min(80 + expand as u16 * 12) as u8;
+            let scale = 1.2 + expand as f32 * 0.15;
+            if widen_aperture(world, tx, ty, throughput, scale, 0xB01E_u64) {
+                if world
+                    .get_cell(tx, ty)
+                    .is_some_and(|c| c.material == MaterialId::Air)
+                {
+                    return Some((tx, ty));
+                }
+            }
+        }
     }
-    let Some(src) = world.get_cell(gx, gy) else {
+    None
+}
+
+/// Flash expansion cracks the boiling host pore (aperture growth).
+fn phase_crack_host(world: &mut World, gx: i32, gy: i32, boiled: u8, expand: u8) {
+    let Some(cell) = world.get_cell(gx, gy) else {
         return;
     };
-    if src.material == MaterialId::Air || src.sat.0 == 0 {
+    if !crate::cell::is_competent_rock(cell.material) {
         return;
+    }
+    let throughput = boiled.saturating_mul(expand.min(16)).max(40);
+    let scale = 0.9 + (expand as f32) * 0.12 + (boiled as f32) / 80.0;
+    let _ = widen_aperture(world, gx, gy, throughput, scale, 0xB01C_u64);
+}
+
+/// Multi-hop reverse seepage: shove pore water toward lower pressure / upward.
+fn reverse_seep_chain(world: &mut World, mut gx: i32, mut gy: i32, mut drive: u8, hops: u8) {
+    for _ in 0..hops {
+        if drive == 0 {
+            return;
+        }
+        let moved = reverse_push_pore_water(world, gx, gy, drive);
+        if moved == 0 {
+            return;
+        }
+        // Follow the liquid upward if we can (pressure wants out toward surface).
+        let mut advanced = false;
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2)] {
+            let tx = world.wrap_x(gx + dx);
+            let ty = gy + dy;
+            if world
+                .get_cell(tx, ty)
+                .is_some_and(|c| c.material != MaterialId::Air && c.sat.0 > 0)
+            {
+                gx = tx;
+                gy = ty;
+                advanced = true;
+                break;
+            }
+            if world
+                .get_cell(tx, ty)
+                .is_some_and(|c| c.material == MaterialId::Air)
+            {
+                // Reached a void — remaining drive punches steam/water into it next cadence.
+                return;
+            }
+        }
+        if !advanced {
+            return;
+        }
+        drive = drive.saturating_sub(moved / 2).max(moved / 4);
+    }
+}
+
+/// Push pore water one step; returns how much moved.
+fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) -> u8 {
+    if drive == 0 {
+        return 0;
+    }
+    let Some(src) = world.get_cell(gx, gy) else {
+        return 0;
+    };
+    if src.material == MaterialId::Air || src.sat.0 == 0 {
+        return 0;
     }
     let want = drive.min(src.sat.0).max(1);
     for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
@@ -817,8 +982,9 @@ fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) {
         world.set_cell(gx, gy, s);
         world.set_cell(tx, ty, d);
         carry_with_water(world, (gx, gy), (tx, ty), moved, before);
-        return;
+        return moved;
     }
+    0
 }
 
 fn escape_pressurized(
@@ -1335,6 +1501,83 @@ mod tests {
             after.pore,
             after.sat.0,
             after.material
+        );
+    }
+
+    #[test]
+    fn sealed_pore_phase_change_reverse_seeps_upward() {
+        // Column of wet limestone with no free Air next to the boiler —
+        // liquid→gas expansion must shove pore water upward (seepage in reverse)
+        // and/or crack apertures. Mass stays flat.
+        let mut w = World::new(37);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..7 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        let cap = crate::cell::water_capacity(MaterialId::Limestone).max(1);
+        let mut boil = Cell::solid(MaterialId::Limestone);
+        boil.sat = Sat(cap);
+        boil.pore = 100;
+        w.set_cell(4, 1, boil);
+        let mut mid = Cell::solid(MaterialId::Limestone);
+        mid.sat = Sat(cap / 4);
+        mid.pore = 100;
+        w.set_cell(4, 2, mid);
+        let mut top = Cell::solid(MaterialId::Limestone);
+        top.sat = Sat(cap / 8);
+        top.pore = 100;
+        w.set_cell(4, 3, top);
+        // Solid roof — no Air seat beside the boiling cell.
+        w.set_cell(4, 4, Cell::solid(MaterialId::Stone));
+        let sat_above0 = w.get_cell(4, 2).unwrap().sat.0 as i32
+            + w.get_cell(4, 3).unwrap().sat.0 as i32;
+        let pore0 = w.get_cell(4, 1).unwrap().pore;
+        let before = sat_totals(&w).cell_total;
+        let hot = temp_fill(&w, 160.0);
+        let cfg = SteamConfig {
+            enable_escape: false,
+            phase_expansion_drive: 16,
+            reverse_seep_hops: 4,
+            pore_boil_max_per_cell: 48,
+            ..SteamConfig::default()
+        };
+        for i in 1..10 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &hot, &cfg);
+        }
+        let sat_above1 = w.get_cell(4, 2).unwrap().sat.0 as i32
+            + w.get_cell(4, 3).unwrap().sat.0 as i32;
+        let host = w.get_cell(4, 1).unwrap();
+        let reverse_or_crack = sat_above1 > sat_above0
+            || host.pore > pore0
+            || host.material == MaterialId::Air
+            || host.sat.0 < cap
+            || steam_total(&w) > 0;
+        assert!(
+            reverse_or_crack,
+            "phase expansion must reverse-seep, crack, or vent steam \
+             (above {sat_above0}→{sat_above1}, pore {pore0}→{}, sat={}, steam={})",
+            host.pore,
+            host.sat.0,
+            steam_total(&w)
+        );
+        assert_eq!(sat_totals(&w).cell_total, before, "phase boil must stay mass-flat");
+    }
+
+    #[test]
+    fn phase_expansion_drive_exceeds_boiled_mass() {
+        // Expansion factor is force: reverse push budget ≫ sat converted.
+        assert!(PHASE_EXPANSION_DRIVE >= 8);
+        let boiled = 10u8;
+        let drive = (boiled as u16)
+            .saturating_mul(PHASE_EXPANSION_DRIVE as u16)
+            .min(255) as u8;
+        assert!(
+            drive > boiled.saturating_mul(4),
+            "drive={drive} must dwarf boiled={boiled}"
         );
     }
 }
