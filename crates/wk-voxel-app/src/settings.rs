@@ -1072,9 +1072,15 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Steam / boil", |ui| {
                     ui.label(
                         None,
-                        "Boils free Air water (lakes / wet air) above the boil point into sparse conduit steam. Humidity / rain stay separate. White mist draws over steam cells.",
+                        "Buoyant vapour (not sky humidity). Hot free water + pore water flash to steam that rises; confined pressure escapes through rock (reverse seepage / tubes) and drops sinter on cool.",
                     );
                     ui.checkbox(hash!(), "Steam enabled", &mut self.steam.enabled);
+                    ui.checkbox(hash!(), "Pore boil (wet rock)", &mut self.steam.enable_pore_boil);
+                    ui.checkbox(
+                        hash!(),
+                        "Pressure escape / steam tubes",
+                        &mut self.steam.enable_escape,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
@@ -1083,30 +1089,53 @@ impl SimSettings {
                         &mut self.steam.boil_point_c,
                     );
                     let mut boil_max = self.steam.boil_max_per_cell as f32;
+                    let mut pore_max = self.steam.pore_boil_max_per_cell as f32;
                     let mut rise_max = self.steam.rise_max_per_cell as f32;
                     let mut residual = self.steam.surface_residual as f32;
                     let mut max_cells = self.steam.max_steam_cells as f32;
                     let mut period = self.steam.period_ticks as f32;
+                    let mut escapes = self.steam.max_escapes_per_tick as f32;
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Boil rate / cell / cadence",
+                        "Free-water boil / cell / cadence",
                         1.0..128.0,
                         &mut boil_max,
                     );
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Rise rate / cell / cadence",
+                        "Pore boil / cell / cadence",
                         0.0..64.0,
+                        &mut pore_max,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Rise rate / cell / cadence",
+                        0.0..96.0,
                         &mut rise_max,
                     );
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Surface mist residual",
+                        "Open-vent mist residual",
                         0.0..120.0,
                         &mut residual,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Escape pressure min",
+                        0.05..0.8,
+                        &mut self.steam.escape_pressure_min,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max escapes / cadence",
+                        1.0..32.0,
+                        &mut escapes,
                     );
                     labeled_slider(
                         ui,
@@ -1117,8 +1146,10 @@ impl SimSettings {
                     );
                     labeled_slider(ui, hash!(), "Steam period (ticks)", 1.0..30.0, &mut period);
                     self.steam.boil_max_per_cell = boil_max.round().clamp(1.0, 255.0) as u8;
+                    self.steam.pore_boil_max_per_cell = pore_max.round().clamp(0.0, 255.0) as u8;
                     self.steam.rise_max_per_cell = rise_max.round().clamp(0.0, 255.0) as u8;
                     self.steam.surface_residual = residual.round().clamp(0.0, 255.0) as u8;
+                    self.steam.max_escapes_per_tick = escapes.round().clamp(1.0, 64.0) as u8;
                     self.steam.max_steam_cells = max_cells.round().clamp(32.0, 2048.0) as u16;
                     self.steam.period_ticks = period.round().clamp(1.0, 60.0) as u64;
                 });

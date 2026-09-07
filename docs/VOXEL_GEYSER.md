@@ -32,10 +32,10 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam | **Void/conduit-only**, sparse markers (`World.steam`). Humidity stays sky. No per-cell vapour field. **P3 — done.** Confined caves keep steam and pressurize confined rise. |
-| Pressure | **No continuum PDE.** Conduit charge bag + episodic discharge (**P4**). Reuse confined communicating-vessel head. |
-| Landscape build | Mineral rides water (`mineral.rs`); eruptions / surface boil drop Flowstone sinter. |
-| Sky path | Do not couple geyser steam into humidity / rain. |
+| Steam | **Buoyant void vapour** (sparse `World.steam`). Wants to rise. Humidity stays sky — steam does **not** dump into H/rain. Pore water also boils. Confined pressure escapes (reverse seepage / soft-rock tubes) and cools to sinter. |
+| Pressure | **No continuum PDE.** Sparse steam charge + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
+| Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |
+| Sky path | Do not couple geyser steam into humidity / rain. Steam *behaves* like warm vapour in voids only. |
 
 ### Hard no’s
 
@@ -134,29 +134,27 @@ across cell; thaw → sat restored, `sat_totals` flat; lake ice path unchanged.
 **Acceptance:** warm confined shaft with dissolved load grows Flowstone lining /
 mound faster than a cold control; `mineral_total` conserved.
 
-### P3 — Sparse conduit steam — **done** (void markers + cave pressure)
+### P3 — Sparse buoyant steam — **done** (void markers + escape)
 
-Boil free **Air** sat at/above 100 °C into sparse `World.steam` (same mass
-units). Humidity untouched. Hard cap `MAX_STEAM_CELLS` (512).
+Boil free **Air** sat and **pore** sat at/above 100 °C into sparse `World.steam`
+(same mass units). Humidity untouched. Hard cap `MAX_STEAM_CELLS` (512).
 
 | Setting | Behaviour |
 |---------|-----------|
-| Open surface / vented shaft | Steam rises into Air above; recondenses when cool |
-| Cave under solid roof | Steam **stays**; `steam_pressure_rate_scale` boosts confined rise; artesian precip sees steam warmth |
+| Open surface / vented shaft | Steam rises into Air above; soft mist residual on wet vents; recondenses when cool (+ sinter) |
+| Cave under solid roof | Steam **rises to the roof** (not a liquid plug); pressure charges; escape reverse-seeps / widens / bursts soft rock into tubes |
+| Hot wet rock | Pore boil injects vapour into nearby Air and presses leftover liquid upward |
 
-Save schema **v17**. Cadence `STEAM_EVERY` (= 5).
+Save schema **v17**. Cadence `STEAM_EVERY` (= 5). Tab → Climate → Steam.
 
-**Acceptance:** surface water above 100 °C loses sat to steam (mass-flat);
-sealed cave keeps steam under the roof and pressurizes confined rise;
-cool steam recondenses to Air sat. **Play:** app draws pale mist on steam
-cells; Tab → Climate → Steam exposes enable / boil point / rates; inspector
-shows `steam=` / confined / pressure; HUD reports steam cell count. Open
-vents keep a surface mist residual so boil is visible while excess rises.
+**Acceptance:** hot free water loses sat to rising steam (mass-flat); cave steam
+piles under the roof and pressurizes; pore boil consumes rock sat; sand lids
+can burst into tubes; cool steam recondenses and sheds dissolved load.
 
-### P4 — Episodic geyser — **blocked on FPS gate**
+### P4 — Episodic geyser jet — **next** (still FPS-aware)
 
-Per-vent charge bag + jet + cooldown; rate-cap; never a second full-world
-pressure walk; add timings bucket.
+Per-vent charge bag + surface jet + cooldown; rate-cap; timings bucket.
+Escape tubes from P3 feed this.
 
 ### P5 — Frost heave — optional, later
 
