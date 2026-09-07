@@ -1,7 +1,7 @@
 # Thermal loop — heat transport before pressurized vapour
 
-**Status:** T0–T2 landing (diffusivity, water↔rock couple, ΔT water
-currents). T3+ still plan. Blocks richer geyser / “humidity under
+**Status:** T0–T3 landing (diffusivity, water↔rock, ΔT currents,
+air↔water skin). T4+ still plan. Blocks richer geyser / “humidity under
 pressure” work until the loop moves heat with water.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
@@ -116,10 +116,12 @@ Acceptance sketches (tests / HUD, not photoreal):
 - Tab: `TempConfig::water_convect_bias` (default 0.35).
 - Goal: **heat rides water toward the surface**; cooler return flow.
 
-### T3 — Air ↔ water skin
+### T3 — Air ↔ water skin ✅
 
-- Strengthen near-surface couple so cold air cools open water (and warm
-  water can warm a thin air band). Same coarse tile math.
+- Watery surface tiles mix with the Air tile above
+  (`TempConfig::air_water_skin_couple`, default 0.18).
+- Cold air cools the water skin; warm water warms a thin air band.
+- Complements the existing one-way air→ground near-surface couple.
 - Closes the surface half of the loop with weather already in
   [`VOXEL_WEATHER.md`](VOXEL_WEATHER.md).
 
