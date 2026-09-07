@@ -156,7 +156,8 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
                 let warmth = world
                     .water_head
                     .geothermal_warmth(from.0, from.1)
-                    .max(world.water_head.geothermal_warmth(to.0, to.1));
+                    .max(world.water_head.geothermal_warmth(to.0, to.1))
+                    .max(crate::steam::steam_pressure_norm(world, from.0, from.1));
                 crate::mineral::precipitate_artesian_warm(world, to.0, to.1, warmth);
             }
         }
@@ -816,9 +817,11 @@ fn accumulate_confined_upward_xfers(
             let dh_sat = ((body.max_head - dst_head) * cap as f32).floor() as i32;
             let warmth = world.water_head.geothermal_warmth(gx, gy - 1);
             let geo = 1.0 + 0.25 * warmth;
+            let steam = crate::steam::steam_pressure_rate_scale(world, gx, gy - 1);
             let cap_rate = ((CONFINED_HEAD_RATE as f32)
                 * world.water_head_rate_scale(gx, gy)
-                * geo)
+                * geo
+                * steam)
                 .round() as i32;
             let amt = cap_rate
                 .min(free)

@@ -29,6 +29,7 @@ pub mod heatmap;
 pub mod humidity;
 pub mod mineral;
 pub mod pore_ice;
+pub mod steam;
 pub mod sediment;
 pub mod organism;
 pub mod parallel;
@@ -136,6 +137,10 @@ pub use grid::{ChunkMap, World};
 pub use pore_ice::{
     apply_pore_ice, freeze_pores, is_frozen as pore_ice_is_frozen, pore_ice_at, thaw_pores,
     PORE_ICE_EVERY,
+};
+pub use steam::{
+    apply_steam, steam_at, steam_pressure_norm, steam_pressure_rate_scale, steam_total,
+    void_is_confined, BOIL_POINT_C, MAX_STEAM_CELLS, STEAM_EVERY,
 };
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};

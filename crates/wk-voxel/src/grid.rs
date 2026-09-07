@@ -152,6 +152,16 @@ pub struct World {
     /// water hot path. Serde still writes a plain map.
     #[serde(default)]
     pub pore_ice: FxHashMap<(i32, i32), u8>,
+    /// Sparse **conduit steam** from boiling free water (see [`crate::steam`]).
+    ///
+    /// Keyed by wrapped `(gx, gy)` → steam units (same mass scale as `sat`).
+    /// Air voids only; humidity stays the sky field. Confined caves keep
+    /// steam and pressurize confined rise. Hard-capped at runtime.
+    ///
+    /// Sparse and saved. Runtime Fx dual — boil / rise / confined probe
+    /// this map. Serde still writes a plain map.
+    #[serde(default)]
+    pub steam: FxHashMap<(i32, i32), u8>,
     /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
     /// Same strain keeps one book across spatial split / reconnect.
     ///
@@ -246,6 +256,7 @@ impl World {
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
+            steam: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
