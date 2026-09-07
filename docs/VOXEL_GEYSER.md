@@ -1,6 +1,8 @@
 # Geyser landscape motor
 
-**Status:** P0–P3 implemented on this track. **P4 still FPS-gated.**
+**Status:** P0–P3 implemented on this track. **P4 and sealed “humidity under
+pressure” wait on [`VOXEL_THERMAL.md`](VOXEL_THERMAL.md)** (coarse heat
+transport + water currents) **and** the FPS gate below.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** native **upward** landscape builder (hot springs → geysers →
 sinter pipes/hills) that balances existing **downhill** erosion, without a
@@ -8,6 +10,7 @@ vapour CA or pressure PDE.
 
 Read first: [`VOXEL_WATER.md`](VOXEL_WATER.md), [`VOXEL_WEATHER.md`](VOXEL_WEATHER.md)
 (rejects world-wide vapour), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md),
+[`VOXEL_THERMAL.md`](VOXEL_THERMAL.md) (heat loop before pressurized vapour),
 [`archive/VOXEL_WEATHER_SOAK.md`](archive/VOXEL_WEATHER_SOAK.md).
 
 ---
