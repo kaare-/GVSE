@@ -118,10 +118,12 @@ pub fn sat_totals(world: &World) -> SatTotals {
             }
         }
     }
+    // Conduit steam is boiled free water — same mass units as sat.
+    let steam: i64 = world.steam.values().map(|&v| v as i64).sum();
     SatTotals {
         free_air,
         pore,
-        cell_total: free_air + pore,
+        cell_total: free_air + pore + steam,
         humidity: 0.0,
         clouds: 0.0,
     }

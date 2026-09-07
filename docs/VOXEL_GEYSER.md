@@ -1,6 +1,6 @@
 # Geyser landscape motor
 
-**Status:** P0–P2 implemented on this track. **Do not jump to P3/P4.**
+**Status:** P0–P3 implemented on this track. **P4 still FPS-gated.**
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** native **upward** landscape builder (hot springs → geysers →
 sinter pipes/hills) that balances existing **downhill** erosion, without a
@@ -32,7 +32,7 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam | **Void/conduit-only**, sparse markers. Humidity stays sky. No per-cell vapour field. **P3 — gated.** |
+| Steam | **Void/conduit-only**, sparse markers (`World.steam`). Humidity stays sky. No per-cell vapour field. **P3 — done.** Confined caves keep steam and pressurize confined rise. |
 | Pressure | **No continuum PDE.** Conduit charge bag + episodic discharge (**P4**). Reuse confined communicating-vessel head. |
 | Landscape build | Mineral rides water (`mineral.rs`); eruptions / surface boil drop Flowstone sinter. |
 | Sky path | Do not couple geyser steam into humidity / rain. |
@@ -134,10 +134,21 @@ across cell; thaw → sat restored, `sat_totals` flat; lake ice path unchanged.
 **Acceptance:** warm confined shaft with dissolved load grows Flowstone lining /
 mound faster than a cold control; `mineral_total` conserved.
 
-### P3 — Sparse conduit steam — **blocked on FPS gate**
+### P3 — Sparse conduit steam — **done** (void markers + cave pressure)
 
-Boil in voids / full wet Air; rising steam markers; recondense; hard cap;
-humidity untouched. See performance gate above.
+Boil free **Air** sat at/above 100 °C into sparse `World.steam` (same mass
+units). Humidity untouched. Hard cap `MAX_STEAM_CELLS` (512).
+
+| Setting | Behaviour |
+|---------|-----------|
+| Open surface / vented shaft | Steam rises into Air above; recondenses when cool |
+| Cave under solid roof | Steam **stays**; `steam_pressure_rate_scale` boosts confined rise; artesian precip sees steam warmth |
+
+Save schema **v17**. Cadence `STEAM_EVERY` (= 5).
+
+**Acceptance:** surface water above 100 °C loses sat to steam (mass-flat);
+sealed cave keeps steam under the roof and pressurizes confined rise;
+cool steam recondenses to Air sat.
 
 ### P4 — Episodic geyser — **blocked on FPS gate**
 

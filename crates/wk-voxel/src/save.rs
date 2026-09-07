@@ -51,7 +51,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v14: [`World::dissolved`] mineral load (karst became a transport loop).
 /// v15: [`World::suspended`] fine sediment (clay travels as suspension).
 /// v16: [`World::pore_ice`] frozen pore water seals (geyser P1).
-pub const SIM_SCHEMA_VERSION: u32 = 16;
+/// v17: [`World::steam`] sparse conduit steam from boiling free water (P3).
+pub const SIM_SCHEMA_VERSION: u32 = 17;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +102,7 @@ impl WorldV5 {
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
+            steam: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -150,6 +152,7 @@ impl WorldV6 {
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
+            steam: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -204,6 +207,7 @@ impl WorldV7 {
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
+            steam: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -267,6 +271,7 @@ impl WorldV8 {
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
+            steam: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -324,6 +329,7 @@ impl WorldV11 {
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
+            steam: FxHashMap::default(),
             sym_net_flow: self.sym_net_flow.into_iter().collect(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -422,6 +428,7 @@ impl WorldV10 {
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
+            steam: FxHashMap::default(),
             sym_net_flow: self
                 .sym_net_flow
                 .into_iter()
@@ -496,6 +503,7 @@ impl WorldV9 {
             dissolved: FxHashMap::default(),
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
+            steam: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -843,6 +851,7 @@ mod tests {
         world.dissolved.insert((3, 5), 42);
         world.suspended.insert((3, 5), 7);
         world.pore_ice.insert((3, 4), 90);
+        world.steam.insert((3, 5), 40);
         world.mycelium_strains.insert((3, 4), vec![(7, 40)]);
         world.mycelium_energy.insert((3, 4), 90);
         world.soft_litter.insert(3, 55);
@@ -903,6 +912,7 @@ mod tests {
         assert_eq!(loaded.world.dissolved.get(&(3, 5)), Some(&42));
         assert_eq!(loaded.world.suspended.get(&(3, 5)), Some(&7));
         assert_eq!(loaded.world.pore_ice.get(&(3, 4)), Some(&90));
+        assert_eq!(loaded.world.steam.get(&(3, 5)), Some(&40));
         assert_eq!(
             loaded.world.mycelium_strains.get(&(3, 4)),
             Some(&vec![(7, 40)])
