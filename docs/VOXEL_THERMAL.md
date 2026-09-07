@@ -1,8 +1,8 @@
 # Thermal loop — heat transport before pressurized vapour
 
-**Status:** T0–T1 landing (diffusivity-weighted tile diffusion + coarse
-free-water ↔ rock heat couple). T2+ still plan. Blocks richer geyser /
-“humidity under pressure” work until the loop moves heat with water.
+**Status:** T0–T2 landing (diffusivity, water↔rock couple, ΔT water
+currents). T3+ still plan. Blocks richer geyser / “humidity under
+pressure” work until the loop moves heat with water.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
 pore water), so gradients can drive currents — not a detailed CFD heat
@@ -107,14 +107,14 @@ Acceptance sketches (tests / HUD, not photoreal):
 - Mass stays in cells; only °C moves.
 - Goal: **cold water cools hot rock**; hot rock warms water.
 
-### T2 — Water currents from ΔT
+### T2 — Water currents from ΔT ✅
 
-- Bias vertical free-water exchange and/or confined rise / fall by local
-  ΔT (warm prefers up). Small dimensionless knobs; Tab-tunable.
-- Optional: slight horizontal mixing where strong lateral ∇T exists —
-  only if free with existing flow neighbourhoods.
-- Goal: **heat rides water toward the surface**; return flow of cooler
-  water.
+- Bias confined rise by ΔT (`water_convect_rise_scale`: warm donor under
+  cooler destination → faster).
+- Soft-throttle Air→Air gravity fall when warm sits over cold
+  (`water_convect_fall_scale`).
+- Tab: `TempConfig::water_convect_bias` (default 0.35).
+- Goal: **heat rides water toward the surface**; cooler return flow.
 
 ### T3 — Air ↔ water skin
 

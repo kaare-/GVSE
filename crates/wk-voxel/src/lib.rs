@@ -221,7 +221,8 @@ pub use rules::{
     MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
-    temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
+    temperature_step_due, water_convect_fall_scale, water_convect_rise_scale, TempConfig,
+    Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
 };
 pub use wind::{Wind, WindConfig, WIND_FIELD_PERIOD};
 pub use save::{SimSnapshot, SIM_SAVE_DIR, SIM_SAVE_EXT, SIM_SCHEMA_VERSION};

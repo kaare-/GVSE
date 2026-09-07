@@ -4683,8 +4683,8 @@ fn confined_body_lookup_skips_equalized_bfs() {
     let bfs = w.confined.bfs_runs;
     assert!(bfs > 0, "first equalise must BFS");
     let regions = super::plan::regions_confined_loaded(&w);
-    super::water_flow::apply_confined_upward_regions(&mut w, &regions);
-    super::water_flow::apply_confined_upward_regions(&mut w, &regions);
+    super::water_flow::apply_confined_upward_regions(&mut w, &regions, None);
+    super::water_flow::apply_confined_upward_regions(&mut w, &regions, None);
     assert_eq!(
         w.confined.bfs_runs, bfs,
         "equalized vessel must look up the stored donor, not BFS"

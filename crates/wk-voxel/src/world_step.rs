@@ -319,6 +319,7 @@ pub fn step_world(
             Some(cfg.grain),
             Some(cfg.fungi),
             Some(cfg.competent),
+            Some(temperature),
             &mut t.physics,
         )
     } else {
@@ -331,6 +332,7 @@ pub fn step_world(
             Some(cfg.grain),
             Some(cfg.fungi),
             Some(cfg.competent),
+            Some(temperature),
         )
     };
     if let (true, Some(t0), Some(t)) = (profile, t_phys, timings.as_mut()) {

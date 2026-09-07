@@ -925,6 +925,13 @@ impl SimSettings {
                         0.0..0.5,
                         &mut self.temp.water_rock_couple,
                     );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Water ΔT convection bias",
+                        0.0..1.0,
+                        &mut self.temp.water_convect_bias,
+                    );
                 });
                 ui.separator();
 

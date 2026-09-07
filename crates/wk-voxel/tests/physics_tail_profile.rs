@@ -97,7 +97,7 @@ fn profile_physics_tail_passes() {
         // ranks relative cost of full-grid scans). Cadence gates inside
         // some helpers still apply (confined / mycelium).
         let t0 = Instant::now();
-        wake_confined_head(&mut world);
+        wake_confined_head(&mut world, None);
         confined += t0.elapsed();
 
         let t0 = Instant::now();

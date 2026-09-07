@@ -52,7 +52,7 @@ pub fn apply_gravity_fall(world: &mut World) {
     // set per colour was 2× the HashSet walk on every standalone call.
     let loaded = water_load_index(world);
     for pass in partition_checkerboard(&regions) {
-        apply_gravity_fall_regions_loaded(world, &pass, &loaded);
+        apply_gravity_fall_regions_loaded(world, &pass, &loaded, None);
     }
 }
 
@@ -91,7 +91,7 @@ pub(crate) fn water_load_index(world: &World) -> FxHashSet<(i32, i32)> {
 /// HashMap `get_cell`/`set_cell`.
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     let loaded = water_load_index(world);
-    apply_gravity_fall_regions_loaded(world, active, &loaded);
+    apply_gravity_fall_regions_loaded(world, active, &loaded, None);
 }
 
 /// Gravity fall with a prebuilt load index — see [`water_load_index`].
@@ -99,6 +99,7 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
     world: &mut World,
     active: &[ActiveChunk],
     loaded: &FxHashSet<(i32, i32)>,
+    temp: Option<&crate::temperature::Temperature>,
 ) {
     let hydro = world.hydro;
     // Gravity only pulls free water. Plant-dirty dry land under dry sky
@@ -372,7 +373,19 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
                     return;
                 }
 
-                let move_amt = above.sat.0.min(free);
+                let mut move_amt = above.sat.0.min(free);
+                if move_amt > 0 {
+                    if let Some(t) = temp {
+                        let gx = gx_of(x);
+                        let gy_above = y as i32 + 1;
+                        let gy_below = y as i32;
+                        let scale = crate::temperature::water_convect_fall_scale(
+                            t, gx, gy_above, gx, gy_below,
+                        );
+                        move_amt = ((move_amt as f32) * scale).round() as u8;
+                        move_amt = move_amt.min(above.sat.0.min(free));
+                    }
+                }
                 if move_amt == 0 {
                     next_cur = Some(above);
                     return;
