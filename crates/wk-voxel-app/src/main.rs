@@ -194,12 +194,11 @@ fn sat_overlay_color(wet: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
-/// Sparse conduit steam as pale mist (always drawn when present).
-fn steam_mist_color(amt: u8) -> Color {
-    let t = (amt as f32 / 255.0).clamp(0.0, 1.0);
-    // Soft vapour wash — must not read as opaque liquid replacing water.
-    let a = (18.0 + 72.0 * t.sqrt()) as u8;
-    Color::from_rgba(245, 248, 252, a)
+/// Sparse conduit steam as a vapour wash (pocket density, not speckles).
+fn steam_mist_color(density: u8) -> Color {
+    let t = (density as f32 / 255.0).clamp(0.0, 1.0);
+    let a = (55.0 + 100.0 * t.sqrt()) as u8;
+    Color::from_rgba(232, 240, 248, a)
 }
 
 fn scale_color_alpha(c: Color, k: f32) -> Color {
@@ -1114,11 +1113,11 @@ async fn main() {
             );
         }
 
-        // Sparse conduit steam mist (geyser P3) — always on when present.
+        // Steam vapour field — continuous wash over the pocket, not speckles.
         if !scene.world.steam.is_empty() {
             let bedrock_y = scene.params.bedrock_floor_y;
-            for (&(gx, gy), &amt) in &scene.world.steam {
-                if amt == 0 || gy < y_min_vis || gy >= y_max_vis {
+            for (gx, gy, density) in wk_voxel::steam_vapour_field(&scene.world) {
+                if density == 0 || gy < y_min_vis || gy >= y_max_vis {
                     continue;
                 }
                 for &x_copy in x_copies {
@@ -1133,7 +1132,7 @@ async fn main() {
                         sy - cell_px,
                         cell_px,
                         cell_px,
-                        steam_mist_color(amt),
+                        steam_mist_color(density),
                     );
                 }
             }

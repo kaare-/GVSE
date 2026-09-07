@@ -23,7 +23,7 @@ use crate::mineral::{
 use crate::temperature::Temperature;
 
 /// Cadence for boil / flood / assault / recondense.
-pub const STEAM_EVERY: u64 = 3;
+pub const STEAM_EVERY: u64 = 1;
 
 /// Default boil point (°C).
 pub const BOIL_POINT_C: f32 = 100.0;
@@ -251,23 +251,28 @@ pub fn apply_steam(world: &mut World, temp: &Temperature, cfg: &SteamConfig) {
         return;
     }
     let period = cfg.period_ticks.max(1);
-    if world.tick % period != 0 {
-        return;
-    }
+    let due = world.tick % period == 0;
+    let max_cells = cfg.max_steam_cells.max(1) as usize;
     let boil = cfg.boil_point_c;
     let recondense_below = boil - RECONDENSE_MARGIN_C;
-    let max_cells = cfg.max_steam_cells.max(1) as usize;
 
-    recondense_cool(world, temp, recondense_below);
-    boil_hot_air(world, temp, cfg, max_cells);
-    if cfg.enable_pore_boil {
-        boil_hot_pores(world, temp, cfg, max_cells);
+    if due {
+        recondense_cool(world, temp, recondense_below);
+        boil_hot_air(world, temp, cfg, max_cells);
+        if cfg.enable_pore_boil {
+            boil_hot_pores(world, temp, cfg, max_cells);
+        }
     }
-    flood_equalize_steam(world, cfg, max_cells);
-    assault_steam_walls(world, cfg);
-    if cfg.enable_escape {
-        escape_pressurized(world, temp, cfg, max_cells);
+    // Equalize every tick while steam exists — vapour fields don't wait on cadence.
+    if !world.steam.is_empty() {
         flood_equalize_steam(world, cfg, max_cells);
+    }
+    if due && !world.steam.is_empty() {
+        assault_steam_walls(world, cfg);
+        if cfg.enable_escape {
+            escape_pressurized(world, temp, cfg, max_cells);
+            flood_equalize_steam(world, cfg, max_cells);
+        }
     }
 }
 
@@ -313,8 +318,8 @@ fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32)
 
 /// Flood-fill connected void Air and redistribute steam like a gas.
 ///
-/// Confined rock pockets equalize across the whole void. Open air only
-/// forms an upward plume (does not paint the entire sky chunk).
+/// Cave / under-roof pockets (including leaky ones) equalize as a vapour
+/// field. Only a fully open shaft uses a buoyant plume.
 fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) {
     if world.steam.is_empty() {
         return;
@@ -350,15 +355,18 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             }
             let here_confined = void_is_confined(world, cx, cy);
             for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0)] {
-                // Open sky: only climb / thin lateral plume — never fill the
-                // whole default-Air chunk like a liquid flood fill.
-                if !seed_confined || !here_confined {
+                // Pure open shaft: climb only. Cave seeds expand through the
+                // whole pocket (ortho) even if a vent eventually opens.
+                if !seed_confined {
                     if dy < 0 {
                         continue;
                     }
                     if cy + dy > sy + open_plume_max as i32 {
                         continue;
                     }
+                } else if !here_confined && dy < 0 {
+                    // Past the vent lip: don't drain back down into the sky map.
+                    continue;
                 }
                 let nx = world.wrap_x(cx + dx);
                 let ny = cy + dy;
@@ -402,14 +410,23 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             continue;
         }
 
-        let confined = seed_confined && !open_to_sky
-            && voids.iter().all(|&(x, y)| void_is_confined(world, x, y));
+        let confined_n = voids
+            .iter()
+            .filter(|&&(x, y)| void_is_confined(world, x, y))
+            .count();
+        // Leaky caves still equalize — only a free open plume skips the field.
+        let as_field = seed_confined || confined_n * 2 >= voids.len();
 
-        if confined {
+        if as_field {
+            // Prefer seating on under-roof voids first so the chamber fills.
+            voids.sort_by(|a, b| {
+                let ca = void_is_confined(world, a.0, a.1);
+                let cb = void_is_confined(world, b.0, b.1);
+                cb.cmp(&ca).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0))
+            });
             let n = voids.len() as u32;
             let base = (total / n) as u8;
             let mut rem = (total % n) as usize;
-            voids.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             for &(x, y) in &voids {
                 let mut put = base;
                 if rem > 0 {
@@ -427,6 +444,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                     }
                 }
             }
+            let _ = open_to_sky;
         } else {
             // Open plume: pack into the top of the climbed column.
             voids.retain(|&(x, y)| (x - sx).abs() <= 1 && y >= sy);
@@ -465,6 +483,86 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             }
         }
     }
+}
+
+/// Continuous vapour wash for rendering: every void cell in a steam pocket
+/// gets the pocket's mean density (not sparse marker speckles).
+///
+/// Returns `(gx, gy, density_u8)` with a visibility floor so thin steam still
+/// reads as a filled field.
+pub fn steam_vapour_field(world: &World) -> Vec<(i32, i32, u8)> {
+    if world.steam.is_empty() {
+        return Vec::new();
+    }
+    let budget = VOID_FLOOD_BUDGET;
+    let seeds: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let mut visited: FxHashSet<(i32, i32)> = FxHashSet::default();
+    let mut out: Vec<(i32, i32, u8)> = Vec::new();
+
+    for (sx, sy) in seeds {
+        let sx = world.wrap_x(sx);
+        if !visited.insert((sx, sy)) {
+            continue;
+        }
+        let seed_confined = void_is_confined(world, sx, sy);
+        let mut queue = vec![(sx, sy)];
+        let mut component: Vec<(i32, i32)> = Vec::new();
+        let mut qi = 0;
+        while qi < queue.len() && component.len() < budget {
+            let (cx, cy) = queue[qi];
+            qi += 1;
+            let Some(cell) = world.get_cell(cx, cy) else {
+                continue;
+            };
+            if cell.material != MaterialId::Air {
+                continue;
+            }
+            component.push((cx, cy));
+            let here_confined = void_is_confined(world, cx, cy);
+            for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0)] {
+                if !seed_confined {
+                    if dy < 0 {
+                        continue;
+                    }
+                    if cy + dy > sy + 32 {
+                        continue;
+                    }
+                } else if !here_confined && dy < 0 {
+                    continue;
+                }
+                let nx = world.wrap_x(cx + dx);
+                let ny = cy + dy;
+                if !visited.insert((nx, ny)) {
+                    continue;
+                }
+                if world
+                    .get_cell(nx, ny)
+                    .is_some_and(|n| n.material == MaterialId::Air && (is_steam_void(n) || steam_at(world, nx, ny) > 0))
+                {
+                    queue.push((nx, ny));
+                }
+            }
+        }
+        let voids: Vec<(i32, i32)> = component
+            .iter()
+            .copied()
+            .filter(|&(x, y)| world.get_cell(x, y).is_some_and(is_steam_void))
+            .collect();
+        if voids.is_empty() {
+            continue;
+        }
+        let total: u32 = voids.iter().map(|&(x, y)| steam_at(world, x, y) as u32).sum();
+        if total == 0 {
+            continue;
+        }
+        let mean = (total / voids.len() as u32).min(255) as u8;
+        // Visibility floor: thin steam still washes the whole pocket.
+        let density = mean.max(36).min(220);
+        for (x, y) in voids {
+            out.push((x, y, density));
+        }
+    }
+    out
 }
 
 /// Steam pressure assaults neighbouring wet rock: reverse push + fast widen.
@@ -943,6 +1041,51 @@ mod tests {
         assert!(
             steam_at(&w, 3, 4) + steam_at(&w, 4, 4) + steam_at(&w, 5, 4) > 0,
             "gas must reach the roof of the pocket, not sit on the floor"
+        );
+        let field = steam_vapour_field(&w);
+        let painted = field
+            .iter()
+            .filter(|&&(x, y, d)| (3..7).contains(&x) && (2..5).contains(&y) && d >= 36)
+            .count();
+        assert!(
+            painted >= 10,
+            "vapour field must wash the whole pocket (painted={painted})"
+        );
+    }
+
+    #[test]
+    fn leaky_cave_still_equalizes_as_field() {
+        let mut w = World::new(31);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Chamber with a one-cell vent to open sky above.
+        for x in 2..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..7 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w.set_cell(5, 5, Cell::air()); // vent through the roof
+        for y in 6..12 {
+            w.set_cell(5, y, Cell::air());
+        }
+        add_steam(&mut w, 3, 2, 180);
+        assert!(void_is_confined(&w, 3, 2));
+        let hot = temp_fill(&w, 120.0);
+        w.tick = 1;
+        apply_steam(&mut w, &hot, &SteamConfig::default());
+        let chamber = steam_at(&w, 3, 3) + steam_at(&w, 4, 3) + steam_at(&w, 6, 3);
+        assert!(
+            chamber > 0,
+            "leaky cave must still equalize the chamber, not only plume the vent"
+        );
+        let field = steam_vapour_field(&w);
+        assert!(
+            field.iter().any(|&(x, y, d)| y <= 4 && (3..7).contains(&x) && d >= 36),
+            "vapour wash must cover the chamber"
         );
     }
 
