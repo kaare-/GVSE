@@ -102,18 +102,36 @@ pub fn apply_evaporation_into_humidity_climate(
 }
 
 /// Reference `rate_per_tick` is ~18 °C, light breeze, dry air.
+///
+/// Near / above boil the sky path is just **accelerated film evaporization**
+/// (not a separate steam flash) — raise the T scale ceiling so open hot
+/// ponds dry into Humidity like a hotter lake, not a special motor.
 pub(crate) fn evap_climate_rate(base: i32, temp_c: f32, wind_abs: f32, humidity_mass: f32) -> i32 {
     if base <= 0 {
         return 0;
     }
     let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp_c);
+    let t_ceil = if temp_c >= 100.0 {
+        12.0
+    } else if temp_c >= 80.0 {
+        8.0
+    } else {
+        4.0
+    };
     let t_scale = (crate::humidity::Humidity::sat_vapor_pressure_hpa(temp_c)
         / crate::humidity::Humidity::sat_vapor_pressure_hpa(18.0))
-    .clamp(0.08, 4.0);
+    .clamp(0.08, t_ceil);
     let w_scale = (0.62 + wind_abs * 10.0).clamp(0.50, 2.0);
     let rh = (humidity_mass / sat.max(1.0)).clamp(0.0, 1.0);
     let deficit = (1.0 - rh).clamp(0.20, 1.0);
-    let cap = (base * 4).max(1);
+    let cap_mul = if temp_c >= 100.0 {
+        12
+    } else if temp_c >= 80.0 {
+        8
+    } else {
+        4
+    };
+    let cap = (base * cap_mul).max(1);
     ((base as f32) * t_scale * w_scale * deficit)
         .round()
         .clamp(0.0, cap as f32) as i32
@@ -286,20 +304,31 @@ fn apply_evap_deltas(
         if want_removed <= 0 {
             continue;
         }
-        // Only lift what the atmosphere can still hold (per-tile cap).
-        let accepted = if let Some(h) = humidity.as_deref_mut() {
-            if h.column_near_saturated(gx, gy) {
-                0
-            } else {
-                match temp {
-                    Some(t) => h
-                        .try_add_at_temp(gx, gy, want_removed as f32, t.at_cell(gx, gy))
-                        .round() as i32,
-                    None => h.try_add(gx, gy, want_removed as f32).round() as i32,
+        // Open-to-sky (incl. open caves / overhangs via BFS) → weather Humidity.
+        // Sealed voids → sparse cave_humidity (ambient cave air, not steam).
+        let open = crate::steam::air_void_open_to_sky(world, gx, gy);
+        let accepted = if open {
+            if let Some(h) = humidity.as_deref_mut() {
+                if h.column_near_saturated(gx, gy) {
+                    0
+                } else {
+                    match temp {
+                        Some(t) => h
+                            .try_add_at_temp(gx, gy, want_removed as f32, t.at_cell(gx, gy))
+                            .round() as i32,
+                        None => h.try_add(gx, gy, want_removed as f32).round() as i32,
+                    }
                 }
+            } else {
+                want_removed
             }
         } else {
-            want_removed
+            crate::cave_humidity::try_add_cave_humidity(
+                world,
+                gx,
+                gy,
+                want_removed.clamp(0, 255) as u8,
+            ) as i32
         };
         if accepted <= 0 {
             continue;
@@ -313,12 +342,107 @@ fn apply_evap_deltas(
                 ..cell
             },
         );
-        // Vapour leaves its mineral behind. This is what builds a mound at an
-        // evaporating spring outlet: water arrives carrying load, departs
-        // without it. Concentration first, then the whole load once dry.
+        // Vapour leaves its mineral behind.
         crate::mineral::precipitate_at(world, gx, gy);
         if new_sat == 0 {
             crate::mineral::precipitate_dry_cell(world, gx, gy);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cave_humidity::cave_humidity_at;
+    use crate::cell::Cell;
+    use crate::chunk::ChunkCoord;
+    use crate::grid::World;
+    use crate::humidity::Humidity;
+    use crate::steam::steam_total;
+    use crate::temperature::Temperature;
+    use wk_material::MaterialId;
+
+    fn hot_fill(world: &World, c: f32) -> Temperature {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 64, 64, world.seed.0, 64, 20, false);
+        for v in t.cells.values_mut() {
+            *v = c;
+        }
+        t
+    }
+
+    #[test]
+    fn open_hot_film_evaporates_into_sky_humidity() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(4, 1, Cell::water());
+        for y in 2..12 {
+            w.set_cell(4, y, Cell::air());
+        }
+        let hot = hot_fill(&w, 110.0);
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let before_h = h.total_mass();
+        let before_sat = w.get_cell(4, 1).unwrap().sat.0;
+        w.tick = 0;
+        apply_evaporation_into_humidity_climate(
+            &mut w,
+            &mut h,
+            &EvapConfig {
+                period_ticks: 1,
+                ..EvapConfig::default()
+            },
+            Some(&hot),
+            0.2,
+        );
+        assert!(
+            w.get_cell(4, 1).unwrap().sat.0 < before_sat,
+            "open hot film must lose sat"
+        );
+        assert!(h.total_mass() > before_h, "mass must land in sky Humidity");
+        assert_eq!(steam_total(&w), 0, "open film must not mint steam");
+        assert_eq!(cave_humidity_at(&w, 4, 1), 0, "open film is not cave humidity");
+    }
+
+    #[test]
+    fn sealed_cave_film_evaporates_into_cave_humidity() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 1..7 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..7 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Film on floor of sealed pocket with dry air above.
+        w.set_cell(4, 2, Cell::water());
+        let warm = hot_fill(&w, 25.0);
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let before_h = h.total_mass();
+        let before_sat = w.get_cell(4, 2).unwrap().sat.0;
+        w.tick = 0;
+        apply_evaporation_into_humidity_climate(
+            &mut w,
+            &mut h,
+            &EvapConfig {
+                period_ticks: 1,
+                ..EvapConfig::default()
+            },
+            Some(&warm),
+            0.0,
+        );
+        assert!(
+            w.get_cell(4, 2).unwrap().sat.0 < before_sat,
+            "sealed film must lose sat"
+        );
+        assert_eq!(h.total_mass(), before_h, "sealed film must not feed sky Humidity");
+        assert!(
+            cave_humidity_at(&w, 4, 2) > 0,
+            "sealed film must deposit cave humidity"
+        );
+        assert_eq!(steam_total(&w), 0, "ambient sealed film is not steam flash");
     }
 }

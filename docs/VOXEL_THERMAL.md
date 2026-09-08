@@ -1,8 +1,8 @@
 # Thermal loop — heat transport before pressurized vapour
 
-**Status:** T0–T5 + T2b lake circulation landed. **T6a** open-sky hot boil →
-Humidity vs sealed → sparse steam is in. T6b/P4 geyser jet still FPS-gated.
-Blocks richer geyser spectacle until wet wall is comfortable.
+**Status:** T0–T5 + T2b landed. **Humidity model:** sky H (incl. open caves) /
+sparse sealed `cave_humidity` / pressurized `steam` flash. Open hot water is
+accelerated evap into sky H. T6b/P4 geyser jet still FPS-gated.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
 pore water), so gradients can drive currents — not a detailed CFD heat
@@ -47,7 +47,9 @@ extend the same couples into pores. Detail is optional later.
 | Rock ↔ pore water | Same idea, later wave: wet porous cells exchange with their host / neighbour rock using the same knobs, smaller rates. |
 | Water convection | Bias existing vertical / confined / flow exchange by ΔT (warm up, cold down). Not a second fluid solver. |
 | Air ↔ water surface | Cold air cools the free-water skin (and reverse); reuse near-surface air↔ground couple patterns already in `temperature.rs`. |
-| Sky Humidity | Weather store only. **Open caves** share moist air with the sky (T5 crest-hoist / flux skip). **Sealed** cavities keep pressurized vapour on the sparse steam store — never dump into rain lottery. Open-sky hot boil flashes into Humidity (T6a); roofed boil stays on `World.steam`. |
+| Sky Humidity | Weather store. **Open caves / overhangs** share it (T5 crest-hoist / flux skip + open-to-sky class). Unroofed hot water is ordinary **accelerated evaporation** into this store — not a special steam flash. |
+| Cave humidity | Sparse `World.cave_humidity` — ambient moist Air in **sealed** voids under rock. Not pressurized, not the rain lottery. |
+| Steam | Sparse `World.steam` — **roofed flash / pressure** for geysers only. Never dumps into sky H. |
 | Boil / evap | Overground “boil” is **fast evaporation** into Humidity when water contacts hot material. Sealed flash stays on the sparse underground store until a vent opens. |
 | Geyser gating | No new sealed-pressure / hot-humidity assault work until T0–T2 below are landed and demo FPS still holds. |
 
@@ -171,16 +173,21 @@ sinking while warm rises / skin drifts.
 
 ### T6 — Return to pressurized vapour / geysers
 
-**T6a (landed):** open vs sealed boil split.
+**Humidity stores (landed):**
 
-- Evap continuum: hot free water with **no roof** (`!void_is_confined`)
-  flashes into **Humidity** (weather mass, same units as surface evap).
-- Sealed / roofed flash still seats sparse `World.steam` only — never
-  dumps into the rain lottery.
-- Docs name: “humidity under pressure” = sealed sparse steam store, not sky H.
+1. **Sky Humidity** — weather; open caves / overhangs share it (T5).
+2. **`World.cave_humidity`** — ambient sealed-cave air (sparse). Ordinary
+   moist void under rock — **not** pressure, **not** rain lottery.
+3. **`World.steam`** — roofed flash / geyser pressure only.
 
-**T6b / P4 (FPS-gated):** episodic geyser jet from escape tubes; sealed
-flash pressure path already in P3.
+**Open hot water:** accelerated film evaporization into sky Humidity
+(evap climate rate ceiling rises near boil). Steam does **not** special-case
+open seats — boiling under open sky is just a hotter lake.
+
+**Roofed flash:** free / pore water ≥100 °C under a roof may mint steam
+(P3 pressure motor).
+
+**T6b / P4 (FPS-gated):** episodic geyser jet from escape tubes.
 
 See [`VOXEL_GEYSER.md`](VOXEL_GEYSER.md).
 

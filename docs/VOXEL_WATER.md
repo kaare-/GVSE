@@ -107,11 +107,11 @@ Per wet Air cell (compute-then-apply, mass-conserving):
    springs build Flowstone mounds (see [`VOXEL_GEYSER.md`](VOXEL_GEYSER.md)).
    **Pore ice** (`World.pore_ice`) seals saturated rock in place without
    replacing the host material — frozen pores do not transmit pressure,
-   seep, or throughflow until thawed. **Conduit steam** (`World.steam`)
-   boils free Air sat at ≥100 °C **under a roof**; open-sky hot free water
-   flashes into Humidity instead (T6a). Roofed steam boosts confined rise;
-   cool steam recondenses (see [`VOXEL_GEYSER.md`](VOXEL_GEYSER.md) § P3).
-   Sealed vapour never dumps into the rain lottery.
+   seep, or throughflow until thawed. **Three vapour stores:** sky Humidity
+   (weather + open caves), sparse `World.cave_humidity` (ambient sealed-cave
+   air), and sparse `World.steam` (roofed flash / pressure only). Unroofed
+   hot free water is accelerated evaporization into Humidity; sealed films
+   feed `cave_humidity`. See [`VOXEL_GEYSER.md`](VOXEL_GEYSER.md) § P3.
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 

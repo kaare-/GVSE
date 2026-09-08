@@ -13,6 +13,7 @@ pub mod atmosphere_metrics;
 pub mod audit;
 pub mod blueprint;
 pub mod carbon;
+pub mod cave_humidity;
 pub mod cell;
 pub mod chunk;
 pub mod climate;
@@ -137,6 +138,9 @@ pub use grid::{ChunkMap, World};
 pub use pore_ice::{
     apply_pore_ice, freeze_pores, is_frozen as pore_ice_is_frozen, pore_ice_at, thaw_pores,
     PORE_ICE_EVERY,
+};
+pub use cave_humidity::{
+    cave_humidity_at, cave_humidity_total, try_add_cave_humidity, MAX_CAVE_HUMIDITY_CELLS,
 };
 pub use steam::{
     air_void_open_to_sky, apply_steam, steam_at, steam_haze_wash, steam_pressure_norm,

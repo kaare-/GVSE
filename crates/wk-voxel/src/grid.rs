@@ -155,13 +155,22 @@ pub struct World {
     /// Sparse **conduit steam** from boiling free water (see [`crate::steam`]).
     ///
     /// Keyed by wrapped `(gx, gy)` → steam units (same mass scale as `sat`).
-    /// Air voids only; humidity stays the sky field. Confined caves keep
-    /// steam and pressurize confined rise. Hard-capped at runtime.
+    /// Air voids only; **roofed flash / pressure** path — not ambient cave
+    /// air (see [`Self::cave_humidity`]) and not sky Humidity. Hard-capped.
     ///
     /// Sparse and saved. Runtime Fx dual — boil / rise / confined probe
     /// this map. Serde still writes a plain map.
     #[serde(default)]
     pub steam: FxHashMap<(i32, i32), u8>,
+    /// Sparse **sealed-cave ambient humidity** (see [`crate::cave_humidity`]).
+    ///
+    /// Moist Air inside closed voids under rock — ordinary cave air, not
+    /// pressurized steam and not the sky weather field. Open caves share
+    /// sky Humidity instead (T5). Same sat mass units; hard-capped.
+    ///
+    /// Sparse and saved (`#[serde(default)]` so older snaps load empty).
+    #[serde(default)]
+    pub cave_humidity: FxHashMap<(i32, i32), u8>,
     /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
     /// Same strain keeps one book across spatial split / reconnect.
     ///
@@ -257,6 +266,7 @@ impl World {
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
+            cave_humidity: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),

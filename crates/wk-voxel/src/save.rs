@@ -52,7 +52,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v15: [`World::suspended`] fine sediment (clay travels as suspension).
 /// v16: [`World::pore_ice`] frozen pore water seals (geyser P1).
 /// v17: [`World::steam`] sparse conduit steam from boiling free water (P3).
-pub const SIM_SCHEMA_VERSION: u32 = 17;
+/// v18: [`World::cave_humidity`] sealed-cave ambient moisture (not sky H, not steam).
+pub const SIM_SCHEMA_VERSION: u32 = 18;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +104,7 @@ impl WorldV5 {
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
+            cave_humidity: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -153,6 +155,7 @@ impl WorldV6 {
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
+            cave_humidity: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -208,6 +211,7 @@ impl WorldV7 {
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
+            cave_humidity: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -272,6 +276,7 @@ impl WorldV8 {
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
+            cave_humidity: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -330,6 +335,7 @@ impl WorldV11 {
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
+            cave_humidity: FxHashMap::default(),
             sym_net_flow: self.sym_net_flow.into_iter().collect(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
@@ -429,6 +435,7 @@ impl WorldV10 {
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
+            cave_humidity: FxHashMap::default(),
             sym_net_flow: self
                 .sym_net_flow
                 .into_iter()
@@ -504,6 +511,7 @@ impl WorldV9 {
             suspended: FxHashMap::default(),
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
+            cave_humidity: FxHashMap::default(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),
