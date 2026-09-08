@@ -13,7 +13,7 @@ sun / moon (soft, fine px)       behind far ridge; soft crest reveal
 far / near ridge fills           XY parallax; sky-washed; soft crest feather
 terrain + standing water         night: deep cool darken + weak moon ambient
 day canopy shade                 humidity column dim + sun cast
-humidity vapour wash             H overlay (default on; the sky water look)
+humidity vapour wash             H overlay (default on; sky H + sealed cave humidity, same soft white wash)
 wind lattice arrows               V overlay (off by default; coarse, short)
                                   underwater → teal ΔT current arrows instead
 debug overlays → organisms
