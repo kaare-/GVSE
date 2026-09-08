@@ -5,9 +5,10 @@
 //! water. It is **not** sky [`Humidity`] and **not** pressurized
 //! [`World::steam`].
 //!
-//! **Why:** Open caves share sky Humidity (T5 continuity). Closed caves under
-//! high-sat rock still need ordinary moist air — without minting geyser
-//! pressure steam or walking the weather field underground.
+//! **Why:** Open caves / overhangs share sky Humidity (T5). Sealed voids under
+//! rock need a second mini field for ordinary closed-cave air — any ambient
+//! moisture, not a pressure or high-RH prerequisite — without minting geyser
+//! steam or expanding the weather walk underground.
 //!
 //! **Motor (v1):** sealed-film evaporation deposits here; cool recondense and
 //! diffusion come later. Never writes the rain lottery.
