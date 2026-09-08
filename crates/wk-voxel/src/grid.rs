@@ -152,11 +152,13 @@ pub struct World {
     /// water hot path. Serde still writes a plain map.
     #[serde(default)]
     pub pore_ice: FxHashMap<(i32, i32), u8>,
-    /// Sparse **conduit steam** from boiling free water (see [`crate::steam`]).
+    /// Sparse **pressurized cavity humidity** (wire name `steam`; see [`crate::steam`]).
     ///
-    /// Keyed by wrapped `(gx, gy)` → steam units (same mass scale as `sat`).
-    /// Air voids only; **roofed flash / pressure** path — not ambient cave
-    /// air (see [`Self::cave_humidity`]) and not sky Humidity. Hard-capped.
+    /// Keyed by wrapped `(gx, gy)` → vapour units (same mass scale as `sat`).
+    /// Air voids only; **roofed / closed-cavity pressure** path — not ambient
+    /// sealed-cave air (see [`Self::cave_humidity`]) and not sky Humidity.
+    /// Hard-capped. Not a separate "steam gas" species — over-capacity cavity
+    /// moisture under pressure.
     ///
     /// Sparse and saved. Runtime Fx dual — boil / rise / confined probe
     /// this map. Serde still writes a plain map.
@@ -164,9 +166,9 @@ pub struct World {
     pub steam: FxHashMap<(i32, i32), u8>,
     /// Sparse **sealed-cave ambient humidity** (see [`crate::cave_humidity`]).
     ///
-    /// Moist Air inside closed voids under rock — ordinary cave air, not
-    /// pressurized steam and not the sky weather field. Open caves share
-    /// sky Humidity instead (T5). Same sat mass units; hard-capped.
+    /// Moist Air inside closed voids under rock — ordinary sealed-cave ambient,
+    /// not pressurized cavity humidity and not the sky weather field. Open caves
+    /// share sky Humidity instead (T5). Same sat mass units; hard-capped.
     ///
     /// Sparse and saved (`#[serde(default)]` so older snaps load empty).
     #[serde(default)]

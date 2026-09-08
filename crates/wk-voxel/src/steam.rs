@@ -1,25 +1,28 @@
-//! Underground vapour / pressure — sparse **sealed flash** store (P3).
+//! Pressurized **cavity humidity** — sparse sealed / semi-sealed void store (P3).
 //!
-//! **Store:** `World.steam` is a capped sparse map of void vapour mass in
-//! **roofed** caves / conduits. It is **not** sky humidity and **not**
-//! ambient sealed-cave air ([`crate::cave_humidity`]).
+//! **Store:** `World.steam` is the wire name for capped sparse **cavity humidity
+//! under pressure** in roofed / side-closed voids. It is **not** sky humidity.
+//! Cool sealed ambient still uses [`crate::cave_humidity`]; this map is the
+//! over-capacity / flash / pressure mode of closed-cavity moisture — not a
+//! separate "steam gas" species.
 //!
 //! **Open vs sealed:**
 //! - Unroofed hot free water is ordinary **accelerated evaporation** into
 //!   sky [`Humidity`] — owned by [`crate::rules::evap`], not this module.
 //! - Open caves / overhangs share sky Humidity (T5 continuity).
-//! - Roofed / confined free water may flash into `World.steam` (pressure /
+//! - Roofed / confined free water may flash into this store (pressure /
 //!   geyser motor). Ambient moist cave air under rock uses `cave_humidity`.
 //!
-//! Sealed vapour **never** dumps into the rain lottery.
+//! Sealed cavity humidity **never** dumps into the rain lottery.
 //!
-//! **Motor:** boil roofed free + pore water above ~100 °C → sparse steam.
-//! Liquid→gas expansion budgets reverse pore seepage + aperture work.
-//! Confined pockets flood-equalize; overpressure assaults wet rock and
-//! bursts soft lids. Cool → liquid + sinter.
+//! **Motor:** boil roofed free + pore water above ~100 °C → sparse cavity
+//! humidity. Liquid→gas expansion budgets reverse pore seepage + aperture
+//! work. Flowing hot water **carries heat** into cooler rock so channels warm
+//! over time. Existing cavity humidity keeps pushing pore water by density
+//! even through rock below boil. Confined pockets flood-equalize; overpressure
+//! assaults wet rock and bursts soft lids. Cool → liquid + sinter.
 //!
 //! See docs/VOXEL_GEYSER.md + VOXEL_THERMAL.md.
-
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -31,8 +34,11 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::mineral::{
-    carry_with_water, dissolved_at, precipitate_artesian_warm, widen_aperture,
+    add_dissolved, carry_with_water, dissolved_at, emit_from_dissolved_rock,
+    is_soluble_rock, precipitate_artesian_warm, precipitate_at, precipitate_dry_cell,
+    widen_aperture, MINERAL_PER_CELL,
 };
+use crate::sediment::{add_suspended, is_suspendable, SEDIMENT_PER_CELL};
 use crate::temperature::Temperature;
 
 /// Cadence for boil / flood / assault / recondense (FPS: not every tick).
@@ -172,13 +178,21 @@ pub fn steam_at(world: &World, gx: i32, gy: i32) -> u8 {
 }
 
 #[inline]
-pub fn add_steam(world: &mut World, gx: i32, gy: i32, amount: u8) {
+pub fn add_steam(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
     if amount == 0 {
-        return;
+        return 0;
     }
     let gx = world.wrap_x(gx);
     let slot = world.steam.entry((gx, gy)).or_insert(0);
-    *slot = slot.saturating_add(amount);
+    let before = *slot;
+    *slot = before.saturating_add(amount);
+    *slot - before
+}
+
+/// Alias: pressurized cavity humidity mass at a cell (`World.steam` wire).
+#[inline]
+pub fn cavity_humidity_at(world: &World, gx: i32, gy: i32) -> u8 {
+    steam_at(world, gx, gy)
 }
 
 /// Remove up to `want`, returning what was taken.
@@ -309,8 +323,49 @@ fn try_place_steam(world: &mut World, gx: i32, gy: i32, amt: u8, max_cells: usiz
     if !can_admit_new_steam_cell(world, gx, gy, max_cells) && steam_at(world, gx, gy) == 0 {
         return 0;
     }
-    add_steam(world, gx, gy, amt);
-    amt
+    let room = 255u8.saturating_sub(steam_at(world, gx, gy));
+    let put = amt.min(room);
+    if put == 0 {
+        return 0;
+    }
+    add_steam(world, gx, gy, put)
+}
+
+/// Spill `amount` across seats without truncating a multi-cell total to 255.
+fn spill_steam_across(
+    world: &mut World,
+    seats: &[(i32, i32)],
+    mut amount: u32,
+    max_cells: usize,
+) -> u32 {
+    if amount == 0 || seats.is_empty() {
+        return amount;
+    }
+    for _ in 0..4 {
+        if amount == 0 {
+            break;
+        }
+        let mut progress = false;
+        for &(x, y) in seats {
+            if amount == 0 {
+                break;
+            }
+            let room = 255u32.saturating_sub(steam_at(world, x, y) as u32);
+            if room == 0 {
+                continue;
+            }
+            let put = amount.min(room).min(255) as u8;
+            let placed = try_place_steam(world, x, y, put, max_cells);
+            if placed > 0 {
+                amount -= placed as u32;
+                progress = true;
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+    amount
 }
 
 /// Prefer injecting boiled steam into void Air above / beside the source.
@@ -334,8 +389,9 @@ fn inject_steam_near(
         if !is_steam_void(c) {
             continue;
         }
-        if try_place_steam(world, tx, ty, amt, max_cells) > 0 {
-            return amt;
+        let placed = try_place_steam(world, tx, ty, amt, max_cells);
+        if placed > 0 {
+            return placed;
         }
     }
     if let Some(c) = world.get_cell(gx, gy) {
@@ -355,7 +411,7 @@ fn inject_steam_near(
 /// Unroofed hot free water is left for accelerated evap → sky Humidity.
 pub fn apply_steam(
     world: &mut World,
-    temp: &Temperature,
+    temp: &mut Temperature,
     cfg: &SteamConfig,
 ) {
     if !cfg.enabled {
@@ -378,7 +434,9 @@ pub fn apply_steam(
     // Flood + assault only on cadence (every-tick flood crushed FPS).
     if !world.steam.is_empty() {
         flood_equalize_steam(world, cfg, max_cells);
-        assault_steam_walls(world, cfg);
+        // Density-driven push + heat deposit continue past the boil isotherm.
+        transmit_cavity_pressure(world, temp, cfg);
+        assault_steam_walls(world, temp, cfg);
         if cfg.enable_escape {
             escape_pressurized(world, temp, cfg, max_cells);
             if !world.steam.is_empty() {
@@ -398,7 +456,7 @@ fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32)
             continue;
         }
         let Some(cell) = world.get_cell(gx, gy) else {
-            world.steam.remove(&(gx, gy));
+            // Unloaded / missing cell: keep mass; do not destroy vapour.
             continue;
         };
         if cell.material != MaterialId::Air {
@@ -516,9 +574,8 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             .filter(|&(x, y)| world.get_cell(x, y).is_some_and(is_steam_void))
             .collect();
         if voids.is_empty() {
-            if let Some(&(x, y)) = component.iter().max_by_key(|c| c.1) {
-                try_place_steam(world, x, y, total.min(255) as u8, max_cells);
-            }
+            let seats: Vec<(i32, i32)> = component.clone();
+            let _ = spill_steam_across(world, &seats, total, max_cells);
             continue;
         }
 
@@ -548,12 +605,14 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                 if put == 0 {
                     continue;
                 }
-                if try_place_steam(world, x, y, put, max_cells) == 0 {
-                    if let Some(&(fx, fy)) =
-                        voids.iter().find(|&&(vx, vy)| steam_at(world, vx, vy) > 0)
-                    {
-                        add_steam(world, fx, fy, put);
-                    }
+                let placed = try_place_steam(world, x, y, put, max_cells);
+                if placed < put {
+                    let _ = spill_steam_across(
+                        world,
+                        &voids,
+                        (put - placed) as u32,
+                        max_cells,
+                    );
                 }
             }
             let _ = open_to_sky;
@@ -582,16 +641,16 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                     continue;
                 }
                 let put = left.min(room);
-                if try_place_steam(world, x, y, put as u8, max_cells) > 0 {
-                    left -= put;
-                }
+                let placed = try_place_steam(world, x, y, put as u8, max_cells) as u32;
+                left -= placed;
             }
             if left > 0 {
-                if let Some(&(x, y)) = voids.first() {
-                    add_steam(world, x, y, left.min(255) as u8);
+                let seats = if voids.is_empty() {
+                    vec![(sx, sy)]
                 } else {
-                    add_steam(world, sx, sy, left.min(255) as u8);
-                }
+                    voids.clone()
+                };
+                let _ = spill_steam_across(world, &seats, left, max_cells);
             }
         }
     }
@@ -814,7 +873,53 @@ fn sample_steam_tile_bilinear(
 
 /// Steam pressure assaults neighbouring wet rock: reverse push + fast widen.
 /// Prefers the roof (up) so energy goes into escape tubes, not sideways leaks.
-fn assault_steam_walls(world: &mut World, cfg: &SteamConfig) {
+/// Cavity humidity density keeps shoving pore water and depositing heat
+/// past the boil isotherm — pressure does not die the moment rock is <100 °C.
+fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig) {
+    if world.steam.is_empty() {
+        return;
+    }
+    let boil = cfg.boil_point_c;
+    let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let mut work = 0u8;
+    let max_work = cfg.max_escapes_per_tick.saturating_mul(2).max(12);
+    for (gx, gy) in keys {
+        if work >= max_work {
+            break;
+        }
+        let dens = steam_at(world, gx, gy);
+        if dens < 10 {
+            continue;
+        }
+        let press = steam_pressure_norm(world, gx, gy).max(dens as f32 / 255.0);
+        let target = boil + press * 35.0;
+        let mix = (dens as f32 / 255.0) * 0.18;
+        temp.deposit_heat_toward(gx, gy, target, mix);
+        for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0), (-1, 1), (1, 1)] {
+            let tx = world.wrap_x(gx + dx);
+            let ty = gy + dy;
+            temp.deposit_heat_toward(tx, ty, target, mix * 0.65);
+            let Some(wall) = world.get_cell(tx, ty) else {
+                continue;
+            };
+            if wall.material == MaterialId::Air || wall.material == MaterialId::Bedrock {
+                continue;
+            }
+            if wall.sat.0 == 0 || permeability_cell(wall, &world.hydro) == 0 {
+                continue;
+            }
+            let drive = ((dens as f32) * (0.2 + press) * 0.85).round() as u8;
+            if drive >= 4 {
+                let moved = reverse_push_pore_water(world, temp, tx, ty, drive);
+                if moved > 0 {
+                    work = work.saturating_add(1);
+                }
+            }
+        }
+    }
+}
+
+fn assault_steam_walls(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig) {
     if world.steam.is_empty() {
         return;
     }
@@ -844,7 +949,7 @@ fn assault_steam_walls(world: &mut World, cfg: &SteamConfig) {
             }
             if wall.sat.0 > 0 && permeability_cell(wall, &world.hydro) > 0 {
                 let drive = ((steam as f32) * (0.25 + press)).round() as u8;
-                reverse_push_pore_water(world, tx, ty, drive.max(4));
+                reverse_push_pore_water(world, temp, tx, ty, drive.max(4));
                 assaults = assaults.saturating_add(1);
             }
             // Upward faces carve hardest; sideways is slower so pockets don't
@@ -886,7 +991,7 @@ fn chunk_overlaps_hot(temp: &Temperature, coord: ChunkCoord, min_c: f32) -> bool
 
 fn boil_hot_air(
     world: &mut World,
-    temp: &Temperature,
+    temp: &mut Temperature,
     cfg: &SteamConfig,
     max_cells: usize,
 ) {
@@ -966,10 +1071,20 @@ fn boil_hot_air(
         let mut next = cell;
         next.sat = Sat(cell.sat.0 - placed);
         world.set_cell(gx, gy, next);
+        if next.sat.0 == 0 {
+            precipitate_dry_cell(world, gx, gy);
+        } else {
+            let _ = precipitate_at(world, gx, gy);
+        }
+        let src_t = temp.at_cell(gx, gy).max(cfg.boil_point_c);
+        temp.deposit_heat_toward(gx, gy, src_t, 0.2);
+        for (dx, dy) in [(0, 1), (0, 2), (-1, 1), (1, 1)] {
+            temp.deposit_heat_toward(world.wrap_x(gx + dx), gy + dy, src_t, 0.12);
+        }
     }
 }
 
-fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_cells: usize) {
+fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, max_cells: usize) {
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     let boil = cfg.boil_point_c;
@@ -1047,32 +1162,42 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
             // along least-resistance seepage so the tube keeps growing.
             let t_c = temp.at_cell(gx, gy);
             let drive = expansion_drive_units(take, expand, t_c, boil);
-            reverse_seep_chain(world, gx, gy, drive, hops);
+            reverse_seep_chain(world, temp, gx, gy, drive, hops);
             work = work.saturating_add(1);
             continue;
         };
 
         let before = cell.sat.0;
-        let mut next = cell;
-        next.sat = Sat(before - take);
-        world.set_cell(gx, gy, next);
-        if try_place_steam(world, sx, sy, take, max_cells) == 0 {
-            // Cap: put sat back.
-            let mut back = world.get_cell(gx, gy).unwrap_or(next);
-            back.sat = Sat(back.sat.0.saturating_add(take));
-            world.set_cell(gx, gy, back);
+        let placed = try_place_steam(world, sx, sy, take, max_cells);
+        if placed == 0 {
+            // No vapour room: expansion still shoves remaining pore water.
+            let t_c = temp.at_cell(gx, gy);
+            let drive = expansion_drive_units(take, expand, t_c, boil);
+            reverse_seep_chain(world, temp, gx, gy, drive, hops);
+            work = work.saturating_add(1);
             continue;
         }
-        carry_with_water(world, (gx, gy), (sx, sy), take, before);
+        let mut next = cell;
+        next.sat = Sat(before - placed);
+        world.set_cell(gx, gy, next);
+        carry_with_water(world, (gx, gy), (sx, sy), placed, before);
+        if world.get_cell(gx, gy).is_some_and(|c| c.sat.0 == 0) {
+            precipitate_dry_cell(world, gx, gy);
+        } else {
+            let _ = precipitate_at(world, gx, gy);
+        }
+        // Flash vapour / hot liquid carry heat into the seat and channel.
+        temp.advect_with_mass(gx, gy, sx, sy, placed);
+        temp.deposit_heat_toward(sx, sy, temp.at_cell(gx, gy).max(boil), 0.35);
 
         // 2) Phase-change pressure: expansion drive ≫ boiled mass, scaled by
         //    heat above boil. Remaining liquid is shoved along the easiest
         //    wet path (seepage in reverse) until it vents or equalizes.
         let t_c = temp.at_cell(gx, gy);
-        let drive = expansion_drive_units(take, expand, t_c, boil);
-        reverse_seep_chain(world, gx, gy, drive, hops);
+        let drive = expansion_drive_units(placed, expand, t_c, boil);
+        reverse_seep_chain(world, temp, gx, gy, drive, hops);
         // Host cell itself also widens under flash expansion.
-        phase_crack_host(world, gx, gy, take, expand);
+        phase_crack_host(world, gx, gy, placed, expand);
         work = work.saturating_add(1);
     }
 }
@@ -1165,12 +1290,19 @@ fn phase_crack_host(world: &mut World, gx: i32, gy: i32, boiled: u8, expand: u8)
 }
 
 /// Multi-hop reverse seepage: shove pore water along the easiest wet path.
-fn reverse_seep_chain(world: &mut World, mut gx: i32, mut gy: i32, mut drive: u8, hops: u8) {
+fn reverse_seep_chain(
+    world: &mut World,
+    temp: &mut Temperature,
+    mut gx: i32,
+    mut gy: i32,
+    mut drive: u8,
+    hops: u8,
+) {
     for _ in 0..hops {
         if drive == 0 {
             return;
         }
-        let moved = reverse_push_pore_water(world, gx, gy, drive);
+        let moved = reverse_push_pore_water(world, temp, gx, gy, drive);
         if moved == 0 {
             return;
         }
@@ -1213,7 +1345,7 @@ fn reverse_seep_chain(world: &mut World, mut gx: i32, mut gy: i32, mut drive: u8
 /// Candidates are scored by permeability + room, with a mild upward bias
 /// (pressure wants out). Venting into Air drops dissolved load as a warm
 /// spring deposit. Returns how much moved.
-fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) -> u8 {
+fn reverse_push_pore_water(world: &mut World, temp: &mut Temperature, gx: i32, gy: i32, drive: u8) -> u8 {
     if drive == 0 {
         return 0;
     }
@@ -1272,6 +1404,7 @@ fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) -> u8
     world.set_cell(gx, gy, s);
     world.set_cell(tx, ty, d);
     carry_with_water(world, (gx, gy), (tx, ty), moved, before);
+    temp.advect_with_mass(gx, gy, tx, ty, moved);
     if d.material == MaterialId::Air {
         // Warm vent: depressurising spring drops dissolved minerals.
         let warmth = steam_pressure_norm(world, gx, gy)
@@ -1284,7 +1417,7 @@ fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) -> u8
 
 fn escape_pressurized(
     world: &mut World,
-    temp: &Temperature,
+    temp: &mut Temperature,
     cfg: &SteamConfig,
     max_cells: usize,
 ) {
@@ -1331,7 +1464,7 @@ fn escape_pressurized(
             }
         }
 
-        if reverse_escape_through_rock(world, gx, gy, steam, press) {
+        if reverse_escape_through_rock(world, temp, gx, gy, steam, press) {
             escapes = escapes.saturating_add(1);
             continue;
         }
@@ -1344,10 +1477,16 @@ fn escape_pressurized(
                 let moved = take_steam(world, gx, gy, steam.min(160));
                 if let Some(c) = world.get_cell(gx, gy + 1) {
                     if c.material == MaterialId::Air {
-                        try_place_steam(world, gx, gy + 1, moved, max_cells);
+                        let placed = try_place_steam(world, gx, gy + 1, moved, max_cells);
+                        if placed < moved {
+                            add_steam(world, gx, gy, moved - placed);
+                        }
+                        if placed > 0 {
+                            temp.advect_with_mass(gx, gy, gx, gy + 1, placed);
+                        }
                     } else {
                         add_steam(world, gx, gy, moved);
-                        reverse_push_pore_water(world, gx, gy + 1, moved);
+                        reverse_push_pore_water(world, temp, gx, gy + 1, moved);
                     }
                 } else {
                     add_steam(world, gx, gy, moved);
@@ -1360,6 +1499,7 @@ fn escape_pressurized(
 
 fn reverse_escape_through_rock(
     world: &mut World,
+    temp: &mut Temperature,
     gx: i32,
     gy: i32,
     steam: u8,
@@ -1375,7 +1515,7 @@ fn reverse_escape_through_rock(
     let drive = ((steam as f32) * (0.3 + press * 0.7)).round() as u8;
     let drive = drive.max(8);
     if roof.sat.0 > 0 {
-        reverse_push_pore_water(world, gx, gy + 1, drive);
+        reverse_push_pore_water(world, temp, gx, gy + 1, drive);
     }
     let roof2 = world.get_cell(gx, gy + 1).unwrap_or(roof);
     let cap = water_capacity_cell(roof2, &world.hydro);
@@ -1386,7 +1526,7 @@ fn reverse_escape_through_rock(
         let mut r = roof2;
         r.sat = Sat(r.sat.0.saturating_add(took));
         world.set_cell(gx, gy + 1, r);
-        reverse_push_pore_water(world, gx, gy + 1, took.saturating_mul(2));
+        reverse_push_pore_water(world, temp, gx, gy + 1, took.saturating_mul(2));
         return true;
     }
     roof.sat.0 > 0
@@ -1407,12 +1547,118 @@ fn burst_grain_tube(
     if !is_grain(cell.material) && !is_flow_erodible(cell.material) {
         return false;
     }
-    let _load = dissolved_at(world, tx, ty);
+    // Take vapour first so chamber ejecta can land in the pressure void.
+    let moved = take_steam(world, from_x, from_y, steam_at(world, from_x, from_y).min(200));
+    if !bank_burst_solid(world, from_x, from_y, tx, ty, cell) {
+        if moved > 0 {
+            add_steam(world, from_x, from_y, moved);
+        }
+        return false;
+    }
+    // Dissolved load stays with the water that remains in the opened tube.
     let mut air = Cell::air();
     air.sat = Sat(cell.sat.0);
     world.set_cell(tx, ty, air);
-    let moved = take_steam(world, from_x, from_y, steam_at(world, from_x, from_y).min(200));
-    try_place_steam(world, tx, ty, moved, max_cells);
+    let placed = try_place_steam(world, tx, ty, moved, max_cells);
+    if placed < moved {
+        add_steam(world, from_x, from_y, moved - placed);
+    }
+    true
+}
+
+/// Keep burst solids on a ledger: suspend clay, relocate bedload grains, or
+/// dissolve carbonate debris into the conduit water. Never delete rock.
+fn bank_burst_solid(
+    world: &mut World,
+    from_x: i32,
+    from_y: i32,
+    tx: i32,
+    ty: i32,
+    was: Cell,
+) -> bool {
+    if is_suspendable(was.material) {
+        add_suspended(world, tx, ty, SEDIMENT_PER_CELL);
+        return true;
+    }
+    let ox = (tx - from_x).signum();
+    let oy = (ty - from_y).signum();
+    let deltas = [
+        (ox, 0),
+        (0, oy),
+        (ox, oy),
+        (-1, 0),
+        (1, 0),
+        (0, 1),
+        (0, -1),
+        (-1, 1),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+        (ox.saturating_mul(2), 0),
+        (0, oy.saturating_mul(2)),
+        (0, 2),
+        (0, 3),
+    ];
+    for (dx, dy) in deltas {
+        if dx == 0 && dy == 0 {
+            continue;
+        }
+        let nx = world.wrap_x(tx + dx);
+        let ny = ty + dy;
+        if try_place_burst_debris(world, nx, ny, was.material, tx, ty) {
+            return true;
+        }
+    }
+    if try_place_burst_debris(world, from_x, from_y, was.material, tx, ty) {
+        return true;
+    }
+    if is_soluble_rock(was.material) {
+        emit_from_dissolved_rock(world, tx, ty, was);
+        return true;
+    }
+    // LooseLimestone is outside solubility props but is still carbonate.
+    if was.material == MaterialId::LooseLimestone {
+        add_dissolved(world, tx, ty, MINERAL_PER_CELL);
+        return true;
+    }
+    false
+}
+
+fn try_place_burst_debris(
+    world: &mut World,
+    nx: i32,
+    ny: i32,
+    material: MaterialId,
+    tube_x: i32,
+    tube_y: i32,
+) -> bool {
+    let nx = world.wrap_x(nx);
+    let Some(dst) = world.get_cell(nx, ny) else {
+        return false;
+    };
+    if dst.material != MaterialId::Air {
+        return false;
+    }
+    if steam_at(world, nx, ny) > 0 {
+        return false;
+    }
+    let mut grain = Cell::solid(material);
+    let cap = water_capacity_cell(grain, &world.hydro);
+    let soak = dst.sat.0.min(cap);
+    grain.sat = Sat(soak);
+    let leftover = dst.sat.0.saturating_sub(soak);
+    world.set_cell(nx, ny, grain);
+    if leftover > 0 {
+        if let Some(tube) = world.get_cell(tube_x, tube_y) {
+            if tube.material == MaterialId::Air {
+                let room = u8::MAX.saturating_sub(tube.sat.0);
+                let put = leftover.min(room);
+                let mut next = tube;
+                next.sat = Sat(tube.sat.0.saturating_add(put));
+                world.set_cell(tube_x, tube_y, next);
+            }
+        }
+    }
     true
 }
 
@@ -1458,10 +1704,10 @@ mod tests {
         for y in 2..20 {
             w.set_cell(4, y, Cell::air());
         }
-        let hot = temp_fill(&w, 110.0);
+        let mut hot = temp_fill(&w, 110.0);
         w.tick = STEAM_EVERY;
         let before = sat_totals(&w).cell_total;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert_eq!(steam_total(&w), 0, "open sky must not mint sparse steam");
         assert_eq!(
             sat_totals(&w).cell_total,
@@ -1487,12 +1733,12 @@ mod tests {
         }
         w.set_cell(4, 2, Cell::water());
         assert!(void_is_confined(&w, 4, 2));
-        let hot = temp_fill(&w, 110.0);
+        let mut hot = temp_fill(&w, 110.0);
         let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         let h_before = h.total_mass();
         w.tick = STEAM_EVERY;
         let before = sat_totals(&w).cell_total;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0, "roofed hot water must boil to steam");
         assert_eq!(h.total_mass(), h_before, "sealed boil must not touch Humidity");
         assert_eq!(sat_totals(&w).cell_total, before, "steam boil must be mass-flat");
@@ -1514,9 +1760,9 @@ mod tests {
         }
         add_steam(&mut w, 3, 2, 200);
         assert!(void_is_confined(&w, 3, 2));
-        let hot = temp_fill(&w, 120.0);
+        let mut hot = temp_fill(&w, 120.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         let mut filled = 0;
         for x in 3..7 {
             for y in 2..5 {
@@ -1570,9 +1816,9 @@ mod tests {
         }
         add_steam(&mut w, 3, 2, 180);
         assert!(void_is_confined(&w, 3, 2));
-        let hot = temp_fill(&w, 120.0);
+        let mut hot = temp_fill(&w, 120.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         let chamber = steam_at(&w, 3, 3) + steam_at(&w, 4, 3) + steam_at(&w, 6, 3);
         assert!(
             chamber > 0,
@@ -1601,9 +1847,9 @@ mod tests {
         }
         add_steam(&mut w, 4, 3, 180);
         add_steam(&mut w, 5, 4, 180);
-        let hot = temp_fill(&w, 140.0);
+        let mut hot = temp_fill(&w, 140.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         let haze = steam_haze_wash(&w, Some(&hot));
         assert!(!haze.is_empty(), "steam must produce a haze wash");
         // Samples live on the cell grid but mass is 4×4 — neighbouring cells in
@@ -1639,15 +1885,15 @@ mod tests {
         w.set_cell(5, 2, Cell::air());
         w.set_cell(5, 3, Cell::air());
         assert!(void_is_confined(&w, 4, 2));
-        let hot = temp_fill(&w, 120.0);
+        let mut hot = temp_fill(&w, 120.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert!(
             steam_at(&w, 4, 3) + steam_at(&w, 5, 3) + steam_at(&w, 5, 2) > 0,
             "confined steam must occupy the void, not only the water seat"
         );
         w.tick = STEAM_EVERY * 2;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert!(
             steam_at(&w, 4, 6) == 0 && steam_at(&w, 4, 7) == 0,
             "steam must not pass an intact stone roof in two cadences"
@@ -1665,9 +1911,9 @@ mod tests {
         w.set_cell(3, 1, air);
         add_steam(&mut w, 3, 1, 80);
         let before = sat_totals(&w).cell_total;
-        let cool = temp_fill(&w, 20.0);
+        let mut cool = temp_fill(&w, 20.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &cool, &SteamConfig::default());
+        apply_steam(&mut w, &mut cool, &SteamConfig::default());
         assert_eq!(steam_at(&w, 3, 1), 0);
         assert_eq!(w.get_cell(3, 1).unwrap().sat.0, 80);
         assert_eq!(sat_totals(&w).cell_total, before);
@@ -1722,9 +1968,9 @@ mod tests {
         }
         add_steam(&mut w, 5, 2, 40);
         assert!(!void_is_confined(&w, 5, 2));
-        let hot = temp_fill(&w, 110.0);
+        let mut hot = temp_fill(&w, 110.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0, "open steam must remain");
         assert!(
             steam_at(&w, 5, 2) < 40,
@@ -1754,12 +2000,12 @@ mod tests {
         for y in 2..16 {
             w.set_cell(4, y, Cell::air());
         }
-        let hot = temp_fill(&w, 150.0);
+        let mut hot = temp_fill(&w, 150.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert_eq!(steam_total(&w), 0);
         w.tick = STEAM_EVERY * 2;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert_eq!(steam_total(&w), 0);
     }
 
@@ -1775,10 +2021,10 @@ mod tests {
         for y in 3..10 {
             w.set_cell(4, y, Cell::air());
         }
-        let hot = temp_fill(&w, 140.0);
+        let mut hot = temp_fill(&w, 140.0);
         w.tick = STEAM_EVERY;
         let before = sat_totals(&w).cell_total;
-        apply_steam(&mut w, &hot, &SteamConfig::default());
+        apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0);
         assert!(
             w.get_cell(4, 1).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand)
@@ -1805,14 +2051,14 @@ mod tests {
         w.set_cell(5, 5, Cell::solid(MaterialId::Stone));
         add_steam(&mut w, 4, 3, 220);
         add_steam(&mut w, 5, 3, 220);
-        let hot = temp_fill(&w, 130.0);
+        let mut hot = temp_fill(&w, 130.0);
         let cfg = SteamConfig {
             escape_pressure_min: 0.02,
             ..SteamConfig::default()
         };
         for i in 1..12 {
             w.tick = STEAM_EVERY * i;
-            apply_steam(&mut w, &hot, &cfg);
+            apply_steam(&mut w, &mut hot, &cfg);
         }
         let sand_gone = w.get_cell(4, 4).unwrap().material == MaterialId::Air
             || w.get_cell(5, 4).unwrap().material == MaterialId::Air
@@ -1830,9 +2076,9 @@ mod tests {
         add_steam(&mut w, 3, 1, 100);
         add_dissolved(&mut w, 3, 1, 400);
         let before_min = crate::audit::mineral_total(&w);
-        let cool = temp_fill(&w, 10.0);
+        let mut cool = temp_fill(&w, 10.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &cool, &SteamConfig::default());
+        apply_steam(&mut w, &mut cool, &SteamConfig::default());
         assert_eq!(steam_at(&w, 3, 1), 0);
         assert_eq!(crate::audit::mineral_total(&w), before_min);
         assert!(
@@ -1860,10 +2106,10 @@ mod tests {
         add_steam(&mut w, 3, 2, 255);
         add_steam(&mut w, 4, 2, 255);
         let pore0 = w.get_cell(3, 3).unwrap().pore;
-        let hot = temp_fill(&w, 130.0);
+        let mut hot = temp_fill(&w, 130.0);
         for i in 1..20 {
             w.tick = STEAM_EVERY * i;
-            apply_steam(&mut w, &hot, &SteamConfig::default());
+            apply_steam(&mut w, &mut hot, &SteamConfig::default());
         }
         let after = w.get_cell(3, 3).unwrap();
         assert!(
@@ -1907,7 +2153,7 @@ mod tests {
             + w.get_cell(4, 3).unwrap().sat.0 as i32;
         let pore0 = w.get_cell(4, 1).unwrap().pore;
         let before = sat_totals(&w).cell_total;
-        let hot = temp_fill(&w, 160.0);
+        let mut hot = temp_fill(&w, 160.0);
         let cfg = SteamConfig {
             enable_escape: false,
             phase_expansion_drive: 16,
@@ -1917,7 +2163,7 @@ mod tests {
         };
         for i in 1..10 {
             w.tick = STEAM_EVERY * i;
-            apply_steam(&mut w, &hot, &cfg);
+            apply_steam(&mut w, &mut hot, &cfg);
         }
         let sat_above1 = w.get_cell(4, 2).unwrap().sat.0 as i32
             + w.get_cell(4, 3).unwrap().sat.0 as i32;
@@ -1998,7 +2244,7 @@ mod tests {
         w.set_cell(4, 2, Cell::solid(MaterialId::Stone));
         w.set_cell(4, 3, Cell::solid(MaterialId::Stone));
         let sand0 = w.get_cell(5, 2).unwrap().sat.0;
-        let hot = temp_fill(&w, 170.0);
+        let mut hot = temp_fill(&w, 170.0);
         let cfg = SteamConfig {
             enable_escape: false,
             phase_expansion_drive: 24,
@@ -2008,7 +2254,7 @@ mod tests {
         };
         for i in 1..12 {
             w.tick = STEAM_EVERY * i;
-            apply_steam(&mut w, &hot, &cfg);
+            apply_steam(&mut w, &mut hot, &cfg);
         }
         let sand1 = w.get_cell(5, 2).unwrap().sat.0;
         assert!(
@@ -2016,6 +2262,225 @@ mod tests {
             "least-resistance reverse seep must wet the sand path or vent              (sand {sand0}→{sand1}, host sat={}, steam={})",
             w.get_cell(4, 1).unwrap().sat.0,
             steam_total(&w)
+        );
+    }
+
+    #[test]
+    fn try_place_steam_reports_clip_not_request() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 2, Cell::air());
+        add_steam(&mut w, 2, 2, 250);
+        let accepted = try_place_steam(&mut w, 2, 2, 20, 64);
+        assert_eq!(accepted, 5, "must report only what fit under 255");
+        assert_eq!(steam_at(&w, 2, 2), 255);
+        assert_eq!(steam_total(&w), 255);
+    }
+
+    #[test]
+    fn flood_equalize_preserves_mass_above_255() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Roofed pocket of void air.
+        for x in 2..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..7 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        add_steam(&mut w, 3, 2, 200);
+        add_steam(&mut w, 4, 2, 200);
+        add_steam(&mut w, 5, 2, 200);
+        let before = steam_total(&w);
+        assert!(before > 255);
+        let mut hot = temp_fill(&w, 120.0);
+        w.tick = STEAM_EVERY;
+        let cfg = SteamConfig {
+            enable_escape: false,
+            enable_pore_boil: false,
+            ..SteamConfig::default()
+        };
+        apply_steam(&mut w, &mut hot, &cfg);
+        assert_eq!(
+            steam_total(&w),
+            before,
+            "flood equalize must not destroy multi-cell vapour totals"
+        );
+    }
+
+    #[test]
+    fn reverse_push_carries_heat_into_cold_neighbour() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Wet limestone column with room above.
+        w.set_cell(4, 1, {
+            let mut c = Cell::solid(MaterialId::Limestone);
+            c.sat = Sat(180);
+            c
+        });
+        w.set_cell(4, 2, {
+            let mut c = Cell::solid(MaterialId::Limestone);
+            c.sat = Sat(20);
+            c
+        });
+        let mut temp = temp_fill(&w, 20.0);
+        // Stamp source tile hot, destination cold.
+        let (shx, shy) = temp.tile_of(4, 1);
+        let (dhx, dhy) = temp.tile_of(4, 2);
+        temp.set_tile_c(shx, shy, 140.0);
+        if (dhx, dhy) != (shx, shy) {
+            temp.set_tile_c(dhx, dhy, 20.0);
+        }
+        let before_dest = temp.at_cell(4, 2);
+        let moved = reverse_push_pore_water(&mut w, &mut temp, 4, 1, 40);
+        assert!(moved > 0, "expected reverse push to move pore water");
+        let after_dest = temp.at_cell(4, 2);
+        if (dhx, dhy) != (shx, shy) {
+            assert!(
+                after_dest > before_dest + 0.5,
+                "hot reverse seep must warm the destination tile ({before_dest} → {after_dest})"
+            );
+        }
+    }
+
+    #[test]
+    fn cavity_pressure_warms_cold_wall_below_boil() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..7 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(4, 3, {
+            let mut c = Cell::solid(MaterialId::Limestone);
+            c.sat = Sat(120);
+            c
+        });
+        add_steam(&mut w, 4, 2, 180);
+        let mut temp = temp_fill(&w, 40.0); // well below boil
+        let before = temp.at_cell(4, 3);
+        let cfg = SteamConfig::default();
+        transmit_cavity_pressure(&mut w, &mut temp, &cfg);
+        let after = temp.at_cell(4, 3);
+        assert!(
+            after > before + 0.25,
+            "dense cavity humidity should deposit heat into adjacent wet rock ({before} → {after})"
+        );
+    }
+
+    fn count_mat(world: &World, mat: MaterialId) -> usize {
+        let mut n = 0usize;
+        for chunk in world.chunks.values() {
+            for cell in &chunk.cells {
+                if cell.material == mat {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn burst_sand_lid_relocates_grain_mass() {
+        let mut w = World::new(31);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..7 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(5, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(5, 3, Cell::air());
+        w.set_cell(4, 4, Cell::solid(MaterialId::Sand));
+        w.set_cell(5, 4, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 5, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 5, Cell::solid(MaterialId::Stone));
+        add_steam(&mut w, 4, 3, 220);
+        add_steam(&mut w, 5, 3, 220);
+        let sand_before = count_mat(&w, MaterialId::Sand);
+        let mut hot = temp_fill(&w, 130.0);
+        let cfg = SteamConfig {
+            escape_pressure_min: 0.02,
+            ..SteamConfig::default()
+        };
+        for i in 1..12 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let sand_after = count_mat(&w, MaterialId::Sand);
+        assert_eq!(
+            sand_after, sand_before,
+            "sand lid burst must relocate grains, not delete them ({sand_before} → {sand_after})"
+        );
+        assert!(
+            w.get_cell(4, 4).unwrap().material == MaterialId::Air
+                || w.get_cell(5, 4).unwrap().material == MaterialId::Air
+                || steam_at(&w, 4, 4) > 0
+                || steam_at(&w, 5, 4) > 0,
+            "soft lid should still open"
+        );
+    }
+
+    #[test]
+    fn burst_clay_lid_banks_suspended_sediment() {
+        let mut w = World::new(37);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..6 {
+            for y in 1..5 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(4, 4, Cell::solid(MaterialId::Clay));
+        w.set_cell(4, 5, Cell::solid(MaterialId::Stone));
+        add_steam(&mut w, 4, 3, 240);
+        let before = crate::audit::sediment_total(&w);
+        assert!(burst_grain_tube(&mut w, 4, 3, 4, 4, 64));
+        assert_eq!(w.get_cell(4, 4).unwrap().material, MaterialId::Air);
+        assert_eq!(
+            crate::audit::sediment_total(&w),
+            before,
+            "clay burst must bank suspended load"
+        );
+    }
+
+    #[test]
+    fn assault_widen_limestone_keeps_mineral_total() {
+        let mut w = World::new(41);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..6 {
+            for y in 1..5 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(3, 2, Cell::air());
+        w.set_cell(4, 2, Cell::air());
+        let mut lime = Cell::solid(MaterialId::Limestone);
+        lime.sat = Sat(80);
+        lime.pore = 200;
+        w.set_cell(3, 3, lime);
+        w.set_cell(3, 4, Cell::solid(MaterialId::Stone));
+        add_steam(&mut w, 3, 2, 200);
+        add_steam(&mut w, 4, 2, 200);
+        let before = crate::audit::mineral_total(&w);
+        let mut hot = temp_fill(&w, 120.0);
+        for i in 1..10 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &SteamConfig::default());
+        }
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "steam assault widen must conserve mineral (solid + dissolved)"
         );
     }
 

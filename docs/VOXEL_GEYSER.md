@@ -1,7 +1,7 @@
 # Geyser landscape motor
 
 **Status:** P0–P3 + three-store humidity model (sky H / sealed
-`cave_humidity` / pressurized `steam`). Open hot water is accelerated
+`cave_humidity` / pressurized cavity humidity (`steam` wire)). Open hot water is accelerated
 evap into sky H. **P4** episodic jet still waits on the FPS gate below.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** native **upward** landscape builder (hot springs → geysers →
@@ -35,9 +35,10 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam / underground vapour | **Three stores:** (1) sky [`Humidity`] for weather + open caves; (2) sparse `World.cave_humidity` for ambient sealed-cave air; (3) sparse `World.steam` for **roofed flash / pressure** only. Steam never dumps into H/rain. |
-| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~32×), not minted mass. Heat above 100 °C further scales the pulse (~×3 by +80 °C — significant, not 1700×). Reverse seep follows **highest permeability** (path of least resistance) and drops Flowstone when it vents into Air. |
+| Cavity humidity / pressure | **Two sealed modes + sky:** (1) sky [`Humidity`] for weather + open caves; (2) sparse `World.cave_humidity` for cool sealed ambient; (3) sparse `World.steam` (wire name) for **pressurized cavity humidity** in closed / semi-closed voids. Not a separate steam-gas species. Never dumps into H/rain. Hot water **carries heat** along reverse seep so channels warm through colder rock; vapour density keeps pushing past the boil isotherm. |
+| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~32×), not minted mass. Heat above 100 °C further scales the pulse (~×3 by +80 °C — significant, not 1700×). Reverse seep **advects tile heat** with the water and follows **highest permeability** (path of least resistance); vents drop Flowstone. Existing cavity humidity keeps driving pore push + heat deposit beyond the hot zone. |
 | Pressure | **No continuum PDE.** Sparse underground vapour density + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
+| Soft-lid burst | Grain lids relocate (bedload ejecta) or clay suspends — solids are not deleted. Soluble widen still banks dissolved mineral. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |
 | Sky path | **Hard split.** Geyser vapour must not write sky humidity / rain lottery. Do not retain cave mass in the weather H store. |
 

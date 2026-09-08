@@ -1104,16 +1104,16 @@ impl SimSettings {
                     self.phase.min_budget_to_snow =
                         self.phase.min_budget_to_snow.clamp(1.0, 255.0);
                 });
-                ui.tree_node(hash!(), "Steam / boil", |ui| {
+                ui.tree_node(hash!(), "Cavity humidity / pressure", |ui| {
                     ui.label(
                         None,
-                        "Buoyant pressurized gas (not sky humidity). Pore liquid→gas expansion drives reverse seepage + aperture growth. Flood-fills cave voids; cool → drip/sinter.",
+                        "Closed / semi-closed cavity humidity under pressure (wire: steam; not sky H). Hot water carries heat into channels; vapour density keeps pushing past the boil isotherm. Cool → drip/sinter.",
                     );
-                    ui.checkbox(hash!(), "Steam enabled", &mut self.steam.enabled);
+                    ui.checkbox(hash!(), "Cavity humidity enabled", &mut self.steam.enabled);
                     ui.checkbox(hash!(), "Pore boil (wet rock)", &mut self.steam.enable_pore_boil);
                     ui.checkbox(
                         hash!(),
-                        "Pressure escape / steam tubes",
+                        "Pressure escape / sinter tubes",
                         &mut self.steam.enable_escape,
                     );
                     labeled_slider(

@@ -573,6 +573,69 @@ impl Temperature {
         self.at_tile(hx, hy)
     }
 
+    /// Write a tile temperature, keeping the dense slab in sync when present.
+    pub fn set_tile_c(&mut self, hx: i32, hy: i32, celsius: f32) {
+        let hx = self.wrap_hx(hx).unwrap_or(hx);
+        if !celsius.is_finite() {
+            return;
+        }
+        self.cells.insert((hx, hy), celsius);
+        if let Some(b) = self.bounds {
+            let cap = b.tile_capacity();
+            if cap > 0 && self.slab.len() == cap && b.contains(hx, hy) {
+                let (w, _) = b.dims();
+                self.slab[b.index(w, hx, hy)] = celsius;
+            }
+        }
+    }
+
+    /// Nudge the tile covering `(gx, gy)` toward `target_c` by `mix` (0..=1).
+    pub fn deposit_heat_toward(&mut self, gx: i32, gy: i32, target_c: f32, mix: f32) {
+        if !target_c.is_finite() {
+            return;
+        }
+        let mix = mix.clamp(0.0, 1.0);
+        if mix < 1e-5 {
+            return;
+        }
+        let (hx, hy) = self.tile_of(gx, gy);
+        let before = self.at_tile_packed(hx, hy);
+        let after = before + (target_c - before) * mix;
+        self.set_tile_c(hx, hy, after);
+    }
+
+    /// Carry heat with a liquid/vapour mass move between cells (tile-coarse).
+    ///
+    /// Destination mixes toward the source tile; source cools slightly so the
+    /// channel warms as hot water/vapour is shoved through colder rock.
+    pub fn advect_with_mass(
+        &mut self,
+        from_gx: i32,
+        from_gy: i32,
+        to_gx: i32,
+        to_gy: i32,
+        moved: u8,
+    ) {
+        if moved == 0 {
+            return;
+        }
+        let (fhx, fhy) = self.tile_of(from_gx, from_gy);
+        let (thx, thy) = self.tile_of(to_gx, to_gy);
+        if fhx == thx && fhy == thy {
+            return;
+        }
+        let src = self.at_tile_packed(fhx, fhy);
+        let dest = self.at_tile_packed(thx, thy);
+        // One cell move is a small fraction of a tile's water, but channels
+        // should warm over repeated pulses — bias the mix upward for feel.
+        let mix = ((moved as f32) / 40.0).clamp(0.0, 0.55);
+        if mix < 1e-4 {
+            return;
+        }
+        self.set_tile_c(thx, thy, dest + (src - dest) * mix);
+        self.set_tile_c(fhx, fhy, src + (dest - src) * (mix * 0.35));
+    }
+
     pub fn mean(&self) -> f32 {
         if self.cells.is_empty() {
             return self.config.base_temp_c;
