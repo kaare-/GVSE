@@ -293,7 +293,7 @@ pub fn apply_cave_humidity(
     let keys: Vec<(i32, i32)> = world.cave_humidity.keys().copied().collect();
     for (gx, gy) in keys {
         let Some(cell) = world.get_cell(gx, gy) else {
-            world.cave_humidity.remove(&(gx, gy));
+            // Unloaded / missing cell: keep mass; do not destroy vapour.
             continue;
         };
         if cell.material != MaterialId::Air {

@@ -264,14 +264,14 @@ pub fn draw_block_inspector(
                 };
                 let press = steam_pressure_norm(world, gx, gy);
                 lines.push(format!(
-                    "steam={steam}/255  confined={}  pressure={press:.2} (void vapour; not H)",
+                    "cavity_h={steam}/255  confined={}  pressure={press:.2} (pressurized cavity humidity; not sky H)",
                     if confined { "yes" } else { "no" }
                 ));
             }
             let cave_h = cave_humidity_at(world, gx, gy);
             if cave_h > 0 {
                 lines.push(format!(
-                    "cave_humidity={cave_h}/255 (sealed ambient; same H wash, not rain)"
+                    "cave_humidity={cave_h}/255 (sealed ambient cavity air; same H wash, not rain)"
                 ));
             }
             if c.mycelium() > 0 {

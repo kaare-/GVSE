@@ -118,12 +118,14 @@ pub fn sat_totals(world: &World) -> SatTotals {
             }
         }
     }
-    // Conduit steam is boiled free water — same mass units as sat.
+    // Conduit cavity humidity (wire: steam) + sealed ambient cave humidity —
+    // same mass units as sat.
     let steam: i64 = world.steam.values().map(|&v| v as i64).sum();
+    let cave_h: i64 = world.cave_humidity.values().map(|&v| v as i64).sum();
     SatTotals {
         free_air,
         pore,
-        cell_total: free_air + pore + steam,
+        cell_total: free_air + pore + steam + cave_h,
         humidity: 0.0,
         clouds: 0.0,
     }

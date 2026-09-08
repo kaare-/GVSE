@@ -1,7 +1,7 @@
 # Thermal loop — heat transport before pressurized vapour
 
 **Status:** T0–T5 + T2b landed. **Humidity model:** sky H (incl. open caves) /
-sparse sealed `cave_humidity` / pressurized `steam` flash. Open hot water is
+sparse sealed `cave_humidity` / pressurized cavity humidity (`steam` wire). Open hot water is
 accelerated evap into sky H. T6b/P4 geyser jet still FPS-gated.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
@@ -26,8 +26,7 @@ vents / open air → cold water (and cold air) sink / contact → rock cools
 ```
 
 Today we have tile `Temperature` (solar, geothermal, uniform diffuse α),
-sky humidity weather, and sparse underground vapour — but **almost no
-rock↔water heat exchange** and **no water convection**. Cold lakes do not
+sky humidity weather, and sparse underground vapour — and rock↔water couples exist; pressurized cavity flow now also **advects heat** with reverse seep so conduits warm over time. Cold lakes do not
 quench hot rock; warm water does not rise. Pressurized vapour on top of
 that would look fake and fight FPS for no physical gain.
 
@@ -49,7 +48,7 @@ extend the same couples into pores. Detail is optional later.
 | Air ↔ water surface | Cold air cools the free-water skin (and reverse); reuse near-surface air↔ground couple patterns already in `temperature.rs`. |
 | Sky Humidity | Weather store. **Open caves / overhangs** share it (T5 crest-hoist / flux skip + open-to-sky class). Unroofed hot water is ordinary **accelerated evaporation** into this store — not a special steam flash. |
 | Cave humidity | Sparse `World.cave_humidity` — ambient moist Air in **sealed** voids under rock. Not pressurized, not the rain lottery. Same soft white `H` wash as sky humidity. |
-| Steam | Sparse `World.steam` — **roofed flash / pressure** for geysers only. Never dumps into sky H. |
+| Cavity humidity (pressure) | Sparse `World.steam` wire — **closed / semi-closed cavity humidity under pressure** for geysers. Hot water/vapour **carry heat** into colder rock; density-driven push continues below 100 °C. Never dumps into sky H. |
 | Boil / evap | Overground “boil” is **fast evaporation** into Humidity when water contacts hot material. Sealed flash stays on the sparse underground store until a vent opens. |
 | Geyser gating | No new sealed-pressure / hot-humidity assault work until T0–T2 below are landed and demo FPS still holds. |
 
