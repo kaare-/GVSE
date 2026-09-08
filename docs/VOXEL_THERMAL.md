@@ -48,7 +48,7 @@ extend the same couples into pores. Detail is optional later.
 | Water convection | Bias existing vertical / confined / flow exchange by ΔT (warm up, cold down). Not a second fluid solver. |
 | Air ↔ water surface | Cold air cools the free-water skin (and reverse); reuse near-surface air↔ground couple patterns already in `temperature.rs`. |
 | Sky Humidity | Weather store. **Open caves / overhangs** share it (T5 crest-hoist / flux skip + open-to-sky class). Unroofed hot water is ordinary **accelerated evaporation** into this store — not a special steam flash. |
-| Cave humidity | Sparse `World.cave_humidity` — ambient moist Air in **sealed** voids under rock. Not pressurized, not the rain lottery. |
+| Cave humidity | Sparse `World.cave_humidity` — ambient moist Air in **sealed** voids under rock. Not pressurized, not the rain lottery. Same soft white `H` wash as sky humidity. |
 | Steam | Sparse `World.steam` — **roofed flash / pressure** for geysers only. Never dumps into sky H. |
 | Boil / evap | Overground “boil” is **fast evaporation** into Humidity when water contacts hot material. Sealed flash stays on the sparse underground store until a vent opens. |
 | Geyser gating | No new sealed-pressure / hot-humidity assault work until T0–T2 below are landed and demo FPS still holds. |

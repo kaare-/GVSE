@@ -4,7 +4,7 @@
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    is_fungus, is_land_plant, permeability_cell, soft_litter_at, steam_at, steam_pressure_norm,
+    is_fungus, is_land_plant, permeability_cell, soft_litter_at, cave_humidity_at, steam_at, steam_pressure_norm,
     void_is_confined, water_capacity_cell, Atom, Cell, Corpse, GeotechMap, Humidity, Temperature,
     World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
 };
@@ -266,6 +266,12 @@ pub fn draw_block_inspector(
                 lines.push(format!(
                     "steam={steam}/255  confined={}  pressure={press:.2} (void vapour; not H)",
                     if confined { "yes" } else { "no" }
+                ));
+            }
+            let cave_h = cave_humidity_at(world, gx, gy);
+            if cave_h > 0 {
+                lines.push(format!(
+                    "cave_humidity={cave_h}/255 (sealed ambient; same H wash, not rain)"
                 ));
             }
             if c.mycelium() > 0 {

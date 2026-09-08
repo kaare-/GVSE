@@ -207,6 +207,15 @@ fn steam_haze_color(density: u8, warmth: u8) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
+
+/// Sealed cave humidity — same soft white wash as sky H (no steam warmth tint).
+fn cave_humidity_haze_color(density: u8) -> Color {
+    let t = (density as f32 / 255.0).clamp(0.0, 1.0);
+    // Match sky humidity haze alpha (~18–60).
+    let a = (18.0 + t * 42.0) as u8;
+    Color::from_rgba(255, 255, 255, a)
+}
+
 fn scale_color_alpha(c: Color, k: f32) -> Color {
     let k = k.clamp(0.0, 1.0);
     Color {
@@ -1119,6 +1128,32 @@ async fn main() {
             );
         }
 
+        
+        // Sealed cave humidity — same soft white H wash (gated with humidity overlay).
+        if humidity_overlay && !scene.world.cave_humidity.is_empty() {
+            let bedrock_y = scene.params.bedrock_floor_y;
+            for sample in wk_voxel::cave_humidity_haze_wash(&scene.world) {
+                if sample.density == 0 || sample.gy < y_min_vis || sample.gy >= y_max_vis {
+                    continue;
+                }
+                for &x_copy in x_copies {
+                    let x = scene.world.wrap_x(sample.gx) + x_copy * scene.params.width_cols;
+                    let sx = origin_x + x as f32 * cell_px;
+                    let sy = origin_y - (sample.gy - bedrock_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy + cell_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px + 0.5,
+                        cell_px + 0.5,
+                        cave_humidity_haze_color(sample.density),
+                    );
+                }
+            }
+        }
+
         // Steam as humidity-shaped haze (4×4 tiles, soft white; pressure/heat tint).
         // Sparse steam mass stays the conduit store — not dumped into sky H/rain.
         if !scene.world.steam.is_empty() {
@@ -1630,7 +1665,7 @@ async fn main() {
                 "night"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C drizzle={} evap={} phase={} steam={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C drizzle={} evap={} phase={} steam={} cave_h={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1643,6 +1678,7 @@ async fn main() {
                 } else {
                     "off".into()
                 },
+                scene.world.cave_humidity.len(),
                 scene.humidity.total_mass(),
                 scene.carbon.atmosphere,
                 scene.carbon.dissolved,
