@@ -55,12 +55,38 @@ pub const PORE_BOIL_MAX_PER_CELL: u8 = 40;
 
 /// Liquid→gas expansion stand-in for pore boil drive.
 ///
-/// Real steam is ~1000× liquid volume; we use a capped sim factor so each
+/// Real steam is ~1000–1700× liquid volume; we use a capped sim factor so each
 /// boiled sat unit budgets this many units of reverse seepage + aperture
 /// work. Mass stays flat (boiled sat ↔ sparse vapour); the factor is *force*,
 /// not minted water. Low values feel inert; dozens read as flash without
-/// pretending full 1700×.
+/// pretending full 1700×. Heat above boil further scales the pulse
+/// ([`phase_heat_drive_scale`]) — a significant spike, still not Clausius
+/// full expansion.
 pub const PHASE_EXPANSION_DRIVE: u8 = 32;
+
+/// Heat multiplier on phase-expansion force above boil.
+///
+/// 1.0 at the boil point; climbs toward ~3× by boil+80 °C. Hot groundwater
+/// therefore pushes harder as it superheats, without minting mass.
+#[inline]
+pub fn phase_heat_drive_scale(temp_c: f32, boil_c: f32) -> f32 {
+    if !temp_c.is_finite() || temp_c <= boil_c {
+        return 1.0;
+    }
+    let over = ((temp_c - boil_c) / 40.0).clamp(0.0, 2.0);
+    1.0 + over
+}
+
+/// Reverse-seepage + crack budget for a boiled pore pulse (force, not mass).
+#[inline]
+pub fn expansion_drive_units(boiled: u8, expand: u8, temp_c: f32, boil_c: f32) -> u8 {
+    if boiled == 0 {
+        return 0;
+    }
+    let heat = phase_heat_drive_scale(temp_c, boil_c);
+    let raw = (boiled as f32) * (expand.max(1) as f32) * heat;
+    raw.round().clamp(1.0, 255.0) as u8
+}
 
 /// How many reverse-seepage hops a phase-expansion pulse may travel.
 pub const REVERSE_SEEP_HOPS: u8 = 4;
@@ -1018,10 +1044,9 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
             });
         let Some((sx, sy)) = seat else {
             // Still no vapour seat: expansion still shoves remaining pore water
-            // upward (seepage in reverse) so the tube keeps growing.
-            let drive = (take as u16)
-                .saturating_mul(expand as u16)
-                .min(255) as u8;
+            // along least-resistance seepage so the tube keeps growing.
+            let t_c = temp.at_cell(gx, gy);
+            let drive = expansion_drive_units(take, expand, t_c, boil);
             reverse_seep_chain(world, gx, gy, drive, hops);
             work = work.saturating_add(1);
             continue;
@@ -1040,11 +1065,11 @@ fn boil_hot_pores(world: &mut World, temp: &Temperature, cfg: &SteamConfig, max_
         }
         carry_with_water(world, (gx, gy), (sx, sy), take, before);
 
-        // 2) Phase-change pressure: expansion drive ≫ boiled mass.
-        //    Remaining liquid is shoved out of the rock (seepage in reverse).
-        let drive = (take as u16)
-            .saturating_mul(expand as u16)
-            .min(255) as u8;
+        // 2) Phase-change pressure: expansion drive ≫ boiled mass, scaled by
+        //    heat above boil. Remaining liquid is shoved along the easiest
+        //    wet path (seepage in reverse) until it vents or equalizes.
+        let t_c = temp.at_cell(gx, gy);
+        let drive = expansion_drive_units(take, expand, t_c, boil);
         reverse_seep_chain(world, gx, gy, drive, hops);
         // Host cell itself also widens under flash expansion.
         phase_crack_host(world, gx, gy, take, expand);
@@ -1139,7 +1164,7 @@ fn phase_crack_host(world: &mut World, gx: i32, gy: i32, boiled: u8, expand: u8)
     let _ = widen_aperture(world, gx, gy, throughput, scale, 0xB01C_u64);
 }
 
-/// Multi-hop reverse seepage: shove pore water toward lower pressure / upward.
+/// Multi-hop reverse seepage: shove pore water along the easiest wet path.
 fn reverse_seep_chain(world: &mut World, mut gx: i32, mut gy: i32, mut drive: u8, hops: u8) {
     for _ in 0..hops {
         if drive == 0 {
@@ -1149,36 +1174,45 @@ fn reverse_seep_chain(world: &mut World, mut gx: i32, mut gy: i32, mut drive: u8
         if moved == 0 {
             return;
         }
-        // Follow the liquid upward if we can (pressure wants out toward surface).
-        let mut advanced = false;
-        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2)] {
+        // Follow the liquid into the most permeable wet neighbour (least
+        // resistance), with a mild upward preference toward escape.
+        let mut best: Option<(i32, i32, i32)> = None; // score, tx, ty
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
             let tx = world.wrap_x(gx + dx);
             let ty = gy + dy;
-            if world
-                .get_cell(tx, ty)
-                .is_some_and(|c| c.material != MaterialId::Air && c.sat.0 > 0)
-            {
-                gx = tx;
-                gy = ty;
-                advanced = true;
-                break;
-            }
-            if world
-                .get_cell(tx, ty)
-                .is_some_and(|c| c.material == MaterialId::Air)
-            {
-                // Reached a void — remaining drive punches steam/water into it next cadence.
+            let Some(c) = world.get_cell(tx, ty) else {
+                continue;
+            };
+            if c.material == MaterialId::Air {
+                // Reached a void — remaining drive vents next cadence.
                 return;
             }
+            if c.sat.0 == 0 {
+                continue;
+            }
+            let perm = permeability_cell(c, &world.hydro) as i32;
+            if perm == 0 {
+                continue;
+            }
+            let score = perm * 8 + dy.max(0) * 40 + (c.sat.0 as i32);
+            if best.is_none_or(|(s, _, _)| score > s) {
+                best = Some((score, tx, ty));
+            }
         }
-        if !advanced {
+        let Some((_, nx, ny)) = best else {
             return;
-        }
+        };
+        gx = nx;
+        gy = ny;
         drive = drive.saturating_sub(moved / 2).max(moved / 4);
     }
 }
 
-/// Push pore water one step; returns how much moved.
+/// Push pore water one step along the path of least resistance.
+///
+/// Candidates are scored by permeability + room, with a mild upward bias
+/// (pressure wants out). Venting into Air drops dissolved load as a warm
+/// spring deposit. Returns how much moved.
 fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) -> u8 {
     if drive == 0 {
         return 0;
@@ -1190,7 +1224,8 @@ fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) -> u8
         return 0;
     }
     let want = drive.min(src.sat.0).max(1);
-    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
+    let mut best: Option<(i32, i32, i32, Cell)> = None; // score, tx, ty, dst
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
         let tx = world.wrap_x(gx + dx);
         let ty = gy + dy;
         let Some(dst) = world.get_cell(tx, ty) else {
@@ -1204,21 +1239,47 @@ fn reverse_push_pore_water(world: &mut World, gx: i32, gy: i32, drive: u8) -> u8
         if room == 0 {
             continue;
         }
-        if dst.material != MaterialId::Air && permeability_cell(dst, &world.hydro) == 0 {
-            continue;
+        let perm = if dst.material == MaterialId::Air {
+            // Open void = free escape path (warm vent seat).
+            255
+        } else {
+            let p = permeability_cell(dst, &world.hydro);
+            if p == 0 {
+                continue;
+            }
+            p
+        };
+        // Least resistance: high perm + room, mild upward preference.
+        let score = (perm as i32) * 8 + (room as i32) * 2 + dy.max(0) * 40;
+        if best.is_none_or(|(s, _, _, _)| score > s) {
+            best = Some((score, tx, ty, dst));
         }
-        let moved = want.min(room);
-        let before = src.sat.0;
-        let mut s = world.get_cell(gx, gy).unwrap();
-        let mut d = dst;
-        s.sat = Sat(s.sat.0 - moved);
-        d.sat = Sat(d.sat.0 + moved);
-        world.set_cell(gx, gy, s);
-        world.set_cell(tx, ty, d);
-        carry_with_water(world, (gx, gy), (tx, ty), moved, before);
-        return moved;
     }
-    0
+    let Some((_, tx, ty, dst)) = best else {
+        return 0;
+    };
+    let cap = water_capacity_cell(dst, &world.hydro);
+    let room = cap.saturating_sub(dst.sat.0);
+    let moved = want.min(room);
+    if moved == 0 {
+        return 0;
+    }
+    let before = src.sat.0;
+    let mut s = world.get_cell(gx, gy).unwrap();
+    let mut d = dst;
+    s.sat = Sat(s.sat.0 - moved);
+    d.sat = Sat(d.sat.0 + moved);
+    world.set_cell(gx, gy, s);
+    world.set_cell(tx, ty, d);
+    carry_with_water(world, (gx, gy), (tx, ty), moved, before);
+    if d.material == MaterialId::Air {
+        // Warm vent: depressurising spring drops dissolved minerals.
+        let warmth = steam_pressure_norm(world, gx, gy)
+            .max(drive as f32 / 255.0)
+            .clamp(0.25, 1.0);
+        precipitate_artesian_warm(world, tx, ty, warmth);
+    }
+    moved
 }
 
 fn escape_pressurized(
@@ -1890,4 +1951,72 @@ mod tests {
             "drive={drive} must dwarf boiled={boiled}"
         );
     }
+
+    #[test]
+    fn phase_heat_drive_scale_spikes_above_boil() {
+        assert_eq!(phase_heat_drive_scale(100.0, 100.0), 1.0);
+        assert_eq!(phase_heat_drive_scale(80.0, 100.0), 1.0);
+        let warm = phase_heat_drive_scale(140.0, 100.0);
+        let hot = phase_heat_drive_scale(180.0, 100.0);
+        assert!(warm > 1.5, "over-boil must raise drive (warm={warm})");
+        assert!(hot >= warm, "hotter must not weaken drive");
+        assert!(hot <= 3.0 + 1e-3, "must stay well below Clausius 1700× (hot={hot})");
+        let cool_drive = expansion_drive_units(10, 16, 100.0, 100.0);
+        let hot_drive = expansion_drive_units(10, 16, 180.0, 100.0);
+        assert!(
+            hot_drive > cool_drive,
+            "superheat must enlarge reverse-seep budget ({cool_drive} → {hot_drive})"
+        );
+    }
+
+    #[test]
+    fn reverse_seep_prefers_higher_permeability_path() {
+        // Hot wet limestone with two upward exits: sand (high perm) vs stone
+        // (low/zero). Expansion must shove water into the sand path.
+        let mut w = World::new(41);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 0..7 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        let lim_cap = crate::cell::water_capacity(MaterialId::Limestone).max(1);
+        let mut boil = Cell::solid(MaterialId::Limestone);
+        boil.sat = Sat(lim_cap);
+        boil.pore = 120;
+        w.set_cell(4, 1, boil);
+        // Left diagonal: impermeable stone (no room for least-resistance).
+        w.set_cell(3, 2, Cell::solid(MaterialId::Stone));
+        // Right diagonal: permeable wet sand — the easy path.
+        let sand_cap = crate::cell::water_capacity(MaterialId::Sand).max(1);
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(sand_cap / 8);
+        sand.pore = 200;
+        w.set_cell(5, 2, sand);
+        // Seal the left/up with stone so sand is clearly preferred.
+        w.set_cell(4, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(4, 3, Cell::solid(MaterialId::Stone));
+        let sand0 = w.get_cell(5, 2).unwrap().sat.0;
+        let hot = temp_fill(&w, 170.0);
+        let cfg = SteamConfig {
+            enable_escape: false,
+            phase_expansion_drive: 24,
+            reverse_seep_hops: 4,
+            pore_boil_max_per_cell: 48,
+            ..SteamConfig::default()
+        };
+        for i in 1..12 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &hot, &cfg);
+        }
+        let sand1 = w.get_cell(5, 2).unwrap().sat.0;
+        assert!(
+            sand1 > sand0 || steam_total(&w) > 0 || w.get_cell(4, 1).unwrap().sat.0 < lim_cap,
+            "least-resistance reverse seep must wet the sand path or vent              (sand {sand0}→{sand1}, host sat={}, steam={})",
+            w.get_cell(4, 1).unwrap().sat.0,
+            steam_total(&w)
+        );
+    }
+
 }

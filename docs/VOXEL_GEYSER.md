@@ -36,7 +36,7 @@ karst opens conduits that feed confined rise
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
 | Steam / underground vapour | **Three stores:** (1) sky [`Humidity`] for weather + open caves; (2) sparse `World.cave_humidity` for ambient sealed-cave air; (3) sparse `World.steam` for **roofed flash / pressure** only. Steam never dumps into H/rain. |
-| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~32×), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
+| Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~32×), not minted mass. Heat above 100 °C further scales the pulse (~×3 by +80 °C — significant, not 1700×). Reverse seep follows **highest permeability** (path of least resistance) and drops Flowstone when it vents into Air. |
 | Pressure | **No continuum PDE.** Sparse underground vapour density + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |
 | Sky path | **Hard split.** Geyser vapour must not write sky humidity / rain lottery. Do not retain cave mass in the weather H store. |
