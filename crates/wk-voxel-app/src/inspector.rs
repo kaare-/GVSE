@@ -4,9 +4,10 @@
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    is_fungus, is_land_plant, permeability_cell, soft_litter_at, cave_humidity_at, steam_at, steam_pressure_norm,
-    void_is_confined, water_capacity_cell, Atom, Cell, Corpse, GeotechMap, Humidity, Temperature,
-    World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
+    is_fungus, is_land_plant, permeability_cell, soft_litter_at, cave_humidity_at, cell_pressure_norm,
+    steam_at, steam_pressure_norm, void_is_confined, water_capacity_cell, Atom, Cell, CellPressureKind,
+    Corpse, GeotechMap, Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS,
 };
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -256,17 +257,31 @@ pub fn draw_block_inspector(
             }
             lines.push(format!("flags=0x{:02X}", c.flags.0));
             let steam = steam_at(world, gx, gy);
-            if steam > 0 || (c.material == MaterialId::Air && c.sat.0 > 0 && temp_c >= 95.0) {
+            let (press, press_kind) = cell_pressure_norm(world, gx, gy, temp_c);
+            // Hot saturated rock used to hide pressure entirely — cavity_h only
+            // fired for steam seats / hot wet Air. Pore flash + cavity share one line.
+            if steam > 0 || press_kind != CellPressureKind::None || press > 0.02 {
                 let confined = if c.material == MaterialId::Air {
                     void_is_confined(world, gx, gy)
                 } else {
                     false
                 };
-                let press = steam_pressure_norm(world, gx, gy);
-                lines.push(format!(
-                    "cavity_h={steam}/255  confined={}  pressure={press:.2} (pressurized cavity humidity; not sky H)",
-                    if confined { "yes" } else { "no" }
-                ));
+                let cavity = steam_pressure_norm(world, gx, gy);
+                let kind = match press_kind {
+                    CellPressureKind::Cavity => "cavity vapour",
+                    CellPressureKind::PoreFlash => "pore flash",
+                    CellPressureKind::None => "trace",
+                };
+                if steam > 0 || c.material == MaterialId::Air {
+                    lines.push(format!(
+                        "cavity_h={steam}/255  confined={}  pressure={press:.2} ({kind}; not sky H)",
+                        if confined { "yes" } else { "no" }
+                    ));
+                } else {
+                    lines.push(format!(
+                        "pressure={press:.2} ({kind}; wet={pct:.0}% T={temp_c:.0}C cavity_P={cavity:.2})"
+                    ));
+                }
             }
             let cave_h = cave_humidity_at(world, gx, gy);
             if cave_h > 0 {

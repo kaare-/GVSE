@@ -299,6 +299,7 @@ const KEYS: &[(&str, LineKind)] = &[
     ("V        wind + water currents — warm↑/cold↓ lakes, skin wind drift (default off)", LineKind::Body),
     ("T        temperature heatmap", LineKind::Body),
     ("U        ground saturation heatmap (pores + free water)", LineKind::Body),
+    ("P        pore / cavity pressure gradient (hot wet rock flash + vapour)", LineKind::Body),
     ("M        mycelium strain colors", LineKind::Body),
     ("G        cycle geotech (shear → load → wet → off)", LineKind::Body),
     ("Tab→Climate  Landscape ↔ heatmap blend slider", LineKind::Body),

@@ -145,10 +145,10 @@ pub use cave_humidity::{
     CAVE_HUMIDITY_HAZE_TILE, MAX_CAVE_HUMIDITY_CELLS,
 };
 pub use steam::{
-    air_void_open_to_sky, apply_steam, cavity_humidity_at, expansion_drive_units,
+    air_void_open_to_sky, apply_steam, cavity_humidity_at, cell_pressure_norm, expansion_drive_units,
     phase_heat_drive_scale, steam_at, steam_haze_wash, steam_pressure_norm,
-    steam_pressure_rate_scale, steam_total, steam_vapour_field, void_is_confined, SteamConfig,
-    SteamHazeSample, BOIL_POINT_C, MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
+    steam_pressure_rate_scale, steam_total, steam_vapour_field, void_is_confined, CellPressureKind,
+    SteamConfig, SteamHazeSample, BOIL_POINT_C, MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
     STEAM_HAZE_TILE,
 };
 // HydroOverrides is defined in wk-material; re-export for app convenience.

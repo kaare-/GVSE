@@ -194,6 +194,29 @@ fn sat_overlay_color(wet: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
+/// Pore / cavity pressure 0..=1 → indigo → magenta → amber.
+fn pressure_overlay_color(p: f32) -> Color {
+    let t = p.clamp(0.0, 1.0);
+    let (r, g, b) = if t < 0.5 {
+        let u = t / 0.5;
+        (
+            (40.0 + u * 160.0) as u8,
+            (30.0 + u * 20.0) as u8,
+            (120.0 + u * 80.0) as u8,
+        )
+    } else {
+        let u = (t - 0.5) / 0.5;
+        (
+            (200.0 + u * 55.0) as u8,
+            (50.0 + u * 140.0) as u8,
+            (200.0 - u * 160.0) as u8,
+        )
+    };
+    let a = (70.0 + t * 150.0) as u8;
+    Color::from_rgba(r, g, b, a)
+}
+
+
 /// Sparse conduit steam as soft humidity-like haze (4×4 tiles).
 /// Pressure/heat raise alpha and warmth; never an opaque blue plug.
 fn steam_haze_color(density: u8, warmth: u8) -> Color {
@@ -239,6 +262,7 @@ async fn main() {
     let mut wind_streaks_overlay = false;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
+    let mut pressure_overlay = false;
     let mut mycelium_overlay = false;
     let mut geotech_mode = GeotechOverlayMode::Off;
     let mut show_hud = true;
@@ -491,6 +515,9 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::U) {
                 sat_overlay = !sat_overlay;
+            }
+            if is_key_pressed(KeyCode::P) {
+                pressure_overlay = !pressure_overlay;
             }
             if is_key_pressed(KeyCode::M) {
                 mycelium_overlay = !mycelium_overlay;
@@ -899,6 +926,7 @@ async fn main() {
         // through even a moderate landscape blend (playtest y≈36 line).
         let heatmap_on_early = sat_overlay
             || temp_overlay
+            || pressure_overlay
             || mycelium_overlay
             || geotech_mode != GeotechOverlayMode::Off;
         if !heatmap_on_early {
@@ -940,6 +968,7 @@ async fn main() {
         // Heatmap blend: 0 = landscape only, 1 = heatmap only (Tab slider).
         let heatmap_on = sat_overlay
             || temp_overlay
+            || pressure_overlay
             || mycelium_overlay
             || geotech_mode != GeotechOverlayMode::Off;
         let blend = settings.heatmap_blend.clamp(0.0, 1.0);
@@ -1354,6 +1383,53 @@ async fn main() {
             }
         }
 
+
+        // Pore / cavity pressure gradient (P): flash drive + pressurized vapour.
+        if pressure_overlay && overlay_k > 0.01 {
+            let (xr, xn) = view_cell_x_ranges(
+                origin_x,
+                cell_px,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+            );
+            for i in 0..xn as usize {
+                let (x0, x1) = xr[i];
+                for x in x0..=x1 {
+                    for &x_copy in x_copies {
+                        let sx = origin_x
+                            + (x + x_copy * scene.params.width_cols) as f32 * cell_px;
+                        if sx + cell_px < 0.0 || sx > sw {
+                            continue;
+                        }
+                        for y in y_min_vis..y_max_vis {
+                            let sy =
+                                origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                            if sy + cell_px < 0.0 || sy > sh {
+                                continue;
+                            }
+                            if scene.world.get_cell(x, y).is_none() {
+                                continue;
+                            }
+                            let temp_c = scene.temperature.at_cell(x, y);
+                            let (p, kind) =
+                                wk_voxel::cell_pressure_norm(&scene.world, x, y, temp_c);
+                            if kind == wk_voxel::CellPressureKind::None || p < 0.03 {
+                                continue;
+                            }
+                            draw_rectangle(
+                                sx,
+                                sy - cell_px,
+                                cell_px,
+                                cell_px,
+                                scale_color_alpha(pressure_overlay_color(p), overlay_k),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // Mycelium strain overlay: bright per-network colors by cream intensity.
         if mycelium_overlay && overlay_k > 0.01 {
             let (xr, xn) = view_cell_x_ranges(
@@ -1702,7 +1778,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|C/E/K/O|I|T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
+                "Tab|Space|R|C/E/K/O|I|T/U/H/V/M/G/P|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
