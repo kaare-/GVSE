@@ -53,6 +53,7 @@ use crate::organism::{OrganismStepOutcome, OrganismStore};
 use crate::parallel::set_parallel_enabled;
 use crate::phase::{apply_phase, PhaseConfig};
 use crate::pore_ice::apply_pore_ice;
+use crate::cave_humidity::apply_cave_humidity;
 use crate::steam::{apply_steam, SteamConfig};
 use crate::plant::{collect_live_root_world_cells, sail_plants_on_wind_rafts_cfg};
 use crate::rules::{
@@ -465,6 +466,7 @@ pub fn step_world(
         apply_phase(world, temperature, cfg.phase);
         apply_pore_ice(world, temperature, cfg.phase.freeze_point_c);
         apply_steam(world, temperature, cfg.steam);
+        apply_cave_humidity(world, temperature, humidity);
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
             t.phase += t0.elapsed();
         }

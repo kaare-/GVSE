@@ -140,7 +140,8 @@ pub use pore_ice::{
     PORE_ICE_EVERY,
 };
 pub use cave_humidity::{
-    cave_humidity_at, cave_humidity_total, try_add_cave_humidity, MAX_CAVE_HUMIDITY_CELLS,
+    apply_cave_humidity, cave_humidity_at, cave_humidity_total, take_cave_humidity,
+    try_add_cave_humidity, CAVE_HUMIDITY_EVERY, MAX_CAVE_HUMIDITY_CELLS,
 };
 pub use steam::{
     air_void_open_to_sky, apply_steam, steam_at, steam_haze_wash, steam_pressure_norm,
