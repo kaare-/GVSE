@@ -311,6 +311,81 @@ pub fn steam_pressure_rate_scale(world: &World, gx: i32, gy: i32) -> f32 {
     1.0 + STEAM_PRESSURE_RATE_SPAN * steam_pressure_norm(world, gx, gy)
 }
 
+/// What kind of pressure [`cell_pressure_norm`] is reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellPressureKind {
+    /// Sparse pressurized cavity humidity (wire: `World.steam`).
+    Cavity,
+    /// Hot wet rock / pore water — flash drive + nearby cavity influence.
+    PoreFlash,
+    /// Negligible.
+    None,
+}
+
+/// Unified 0..=1 pressure readout for inspector + overlay.
+///
+/// - **Air / steam seats:** column cavity fill ([`steam_pressure_norm`]).
+/// - **Hot saturated rock:** pore flash drive from wetness × superheat above
+///   boil, blended with nearby cavity pressure so conduits read as gradients
+///   without inventing a continuum PDE.
+pub fn cell_pressure_norm(world: &World, gx: i32, gy: i32, temp_c: f32) -> (f32, CellPressureKind) {
+    let steam = steam_at(world, gx, gy);
+    let cavity = steam_pressure_norm(world, gx, gy);
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return if cavity > 0.02 {
+            (cavity, CellPressureKind::Cavity)
+        } else {
+            (0.0, CellPressureKind::None)
+        };
+    };
+
+    if cell.material == MaterialId::Air || steam > 0 {
+        let local = (steam as f32 / 255.0).max(cavity);
+        return if local > 0.02 || (cell.material == MaterialId::Air && cell.sat.0 > 0 && temp_c >= 95.0)
+        {
+            (local.clamp(0.0, 1.0), CellPressureKind::Cavity)
+        } else {
+            (0.0, CellPressureKind::None)
+        };
+    }
+
+    let cap = water_capacity_cell(cell, &world.hydro);
+    let wet = if cap == 0 {
+        0.0
+    } else {
+        (cell.sat.0 as f32 / cap as f32).clamp(0.0, 1.0)
+    };
+    if wet < 0.05 && cavity < 0.02 {
+        return (0.0, CellPressureKind::None);
+    }
+    let boil = BOIL_POINT_C;
+    let heat = if !temp_c.is_finite() {
+        0.0
+    } else if temp_c >= boil {
+        // 0 at boil → 1 by boil+80 °C (matches phase-heat drive span).
+        ((temp_c - boil) / 80.0).clamp(0.0, 1.0)
+    } else if temp_c >= boil - 15.0 {
+        // Soft approach so near-boil wet rock isn't invisible.
+        (((temp_c - (boil - 15.0)) / 15.0).clamp(0.0, 1.0)) * 0.2
+    } else {
+        0.0
+    };
+    let pore_flash = wet * heat;
+    // Nearby cavity humidity still pushes through wet rock below/around boil.
+    let blended = (pore_flash * 0.9 + cavity * (0.35 + 0.65 * wet)).clamp(0.0, 1.0);
+    if blended < 0.02 {
+        return (0.0, CellPressureKind::None);
+    }
+    let kind = if pore_flash >= cavity * 0.5 && pore_flash > 0.02 {
+        CellPressureKind::PoreFlash
+    } else if cavity > 0.02 {
+        CellPressureKind::Cavity
+    } else {
+        CellPressureKind::PoreFlash
+    };
+    (blended, kind)
+}
+
 fn can_admit_new_steam_cell(world: &World, gx: i32, gy: i32, max_cells: usize) -> bool {
     if world.steam.contains_key(&(world.wrap_x(gx), gy)) {
         return true;
@@ -2756,5 +2831,45 @@ mod tests {
         );
     }
 
+
+
+    #[test]
+    fn hot_saturated_rock_reports_pore_flash_pressure() {
+        let mut w = World::new(91);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut rock = Cell::solid(MaterialId::LooseRock);
+        rock.pore = 64;
+        let cap = water_capacity_cell(rock, &w.hydro).max(1);
+        rock.sat = Sat(cap);
+        w.set_cell(5, 3, rock);
+        let (p, kind) = cell_pressure_norm(&w, 5, 3, 107.0);
+        assert!(
+            p > 0.05,
+            "hot fully-wet rock must show pore pressure (got {p})"
+        );
+        assert_eq!(kind, CellPressureKind::PoreFlash);
+        let (cold, cold_kind) = cell_pressure_norm(&w, 5, 3, 20.0);
+        assert!(
+            cold < 0.02 && cold_kind == CellPressureKind::None,
+            "cold wet rock without cavity vapour stays quiet ({cold}, {cold_kind:?})"
+        );
+    }
+
+    #[test]
+    fn cavity_steam_pressure_reads_as_cavity_kind() {
+        let mut w = World::new(93);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..7 {
+            for y in 1..5 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        add_steam(&mut w, 4, 2, 180);
+        let (p, kind) = cell_pressure_norm(&w, 4, 2, 120.0);
+        assert!(p > 0.2, "dense cavity humidity must read pressure (got {p})");
+        assert_eq!(kind, CellPressureKind::Cavity);
+    }
 
 }
