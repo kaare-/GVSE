@@ -167,22 +167,33 @@ sinking while warm rises / skin drifts.
 
 - Crest-hoist / vertical flux snap skip seats whose tile-centre Air is
   sky-connected (`air_void_open_to_sky`: upward probe + short Air BFS).
-- Open shafts / vented caves keep weather Humidity (rain lottery eligible).
+- Open shafts / vented caves / cliff overhangs keep weather Humidity
+  (rain lottery eligible) — same store as free sky.
 - Sealed / roofed cavities still hoist off the under-crest seat (stay
-  outside the lottery; sparse steam later).
+  outside the lottery; ambient moisture → `cave_humidity`, pressure → steam).
+
+**Walk cost:** sky-open class is **not** a second humidity grid. Cheap path
+is an upward column probe; only roofed seats pay a short Air BFS
+(`BFS_BUDGET` 96) looking for a side entrance / skylight. Sealed pockets
+return false and never enlarge the weather walk.
 
 ### T6 — Return to pressurized vapour / geysers
 
 **Humidity stores (landed):**
 
 1. **Sky Humidity** — weather; open caves / overhangs share it (T5).
-2. **`World.cave_humidity`** — ambient sealed-cave air (sparse). Ordinary
-   moist void under rock — **not** pressure, **not** rain lottery.
-3. **`World.steam`** — roofed flash / geyser pressure only.
+   Boiling under open sky is ordinary **accelerated evaporation** into this
+   store — nothing special vs a hotter lake.
+2. **`World.cave_humidity`** — second mini field, **underground sealed air
+   only**. Conventional closed cave under high-sat rock: ambient moist Air,
+   sparse + hard-capped. **Not** pressure, **not** a high-humidity
+   prerequisite, **not** rain lottery.
+3. **`World.steam`** — roofed flash / geyser pressure only. Never dumps
+   into sky H.
 
 **Open hot water:** accelerated film evaporization into sky Humidity
 (evap climate rate ceiling rises near boil). Steam does **not** special-case
-open seats — boiling under open sky is just a hotter lake.
+open seats.
 
 **Roofed flash:** free / pore water ≥100 °C under a roof may mint steam
 (P3 pressure motor).
