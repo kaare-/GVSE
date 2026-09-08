@@ -70,7 +70,7 @@ pub const PORE_BOIL_MAX_PER_CELL: u8 = 40;
 /// pretending full 1700×. Heat above boil further scales the pulse
 /// ([`phase_heat_drive_scale`]) — a significant spike, still not Clausius
 /// full expansion.
-pub const PHASE_EXPANSION_DRIVE: u8 = 32;
+pub const PHASE_EXPANSION_DRIVE: u8 = 48;
 
 /// Heat multiplier on phase-expansion force above boil.
 ///
@@ -97,7 +97,7 @@ pub fn expansion_drive_units(boiled: u8, expand: u8, temp_c: f32, boil_c: f32) -
 }
 
 /// How many reverse-seepage hops a phase-expansion pulse may travel.
-pub const REVERSE_SEEP_HOPS: u8 = 4;
+pub const REVERSE_SEEP_HOPS: u8 = 10;
 
 /// Legacy rise knob (open vents still use buoyant pour after flood).
 pub const RISE_MAX_PER_CELL: u8 = 64;
@@ -959,9 +959,9 @@ fn assault_steam_walls(world: &mut World, temp: &mut Temperature, cfg: &SteamCon
             if crate::cell::is_competent_rock(wall.material)
                 && press >= cfg.escape_pressure_min * 0.5
             {
-                let up_bias = if dy > 0 { 0.55 } else { 0.25 };
-                let throughput = ((36.0 + press * 48.0) * up_bias) as u8;
-                let scale = (0.12 + press * 0.28) * up_bias;
+                let up_bias = if dy > 0 { 0.85 } else { 0.4 };
+                let throughput = ((80.0 + press * 90.0) * up_bias) as u8;
+                let scale = (1.6 + press * 2.8) * up_bias;
                 if widen_aperture(
                     world,
                     tx,
@@ -1189,6 +1189,7 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
             let t_c = temp.at_cell(gx, gy);
             let drive = expansion_drive_units(take, expand, t_c, boil);
             reverse_seep_chain(world, temp, gx, gy, drive, hops);
+            phase_crack_host(world, gx, gy, take, expand);
             work = work.saturating_add(1);
             continue;
         }
@@ -1205,9 +1206,8 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
         temp.advect_with_mass(gx, gy, sx, sy, placed);
         temp.deposit_heat_toward(sx, sy, temp.at_cell(gx, gy).max(boil), 0.35);
 
-        // 2) Phase-change pressure: expansion drive ≫ boiled mass, scaled by
-        //    heat above boil. Remaining liquid is shoved along the easiest
-        //    wet path (seepage in reverse) until it vents or equalizes.
+        // Phase-change pressure: shove after flash. Chain hops into wet
+        // neighbours if the host was emptied by the boil take.
         let t_c = temp.at_cell(gx, gy);
         let drive = expansion_drive_units(placed, expand, t_c, boil);
         reverse_seep_chain(world, temp, gx, gy, drive, hops);
@@ -1284,8 +1284,8 @@ fn open_pore_steam_seat(
             continue;
         }
         if crate::cell::is_competent_rock(wall.material) {
-            let throughput = (72u16).min(28 + expand as u16 * 6) as u8;
-            let scale = 0.18 + expand as f32 * 0.04;
+            let throughput = (140u16).min(48 + expand as u16 * 8) as u8;
+            let scale = 2.0 + expand as f32 * 0.08;
             let _ = widen_aperture(world, tx, ty, throughput, scale, 0xB01E_u64, false);
         }
     }
@@ -1301,8 +1301,8 @@ fn phase_crack_host(world: &mut World, gx: i32, gy: i32, boiled: u8, expand: u8)
     if !crate::cell::is_competent_rock(cell.material) {
         return;
     }
-    let throughput = boiled.saturating_mul(expand.min(12)).max(24);
-    let scale = 0.2 + (expand as f32) * 0.03 + (boiled as f32) / 200.0;
+    let throughput = boiled.saturating_mul(expand.min(16)).max(48);
+    let scale = 1.2 + (expand as f32) * 0.06 + (boiled as f32) / 120.0;
     let _ = widen_aperture(world, gx, gy, throughput, scale, 0xB01C_u64, false);
 }
 
@@ -1319,38 +1319,43 @@ fn reverse_seep_chain(
         if drive == 0 {
             return;
         }
-        let moved = reverse_push_pore_water(world, temp, gx, gy, drive);
+        let (moved, dest) = reverse_push_pore_water_to(world, temp, gx, gy, drive);
         if moved == 0 {
-            return;
-        }
-        // Follow the liquid into the most permeable wet neighbour (least
-        // resistance), with a mild upward preference toward escape.
-        let mut best: Option<(i32, i32, i32)> = None; // score, tx, ty
-        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
-            let tx = world.wrap_x(gx + dx);
-            let ty = gy + dy;
-            let Some(c) = world.get_cell(tx, ty) else {
-                continue;
-            };
-            if c.material == MaterialId::Air {
-                // Reached a void — remaining drive vents next cadence.
+            // Host may have flashed dry after boil — keep the pulse moving
+            // through a wet neighbour so conduits still lengthen.
+            let mut hopped = false;
+            for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, 2)] {
+                let nx = world.wrap_x(gx + dx);
+                let ny = gy + dy;
+                let Some(c) = world.get_cell(nx, ny) else {
+                    continue;
+                };
+                if c.material == MaterialId::Air || c.sat.0 == 0 {
+                    continue;
+                }
+                if permeability_cell(c, &world.hydro) == 0 {
+                    continue;
+                }
+                gx = nx;
+                gy = ny;
+                hopped = true;
+                break;
+            }
+            if !hopped {
                 return;
             }
-            if c.sat.0 == 0 {
-                continue;
-            }
-            let perm = permeability_cell(c, &world.hydro) as i32;
-            if perm == 0 {
-                continue;
-            }
-            let score = perm * 8 + dy.max(0) * 40 + (c.sat.0 as i32);
-            if best.is_none_or(|(s, _, _)| score > s) {
-                best = Some((score, tx, ty));
-            }
+            continue;
         }
-        let Some((_, nx, ny)) = best else {
+        let Some((nx, ny)) = dest else {
             return;
         };
+        if world
+            .get_cell(nx, ny)
+            .is_some_and(|c| c.material == MaterialId::Air)
+        {
+            // Reached a void — remaining drive vents next cadence.
+            return;
+        }
         gx = nx;
         gy = ny;
         drive = drive.saturating_sub(moved / 2).max(moved / 4);
@@ -1363,14 +1368,18 @@ fn reverse_seep_chain(
 /// (pressure wants out). Venting into Air drops dissolved load as a warm
 /// spring deposit. Returns how much moved.
 fn reverse_push_pore_water(world: &mut World, temp: &mut Temperature, gx: i32, gy: i32, drive: u8) -> u8 {
+    reverse_push_pore_water_to(world, temp, gx, gy, drive).0
+}
+
+fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32, gy: i32, drive: u8) -> (u8, Option<(i32, i32)>) {
     if drive == 0 {
-        return 0;
+        return (0, None);
     }
     let Some(src) = world.get_cell(gx, gy) else {
-        return 0;
+        return (0, None);
     };
     if src.material == MaterialId::Air || src.sat.0 == 0 {
-        return 0;
+        return (0, None);
     }
     let want = drive.min(src.sat.0).max(1);
     let mut best: Option<(i32, i32, i32, Cell)> = None; // score, tx, ty, dst
@@ -1405,13 +1414,13 @@ fn reverse_push_pore_water(world: &mut World, temp: &mut Temperature, gx: i32, g
         }
     }
     let Some((_, tx, ty, dst)) = best else {
-        return 0;
+        return (0, None);
     };
     let cap = water_capacity_cell(dst, &world.hydro);
     let room = cap.saturating_sub(dst.sat.0);
     let moved = want.min(room);
     if moved == 0 {
-        return 0;
+        return (0, None);
     }
     let before = src.sat.0;
     let mut s = world.get_cell(gx, gy).unwrap();
@@ -1422,14 +1431,30 @@ fn reverse_push_pore_water(world: &mut World, temp: &mut Temperature, gx: i32, g
     world.set_cell(tx, ty, d);
     carry_with_water(world, (gx, gy), (tx, ty), moved, before);
     temp.advect_with_mass(gx, gy, tx, ty, moved);
+    // Self-amplifying steam conduit: pressurized throughput widens rock along
+    // the reverse-seep path (mint_void=false — high-aperture rock, not Air pipes).
+    if d.material != MaterialId::Air && crate::cell::is_competent_rock(d.material) {
+        let thr = moved.max(12);
+        let _ = widen_aperture(world, tx, ty, thr, 3.2, 0x5EEF_u64, false);
+    }
+    if crate::cell::is_competent_rock(s.material) {
+        let thr = moved.max(8);
+        let _ = widen_aperture(world, gx, gy, thr, 1.6, 0x5EE0_u64, false);
+    }
     if d.material == MaterialId::Air {
         // Warm vent: depressurising spring drops dissolved minerals.
         let warmth = steam_pressure_norm(world, gx, gy)
             .max(drive as f32 / 255.0)
-            .clamp(0.25, 1.0);
+            .clamp(0.35, 1.0);
+        precipitate_artesian_warm(world, tx, ty, warmth);
+        // Second pass — vent mounds were crawling under the old step cap.
+        precipitate_artesian_warm(world, tx, ty, warmth);
+    } else if dissolved_at(world, tx, ty) > 0 && moved >= 8 {
+        // Supersaturated pressurized hops shed a little load into the conduit wall.
+        let warmth = (drive as f32 / 255.0).clamp(0.15, 0.7);
         precipitate_artesian_warm(world, tx, ty, warmth);
     }
-    moved
+    (moved, Some((tx, ty)))
 }
 
 fn escape_pressurized(
@@ -1490,8 +1515,8 @@ fn escape_pressurized(
         }
 
         if crate::cell::is_competent_rock(above.material) {
-            let throughput = (48.0 + press * 55.0) as u8;
-            let scale = 0.15 + press * 0.4;
+            let throughput = (90.0 + press * 100.0) as u8;
+            let scale = 2.2 + press * 3.5;
             // Pore conduit only — do not mint Air roofs as sand/void pipes.
             let _ = widen_aperture(
                 world,
@@ -2610,5 +2635,126 @@ mod tests {
             "steam assault widen must conserve mineral (solid + dissolved)"
         );
     }
+
+    #[test]
+    fn reverse_push_widens_conduit_along_path() {
+        // Pressurized reverse seep must carve high-aperture rock conduits —
+        // not only move water.
+        let mut w = World::new(61);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 1..6 {
+            let mut rock = Cell::solid(MaterialId::Limestone);
+            rock.sat = Sat(200);
+            rock.pore = 40;
+            w.set_cell(4, y, rock);
+        }
+        w.set_cell(4, 6, Cell::air());
+        add_dissolved(&mut w, 4, 1, 120);
+        let pore0 = w.get_cell(4, 2).unwrap().pore
+            + w.get_cell(4, 3).unwrap().pore
+            + w.get_cell(4, 4).unwrap().pore;
+        let mut hot = temp_fill(&w, 40.0);
+        for _ in 0..24 {
+            let _ = reverse_push_pore_water(&mut w, &mut hot, 4, 1, 200);
+            // Walk the chain a few hops like reverse_seep_chain would.
+            let _ = reverse_push_pore_water(&mut w, &mut hot, 4, 2, 180);
+            let _ = reverse_push_pore_water(&mut w, &mut hot, 4, 3, 160);
+        }
+        let pore1 = w.get_cell(4, 2).unwrap().pore
+            + w.get_cell(4, 3).unwrap().pore
+            + w.get_cell(4, 4).unwrap().pore;
+        assert!(
+            pore1 > pore0,
+            "reverse-push conduit must widen rock along the path ({pore0} → {pore1})"
+        );
+        assert_ne!(
+            w.get_cell(4, 2).unwrap().material,
+            MaterialId::Air,
+            "path carving must stay high-aperture rock, not mint Air pipes"
+        );
+    }
+
+    #[test]
+    fn reverse_seep_hops_default_reaches_farther() {
+        assert!(
+            REVERSE_SEEP_HOPS >= 8,
+            "default reverse-seep range must be long enough to feed conduits"
+        );
+        assert!(
+            PHASE_EXPANSION_DRIVE >= 40,
+            "default phase drive must shove more than a token pulse"
+        );
+        let mut w = World::new(67);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Embed the conduit in competent rock so reverse-push cannot vent into
+        // the default surrounding Air.
+        for x in 3..8 {
+            for y in 0..13 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for y in 1..12 {
+            let mut rock = Cell::solid(MaterialId::Limestone);
+            rock.sat = Sat(if y == 1 { 220 } else { 0 });
+            rock.pore = 200;
+            w.set_cell(5, y, rock);
+        }
+        // Roofed — no free Air seat beside the column.
+        w.set_cell(5, 12, Cell::solid(MaterialId::Stone));
+        let mut hot = temp_fill(&w, 50.0);
+        reverse_seep_chain(&mut w, &mut hot, 5, 1, 255, REVERSE_SEEP_HOPS);
+        for _ in 0..5 {
+            if let Some(mut c) = w.get_cell(5, 1) {
+                c.sat = Sat(220);
+                w.set_cell(5, 1, c);
+            }
+            reverse_seep_chain(&mut w, &mut hot, 5, 1, 255, REVERSE_SEEP_HOPS);
+        }
+        // Mid-column cells may drain as the pulse climbs; success is water or
+        // aperture work well above the source.
+        let far_wet = (7..=11).any(|y| w.get_cell(5, y).unwrap().sat.0 > 0);
+        let far_carved = (3..=8).any(|y| w.get_cell(5, y).unwrap().pore > 200);
+        assert!(
+            far_wet || far_carved,
+            "default hop budget must carry water/carve several cells up-column"
+        );
+    }
+
+    #[test]
+    fn reverse_push_vent_deposits_dissolved_load() {
+        let mut w = World::new(71);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 1, Cell::solid(MaterialId::Stone));
+        let mut rock = Cell::solid(MaterialId::Limestone);
+        rock.sat = Sat(200);
+        rock.pore = 60;
+        w.set_cell(3, 2, rock);
+        w.set_cell(3, 3, Cell::air());
+        add_dissolved(&mut w, 3, 2, 220);
+        let load0 = dissolved_at(&w, 3, 2) + dissolved_at(&w, 3, 3);
+        let pore0 = w.get_cell(3, 2).unwrap().pore;
+        let mut hot = temp_fill(&w, 30.0);
+        for _ in 0..20 {
+            let _ = reverse_push_pore_water(&mut w, &mut hot, 3, 2, 200);
+            if let Some(mut c) = w.get_cell(3, 2) {
+                if c.material != MaterialId::Air {
+                    c.sat = Sat(c.sat.0.max(150));
+                    w.set_cell(3, 2, c);
+                }
+            }
+        }
+        let load1 = dissolved_at(&w, 3, 2) + dissolved_at(&w, 3, 3);
+        let floor_closed = w
+            .get_cell(3, 2)
+            .is_some_and(|c| c.material != MaterialId::Air && c.pore < pore0);
+        let vent_solid = w
+            .get_cell(3, 3)
+            .is_some_and(|c| c.material != MaterialId::Air);
+        assert!(
+            load1 < load0 || floor_closed || vent_solid,
+            "artesian vent must drop dissolved mineral (load {load0}→{load1}, pore {pore0})"
+        );
+    }
+
 
 }
