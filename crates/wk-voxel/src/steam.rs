@@ -34,8 +34,11 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::mineral::{
-    carry_with_water, dissolved_at, precipitate_artesian_warm, widen_aperture,
+    add_dissolved, carry_with_water, dissolved_at, emit_from_dissolved_rock,
+    is_soluble_rock, precipitate_artesian_warm, precipitate_at, precipitate_dry_cell,
+    widen_aperture, MINERAL_PER_CELL,
 };
+use crate::sediment::{add_suspended, is_suspendable, SEDIMENT_PER_CELL};
 use crate::temperature::Temperature;
 
 /// Cadence for boil / flood / assault / recondense (FPS: not every tick).
@@ -1068,6 +1071,11 @@ fn boil_hot_air(
         let mut next = cell;
         next.sat = Sat(cell.sat.0 - placed);
         world.set_cell(gx, gy, next);
+        if next.sat.0 == 0 {
+            precipitate_dry_cell(world, gx, gy);
+        } else {
+            let _ = precipitate_at(world, gx, gy);
+        }
         let src_t = temp.at_cell(gx, gy).max(cfg.boil_point_c);
         temp.deposit_heat_toward(gx, gy, src_t, 0.2);
         for (dx, dy) in [(0, 1), (0, 2), (-1, 1), (1, 1)] {
@@ -1173,6 +1181,11 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
         next.sat = Sat(before - placed);
         world.set_cell(gx, gy, next);
         carry_with_water(world, (gx, gy), (sx, sy), placed, before);
+        if world.get_cell(gx, gy).is_some_and(|c| c.sat.0 == 0) {
+            precipitate_dry_cell(world, gx, gy);
+        } else {
+            let _ = precipitate_at(world, gx, gy);
+        }
         // Flash vapour / hot liquid carry heat into the seat and channel.
         temp.advect_with_mass(gx, gy, sx, sy, placed);
         temp.deposit_heat_toward(sx, sy, temp.at_cell(gx, gy).max(boil), 0.35);
@@ -1534,14 +1547,117 @@ fn burst_grain_tube(
     if !is_grain(cell.material) && !is_flow_erodible(cell.material) {
         return false;
     }
-    let _load = dissolved_at(world, tx, ty);
+    // Take vapour first so chamber ejecta can land in the pressure void.
+    let moved = take_steam(world, from_x, from_y, steam_at(world, from_x, from_y).min(200));
+    if !bank_burst_solid(world, from_x, from_y, tx, ty, cell) {
+        if moved > 0 {
+            add_steam(world, from_x, from_y, moved);
+        }
+        return false;
+    }
+    // Dissolved load stays with the water that remains in the opened tube.
     let mut air = Cell::air();
     air.sat = Sat(cell.sat.0);
     world.set_cell(tx, ty, air);
-    let moved = take_steam(world, from_x, from_y, steam_at(world, from_x, from_y).min(200));
     let placed = try_place_steam(world, tx, ty, moved, max_cells);
     if placed < moved {
         add_steam(world, from_x, from_y, moved - placed);
+    }
+    true
+}
+
+/// Keep burst solids on a ledger: suspend clay, relocate bedload grains, or
+/// dissolve carbonate debris into the conduit water. Never delete rock.
+fn bank_burst_solid(
+    world: &mut World,
+    from_x: i32,
+    from_y: i32,
+    tx: i32,
+    ty: i32,
+    was: Cell,
+) -> bool {
+    if is_suspendable(was.material) {
+        add_suspended(world, tx, ty, SEDIMENT_PER_CELL);
+        return true;
+    }
+    let ox = (tx - from_x).signum();
+    let oy = (ty - from_y).signum();
+    let deltas = [
+        (ox, 0),
+        (0, oy),
+        (ox, oy),
+        (-1, 0),
+        (1, 0),
+        (0, 1),
+        (0, -1),
+        (-1, 1),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+        (ox.saturating_mul(2), 0),
+        (0, oy.saturating_mul(2)),
+        (0, 2),
+        (0, 3),
+    ];
+    for (dx, dy) in deltas {
+        if dx == 0 && dy == 0 {
+            continue;
+        }
+        let nx = world.wrap_x(tx + dx);
+        let ny = ty + dy;
+        if try_place_burst_debris(world, nx, ny, was.material, tx, ty) {
+            return true;
+        }
+    }
+    if try_place_burst_debris(world, from_x, from_y, was.material, tx, ty) {
+        return true;
+    }
+    if is_soluble_rock(was.material) {
+        emit_from_dissolved_rock(world, tx, ty, was);
+        return true;
+    }
+    // LooseLimestone is outside solubility props but is still carbonate.
+    if was.material == MaterialId::LooseLimestone {
+        add_dissolved(world, tx, ty, MINERAL_PER_CELL);
+        return true;
+    }
+    false
+}
+
+fn try_place_burst_debris(
+    world: &mut World,
+    nx: i32,
+    ny: i32,
+    material: MaterialId,
+    tube_x: i32,
+    tube_y: i32,
+) -> bool {
+    let nx = world.wrap_x(nx);
+    let Some(dst) = world.get_cell(nx, ny) else {
+        return false;
+    };
+    if dst.material != MaterialId::Air {
+        return false;
+    }
+    if steam_at(world, nx, ny) > 0 {
+        return false;
+    }
+    let mut grain = Cell::solid(material);
+    let cap = water_capacity_cell(grain, &world.hydro);
+    let soak = dst.sat.0.min(cap);
+    grain.sat = Sat(soak);
+    let leftover = dst.sat.0.saturating_sub(soak);
+    world.set_cell(nx, ny, grain);
+    if leftover > 0 {
+        if let Some(tube) = world.get_cell(tube_x, tube_y) {
+            if tube.material == MaterialId::Air {
+                let room = u8::MAX.saturating_sub(tube.sat.0);
+                let put = leftover.min(room);
+                let mut next = tube;
+                next.sat = Sat(tube.sat.0.saturating_add(put));
+                world.set_cell(tube_x, tube_y, next);
+            }
+        }
     }
     true
 }
@@ -2258,5 +2374,114 @@ mod tests {
         );
     }
 
+    fn count_mat(world: &World, mat: MaterialId) -> usize {
+        let mut n = 0usize;
+        for chunk in world.chunks.values() {
+            for cell in &chunk.cells {
+                if cell.material == mat {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn burst_sand_lid_relocates_grain_mass() {
+        let mut w = World::new(31);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..7 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(5, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(5, 3, Cell::air());
+        w.set_cell(4, 4, Cell::solid(MaterialId::Sand));
+        w.set_cell(5, 4, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 5, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 5, Cell::solid(MaterialId::Stone));
+        add_steam(&mut w, 4, 3, 220);
+        add_steam(&mut w, 5, 3, 220);
+        let sand_before = count_mat(&w, MaterialId::Sand);
+        let mut hot = temp_fill(&w, 130.0);
+        let cfg = SteamConfig {
+            escape_pressure_min: 0.02,
+            ..SteamConfig::default()
+        };
+        for i in 1..12 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let sand_after = count_mat(&w, MaterialId::Sand);
+        assert_eq!(
+            sand_after, sand_before,
+            "sand lid burst must relocate grains, not delete them ({sand_before} → {sand_after})"
+        );
+        assert!(
+            w.get_cell(4, 4).unwrap().material == MaterialId::Air
+                || w.get_cell(5, 4).unwrap().material == MaterialId::Air
+                || steam_at(&w, 4, 4) > 0
+                || steam_at(&w, 5, 4) > 0,
+            "soft lid should still open"
+        );
+    }
+
+    #[test]
+    fn burst_clay_lid_banks_suspended_sediment() {
+        let mut w = World::new(37);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..6 {
+            for y in 1..5 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(4, 4, Cell::solid(MaterialId::Clay));
+        w.set_cell(4, 5, Cell::solid(MaterialId::Stone));
+        add_steam(&mut w, 4, 3, 240);
+        let before = crate::audit::sediment_total(&w);
+        assert!(burst_grain_tube(&mut w, 4, 3, 4, 4, 64));
+        assert_eq!(w.get_cell(4, 4).unwrap().material, MaterialId::Air);
+        assert_eq!(
+            crate::audit::sediment_total(&w),
+            before,
+            "clay burst must bank suspended load"
+        );
+    }
+
+    #[test]
+    fn assault_widen_limestone_keeps_mineral_total() {
+        let mut w = World::new(41);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..6 {
+            for y in 1..5 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(3, 2, Cell::air());
+        w.set_cell(4, 2, Cell::air());
+        let mut lime = Cell::solid(MaterialId::Limestone);
+        lime.sat = Sat(80);
+        lime.pore = 200;
+        w.set_cell(3, 3, lime);
+        w.set_cell(3, 4, Cell::solid(MaterialId::Stone));
+        add_steam(&mut w, 3, 2, 200);
+        add_steam(&mut w, 4, 2, 200);
+        let before = crate::audit::mineral_total(&w);
+        let mut hot = temp_fill(&w, 120.0);
+        for i in 1..10 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &SteamConfig::default());
+        }
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "steam assault widen must conserve mineral (solid + dissolved)"
+        );
+    }
 
 }
