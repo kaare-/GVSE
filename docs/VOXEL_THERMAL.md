@@ -196,6 +196,8 @@ return false and never enlarge the weather walk.
 (evap climate rate ceiling rises near boil). Steam does **not** special-case
 open seats.
 
+**Pore pressure (sparse):** above 100 °C, phase-expansion drive spikes with heat (~×3 by +80 °C, not 1700×). Reverse seep follows highest permeability (path of least resistance) and can vent as a warm spring that drops Flowstone.
+
 **Roofed flash:** free / pore water ≥100 °C under a roof may mint steam
 (P3 pressure motor).
 
