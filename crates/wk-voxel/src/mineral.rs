@@ -48,7 +48,7 @@ pub const SOLUBILITY_PER_SAT: u16 = 24;
 pub const DEPOSIT_MATERIAL: MaterialId = MaterialId::Flowstone;
 
 /// Pore steps one precipitation event may close (keeps cementing gradual).
-pub const PRECIPITATE_MAX_STEP: u16 = 8;
+pub const PRECIPITATE_MAX_STEP: u16 = 16;
 
 /// Solubility that [`widen_aperture`]'s scale is expressed against (limestone).
 /// Other materials open proportionally slower.
@@ -77,12 +77,12 @@ pub const APERTURE_MIN_THROUGHPUT: u8 = 8;
 /// Water arriving under pressure gives up a share of its load as it
 /// depressurises, so a rising spring builds a mound instead of carrying its
 /// mineral away to wherever it eventually evaporates.
-const ARTESIAN_CEILING_DIVISOR: u16 = 4;
+const ARTESIAN_CEILING_DIVISOR: u16 = 2;
 
 /// Extra divisor span at full geothermal warmth (P2 hot spring).
 ///
 /// Warmth 0 → divisor 4; warmth 1 → divisor 8 (half the cold ceiling).
-const ARTESIAN_WARM_DIVISOR_SPAN: f32 = 4.0;
+const ARTESIAN_WARM_DIVISOR_SPAN: f32 = 3.0;
 
 /// Dissolved load carried by the water in this cell.
 #[inline]
