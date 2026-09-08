@@ -804,6 +804,7 @@ pub fn apply_seepage_regions_ex(world: &mut World, active: &[ActiveChunk], conta
                 amt as u8,
                 APERTURE_GROWTH_SCALE,
                 APERTURE_SEED_SALT,
+                true,
             );
         }
     }

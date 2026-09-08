@@ -191,7 +191,13 @@ pub fn emit_from_dissolved_rock(world: &mut World, gx: i32, gy: i32, was: Cell) 
 /// Deliberately probabilistic and slow: geology, not a frame-scale effect.
 /// Deterministic given `(seed, position, tick)` like the rest of karst.
 ///
-/// Returns true when the cell opened fully and dissolved away.
+/// Returns true when the cell opened fully and dissolved away (only if
+/// `mint_void` is true).
+///
+/// When `mint_void` is false, aperture stops at `u8::MAX - 1`: wet rock can
+/// become a high-permeability conduit without minting an Air / loose-sand
+/// pipe. Steam assault uses that mode so pressure prefers reverse seep through
+/// pores instead of cheap void columns.
 pub fn widen_aperture(
     world: &mut World,
     gx: i32,
@@ -199,6 +205,7 @@ pub fn widen_aperture(
     throughput: u8,
     scale: f32,
     seed_salt: u64,
+    mint_void: bool,
 ) -> bool {
     if throughput == 0 || scale <= 0.0 {
         return false;
@@ -210,6 +217,10 @@ pub fn widen_aperture(
     // Carbonate dissolves and silicate abrades, but both widen under flow, so
     // both belong here — only the rate and the ledger differ.
     if !crate::cell::is_competent_rock(cell.material) || cell.pore == u8::MAX {
+        return false;
+    }
+    // Conduit mode: never take the last pore step that would mint Air / sand.
+    if !mint_void && cell.pore >= u8::MAX - 1 {
         return false;
     }
     // Below a threshold flow, competent rock simply does not yield. Without a
@@ -682,7 +693,7 @@ mod tests {
         w.set_cell(4, 1, rock);
         let before = crate::audit::mineral_total(&w);
         // Force the roll to pass with a certainty-scale call.
-        let opened = widen_aperture(&mut w, 4, 1, 255, 1000.0, 1);
+        let opened = widen_aperture(&mut w, 4, 1, 255, 1000.0, 1, true);
         assert!(!opened, "one step should not fully dissolve a fresh cell");
         assert_eq!(
             w.get_cell(4, 1).unwrap().pore,
@@ -705,7 +716,7 @@ mod tests {
         let before = crate::audit::mineral_total(&w);
         let mut opened = false;
         for _ in 0..8 {
-            if widen_aperture(&mut w, 4, 1, 255, 1000.0, 2) {
+            if widen_aperture(&mut w, 4, 1, 255, 1000.0, 2, true) {
                 opened = true;
                 break;
             }
@@ -734,7 +745,7 @@ mod tests {
             rock.pore = 100;
             w.set_cell(4, 1, rock);
             w.tick = t as u64;
-            if widen_aperture(&mut w, 4, 1, throughput, scale, 7) {
+            if widen_aperture(&mut w, 4, 1, throughput, scale, 7, true) {
                 hits += 1;
             } else if w.get_cell(4, 1).unwrap().pore > 100 {
                 hits += 1;
@@ -958,12 +969,32 @@ mod tests {
         let mut rock = Cell::solid(MaterialId::Sandstone);
         rock.pore = u8::MAX - 1;
         w.set_cell(4, 1, rock);
-        let opened = widen_aperture(&mut w, 4, 1, 255, 1000.0, 0);
+        let opened = widen_aperture(&mut w, 4, 1, 255, 1000.0, 0, true);
         assert!(opened, "a nearly-open cell should finish opening");
         assert_eq!(
             w.get_cell(4, 1).unwrap().material,
             MaterialId::Sand,
             "dissolved sandstone must leave its sand behind"
+        );
+    }
+
+    #[test]
+    fn conduit_widen_does_not_mint_void() {
+        let mut w = bed(11);
+        let mut rock = Cell::solid(MaterialId::Limestone);
+        rock.pore = u8::MAX - 1;
+        w.set_cell(4, 1, rock);
+        let opened = widen_aperture(&mut w, 4, 1, 255, 1000.0, 0, false);
+        assert!(!opened, "conduit mode must refuse the last pore step");
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().material,
+            MaterialId::Limestone,
+            "steam/karst conduit mode must not mint Air through rock"
+        );
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().pore,
+            u8::MAX - 1,
+            "aperture stays at near-max without void mint"
         );
     }
 
@@ -1010,7 +1041,7 @@ mod mechanical_karst_tests {
         // Strong flow, generous scale: this asks "can it ever", not "how fast".
         for t in 0..4000 {
             w.tick = t;
-            widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD);
+            widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD, true);
         }
         let after = w.get_cell(4, 4).unwrap().pore;
         assert!(
@@ -1028,7 +1059,7 @@ mod mechanical_karst_tests {
             // the ratio is invisible.
             for t in 0..300 {
                 w.tick = t;
-                widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD);
+                widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD, true);
             }
             let pore = w.get_cell(4, 4).unwrap().pore;
             (pore, dissolved_at(&w, 4, 4))
@@ -1057,7 +1088,7 @@ mod mechanical_karst_tests {
         let (mut w, _) = slab(MaterialId::Bedrock, 100);
         for t in 0..2000 {
             w.tick = t;
-            widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD);
+            widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD, true);
         }
         assert_eq!(w.get_cell(4, 4).unwrap().pore, 100, "bedrock must not open");
     }

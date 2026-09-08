@@ -20,7 +20,9 @@
 //! work. Flowing hot water **carries heat** into cooler rock so channels warm
 //! over time. Existing cavity humidity keeps pushing pore water by density
 //! even through rock below boil. Confined pockets flood-equalize; overpressure
-//! assaults wet rock and bursts soft lids. Cool → liquid + sinter.
+//! assaults wet rock as **high-aperture conduits** (no instant Air pipes) and
+//! only bursts soft lids that open to free atmosphere. Cool → liquid + sinter.
+//! Buried grain lenses under competent rock are not treated as sand pillars.
 //!
 //! See docs/VOXEL_GEYSER.md + VOXEL_THERMAL.md.
 
@@ -952,15 +954,28 @@ fn assault_steam_walls(world: &mut World, temp: &mut Temperature, cfg: &SteamCon
                 reverse_push_pore_water(world, temp, tx, ty, drive.max(4));
                 assaults = assaults.saturating_add(1);
             }
-            // Upward faces carve hardest; sideways is slower so pockets don't
-            // leak into the default-Air chunk before the roof yields.
+            // Prefer pore conduits over minting Air columns. Assault never
+            // dissolves the last cement step (`mint_void = false`).
             if crate::cell::is_competent_rock(wall.material)
                 && press >= cfg.escape_pressure_min * 0.5
             {
-                let up_bias = if dy > 0 { 1.0 } else { 0.35 };
-                let throughput = ((120.0 + press * 135.0) * up_bias) as u8;
-                let scale = (0.8 + press * 2.0) * up_bias;
-                if widen_aperture(world, tx, ty, throughput.max(1), scale, 0x0A51_u64) {
+                let up_bias = if dy > 0 { 0.55 } else { 0.25 };
+                let throughput = ((36.0 + press * 48.0) * up_bias) as u8;
+                let scale = (0.12 + press * 0.28) * up_bias;
+                if widen_aperture(
+                    world,
+                    tx,
+                    ty,
+                    throughput.max(1),
+                    scale,
+                    0x0A51_u64,
+                    false,
+                ) {
+                    assaults = assaults.saturating_add(1);
+                } else if world
+                    .get_cell(tx, ty)
+                    .is_some_and(|c| c.pore > wall.pore)
+                {
                     assaults = assaults.saturating_add(1);
                 }
             }
@@ -1237,7 +1252,8 @@ fn find_steam_seat(
     None
 }
 
-/// Expansion work opens a micro-void (widen / burst) so steam has somewhere to go.
+/// Expansion work widens wet competent neighbours into conduits. Never bursts
+/// buried grains into Air seats — that was the cheap sand-pipe look.
 fn open_pore_steam_seat(
     world: &mut World,
     gx: i32,
@@ -1252,28 +1268,29 @@ fn open_pore_steam_seat(
         let Some(wall) = world.get_cell(tx, ty) else {
             continue;
         };
-        if wall.material == MaterialId::Air || wall.material == MaterialId::Bedrock {
-            continue;
-        }
-        if is_grain(wall.material) || is_flow_erodible(wall.material) {
-            if burst_grain_tube(world, gx, gy, tx, ty, max_cells) {
+        if wall.material == MaterialId::Air {
+            if can_admit_new_steam_cell(world, tx, ty, max_cells) || steam_at(world, tx, ty) > 0
+            {
                 return Some((tx, ty));
             }
+            continue;
+        }
+        if wall.material == MaterialId::Bedrock {
+            continue;
+        }
+        // Soft neighbours: reverse-push only. Burst is reserved for true
+        // atmosphere soft lids in `escape_pressurized`.
+        if is_grain(wall.material) || is_flow_erodible(wall.material) {
+            continue;
         }
         if crate::cell::is_competent_rock(wall.material) {
-            let throughput = (160u16).min(80 + expand as u16 * 12) as u8;
-            let scale = 1.2 + expand as f32 * 0.15;
-            if widen_aperture(world, tx, ty, throughput, scale, 0xB01E_u64) {
-                if world
-                    .get_cell(tx, ty)
-                    .is_some_and(|c| c.material == MaterialId::Air)
-                {
-                    return Some((tx, ty));
-                }
-            }
+            let throughput = (72u16).min(28 + expand as u16 * 6) as u8;
+            let scale = 0.18 + expand as f32 * 0.04;
+            let _ = widen_aperture(world, tx, ty, throughput, scale, 0xB01E_u64, false);
         }
     }
-    None
+    // After conduit work, only seat into Air that already exists nearby.
+    find_steam_seat(world, gx, gy, max_cells)
 }
 
 /// Flash expansion cracks the boiling host pore (aperture growth).
@@ -1284,9 +1301,9 @@ fn phase_crack_host(world: &mut World, gx: i32, gy: i32, boiled: u8, expand: u8)
     if !crate::cell::is_competent_rock(cell.material) {
         return;
     }
-    let throughput = boiled.saturating_mul(expand.min(16)).max(40);
-    let scale = 0.9 + (expand as f32) * 0.12 + (boiled as f32) / 80.0;
-    let _ = widen_aperture(world, gx, gy, throughput, scale, 0xB01C_u64);
+    let throughput = boiled.saturating_mul(expand.min(12)).max(24);
+    let scale = 0.2 + (expand as f32) * 0.03 + (boiled as f32) / 200.0;
+    let _ = widen_aperture(world, gx, gy, throughput, scale, 0xB01C_u64, false);
 }
 
 /// Multi-hop reverse seepage: shove pore water along the easiest wet path.
@@ -1451,9 +1468,12 @@ fn escape_pressurized(
             continue;
         }
 
-        // Soft lids burst first — that's the violent escape.
+        // Soft lids burst only when they open to free atmosphere — buried
+        // sand lenses under competent rock must not become rising air pipes.
         if is_grain(above.material) || is_flow_erodible(above.material) {
-            if burst_grain_tube(world, gx, gy, gx, gy + 1, max_cells) {
+            if soft_lid_opens_to_atmosphere(world, gx, gy + 1)
+                && burst_grain_tube(world, gx, gy, gx, gy + 1, max_cells)
+            {
                 escapes = escapes.saturating_add(1);
                 let t = temp.at_cell(gx, gy + 1);
                 if t < cfg.boil_point_c {
@@ -1470,27 +1490,26 @@ fn escape_pressurized(
         }
 
         if crate::cell::is_competent_rock(above.material) {
-            let throughput = (140.0 + press * 115.0) as u8;
-            let scale = 1.0 + press * 2.5;
-            let opened = widen_aperture(world, gx, gy + 1, throughput, scale, 0x57EA_u64);
-            if opened {
-                let moved = take_steam(world, gx, gy, steam.min(160));
-                if let Some(c) = world.get_cell(gx, gy + 1) {
-                    if c.material == MaterialId::Air {
-                        let placed = try_place_steam(world, gx, gy + 1, moved, max_cells);
-                        if placed < moved {
-                            add_steam(world, gx, gy, moved - placed);
-                        }
-                        if placed > 0 {
-                            temp.advect_with_mass(gx, gy, gx, gy + 1, placed);
-                        }
-                    } else {
-                        add_steam(world, gx, gy, moved);
-                        reverse_push_pore_water(world, temp, gx, gy + 1, moved);
-                    }
-                } else {
-                    add_steam(world, gx, gy, moved);
-                }
+            let throughput = (48.0 + press * 55.0) as u8;
+            let scale = 0.15 + press * 0.4;
+            // Pore conduit only — do not mint Air roofs as sand/void pipes.
+            let _ = widen_aperture(
+                world,
+                gx,
+                gy + 1,
+                throughput,
+                scale,
+                0x57EA_u64,
+                false,
+            );
+            let pore_grew = world
+                .get_cell(gx, gy + 1)
+                .is_some_and(|c| c.pore > above.pore);
+            if pore_grew {
+                let drive = ((steam as f32) * (0.2 + press * 0.5))
+                    .round()
+                    .clamp(4.0, 96.0) as u8;
+                reverse_push_pore_water(world, temp, gx, gy + 1, drive);
                 escapes = escapes.saturating_add(1);
             }
         }
@@ -1532,6 +1551,34 @@ fn reverse_escape_through_rock(
     roof.sat.0 > 0
 }
 
+fn soft_lid_opens_to_atmosphere(world: &World, lx: i32, ly: i32) -> bool {
+    // Soft column must reach free air (no steam) without crossing competent rock.
+    let mut y = ly;
+    for _ in 0..20 {
+        y += 1;
+        let Some(c) = world.get_cell(lx, y) else {
+            return true;
+        };
+        if c.material == MaterialId::Bedrock {
+            return false;
+        }
+        if crate::cell::is_competent_rock(c.material) {
+            return false;
+        }
+        if c.material == MaterialId::Air {
+            if steam_at(world, lx, y) == 0 {
+                return true;
+            }
+            continue;
+        }
+        if is_grain(c.material) || is_flow_erodible(c.material) {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 fn burst_grain_tube(
     world: &mut World,
     from_x: i32,
@@ -1547,7 +1594,7 @@ fn burst_grain_tube(
     if !is_grain(cell.material) && !is_flow_erodible(cell.material) {
         return false;
     }
-    // Take vapour first so chamber ejecta can land in the pressure void.
+    // Take vapour first; debris must land *outside* the pressure chamber.
     let moved = take_steam(world, from_x, from_y, steam_at(world, from_x, from_y).min(200));
     if !bank_burst_solid(world, from_x, from_y, tx, ty, cell) {
         if moved > 0 {
@@ -1568,6 +1615,8 @@ fn burst_grain_tube(
 
 /// Keep burst solids on a ledger: suspend clay, relocate bedload grains, or
 /// dissolve carbonate debris into the conduit water. Never delete rock.
+/// Never dump debris into the sealed pressure chamber — that looked like a
+/// sand pillar collapsing into the void.
 fn bank_burst_solid(
     world: &mut World,
     from_x: i32,
@@ -1581,23 +1630,25 @@ fn bank_burst_solid(
         return true;
     }
     let ox = (tx - from_x).signum();
-    let oy = (ty - from_y).signum();
+    let oy = (ty - from_y).signum().max(1); // prefer ejecta above the lid
     let deltas = [
-        (ox, 0),
-        (0, oy),
-        (ox, oy),
-        (-1, 0),
-        (1, 0),
         (0, 1),
-        (0, -1),
-        (-1, 1),
-        (1, 1),
-        (-1, -1),
-        (1, -1),
-        (ox.saturating_mul(2), 0),
-        (0, oy.saturating_mul(2)),
         (0, 2),
         (0, 3),
+        (0, 4),
+        (-1, 2),
+        (1, 2),
+        (-1, 3),
+        (1, 3),
+        (ox, oy),
+        (-1, 1),
+        (1, 1),
+        (-2, 2),
+        (2, 2),
+        (ox, 0),
+        (-1, 0),
+        (1, 0),
+        (0, oy.saturating_mul(2)),
     ];
     for (dx, dy) in deltas {
         if dx == 0 && dy == 0 {
@@ -1605,12 +1656,12 @@ fn bank_burst_solid(
         }
         let nx = world.wrap_x(tx + dx);
         let ny = ty + dy;
-        if try_place_burst_debris(world, nx, ny, was.material, tx, ty) {
+        if nx == from_x && ny == from_y {
+            continue;
+        }
+        if try_place_burst_debris(world, nx, ny, was.material, tx, ty, from_x, from_y) {
             return true;
         }
-    }
-    if try_place_burst_debris(world, from_x, from_y, was.material, tx, ty) {
-        return true;
     }
     if is_soluble_rock(was.material) {
         emit_from_dissolved_rock(world, tx, ty, was);
@@ -1619,6 +1670,12 @@ fn bank_burst_solid(
     // LooseLimestone is outside solubility props but is still carbonate.
     if was.material == MaterialId::LooseLimestone {
         add_dissolved(world, tx, ty, MINERAL_PER_CELL);
+        return true;
+    }
+    // No exterior bedload seat: fluidize grains into suspended load rather
+    // than dumping them into the chamber (collapsing sand pillar).
+    if is_grain(was.material) || is_flow_erodible(was.material) {
+        add_suspended(world, tx, ty, SEDIMENT_PER_CELL);
         return true;
     }
     false
@@ -1631,8 +1688,13 @@ fn try_place_burst_debris(
     material: MaterialId,
     tube_x: i32,
     tube_y: i32,
+    chamber_x: i32,
+    chamber_y: i32,
 ) -> bool {
     let nx = world.wrap_x(nx);
+    if nx == chamber_x && ny == chamber_y {
+        return false;
+    }
     let Some(dst) = world.get_cell(nx, ny) else {
         return false;
     };
@@ -2045,10 +2107,14 @@ mod tests {
         w.set_cell(5, 2, Cell::air());
         w.set_cell(4, 3, Cell::air());
         w.set_cell(5, 3, Cell::air());
+        // Soft lid must open to free atmosphere — buried sand under stone is
+        // no longer treated as a burst pipe.
         w.set_cell(4, 4, Cell::solid(MaterialId::Sand));
         w.set_cell(5, 4, Cell::solid(MaterialId::Sand));
-        w.set_cell(4, 5, Cell::solid(MaterialId::Stone));
-        w.set_cell(5, 5, Cell::solid(MaterialId::Stone));
+        for y in 5..12 {
+            w.set_cell(4, y, Cell::air());
+            w.set_cell(5, y, Cell::air());
+        }
         add_steam(&mut w, 4, 3, 220);
         add_steam(&mut w, 5, 3, 220);
         let mut hot = temp_fill(&w, 130.0);
@@ -2391,7 +2457,7 @@ mod tests {
         let mut w = World::new(31);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         for x in 3..7 {
-            for y in 1..6 {
+            for y in 1..5 {
                 w.set_cell(x, y, Cell::solid(MaterialId::Stone));
             }
         }
@@ -2399,13 +2465,17 @@ mod tests {
         w.set_cell(5, 2, Cell::air());
         w.set_cell(4, 3, Cell::air());
         w.set_cell(5, 3, Cell::air());
+        // Soft lid open to sky — not buried under competent rock.
         w.set_cell(4, 4, Cell::solid(MaterialId::Sand));
         w.set_cell(5, 4, Cell::solid(MaterialId::Sand));
-        w.set_cell(4, 5, Cell::solid(MaterialId::Stone));
-        w.set_cell(5, 5, Cell::solid(MaterialId::Stone));
+        for y in 5..12 {
+            w.set_cell(4, y, Cell::air());
+            w.set_cell(5, y, Cell::air());
+        }
         add_steam(&mut w, 4, 3, 220);
         add_steam(&mut w, 5, 3, 220);
         let sand_before = count_mat(&w, MaterialId::Sand);
+        let sediment_before = crate::audit::sediment_total(&w);
         let mut hot = temp_fill(&w, 130.0);
         let cfg = SteamConfig {
             escape_pressure_min: 0.02,
@@ -2416,16 +2486,73 @@ mod tests {
             apply_steam(&mut w, &mut hot, &cfg);
         }
         let sand_after = count_mat(&w, MaterialId::Sand);
+        let sediment_after = crate::audit::sediment_total(&w);
         assert_eq!(
-            sand_after, sand_before,
-            "sand lid burst must relocate grains, not delete them ({sand_before} → {sand_after})"
+            sand_after as i64
+                + (sediment_after - sediment_before) / i64::from(SEDIMENT_PER_CELL),
+            sand_before as i64,
+            "sand lid mass must relocate as grain or suspended ({sand_before} → sand {sand_after}, sed Δ {})",
+            sediment_after - sediment_before
         );
         assert!(
             w.get_cell(4, 4).unwrap().material == MaterialId::Air
                 || w.get_cell(5, 4).unwrap().material == MaterialId::Air
                 || steam_at(&w, 4, 4) > 0
                 || steam_at(&w, 5, 4) > 0,
-            "soft lid should still open"
+            "atmosphere soft lid should still open"
+        );
+        // Debris must not refill the sealed chamber as a collapsing pillar.
+        assert_ne!(
+            w.get_cell(4, 3).unwrap().material,
+            MaterialId::Sand,
+            "burst must not dump sand into the pressure chamber"
+        );
+        assert_ne!(
+            w.get_cell(5, 3).unwrap().material,
+            MaterialId::Sand,
+            "burst must not dump sand into the pressure chamber"
+        );
+    }
+
+    #[test]
+    fn buried_sand_lens_does_not_mint_air_pipe() {
+        let mut w = World::new(43);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..7 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Limestone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        // Buried soft lens under competent limestone — must not burst into a pipe.
+        w.set_cell(4, 4, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 5, Cell::solid(MaterialId::Limestone));
+        w.set_cell(4, 6, Cell::solid(MaterialId::Limestone));
+        add_steam(&mut w, 4, 3, 240);
+        let mut hot = temp_fill(&w, 130.0);
+        let cfg = SteamConfig {
+            escape_pressure_min: 0.02,
+            ..SteamConfig::default()
+        };
+        for i in 1..16 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        assert_eq!(
+            w.get_cell(4, 4).unwrap().material,
+            MaterialId::Sand,
+            "buried sand under limestone must not burst into an air pipe"
+        );
+        assert_ne!(
+            w.get_cell(4, 5).unwrap().material,
+            MaterialId::Air,
+            "competent limestone roof must not mint an air column from steam assault"
+        );
+        assert_ne!(
+            w.get_cell(4, 6).unwrap().material,
+            MaterialId::Air,
+            "competent limestone column must stay rock, not a void pipe"
         );
     }
 
