@@ -105,6 +105,26 @@ pub struct CaveHumidityHazeSample {
 /// Same 4×4 tile grain as sky Humidity and steam haze.
 pub const CAVE_HUMIDITY_HAZE_TILE: i32 = 4;
 
+
+/// Free-water / standing pool — vapour wash must stop at the surface.
+#[inline]
+fn is_free_water_seat(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    if cell.material != MaterialId::Air {
+        return true;
+    }
+    // Same free-water read as sky wind/haze: near-full Air sat is a pool cell.
+    if cell.sat.0 >= 200 {
+        return true;
+    }
+    crate::rules::is_standing_water(world, gx, gy)
+}
+
+/// Air volume that can hold cave humidity vapour (above the waterline).
+#[inline]
+fn is_cave_humidity_void(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    cell.material == MaterialId::Air && !is_free_water_seat(world, gx, gy, cell)
+}
+
 /// Build a sky-Humidity-shaped wash over sealed cave air.
 ///
 /// Mass bins onto coarse tiles, then each sealed Air cell bilinear-samples
@@ -149,7 +169,7 @@ pub fn cave_humidity_haze_wash(world: &World) -> Vec<CaveHumidityHazeSample> {
             let Some(cell) = world.get_cell(cx, cy) else {
                 continue;
             };
-            if cell.material != MaterialId::Air {
+            if !is_cave_humidity_void(world, cx, cy, cell) {
                 continue;
             }
             if crate::steam::air_void_open_to_sky(world, cx, cy) {
@@ -162,10 +182,7 @@ pub fn cave_humidity_haze_wash(world: &World) -> Vec<CaveHumidityHazeSample> {
                 if !visited.insert((nx, ny)) {
                     continue;
                 }
-                if world
-                    .get_cell(nx, ny)
-                    .is_some_and(|n| n.material == MaterialId::Air)
-                {
+                if world.get_cell(nx, ny).is_some_and(|n| is_cave_humidity_void(world, nx, ny, n)) {
                     queue.push((nx, ny));
                 }
             }
@@ -217,7 +234,7 @@ pub fn cave_humidity_haze_wash(world: &World) -> Vec<CaveHumidityHazeSample> {
                 let Some(cell) = world.get_cell(gx, gy) else {
                     continue;
                 };
-                if cell.material != MaterialId::Air {
+                if !is_cave_humidity_void(world, gx, gy, cell) {
                     continue;
                 }
                 // Open shafts belong to sky H — don't double-paint.
@@ -281,6 +298,17 @@ pub fn apply_cave_humidity(
         };
         if cell.material != MaterialId::Air {
             world.cave_humidity.remove(&(gx, gy));
+            continue;
+        }
+        // Flooded pool seats: vapour stops at the waterline — drip into sat.
+        if is_free_water_seat(world, gx, gy, cell) {
+            let hum = cave_humidity_at(world, gx, gy);
+            if hum > 0 {
+                let took = take_cave_humidity(world, gx, gy, hum);
+                let _ = drip_into_air(world, gx, gy, took);
+            } else {
+                world.cave_humidity.remove(&(gx, gy));
+            }
             continue;
         }
         let hum = cave_humidity_at(world, gx, gy);
@@ -441,7 +469,7 @@ mod tests {
         assert_eq!(w.get_cell(4, 2).unwrap().sat.0, 0);
     }
 
-    #[test]
+        #[test]
     fn sealed_pocket_washes_soft_white_haze() {
         let mut w = World::new(1);
         sealed_pocket(&mut w);
@@ -454,6 +482,35 @@ mod tests {
         assert!(
             wash.iter().all(|s| s.density <= 200),
             "haze stays soft, never opaque fill"
+        );
+    }
+
+    #[test]
+    fn haze_stops_at_cave_pool_surface() {
+        let mut w = World::new(1);
+        sealed_pocket(&mut w);
+        // Tall sealed shaft: stone shell, full pool on floor, dry air above.
+        for x in 3..=5 {
+            for y in 1..=4 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut pool = Cell::air();
+        pool.sat = Sat(255);
+        w.set_cell(4, 2, pool);
+        let mut air = Cell::air();
+        air.sat = Sat(0);
+        w.set_cell(4, 3, air);
+        let _ = try_add_cave_humidity(&mut w, 4, 3, 180);
+        let _ = try_add_cave_humidity(&mut w, 4, 2, 180);
+        let wash = cave_humidity_haze_wash(&w);
+        assert!(
+            wash.iter().any(|s| s.gx == 4 && s.gy == 3 && s.density > 0),
+            "vapour above the pool must still wash"
+        );
+        assert!(
+            wash.iter().all(|s| !(s.gx == 4 && s.gy == 2)),
+            "haze must stop at the water surface (no wash in the pool)"
         );
     }
 }

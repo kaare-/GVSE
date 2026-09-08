@@ -158,7 +158,7 @@ cave air uses sparse `World.cave_humidity` (not pressure). Hard cap
 |---------|-----------|
 | Open surface (no roof) | Accelerated film evaporization into **Humidity** — steam module skips (hotter lake, not a special path) |
 | Open cave / overhang / side vent | Same sky Humidity store (T5 `air_void_open_to_sky`); films deposit to H |
-| Sealed cave under rock (any RH) | Ambient film → sparse **`cave_humidity`**; cool surplus drips to Air sat; open vent → sky H |
+| Sealed cave under rock (any RH) | Ambient film → sparse **`cave_humidity`**; cool surplus drips to Air sat; open vent → sky H; wash stops at pool waterline |
 | Cave under solid roof, ≥100 °C | Steam **flood-fills** the void; pressure assaults wet pores + soft lids |
 | Hot wet rock | Pore boil seats vapour; phase expansion reverse-seeps / cracks host |
 
