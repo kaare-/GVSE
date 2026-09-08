@@ -1,7 +1,8 @@
 # Geyser landscape motor
 
-**Status:** P0–P3 + **T6a** open-sky boil→Humidity split implemented.
-**P4** episodic jet still waits on the FPS gate below.
+**Status:** P0–P3 + three-store humidity model (sky H / sealed
+`cave_humidity` / pressurized `steam`). Open hot water is accelerated
+evap into sky H. **P4** episodic jet still waits on the FPS gate below.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** native **upward** landscape builder (hot springs → geysers →
 sinter pipes/hills) that balances existing **downhill** erosion, without a
@@ -34,7 +35,7 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Steam / underground vapour | **Sparse void vapour** (`World.steam`). Separate from sky [`Humidity`]. Looks like soft 4×4 haze; **never** dumps into H/rain. Overpressure equalizes by reverse pore seepage + aperture/escape. Cool → liquid + sinter. Cadence `STEAM_EVERY` (= 5). |
+| Steam / underground vapour | **Three stores:** (1) sky [`Humidity`] for weather + open caves; (2) sparse `World.cave_humidity` for ambient sealed-cave air; (3) sparse `World.steam` for **roofed flash / pressure** only. Steam never dumps into H/rain. |
 | Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~32×), not minted mass. Sealed wet rock still cracks + reverse-seeps multi-hop toward the surface. |
 | Pressure | **No continuum PDE.** Sparse underground vapour density + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
 | Landscape build | Mineral rides water (`mineral.rs`); cool recondense + artesian outlets drop Flowstone sinter. |
@@ -44,7 +45,9 @@ karst opens conduits that feed confined rise
 
 - No world-wide vapour or pressure grids.
 - No second full-world confined/pressure BFS.
-- **No writing underground boil / pressure into the sky Humidity store.**
+- **No writing sealed-cave boil / pressure steam into the sky Humidity store.**
+  Open-sky hot water may evaporate into sky H (weather). Sealed ambient air
+  uses `cave_humidity`.
 - No frost heave (P5) until P1–P4 are proven and someone asks.
 - Do not skip the condensation lottery to “make steam.”
 - Do not apply the contact dry-pore skip on the deep seepage pass.
@@ -145,25 +148,25 @@ mound faster than a cold control; `mineral_total` conserved.
 
 ### P3 — Sparse buoyant steam — **done** (void markers + escape)
 
-Boil free **Air** sat and **pore** sat at/above 100 °C. **T6a:** unroofed
-hot free water flashes into sky [`Humidity`] (weather continuum). Roofed /
-confined seats still boil into sparse `World.steam` only (same mass units;
-never rain lottery). Hard cap `MAX_STEAM_CELLS`.
+Boil free **Air** sat and **pore** sat at/above 100 °C **under a roof** into
+sparse `World.steam`. Unroofed hot free water is **accelerated evaporation**
+into sky [`Humidity`] (evap owns it — not a steam flash). Sealed ambient
+cave air uses sparse `World.cave_humidity` (not pressure). Hard cap
+`MAX_STEAM_CELLS`.
 
 | Setting | Behaviour |
 |---------|-----------|
-| Open surface (no roof) | Fast flash into **Humidity** — not sparse steam |
-| Open shaft with existing steam | Steam flood-pours toward the top of the open Air column |
-| Cave under solid roof | Steam **flood-fills the connected void** (equal density); pressure assaults wet pores + widens/bursts soft lids into tubes |
-| Hot wet rock | Pore boil seats vapour (or opens a micro-void); **phase expansion** (`phase_expansion_drive` × boiled) reverse-seeps multi-hop (`reverse_seep_hops`) and cracks the host — even when sealed |
+| Open surface (no roof) | Accelerated film evaporization into **Humidity** — steam module skips (hotter lake, not a special path) |
+| Open cave / overhang / side vent | Same sky Humidity store (T5 `air_void_open_to_sky`); films deposit to H |
+| Sealed cave under rock (any RH) | Ambient film → sparse **`cave_humidity`** — ordinary closed-cave air, not pressure |
+| Cave under solid roof, ≥100 °C | Steam **flood-fills** the void; pressure assaults wet pores + soft lids |
+| Hot wet rock | Pore boil seats vapour; phase expansion reverse-seeps / cracks host |
 
-Save schema **v17**. Cadence `STEAM_EVERY` (= 5). Tab → Climate → Steam
-(phase expansion + reverse-seep hops knobs). Flood/assault run on cadence only.
+Save schema **v18** (`cave_humidity`). Cadence `STEAM_EVERY` (= 5).
 
-**Acceptance:** open hot free water loses sat into Humidity (mass-flat, no
-`World.steam`); roofed cave water boils to steam and pressurizes; sealed wet
-limestone reverse-pushes pore water upward / widens under flash boil; sand
-lids can burst into tubes; cool steam recondenses and sheds dissolved load.
+**Acceptance:** open hot free water loses sat into Humidity with `steam==0`;
+sealed cool film feeds `cave_humidity` not sky H; roofed ≥100 °C water mints
+steam and pressurizes; cool steam recondenses.
 
 ### P4 — Episodic geyser jet — **next** (still FPS-aware)
 

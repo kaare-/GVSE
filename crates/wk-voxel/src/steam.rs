@@ -1,22 +1,25 @@
-//! Underground vapour / pressure — sparse sealed store (T6a / P3).
+//! Underground vapour / pressure — sparse **sealed flash** store (P3).
 //!
 //! **Store:** `World.steam` is a capped sparse map of void vapour mass in
-//! **roofed** caves / conduits. It is **not** the sky humidity field.
+//! **roofed** caves / conduits. It is **not** sky humidity and **not**
+//! ambient sealed-cave air ([`crate::cave_humidity`]).
 //!
-//! **Open vs sealed (T6a):** hot free water with **no roof**
-//! ([`void_is_confined`] false) flashes into sky [`Humidity`] — weather
-//! continuum, same mass units as evap. Roofed / confined seats still boil
-//! into `World.steam` only. Sealed vapour **never** dumps into the rain
-//! lottery; vents stay steam until they recondense or escape as liquid.
+//! **Open vs sealed:**
+//! - Unroofed hot free water is ordinary **accelerated evaporation** into
+//!   sky [`Humidity`] — owned by [`crate::rules::evap`], not this module.
+//! - Open caves / overhangs share sky Humidity (T5 continuity).
+//! - Roofed / confined free water may flash into `World.steam` (pressure /
+//!   geyser motor). Ambient moist cave air under rock uses `cave_humidity`.
 //!
-//! **Motor:** boil free + pore water above ~100 °C → sparse vapour (sealed)
-//! or Humidity (open sky). Liquid→gas expansion (`phase_expansion_drive`)
-//! budgets reverse pore seepage + aperture work (force, not minted mass).
-//! Confined pockets flood-equalize; overpressure assaults wet rock upward
-//! and bursts soft lids. Cool → liquid + sinter.
+//! Sealed vapour **never** dumps into the rain lottery.
 //!
-//! **Look:** draws like soft haze (4×4 tiles) so it *reads* as vapour without
-//! joining the humidity store. See docs/VOXEL_GEYSER.md + VOXEL_THERMAL.md T6.
+//! **Motor:** boil roofed free + pore water above ~100 °C → sparse steam.
+//! Liquid→gas expansion budgets reverse pore seepage + aperture work.
+//! Confined pockets flood-equalize; overpressure assaults wet rock and
+//! bursts soft lids. Cool → liquid + sinter.
+//!
+//! See docs/VOXEL_GEYSER.md + VOXEL_THERMAL.md.
+
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -30,7 +33,6 @@ use crate::grid::World;
 use crate::mineral::{
     carry_with_water, dissolved_at, precipitate_artesian_warm, widen_aperture,
 };
-use crate::humidity::Humidity;
 use crate::temperature::Temperature;
 
 /// Cadence for boil / flood / assault / recondense (FPS: not every tick).
@@ -324,13 +326,11 @@ fn inject_steam_near(
 /// Boil / flood / assault / escape / recondense.
 ///
 /// **Hard rule:** sealed / roofed vapour never dumps into the rain lottery.
-/// Open-sky hot free water may flash into [`Humidity`] when `humidity` is
-/// provided (T6a weather continuum) — that is not underground pressure.
+/// Unroofed hot free water is left for accelerated evap → sky Humidity.
 pub fn apply_steam(
     world: &mut World,
     temp: &Temperature,
     cfg: &SteamConfig,
-    humidity: Option<&mut Humidity>,
 ) {
     if !cfg.enabled {
         return;
@@ -345,7 +345,7 @@ pub fn apply_steam(
     let recondense_below = boil - RECONDENSE_MARGIN_C;
 
     recondense_cool(world, temp, recondense_below);
-    boil_hot_air(world, temp, cfg, max_cells, humidity);
+    boil_hot_air(world, temp, cfg, max_cells);
     if cfg.enable_pore_boil {
         boil_hot_pores(world, temp, cfg, max_cells);
     }
@@ -863,7 +863,6 @@ fn boil_hot_air(
     temp: &Temperature,
     cfg: &SteamConfig,
     max_cells: usize,
-    mut humidity: Option<&mut Humidity>,
 ) {
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
@@ -897,12 +896,12 @@ fn boil_hot_air(
                     continue;
                 }
                 let confined = void_is_confined(world, gx, gy);
-                // Steam map near cap: still allow open-sky → H jobs; only
-                // skip minting more *open* steam seats.
-                if prefer_confined && !confined && steam_at(world, gx, gy) == 0 && humidity.is_none()
-                {
+                // Open seats belong to accelerated evap → sky Humidity.
+                // Steam is sealed-flash only. Near cap, prefer confined seats.
+                if !confined {
                     continue;
                 }
+                let _ = prefer_confined; // reserved if we later prioritize seats
                 let heat = ((t_c - boil) / 50.0).clamp(0.0, 2.0);
                 let cap = ((cfg.boil_max_per_cell as f32) * (1.0 + heat))
                     .round()
@@ -930,23 +929,8 @@ fn boil_hot_air(
         if take == 0 {
             continue;
         }
-        // T6a: unroofed hot free water is weather flash → Humidity.
-        // Roofed seats keep sparse steam (underground humidity under pressure).
+        // Unroofed seats are filtered at collect time; belt-and-braces.
         if !void_is_confined(world, gx, gy) {
-            let Some(h) = humidity.as_deref_mut() else {
-                continue;
-            };
-            let t_c = temp.at_cell(gx, gy);
-            let accepted = h
-                .try_add_at_temp(gx, gy, take as f32, t_c)
-                .round()
-                .clamp(0.0, take as f32) as u8;
-            if accepted == 0 {
-                continue;
-            }
-            let mut next = cell;
-            next.sat = Sat(cell.sat.0 - accepted);
-            world.set_cell(gx, gy, next);
             continue;
         }
         let placed = inject_steam_near(world, gx, gy, take, max_cells);
@@ -1379,6 +1363,7 @@ pub fn steam_total(world: &World) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::humidity::Humidity;
     use crate::audit::sat_totals;
     use crate::chunk::ChunkCoord;
     use crate::mineral::add_dissolved;
@@ -1403,8 +1388,8 @@ mod tests {
     }
 
     #[test]
-    fn surface_water_boils_into_humidity_above_100c() {
-        // T6a: unroofed hot free water is weather flash → Humidity, not steam.
+    fn open_surface_water_is_not_minted_as_steam() {
+        // Unroofed hot free water is not steam's job — accelerated evap owns it.
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
@@ -1413,22 +1398,14 @@ mod tests {
             w.set_cell(4, y, Cell::air());
         }
         let hot = temp_fill(&w, 110.0);
-        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         w.tick = STEAM_EVERY;
-        let before_sat = sat_totals(&w).cell_total;
-        let before_h = h.total_mass();
-        apply_steam(&mut w, &hot, &SteamConfig::default(), Some(&mut h));
+        let before = sat_totals(&w).cell_total;
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert_eq!(steam_total(&w), 0, "open sky must not mint sparse steam");
-        assert!(
-            w.get_cell(4, 1).unwrap().sat.0 < 255,
-            "boil must consume free sat"
-        );
-        let gained = h.total_mass() - before_h;
-        assert!(gained > 0.0, "open boil must lift mass into Humidity");
         assert_eq!(
-            sat_totals(&w).cell_total + gained.round() as i64,
-            before_sat,
-            "sat↓ must match H↑ (mass-flat)"
+            sat_totals(&w).cell_total,
+            before,
+            "steam pass must leave open water for accelerated evap"
         );
     }
 
@@ -1454,7 +1431,7 @@ mod tests {
         let h_before = h.total_mass();
         w.tick = STEAM_EVERY;
         let before = sat_totals(&w).cell_total;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), Some(&mut h));
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0, "roofed hot water must boil to steam");
         assert_eq!(h.total_mass(), h_before, "sealed boil must not touch Humidity");
         assert_eq!(sat_totals(&w).cell_total, before, "steam boil must be mass-flat");
@@ -1478,7 +1455,7 @@ mod tests {
         assert!(void_is_confined(&w, 3, 2));
         let hot = temp_fill(&w, 120.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), None);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         let mut filled = 0;
         for x in 3..7 {
             for y in 2..5 {
@@ -1534,7 +1511,7 @@ mod tests {
         assert!(void_is_confined(&w, 3, 2));
         let hot = temp_fill(&w, 120.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), None);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         let chamber = steam_at(&w, 3, 3) + steam_at(&w, 4, 3) + steam_at(&w, 6, 3);
         assert!(
             chamber > 0,
@@ -1565,7 +1542,7 @@ mod tests {
         add_steam(&mut w, 5, 4, 180);
         let hot = temp_fill(&w, 140.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), None);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         let haze = steam_haze_wash(&w, Some(&hot));
         assert!(!haze.is_empty(), "steam must produce a haze wash");
         // Samples live on the cell grid but mass is 4×4 — neighbouring cells in
@@ -1603,13 +1580,13 @@ mod tests {
         assert!(void_is_confined(&w, 4, 2));
         let hot = temp_fill(&w, 120.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), None);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert!(
             steam_at(&w, 4, 3) + steam_at(&w, 5, 3) + steam_at(&w, 5, 2) > 0,
             "confined steam must occupy the void, not only the water seat"
         );
         w.tick = STEAM_EVERY * 2;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), None);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert!(
             steam_at(&w, 4, 6) == 0 && steam_at(&w, 4, 7) == 0,
             "steam must not pass an intact stone roof in two cadences"
@@ -1629,7 +1606,7 @@ mod tests {
         let before = sat_totals(&w).cell_total;
         let cool = temp_fill(&w, 20.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &cool, &SteamConfig::default(), None);
+        apply_steam(&mut w, &cool, &SteamConfig::default());
         assert_eq!(steam_at(&w, 3, 1), 0);
         assert_eq!(w.get_cell(3, 1).unwrap().sat.0, 80);
         assert_eq!(sat_totals(&w).cell_total, before);
@@ -1686,7 +1663,7 @@ mod tests {
         assert!(!void_is_confined(&w, 5, 2));
         let hot = temp_fill(&w, 110.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), None);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0, "open steam must remain");
         assert!(
             steam_at(&w, 5, 2) < 40,
@@ -1707,8 +1684,8 @@ mod tests {
     }
 
     #[test]
-    fn wet_boil_site_lifts_humidity_plume_mass() {
-        // Open boil site: mass leaves as Humidity (weather), not sparse steam.
+    fn open_wet_boil_site_stays_out_of_steam() {
+        // Open boil seats stay out of World.steam (weather path).
         let mut w = World::new(13);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
@@ -1717,14 +1694,12 @@ mod tests {
             w.set_cell(4, y, Cell::air());
         }
         let hot = temp_fill(&w, 150.0);
-        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), Some(&mut h));
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert_eq!(steam_total(&w), 0);
-        assert!(h.total_mass() > 0.0);
         w.tick = STEAM_EVERY * 2;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), Some(&mut h));
-        assert!(h.total_mass() > 0.0);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
+        assert_eq!(steam_total(&w), 0);
     }
 
     #[test]
@@ -1742,7 +1717,7 @@ mod tests {
         let hot = temp_fill(&w, 140.0);
         w.tick = STEAM_EVERY;
         let before = sat_totals(&w).cell_total;
-        apply_steam(&mut w, &hot, &SteamConfig::default(), None);
+        apply_steam(&mut w, &hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0);
         assert!(
             w.get_cell(4, 1).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand)
@@ -1776,7 +1751,7 @@ mod tests {
         };
         for i in 1..12 {
             w.tick = STEAM_EVERY * i;
-            apply_steam(&mut w, &hot, &cfg, None);
+            apply_steam(&mut w, &hot, &cfg);
         }
         let sand_gone = w.get_cell(4, 4).unwrap().material == MaterialId::Air
             || w.get_cell(5, 4).unwrap().material == MaterialId::Air
@@ -1796,7 +1771,7 @@ mod tests {
         let before_min = crate::audit::mineral_total(&w);
         let cool = temp_fill(&w, 10.0);
         w.tick = STEAM_EVERY;
-        apply_steam(&mut w, &cool, &SteamConfig::default(), None);
+        apply_steam(&mut w, &cool, &SteamConfig::default());
         assert_eq!(steam_at(&w, 3, 1), 0);
         assert_eq!(crate::audit::mineral_total(&w), before_min);
         assert!(
@@ -1827,7 +1802,7 @@ mod tests {
         let hot = temp_fill(&w, 130.0);
         for i in 1..20 {
             w.tick = STEAM_EVERY * i;
-            apply_steam(&mut w, &hot, &SteamConfig::default(), None);
+            apply_steam(&mut w, &hot, &SteamConfig::default());
         }
         let after = w.get_cell(3, 3).unwrap();
         assert!(
@@ -1881,7 +1856,7 @@ mod tests {
         };
         for i in 1..10 {
             w.tick = STEAM_EVERY * i;
-            apply_steam(&mut w, &hot, &cfg, None);
+            apply_steam(&mut w, &hot, &cfg);
         }
         let sat_above1 = w.get_cell(4, 2).unwrap().sat.0 as i32
             + w.get_cell(4, 3).unwrap().sat.0 as i32;
