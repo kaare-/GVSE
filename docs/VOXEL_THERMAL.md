@@ -185,9 +185,10 @@ return false and never enlarge the weather walk.
    Boiling under open sky is ordinary **accelerated evaporation** into this
    store — nothing special vs a hotter lake.
 2. **`World.cave_humidity`** — second mini field, **underground sealed air
-   only**. Conventional closed cave under high-sat rock: ambient moist Air,
-   sparse + hard-capped. **Not** pressure, **not** a high-humidity
-   prerequisite, **not** rain lottery.
+   only**. Conventional closed cave under rock: ambient moist Air, sparse +
+   hard-capped. Cool surplus (above Magnus cell capacity) recondenses into
+   Air sat; seats that open to sky hand off to weather H. **Not** pressure,
+   **not** rain lottery.
 3. **`World.steam`** — roofed flash / geyser pressure only. Never dumps
    into sky H.
 
