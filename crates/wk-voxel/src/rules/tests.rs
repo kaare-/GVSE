@@ -1553,6 +1553,32 @@ fn buried_quiet_full_rescan_after_unsat_write() {
     );
 }
 
+#[test]
+fn cavity_in_wet_chunk_dirties_weep_faces() {
+    // Few Air cells, many wet pores → vent-first path. Same dirty set
+    // as probing every donor: cavity walls and the roomy Air seats.
+    let mut w = World::new(203);
+    let coord = ChunkCoord::new(0, 0);
+    fill_chunk_saturated_stone(&mut w, coord);
+    for x in 20..24 {
+        for y in 20..24 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    assert!(w.chunks[&coord].has_open_air);
+    assert!(w.chunks[&coord].has_wet_pores);
+    clear_all_dirty(&mut w);
+    wake_pore_weep_into_air(&mut w);
+    let chunk = &w.chunks[&coord];
+    assert!(
+        chunk.dirty_bits.get(20, 20),
+        "roomy cavity Air must be dirtied"
+    );
+    assert!(
+        chunk.dirty_bits.get(19, 20) || chunk.dirty_bits.get(20, 19),
+        "wet stone on the cavity face must be dirtied"
+    );
+}
 
 #[test]
 fn landed_snow_does_not_drift() {

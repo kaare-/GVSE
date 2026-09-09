@@ -1316,6 +1316,87 @@ fn ortho_neighbours_seal_weep(world: &World, coord: ChunkCoord) -> bool {
     true
 }
 
+const WEEP_DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+
+#[inline]
+fn weep_neighbour(
+    world: &World,
+    chunk: &Chunk,
+    gx: i32,
+    gy: i32,
+    x: usize,
+    y: usize,
+    dx: i32,
+    dy: i32,
+) -> Option<(i32, i32, Cell)> {
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
+    let lx = x as i32 + dx;
+    let ly = y as i32 + dy;
+    let nx = world.wrap_x(gx + dx);
+    let ny = gy + dy;
+    let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+        Some(chunk.get(lx as usize, ly as usize))
+    } else {
+        world.get_cell(nx, ny)
+    };
+    n.map(|c| (nx, ny, c))
+}
+
+#[inline]
+fn is_weep_donor(cell: Cell, hydro: &HydroOverrides) -> bool {
+    if !is_porous_cell(cell, hydro) {
+        return false;
+    }
+    let cap = water_capacity_cell(cell, hydro);
+    cap > 0 && cell.sat.0 > 2
+}
+
+/// Dirty an Air↔pore face and the wet-pore recharge halo. Same touches as
+/// the old per-donor 4-neighbour walk.
+fn weep_dirty_from_donor(
+    world: &World,
+    chunk: &Chunk,
+    hydro: &HydroOverrides,
+    gx: i32,
+    gy: i32,
+    x: usize,
+    y: usize,
+    cell: Cell,
+    touches: &mut Vec<(i32, i32)>,
+) {
+    if !is_weep_donor(cell, hydro) {
+        return;
+    }
+    let mut face = false;
+    for (dx, dy) in WEEP_DIRS {
+        let Some((nx, ny, n)) = weep_neighbour(world, chunk, gx, gy, x, y, dx, dy) else {
+            continue;
+        };
+        if n.material == MaterialId::Air && !n.sat.is_full() {
+            touches.push((nx, ny));
+            face = true;
+        }
+    }
+    if !face {
+        return;
+    }
+    touches.push((gx, gy));
+    for (dx, dy) in WEEP_DIRS {
+        let Some((nx, ny, n)) = weep_neighbour(world, chunk, gx, gy, x, y, dx, dy) else {
+            continue;
+        };
+        if is_porous_cell(n, hydro) && n.sat.0 > 0 {
+            touches.push((nx, ny));
+        }
+    }
+}
+
+#[inline]
+fn is_chunk_perimeter(x: usize, y: usize) -> bool {
+    x == 0 || x + 1 == CHUNK_CELLS_W || y == 0 || y + 1 == CHUNK_CELLS_H
+}
+
 /// Re-dirty wet porous faces that can still weep into Air with room.
 ///
 /// Quiet groundwater next to a dug cavity otherwise drops out of dirty
@@ -1329,6 +1410,11 @@ fn ortho_neighbours_seal_weep(world: &World, coord: ChunkCoord) -> bool {
 /// A neighbour with `has_open_air` keeps that perimeter path so a dug
 /// face still wakes; carving Air in-chunk raises `has_open_air` and
 /// returns to the full scan.
+///
+/// Open / cavity chunks used to probe every wet pore (thousands on a
+/// geothermal mountain) for an Air face. Weep only exists on Air↔pore
+/// contacts, so when the chunk has fewer roomy Air cells than donors we
+/// walk the vents and the perimeter donors instead — same dirty set.
 pub fn wake_pore_weep_into_air(world: &mut World) {
     let hydro = world.hydro;
     let ch = CHUNK_CELLS_H as i32;
@@ -1337,7 +1423,6 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
     let mut clear_pores: Vec<ChunkCoord> = Vec::new();
     let mut air_updates: Vec<(ChunkCoord, bool)> = Vec::new();
     let mut unsat_updates: Vec<(ChunkCoord, bool)> = Vec::new();
-    const DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -1399,58 +1484,23 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         if !open_air && !unsat {
             for y in 0..CHUNK_CELLS_H {
                 for x in 0..CHUNK_CELLS_W {
-                    if x != 0 && x + 1 != CHUNK_CELLS_W && y != 0 && y + 1 != CHUNK_CELLS_H {
+                    if !is_chunk_perimeter(x, y) {
                         continue;
                     }
                     let cell = chunk.get(x, y);
-                    if !is_porous_cell(cell, &hydro) {
-                        continue;
-                    }
-                    let cap = water_capacity_cell(cell, &hydro);
-                    if cap == 0 || cell.sat.0 <= 2 {
-                        continue;
-                    }
                     let gx = world.wrap_x(base_gx + x as i32);
                     let gy = base_gy + y as i32;
-                    let mut face = false;
-                    for (dx, dy) in DIRS {
-                        let lx = x as i32 + dx;
-                        let ly = y as i32 + dy;
-                        let nx = world.wrap_x(gx + dx);
-                        let ny = gy + dy;
-                        let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
-                            Some(chunk.get(lx as usize, ly as usize))
-                        } else {
-                            world.get_cell(nx, ny)
-                        };
-                        let Some(n) = n else {
-                            continue;
-                        };
-                        if n.material == MaterialId::Air && !n.sat.is_full() {
-                            touches.push((nx, ny));
-                            face = true;
-                        }
-                    }
-                    if face {
-                        touches.push((gx, gy));
-                        for (dx, dy) in DIRS {
-                            let lx = x as i32 + dx;
-                            let ly = y as i32 + dy;
-                            let nx = world.wrap_x(gx + dx);
-                            let ny = gy + dy;
-                            let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
-                                Some(chunk.get(lx as usize, ly as usize))
-                            } else {
-                                world.get_cell(nx, ny)
-                            };
-                            let Some(n) = n else {
-                                continue;
-                            };
-                            if is_porous_cell(n, &hydro) && n.sat.0 > 0 {
-                                touches.push((nx, ny));
-                            }
-                        }
-                    }
+                    weep_dirty_from_donor(
+                        world,
+                        chunk,
+                        &hydro,
+                        gx,
+                        gy,
+                        x,
+                        y,
+                        cell,
+                        &mut touches,
+                    );
                 }
             }
             continue;
@@ -1458,11 +1508,16 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         let mut still_wet = false;
         let mut any_air = false;
         let mut any_unsat = false;
+        let mut donors: Vec<(u8, u8)> = Vec::new();
+        let mut vents: Vec<(u8, u8)> = Vec::new();
         for y in 0..CHUNK_CELLS_H {
             for x in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(x, y);
                 if cell.material == MaterialId::Air {
                     any_air = true;
+                    if !cell.sat.is_full() {
+                        vents.push((x as u8, y as u8));
+                    }
                 }
                 if is_porous_cell(cell, &hydro) {
                     if cell.sat.0 > 0 {
@@ -1472,62 +1527,86 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
                     if cap > 0 && cell.sat.0 < cap {
                         any_unsat = true;
                     }
+                    if cap > 0 && cell.sat.0 > 2 {
+                        donors.push((x as u8, y as u8));
+                    }
                 }
-                if !open_air && x != 0 && x + 1 != CHUNK_CELLS_W && y != 0 && y + 1 != CHUNK_CELLS_H
-                {
-                    continue;
-                }
-                if !is_porous_cell(cell, &hydro) {
-                    continue;
-                }
-                let cap = water_capacity_cell(cell, &hydro);
-                // Need a meaningful donor — residual film only skipped.
-                if cap == 0 || cell.sat.0 <= 2 {
-                    continue;
-                }
-                let gx = world.wrap_x(base_gx + x as i32);
-                let gy = base_gy + y as i32;
-                let mut face = false;
-                for (dx, dy) in DIRS {
+            }
+        }
+        // Cavity / wet-rock: few roomy Air cells, many donors — probe
+        // vents (in-chunk faces) plus perimeter donors (neighbour Air).
+        // Surface sky: many vents, fewer donors — keep the donor walk.
+        if open_air && vents.len() < donors.len() {
+            for &(vx, vy) in &vents {
+                let x = vx as usize;
+                let y = vy as usize;
+                for (dx, dy) in WEEP_DIRS {
                     let lx = x as i32 + dx;
                     let ly = y as i32 + dy;
-                    let nx = world.wrap_x(gx + dx);
-                    let ny = gy + dy;
-                    let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
-                        Some(chunk.get(lx as usize, ly as usize))
-                    } else {
-                        world.get_cell(nx, ny)
-                    };
-                    let Some(n) = n else {
+                    if lx < 0 || lx >= cw || ly < 0 || ly >= ch {
                         continue;
-                    };
-                    if n.material == MaterialId::Air && !n.sat.is_full() {
-                        touches.push((nx, ny));
-                        face = true;
                     }
-                }
-                if face {
-                    touches.push((gx, gy));
-                    // Recharge halo: wake wet pore neighbours so the
-                    // aquifer can keep feeding the spring face.
-                    for (dx, dy) in DIRS {
-                        let lx = x as i32 + dx;
-                        let ly = y as i32 + dy;
-                        let nx = world.wrap_x(gx + dx);
-                        let ny = gy + dy;
-                        let n = if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
-                            Some(chunk.get(lx as usize, ly as usize))
-                        } else {
-                            world.get_cell(nx, ny)
-                        };
-                        let Some(n) = n else {
-                            continue;
-                        };
-                        if is_porous_cell(n, &hydro) && n.sat.0 > 0 {
-                            touches.push((nx, ny));
-                        }
+                    let donor = chunk.get(lx as usize, ly as usize);
+                    if !is_weep_donor(donor, &hydro) {
+                        continue;
                     }
+                    let dgx = world.wrap_x(base_gx + lx);
+                    let dgy = base_gy + ly;
+                    weep_dirty_from_donor(
+                        world,
+                        chunk,
+                        &hydro,
+                        dgx,
+                        dgy,
+                        lx as usize,
+                        ly as usize,
+                        donor,
+                        &mut touches,
+                    );
                 }
+            }
+            for &(dx, dy) in &donors {
+                let x = dx as usize;
+                let y = dy as usize;
+                if !is_chunk_perimeter(x, y) {
+                    continue;
+                }
+                let cell = chunk.get(x, y);
+                let gx = world.wrap_x(base_gx + x as i32);
+                let gy = base_gy + y as i32;
+                weep_dirty_from_donor(
+                    world,
+                    chunk,
+                    &hydro,
+                    gx,
+                    gy,
+                    x,
+                    y,
+                    cell,
+                    &mut touches,
+                );
+            }
+        } else {
+            for &(dx, dy) in &donors {
+                let x = dx as usize;
+                let y = dy as usize;
+                if !open_air && !is_chunk_perimeter(x, y) {
+                    continue;
+                }
+                let cell = chunk.get(x, y);
+                let gx = world.wrap_x(base_gx + x as i32);
+                let gy = base_gy + y as i32;
+                weep_dirty_from_donor(
+                    world,
+                    chunk,
+                    &hydro,
+                    gx,
+                    gy,
+                    x,
+                    y,
+                    cell,
+                    &mut touches,
+                );
             }
         }
         if !still_wet {
