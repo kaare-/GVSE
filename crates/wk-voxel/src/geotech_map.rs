@@ -188,7 +188,25 @@ impl GeotechMap {
         self.rebuild_active(world, &active);
     }
 
-    /// Rebuild only columns touched by `active` (inflated ±1 in x).
+    /// After the CA tick: refresh dirty columns only. Never force a
+    /// second full-world sweep — pre-CA [`Self::rebuild_smart`] already
+    /// paid [`GEOTECH_FULL_EVERY`].
+    pub fn rebuild_after_ca(&mut self, world: &World) {
+        let active = plan_active(world);
+        if active.is_empty() {
+            return;
+        }
+        self.rebuild_active(world, &active);
+        // Do not increment `rebuilds_since_full` again — this is the
+        // same due tick's follow-up, not another smart period.
+        self.rebuilds_since_full = self.rebuilds_since_full.saturating_sub(1);
+    }
+
+    /// Rebuild only columns touched by `active`.
+    ///
+    /// Sparse dirty bits are already dilated by [`plan_active`]. Walking
+    /// the AABB x-span used to rescan every column in a rain-fat box.
+    /// Dense (legacy / wake) rects still take the box ±1.
     pub fn rebuild_active(&mut self, world: &World, active: &[ActiveChunk]) {
         let mut columns: Vec<i32> = Vec::new();
         let mut y_lo = i32::MAX;
@@ -196,14 +214,17 @@ impl GeotechMap {
         for ac in active {
             let base_x = ac.coord.cx * CHUNK_CELLS_W as i32;
             let base_y = ac.coord.cy * CHUNK_CELLS_H as i32;
-            let x0 = world.wrap_x(base_x + ac.rect.x0 as i32 - 1);
-            let x1 = world.wrap_x(base_x + ac.rect.x1 as i32 + 1);
-            // Collect inclusive x range (handle wrap by scanning rect locals).
-            for lx in ac.rect.x0.saturating_sub(1)..=(ac.rect.x1 + 1).min((CHUNK_CELLS_W - 1) as u8)
-            {
-                columns.push(world.wrap_x(base_x + lx as i32));
+            if ac.is_dense() {
+                let x0 = ac.rect.x0.saturating_sub(1);
+                let x1 = (ac.rect.x1 + 1).min((CHUNK_CELLS_W - 1) as u8);
+                for lx in x0..=x1 {
+                    columns.push(world.wrap_x(base_x + lx as i32));
+                }
+            } else {
+                ac.for_each_x(|lx| {
+                    columns.push(world.wrap_x(base_x + lx as i32));
+                });
             }
-            let _ = (x0, x1);
             y_lo = y_lo.min(base_y + ac.rect.y0 as i32 - 1);
             y_hi = y_hi.max(base_y + ac.rect.y1 as i32 + 1);
         }
@@ -751,6 +772,35 @@ mod tests {
             face.hydro_load >= 4,
             "incremental rebuild must see wet column (hydro={})",
             face.hydro_load
+        );
+    }
+
+    #[test]
+    fn rebuild_after_ca_is_incremental_and_skips_quiet() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 4);
+        w.set_cell(2, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(3, 1, Cell::air());
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        let since = map.rebuilds_since_full;
+        crate::active::clear_all_dirty(&mut w);
+        map.rebuild_after_ca(&w);
+        assert_eq!(
+            map.rebuilds_since_full, since,
+            "quiet post-CA must not count as another smart period"
+        );
+
+        for y in 1..=4 {
+            w.set_cell(3, y, wet_air());
+        }
+        map.rebuild_after_ca(&w);
+        assert!(map.last_was_incremental);
+        let face = map.at_cell(2, 1).expect("face");
+        assert!(
+            face.hydro_load >= 2,
+            "post-CA incremental must see the new wet column"
         );
     }
 
