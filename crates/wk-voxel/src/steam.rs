@@ -197,7 +197,11 @@ pub fn add_steam(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
     let slot = world.steam.entry((gx, gy)).or_insert(0);
     let before = *slot;
     *slot = before.saturating_add(amount);
-    *slot - before
+    let placed = *slot - before;
+    if placed > 0 {
+        world.steam_rev = world.steam_rev.wrapping_add(1);
+    }
+    placed
 }
 
 /// Alias: pressurized cavity humidity mass at a cell (`World.steam` wire).
@@ -219,6 +223,9 @@ pub fn take_steam(world: &mut World, gx: i32, gy: i32, want: u8) -> u8 {
     *slot -= took;
     if *slot == 0 {
         world.steam.remove(&(gx, gy));
+    }
+    if took > 0 {
+        world.steam_rev = world.steam_rev.wrapping_add(1);
     }
     took
 }
@@ -246,9 +253,20 @@ struct SteamHazeMemo {
     samples: Vec<SteamHazeSample>,
 }
 
+#[derive(Default)]
+struct PressMemo {
+    world_id: u64,
+    tick: u64,
+    steam_rev: u64,
+    /// Inclusive padded influence box; `None` if steam is empty.
+    bbox: Option<(i32, i32, i32, i32)>,
+    map: FxHashMap<(i32, i32), f32>,
+}
+
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
+    static PRESS_MEMO: RefCell<PressMemo> = RefCell::new(PressMemo::default());
 }
 
 fn bind_sky_probe(world: &World) {
@@ -396,12 +414,61 @@ fn is_steam_void(cell: Cell) -> bool {
     cell.material == MaterialId::Air && cell.sat.0 <= STEAM_VOID_SAT_MAX
 }
 
+fn bind_press_memo(world: &World) {
+    PRESS_MEMO.with(|slot| {
+        let mut c = slot.borrow_mut();
+        let id = world.chunk_cache_id.get();
+        if c.world_id != id || c.tick != world.tick || c.steam_rev != world.steam_rev {
+            c.world_id = id;
+            c.tick = world.tick;
+            c.steam_rev = world.steam_rev;
+            c.map.clear();
+            c.bbox = steam_influence_bbox(world);
+        }
+    });
+}
+
+fn steam_influence_bbox(world: &World) -> Option<(i32, i32, i32, i32)> {
+    if world.steam.is_empty() {
+        return None;
+    }
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+    for &(x, y) in world.steam.keys() {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    Some((
+        min_x - 1,
+        max_x + 1,
+        min_y - PRESSURE_DEPTH,
+        max_y,
+    ))
+}
+
 /// 0..=1 pressure — local steam density in the column (gas fill, not a liquid stack).
 pub fn steam_pressure_norm(world: &World, gx: i32, gy: i32) -> f32 {
     if world.steam.is_empty() {
         return 0.0;
     }
     let gx = world.wrap_x(gx);
+    bind_press_memo(world);
+    let outside = world.wrap_width.is_none()
+        && PRESS_MEMO.with(|c| {
+            c.borrow()
+                .bbox
+                .is_some_and(|(x0, x1, y0, y1)| gx < x0 || gx > x1 || gy < y0 || gy > y1)
+        });
+    if outside {
+        return 0.0;
+    }
+    if let Some(hit) = PRESS_MEMO.with(|c| c.borrow().map.get(&(gx, gy)).copied()) {
+        return hit;
+    }
     let mut sum = 0u32;
     let mut voids = 0u32;
     for dx in [-1_i32, 0, 1] {
@@ -415,10 +482,15 @@ pub fn steam_pressure_norm(world: &World, gx: i32, gy: i32) -> f32 {
             }
         }
     }
-    if voids == 0 {
-        return 0.0;
-    }
-    (sum as f32 / (voids as f32 * 255.0)).clamp(0.0, 1.0)
+    let norm = if voids == 0 {
+        0.0
+    } else {
+        (sum as f32 / (voids as f32 * 255.0)).clamp(0.0, 1.0)
+    };
+    PRESS_MEMO.with(|c| {
+        c.borrow_mut().map.insert((gx, gy), norm);
+    });
+    norm
 }
 
 /// Confined-rise rate boost from underground steam (1 + span * norm).
@@ -708,8 +780,10 @@ pub fn apply_steam(
         transmit_cavity_pressure(world, temp, cfg);
         assault_steam_walls(world, temp, cfg);
         if cfg.enable_escape {
-            escape_pressurized(world, temp, cfg, max_cells);
-            if !world.steam.is_empty() {
+            let escaped = escape_pressurized(world, temp, cfg, max_cells);
+            // Second flood is only needed when a burst / tube actually
+            // relocated vapour. Pore-only widen leaves the field in place.
+            if escaped > 0 && !world.steam.is_empty() {
                 flood_equalize_steam(world, cfg, max_cells);
             }
         }
@@ -1258,16 +1332,17 @@ fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &Ste
         return;
     }
     let boil = cfg.boil_point_c;
-    let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let mut keys: Vec<(i32, i32, u8)> = world
+        .steam
+        .iter()
+        .filter_map(|(&(x, y), &d)| (d >= 10).then_some((x, y, d)))
+        .collect();
+    keys.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
     let mut work = 0u8;
     let max_work = cfg.max_escapes_per_tick.saturating_mul(2).max(12);
-    for (gx, gy) in keys {
+    for (gx, gy, dens) in keys {
         if work >= max_work {
             break;
-        }
-        let dens = steam_at(world, gx, gy);
-        if dens < 10 {
-            continue;
         }
         let press = steam_pressure_norm(world, gx, gy).max(dens as f32 / 255.0);
         let target = boil + press * 35.0;
@@ -1314,16 +1389,17 @@ fn assault_steam_walls(world: &mut World, temp: &mut Temperature, cfg: &SteamCon
     if world.steam.is_empty() {
         return;
     }
-    let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let mut keys: Vec<(i32, i32, u8)> = world
+        .steam
+        .iter()
+        .filter_map(|(&(x, y), &d)| (d >= 12).then_some((x, y, d)))
+        .collect();
+    keys.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
     let mut assaults = 0u8;
     let max_a = cfg.max_escapes_per_tick.saturating_mul(2).max(8);
-    for (gx, gy) in keys {
+    for (gx, gy, steam) in keys {
         if assaults >= max_a {
             break;
-        }
-        let steam = steam_at(world, gx, gy);
-        if steam < 12 {
-            continue;
         }
         let press = steam_pressure_norm(world, gx, gy).max(steam as f32 / 255.0);
         for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, -1), (-1, 0), (1, 0)] {
@@ -2027,9 +2103,9 @@ fn escape_pressurized(
     temp: &mut Temperature,
     cfg: &SteamConfig,
     max_cells: usize,
-) {
+) -> u8 {
     if world.steam.is_empty() {
-        return;
+        return 0;
     }
     let min_p = cfg.escape_pressure_min.clamp(0.02, 0.95);
     let mut keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
@@ -2104,6 +2180,7 @@ fn escape_pressurized(
             }
         }
     }
+    escapes
 }
 
 fn reverse_escape_through_rock(
@@ -3809,6 +3886,34 @@ mod tests {
         let b = steam_haze_wash(&w, None);
         assert_eq!(a, b, "paused-frame haze memo must be identical");
         assert!(!a.is_empty(), "boiler haze must paint");
+    }
+
+    #[test]
+    fn steam_pressure_norm_is_zero_far_from_boiler() {
+        let mut w = World::new(121);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..7 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        add_steam(&mut w, 4, 3, 200);
+        assert!(steam_pressure_norm(&w, 4, 3) > 0.0);
+        assert_eq!(
+            steam_pressure_norm(&w, 4, 3),
+            steam_pressure_norm(&w, 4, 3),
+            "repeat pressure reads must hit the memo"
+        );
+        assert_eq!(
+            steam_pressure_norm(&w, 40, 3),
+            0.0,
+            "cells outside the steam bbox must skip the column walk"
+        );
+        assert_eq!(
+            steam_pressure_rate_scale(&w, 40, 3),
+            1.0,
+            "far confined wells must not pay boiler pressure"
+        );
     }
 
 }

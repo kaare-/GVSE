@@ -243,6 +243,10 @@ pub struct World {
     /// does not re-BFS every steam / cave-humidity cell.
     #[serde(skip, default)]
     pub(crate) sky_topo_gen: u64,
+    /// Bumps when [`Self::steam`] mass moves. Pressure memos key off this
+    /// so a live boiler does not re-walk a 51-cell column per well cell.
+    #[serde(skip, default)]
+    pub(crate) steam_rev: u64,
     /// True after a buoyant occupancy pass has run this session.
     ///
     /// Legacy saves predate [`Chunk::has_buoyant`]; the first collect
@@ -290,6 +294,7 @@ impl World {
             competent_level_vacated: FxHashMap::default(),
             chunk_cache_id: ChunkCacheId::default(),
             sky_topo_gen: 0,
+            steam_rev: 0,
             buoyant_flags_ready: false,
             water_head: crate::water_head::WaterHead::default(),
             confined: crate::confined::ConfinedStore::default(),
