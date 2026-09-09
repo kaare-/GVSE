@@ -546,8 +546,22 @@ fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32)
         if cell.material != MaterialId::Air {
             if let Some(up) = world.get_cell(gx, gy + 1) {
                 if is_steam_void(up) {
-                    let moved = take_steam(world, gx, gy, steam_at(world, gx, gy));
-                    add_steam(world, gx, gy + 1, moved);
+                    let want = steam_at(world, gx, gy);
+                    let room = 255u8.saturating_sub(steam_at(world, gx, gy + 1));
+                    let put = want.min(room);
+                    if put > 0 {
+                        let moved = take_steam(world, gx, gy, put);
+                        let placed = add_steam(world, gx, gy + 1, moved);
+                        if placed < moved {
+                            // Rare saturating clip — park the rejected units.
+                            let _ = crate::displace::park_orphan_water(
+                                world,
+                                gx,
+                                gy + 1,
+                                (moved - placed) as u32,
+                            );
+                        }
+                    }
                 }
             }
             continue;
@@ -662,7 +676,12 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             .collect();
         let seats_all = component.clone();
         if voids.is_empty() {
-            let _ = spill_steam_across(world, &seats_all, total, max_cells);
+            let left = spill_steam_across(world, &seats_all, total, max_cells);
+            if left > 0 {
+                // Cap / full seats: convert leftover vapour to liquid store.
+                let seed = seats_all.first().copied().unwrap_or((sx, sy));
+                let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, left);
+            }
             continue;
         }
 
@@ -707,7 +726,11 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                 }
             }
             if left > 0 {
-                let _ = spill_steam_across(world, &seats, left, max_cells);
+                let left = spill_steam_across(world, &seats, left, max_cells);
+                if left > 0 {
+                    let seed = seats.first().copied().unwrap_or((sx, sy));
+                    let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, left);
+                }
             }
             let _ = open_to_sky;
         } else {
@@ -746,7 +769,11 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                 } else {
                     seats_all
                 };
-                let _ = spill_steam_across(world, &seats, left, max_cells);
+                let left = spill_steam_across(world, &seats, left, max_cells);
+                if left > 0 {
+                    let seed = seats.first().copied().unwrap_or((sx, sy));
+                    let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, left);
+                }
             }
         }
     }
@@ -1918,14 +1945,21 @@ fn try_place_burst_debris(
     let leftover = dst.sat.0.saturating_sub(soak);
     world.set_cell(nx, ny, grain);
     if leftover > 0 {
+        let mut left = leftover;
         if let Some(tube) = world.get_cell(tube_x, tube_y) {
             if tube.material == MaterialId::Air {
                 let room = u8::MAX.saturating_sub(tube.sat.0);
-                let put = leftover.min(room);
-                let mut next = tube;
-                next.sat = Sat(tube.sat.0.saturating_add(put));
-                world.set_cell(tube_x, tube_y, next);
+                let put = left.min(room);
+                if put > 0 {
+                    let mut next = tube;
+                    next.sat = Sat(tube.sat.0.saturating_add(put));
+                    world.set_cell(tube_x, tube_y, next);
+                    left -= put;
+                }
             }
+        }
+        if left > 0 {
+            let _ = crate::displace::park_orphan_water(world, tube_x, tube_y, left as u32);
         }
     }
     true
@@ -2664,6 +2698,40 @@ mod tests {
         };
         flood_equalize_steam(&mut w, &cfg, cfg.max_steam_cells as usize);
         assert_eq!(steam_total(&w), before, "u32 share must not truncate");
+    }
+
+    #[test]
+    fn flood_equalize_parks_leftover_when_steam_map_is_full() {
+        // With max_cells=1, flood takes every seat then can only re-place on
+        // one marker. Leftover must park into sat/cave_humidity — not vanish.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..7 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        add_steam(&mut w, 3, 2, 200);
+        add_steam(&mut w, 4, 2, 200);
+        add_steam(&mut w, 5, 2, 200);
+        let before = sat_totals(&w).cell_total;
+        let cfg = SteamConfig {
+            enable_escape: false,
+            enable_pore_boil: false,
+            max_steam_cells: 1,
+            ..SteamConfig::default()
+        };
+        flood_equalize_steam(&mut w, &cfg, 1);
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "steam-cap leftover must stay in the cell water budget"
+        );
     }
 
     #[test]

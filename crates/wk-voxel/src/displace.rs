@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 
 use wk_material::MaterialId;
 
-use crate::cell::{Cell, Sat};
+use crate::cell::{water_capacity_cell, Cell, Sat};
 use crate::fasthash::FxHashSet as HashSet;
 use crate::grid::World;
 
@@ -71,6 +71,106 @@ fn fill_cell(world: &mut World, x: i32, y: i32, units: &mut u32) {
   *units -= put;
 }
 
+/// Park orphan water near `(gx, gy)` so a take-then-partial-place path never
+/// silently deletes the remainder.
+///
+/// Order: free Air sat upward → lateral Air / porous room → cave humidity.
+/// Returns units still unplaced (should be rare; only when the neighbourhood
+/// and the cave-humidity map are both full).
+pub fn park_orphan_water(world: &mut World, gx: i32, gy: i32, mut units: u32) -> u32 {
+  if units == 0 {
+    return 0;
+  }
+  let gx = world.wrap_x(gx);
+  for dy in 0..16 {
+    if units == 0 {
+      return 0;
+    }
+    let y = gy + dy;
+    let Some(mut c) = world.get_cell(gx, y) else {
+      break;
+    };
+    if c.material != MaterialId::Air {
+      continue;
+    }
+    let room = (u8::MAX - c.sat.0) as u32;
+    let put = room.min(units);
+    if put > 0 {
+      c.sat = Sat(c.sat.0 + put as u8);
+      world.set_cell(gx, y, c);
+      units -= put;
+    }
+  }
+  if units > 0 {
+    for (dx, dy) in [
+      (-1, 0),
+      (1, 0),
+      (-1, 1),
+      (1, 1),
+      (0, 1),
+      (-2, 0),
+      (2, 0),
+      (0, 2),
+      (-1, 2),
+      (1, 2),
+    ] {
+      if units == 0 {
+        break;
+      }
+      let x = world.wrap_x(gx + dx);
+      let y = gy + dy;
+      let Some(mut c) = world.get_cell(x, y) else {
+        continue;
+      };
+      let cap = water_capacity_cell(c, &world.hydro) as u32;
+      if cap == 0 {
+        continue;
+      }
+      let room = cap.saturating_sub(c.sat.0 as u32);
+      let put = room.min(units);
+      if put == 0 {
+        continue;
+      }
+      c.sat = Sat(c.sat.0 + put as u8);
+      world.set_cell(x, y, c);
+      units -= put;
+    }
+  }
+  if units > 0 {
+    for (dx, dy) in [
+      (0, 0),
+      (0, 1),
+      (-1, 0),
+      (1, 0),
+      (0, 2),
+      (-1, 1),
+      (1, 1),
+      (0, 3),
+    ] {
+      if units == 0 {
+        break;
+      }
+      let x = world.wrap_x(gx + dx);
+      let y = gy + dy;
+      if !world
+        .get_cell(x, y)
+        .is_some_and(|c| c.material == MaterialId::Air)
+      {
+        continue;
+      }
+      while units > 0 {
+        let chunk = units.min(255) as u8;
+        let put = crate::cave_humidity::try_add_cave_humidity(world, x, y, chunk);
+        if put == 0 {
+          break;
+        }
+        units -= put as u32;
+      }
+    }
+  }
+  units
+}
+
 /// Pour displaced water back into the world.
 ///
 /// `prefer` is tried in order first (normally the cells the body vacated, which
@@ -103,6 +203,9 @@ pub fn deposit_free_water(
     .collect();
   let mut q: VecDeque<(i32, i32)> = seen.iter().copied().collect();
   if q.is_empty() {
+    if let Some(&(sx, sy)) = prefer.first() {
+      return park_orphan_water(world, sx, sy, units);
+    }
     return units;
   }
   let mut visited = 0usize;
@@ -133,6 +236,14 @@ pub fn deposit_free_water(
         break;
       }
     }
+  }
+  if units > 0 {
+    let seed = prefer
+      .first()
+      .copied()
+      .or_else(|| seen.iter().next().copied())
+      .unwrap_or((0, 0));
+    units = park_orphan_water(world, seed.0, seed.1, units);
   }
   units
 }
@@ -319,6 +430,33 @@ mod tests {
       w.get_cell(5, 5).unwrap().sat.0,
       0,
       "blocked cell must stay dry"
+    );
+  }
+
+  #[test]
+  fn park_orphan_water_under_lid_uses_cave_humidity() {
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    // Sealed stone box with one Air cell already full of sat.
+    for x in 3..8 {
+      for y in 1..6 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let mut full = Cell::air();
+    full.sat = Sat(255);
+    w.set_cell(5, 2, full);
+    w.set_cell(5, 3, Cell::air()); // dry neighbour for cave humidity
+    w.set_cell(5, 4, Cell::solid(MaterialId::Stone)); // roof
+    let before = crate::audit::sat_totals(&w).cell_total;
+    let left = park_orphan_water(&mut w, 5, 2, 40);
+    assert_eq!(left, 0, "must park under a lid");
+    let after = crate::audit::sat_totals(&w).cell_total;
+    assert_eq!(after, before + 40, "parked units must stay in the cell budget");
+    assert!(
+      crate::cave_humidity::cave_humidity_at(&w, 5, 3) > 0
+        || w.get_cell(5, 3).unwrap().sat.0 > 0,
+      "units must land as sat or cave humidity"
     );
   }
 

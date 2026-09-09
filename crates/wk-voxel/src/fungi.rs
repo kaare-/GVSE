@@ -2683,8 +2683,13 @@ pub fn dissolve_corpse_to_organic(
                 let mut org = Cell::solid(MaterialId::Organic);
                 org.pore = c.pore;
                 let cap = water_capacity_cell(org, &world.hydro);
-                org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
+                let keep = if cap > 0 { c.sat.0.min(cap) } else { 0 };
+                let excess = c.sat.0.saturating_sub(keep);
+                org.sat.0 = keep;
                 world.set_cell(wx, wy, org);
+                if excess > 0 {
+                    push_excess_sat(world, wx, wy, excess);
+                }
                 painted += 1;
             }
         }
