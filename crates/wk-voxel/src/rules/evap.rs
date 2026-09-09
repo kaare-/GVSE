@@ -229,7 +229,9 @@ fn collect_evap_deltas(
                 // Orphaned crest film: no Air neighbour anywhere on the
                 // surface (same-y or diagonal-down) → evaporate hard so
                 // a single ridge pixel doesn't linger for hours.
-                if is_orphan_surface_film(world, gx, gy) {
+                // Standing / lake cells are not ridge films — skip the
+                // six-neighbour walk on every full-water surface cell.
+                if cur.sat.0 < STANDING_AIR_SAT && is_orphan_surface_film(world, gx, gy) {
                     rate = (rate * 8).max(4);
                 }
                 if rate <= 0 {
@@ -473,5 +475,35 @@ mod tests {
             "sealed film must deposit cave humidity into dry air above/beside the pool"
         );
         assert_eq!(steam_total(&w), 0, "ambient sealed film is not steam flash");
+    }
+
+    #[test]
+    fn standing_lake_surface_still_evaporates_without_orphan_walk() {
+        // A 3-wide pool has Air neighbours, so it was never an orphan
+        // film. Skipping that 6-neighbour probe must not change the
+        // surface evap path.
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::water());
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let before = w.get_cell(5, 1).unwrap().sat.0;
+        assert!(before >= STANDING_AIR_SAT);
+        w.tick = 0;
+        apply_evaporation(
+            &mut w,
+            &EvapConfig {
+                period_ticks: 1,
+                ..EvapConfig::default()
+            },
+        );
+        assert!(
+            w.get_cell(5, 1).unwrap().sat.0 < before,
+            "standing lake surface must still evaporate"
+        );
     }
 }
