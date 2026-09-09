@@ -297,17 +297,66 @@ pub fn apply_cave_humidity(
             continue;
         };
         if cell.material != MaterialId::Air {
-            world.cave_humidity.remove(&(gx, gy));
+            // Seat solidified (Flowstone mint / fill): relocate vapour, never delete.
+            let hum = cave_humidity_at(world, gx, gy);
+            if hum == 0 {
+                world.cave_humidity.remove(&(gx, gy));
+                continue;
+            }
+            let mut left = hum;
+            for (dx, dy) in [(0, 1), (-1, 0), (1, 0), (0, -1), (0, 2)] {
+                if left == 0 {
+                    break;
+                }
+                let nx = world.wrap_x(gx + dx);
+                let ny = gy + dy;
+                if world
+                    .get_cell(nx, ny)
+                    .is_some_and(|n| n.material == MaterialId::Air)
+                {
+                    let put = try_add_cave_humidity(world, nx, ny, left);
+                    left = left.saturating_sub(put);
+                }
+            }
+            let moved = hum.saturating_sub(left);
+            if moved > 0 {
+                let _ = take_cave_humidity(world, gx, gy, moved);
+            }
+            // Unmoved remainder stays on this key rather than being deleted.
             continue;
         }
-        // Flooded pool seats: vapour stops at the waterline — drip into sat.
+        // Flooded pool seats: vapour stops at the waterline — only drip what fits.
         if is_free_water_seat(world, gx, gy, cell) {
             let hum = cave_humidity_at(world, gx, gy);
-            if hum > 0 {
-                let took = take_cave_humidity(world, gx, gy, hum);
-                let _ = drip_into_air(world, gx, gy, took);
-            } else {
+            if hum == 0 {
                 world.cave_humidity.remove(&(gx, gy));
+                continue;
+            }
+            // Prefer the air column above a full pool so we do not take vapour
+            // and then discard it when sat has no room.
+            let mut left = hum;
+            for dy in 1..=4 {
+                if left == 0 {
+                    break;
+                }
+                let ny = gy + dy;
+                let Some(above) = world.get_cell(gx, ny) else {
+                    continue;
+                };
+                if above.material == MaterialId::Air
+                    && !is_free_water_seat(world, gx, ny, above)
+                {
+                    let put = try_add_cave_humidity(world, gx, ny, left);
+                    left = left.saturating_sub(put);
+                }
+            }
+            if left > 0 {
+                let put = drip_into_air(world, gx, gy, left);
+                left = left.saturating_sub(put);
+            }
+            let moved = hum.saturating_sub(left);
+            if moved > 0 {
+                let _ = take_cave_humidity(world, gx, gy, moved);
             }
             continue;
         }
@@ -319,16 +368,22 @@ pub fn apply_cave_humidity(
 
         // Side vent / skylight opened → same store as free sky.
         if crate::steam::air_void_open_to_sky(world, gx, gy) {
-            let took = take_cave_humidity(world, gx, gy, hum);
             let t_c = temp.at_cell(gx, gy);
             let accepted = humidity
-                .try_add_at_temp(gx, gy, took as f32, t_c)
+                .try_add_at_temp(gx, gy, hum as f32, t_c)
                 .round()
                 .clamp(0.0, 255.0) as u8;
-            let left = took.saturating_sub(accepted);
-            if left > 0 {
-                let _ = drip_into_air(world, gx, gy, left);
+            if accepted > 0 {
+                let _ = take_cave_humidity(world, gx, gy, accepted);
             }
+            let left = hum.saturating_sub(accepted);
+            if left > 0 {
+                let put = drip_into_air(world, gx, gy, left);
+                if put > 0 {
+                    let _ = take_cave_humidity(world, gx, gy, put);
+                }
+            }
+            // Unaccepted remainder stays in cave_humidity (mass-flat).
             continue;
         }
 
@@ -513,4 +568,67 @@ mod tests {
             "haze must stop at the water surface (no wash in the pool)"
         );
     }
+
+    #[test]
+    fn pool_drip_does_not_destroy_cave_humidity() {
+        let mut w = World::new(29);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..7 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Full pool seat with vapour sitting on it + dry air above.
+        let mut pool = Cell::air();
+        pool.sat = Sat(255);
+        w.set_cell(4, 2, pool);
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(4, 4, Cell::air());
+        w.set_cell(4, 5, Cell::solid(MaterialId::Stone)); // roof
+        try_add_cave_humidity(&mut w, 4, 2, 80);
+        let before = cave_humidity_total(&w) as i64 + crate::audit::sat_totals(&w).cell_total;
+        let mut hum = Humidity::new(32);
+        let temp = hot_fill(&w, 11.0);
+        // Force cadence.
+        w.tick = CAVE_HUMIDITY_EVERY;
+        apply_cave_humidity(&mut w, &temp, &mut hum);
+        let after = cave_humidity_total(&w) as i64 + crate::audit::sat_totals(&w).cell_total;
+        assert_eq!(
+            after, before,
+            "pool drip must relocate vapour, not delete it (cave_h {} → {}, sat cell {})",
+            cave_humidity_total(&w),
+            before,
+            crate::audit::sat_totals(&w).cell_total
+        );
+    }
+
+    #[test]
+    fn solid_seat_relocates_cave_humidity() {
+        let mut w = World::new(31);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..7 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        try_add_cave_humidity(&mut w, 4, 2, 60);
+        // Solidify the seat (Flowstone-like).
+        w.set_cell(4, 2, Cell::solid(MaterialId::Flowstone));
+        let before = cave_humidity_total(&w);
+        assert_eq!(before, 60);
+        let mut hum = Humidity::new(32);
+        let temp = hot_fill(&w, 11.0);
+        w.tick = CAVE_HUMIDITY_EVERY;
+        apply_cave_humidity(&mut w, &temp, &mut hum);
+        assert_eq!(
+            cave_humidity_total(&w),
+            before,
+            "solidified seat must relocate vapour, not remove it"
+        );
+        assert_eq!(cave_humidity_at(&w, 4, 2), 0);
+        assert!(cave_humidity_at(&w, 4, 3) > 0);
+    }
+
 }

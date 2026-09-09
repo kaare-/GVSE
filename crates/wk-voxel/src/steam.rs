@@ -652,14 +652,17 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             continue;
         }
 
+        // Prefer dry gas voids for seating, but wet Air that contributed steam
+        // must remain eligible seats — excluding them (or truncating share to
+        // u8) silently destroyed multi-cell vapour totals.
         let mut voids: Vec<(i32, i32)> = component
             .iter()
             .copied()
             .filter(|&(x, y)| world.get_cell(x, y).is_some_and(is_steam_void))
             .collect();
+        let seats_all = component.clone();
         if voids.is_empty() {
-            let seats: Vec<(i32, i32)> = component.clone();
-            let _ = spill_steam_across(world, &seats, total, max_cells);
+            let _ = spill_steam_across(world, &seats_all, total, max_cells);
             continue;
         }
 
@@ -671,33 +674,40 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
         let as_field = seed_confined || confined_n * 2 >= voids.len();
 
         if as_field {
-            // Prefer seating on under-roof voids first so the chamber fills.
-            voids.sort_by(|a, b| {
+            // Seat across the whole pocket (voids first), never `as u8` share.
+            let mut seats = seats_all;
+            seats.sort_by(|a, b| {
+                let va = world.get_cell(a.0, a.1).is_some_and(is_steam_void);
+                let vb = world.get_cell(b.0, b.1).is_some_and(is_steam_void);
                 let ca = void_is_confined(world, a.0, a.1);
                 let cb = void_is_confined(world, b.0, b.1);
-                cb.cmp(&ca).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0))
+                vb.cmp(&va)
+                    .then(cb.cmp(&ca))
+                    .then(b.1.cmp(&a.1))
+                    .then(a.0.cmp(&b.0))
             });
-            let n = voids.len() as u32;
-            let base = (total / n) as u8;
-            let mut rem = (total % n) as usize;
-            for &(x, y) in &voids {
-                let mut put = base;
+            let n = seats.len() as u32;
+            let base = total / n;
+            let mut rem = total % n;
+            let mut left = 0u32;
+            for &(x, y) in &seats {
+                let mut need = base;
                 if rem > 0 {
-                    put = put.saturating_add(1);
+                    need += 1;
                     rem -= 1;
                 }
-                if put == 0 {
-                    continue;
+                while need > 0 {
+                    let chunk = need.min(255) as u8;
+                    let placed = try_place_steam(world, x, y, chunk, max_cells);
+                    if placed == 0 {
+                        left += need;
+                        break;
+                    }
+                    need -= placed as u32;
                 }
-                let placed = try_place_steam(world, x, y, put, max_cells);
-                if placed < put {
-                    let _ = spill_steam_across(
-                        world,
-                        &voids,
-                        (put - placed) as u32,
-                        max_cells,
-                    );
-                }
+            }
+            if left > 0 {
+                let _ = spill_steam_across(world, &seats, left, max_cells);
             }
             let _ = open_to_sky;
         } else {
@@ -724,15 +734,17 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                 if room == 0 {
                     continue;
                 }
-                let put = left.min(room);
-                let placed = try_place_steam(world, x, y, put as u8, max_cells) as u32;
+                let put = left.min(room).min(255) as u8;
+                let placed = try_place_steam(world, x, y, put, max_cells) as u32;
                 left -= placed;
             }
             if left > 0 {
-                let seats = if voids.is_empty() {
+                // Fall back to the whole component (incl. wet Air), not only
+                // the dry plume seats — otherwise leftover vapour vanishes.
+                let seats = if seats_all.is_empty() {
                     vec![(sx, sy)]
                 } else {
-                    voids.clone()
+                    seats_all
                 };
                 let _ = spill_steam_across(world, &seats, left, max_cells);
             }
@@ -2577,6 +2589,81 @@ mod tests {
             before,
             "flood equalize must not destroy multi-cell vapour totals"
         );
+    }
+
+    #[test]
+    fn flood_equalize_does_not_truncate_wet_air_steam() {
+        // Wet lake Air (sat > STEAM_VOID_SAT_MAX) holds steam and joins the
+        // flood component, but used to be excluded from void seats while
+        // `(total/n) as u8` truncated shares >255 — vapour vanished.
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..9 {
+            for y in 1..7 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Two dry voids + five wet pool cells under a roof.
+        for x in 3..8 {
+            let mut wet = Cell::air();
+            wet.sat = Sat(255);
+            w.set_cell(x, 2, wet);
+        }
+        w.set_cell(3, 3, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(5, 3, Cell::air());
+        w.set_cell(3, 4, Cell::air());
+        w.set_cell(4, 4, Cell::air());
+        // Pack steam onto wet seats so total/n_voids would exceed 255.
+        for x in 3..8 {
+            add_steam(&mut w, x, 2, 251);
+        }
+        let before = steam_total(&w);
+        assert!(before > 255 * 2, "fixture must stress the old u8 truncate path");
+        let cfg = SteamConfig {
+            enable_escape: false,
+            enable_pore_boil: false,
+            ..SteamConfig::default()
+        };
+        flood_equalize_steam(&mut w, &cfg, cfg.max_steam_cells as usize);
+        assert_eq!(
+            steam_total(&w),
+            before,
+            "flood must preserve steam mass ({before} → {})",
+            steam_total(&w)
+        );
+    }
+
+    #[test]
+    fn flood_equalize_share_above_255_is_not_cast_to_u8() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..7 {
+            for y in 1..5 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // One dry void + three wet steam seats.
+        w.set_cell(3, 2, Cell::air());
+        for x in 4..7 {
+            let mut wet = Cell::air();
+            wet.sat = Sat(220);
+            w.set_cell(x, 2, wet);
+        }
+        add_steam(&mut w, 3, 2, 200);
+        add_steam(&mut w, 4, 2, 255);
+        add_steam(&mut w, 5, 2, 255);
+        add_steam(&mut w, 6, 2, 255);
+        let before = steam_total(&w);
+        // If only the dry void seats, share = before/1 > 255 → old `as u8` loss.
+        assert!(before > 255);
+        let cfg = SteamConfig {
+            enable_escape: false,
+            enable_pore_boil: false,
+            ..SteamConfig::default()
+        };
+        flood_equalize_steam(&mut w, &cfg, cfg.max_steam_cells as usize);
+        assert_eq!(steam_total(&w), before, "u32 share must not truncate");
     }
 
     #[test]

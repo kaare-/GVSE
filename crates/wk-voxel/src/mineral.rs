@@ -487,8 +487,13 @@ fn precipitate_over(world: &mut World, gx: i32, gy: i32, ceiling: u16) -> u16 {
             // Keep whatever water fits; the rest stays as free load-free water
             // above, handled by the normal passes.
             let cap = water_capacity_cell(deposit, &world.hydro);
-            deposit.sat = Sat(cell.sat.0.min(cap));
+            let keep = cell.sat.0.min(cap);
+            let spill = cell.sat.0.saturating_sub(keep);
+            deposit.sat = Sat(keep);
             world.set_cell(gx, gy, deposit);
+            if spill > 0 {
+                push_water_up(world, gx, gy + 1, spill);
+            }
             return used;
         }
     }
@@ -555,14 +560,21 @@ fn occlude_pore(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
 }
 
 /// Park shed water in the first Air cell with room above `gy`.
-fn push_water_up(world: &mut World, gx: i32, gy: i32, mut amount: u8) {
-    for dy in 0..8 {
+///
+/// Returns any units that still could not be seated (should stay ~0 after the
+/// cave-humidity fallback — sinter under a lid must not delete sat).
+fn push_water_up(world: &mut World, gx: i32, gy: i32, mut amount: u8) -> u8 {
+    if amount == 0 {
+        return 0;
+    }
+    // Vertical Air column first.
+    for dy in 0..12 {
         if amount == 0 {
-            return;
+            return 0;
         }
         let y = gy + dy;
         let Some(mut c) = world.get_cell(gx, y) else {
-            return;
+            break;
         };
         if c.material != MaterialId::Air {
             continue;
@@ -575,7 +587,51 @@ fn push_water_up(world: &mut World, gx: i32, gy: i32, mut amount: u8) {
             amount -= put;
         }
     }
+    // Lateral Air / porous room so sinter under a lid does not delete sat.
+    if amount > 0 {
+        for (dx, dy) in [(-1, 0), (1, 0), (-1, 1), (1, 1), (0, 1), (-2, 0), (2, 0)] {
+            if amount == 0 {
+                break;
+            }
+            let x = world.wrap_x(gx + dx);
+            let y = gy + dy;
+            let Some(mut c) = world.get_cell(x, y) else {
+                continue;
+            };
+            let cap = water_capacity_cell(c, &world.hydro);
+            if cap == 0 {
+                continue;
+            }
+            let room = cap.saturating_sub(c.sat.0);
+            let put = room.min(amount);
+            if put == 0 {
+                continue;
+            }
+            c.sat = Sat(c.sat.0 + put);
+            world.set_cell(x, y, c);
+            amount -= put;
+        }
+    }
+    // Last resort: sealed vapour so cement/sinter under a full lid stays flat.
+    if amount > 0 {
+        for (dx, dy) in [(0, 0), (0, 1), (-1, 0), (1, 0), (0, 2)] {
+            if amount == 0 {
+                break;
+            }
+            let x = world.wrap_x(gx + dx);
+            let y = gy + dy;
+            if world
+                .get_cell(x, y)
+                .is_some_and(|c| c.material == MaterialId::Air)
+            {
+                let put = crate::cave_humidity::try_add_cave_humidity(world, x, y, amount);
+                amount = amount.saturating_sub(put);
+            }
+        }
+    }
+    amount
 }
+
 
 /// Drop the entire load of a cell whose water has left (evaporation, drainage).
 ///
