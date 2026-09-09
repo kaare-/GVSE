@@ -284,7 +284,9 @@ pub fn draw_block_inspector(
                 }
             }
             let cave_h = cave_humidity_at(world, gx, gy);
-            if cave_h > 0 {
+            // Full-water Air is a pool seat — ambient cave vapour does not live
+            // in the lake volume (scrub lifts it every tick; never show it here).
+            if cave_h > 0 && !(c.material == MaterialId::Air && c.sat.0 >= 200) {
                 lines.push(format!(
                     "cave_humidity={cave_h}/255 (sealed ambient cavity air; same H wash, not rain)"
                 ));
