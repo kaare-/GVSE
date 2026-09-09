@@ -1448,8 +1448,11 @@ fn assault_steam_walls(world: &mut World, temp: &mut Temperature, cfg: &SteamCon
     }
 }
 
-/// True when any temperature tile covering this chunk is near/above `min_c`.
-fn chunk_overlaps_hot(temp: &Temperature, coord: ChunkCoord, min_c: f32) -> bool {
+fn chunk_tiles_any(
+    temp: &Temperature,
+    coord: ChunkCoord,
+    pred: impl Fn(f32) -> bool,
+) -> bool {
     let tc = temp.tile_cols.max(1);
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
@@ -1461,7 +1464,7 @@ fn chunk_overlaps_hot(temp: &Temperature, coord: ChunkCoord, min_c: f32) -> bool
     let hy1 = (y0 + ch - 1).div_euclid(tc);
     for hy in hy0..=hy1 {
         for hx in hx0..=hx1 {
-            if temp.at_tile(hx, hy) >= min_c {
+            if pred(temp.at_tile(hx, hy)) {
                 return true;
             }
         }
@@ -1469,17 +1472,29 @@ fn chunk_overlaps_hot(temp: &Temperature, coord: ChunkCoord, min_c: f32) -> bool
     false
 }
 
-/// Walk cells whose temperature tile is ≥ `min_c`.
+/// True when any temperature tile covering this chunk is near/above `min_c`.
+fn chunk_overlaps_hot(temp: &Temperature, coord: ChunkCoord, min_c: f32) -> bool {
+    chunk_tiles_any(temp, coord, |t| t >= min_c)
+}
+
+/// True when any temperature tile covering this chunk is at/below `max_c`.
 ///
-/// `Temperature::at_cell` is tile-constant, so a 64×64 wet geothermal
-/// chunk still paid 4096 hashmap reads after [`chunk_overlaps_hot`]
-/// let it in. Cold tiles (the usual case above the boil isotherm) are
-/// skipped entirely; hot tiles reuse one `at_tile` for the heat term.
-fn for_each_hot_tile_cell(
+/// Freeze scans use this so a hot wet mountain does not walk 4096 cells
+/// per chunk looking for pore ice that cannot form.
+pub(crate) fn chunk_overlaps_cold(temp: &Temperature, coord: ChunkCoord, max_c: f32) -> bool {
+    chunk_tiles_any(temp, coord, |t| t <= max_c)
+}
+
+/// Walk cells whose tile temperature satisfies `keep`.
+///
+/// `Temperature::at_cell` is tile-constant, so a 64×64 wet chunk still
+/// paid 4096 hashmap reads after a chunk-level gate let it in. Tiles
+/// that fail `keep` are skipped; kept tiles reuse one `at_tile`.
+pub(crate) fn for_each_tile_cell_where(
     world: &World,
     temp: &Temperature,
     coord: ChunkCoord,
-    min_c: f32,
+    keep: impl Fn(f32) -> bool,
     mut visit: impl FnMut(i32, i32, f32, crate::cell::Cell),
 ) {
     let Some(chunk) = world.chunks.get(&coord) else {
@@ -1497,7 +1512,7 @@ fn for_each_hot_tile_cell(
     for hy in hy0..=hy1 {
         for hx in hx0..=hx1 {
             let t_c = temp.at_tile(hx, hy);
-            if t_c < min_c {
+            if !keep(t_c) {
                 continue;
             }
             let tx0 = hx * tc;
@@ -1516,6 +1531,17 @@ fn for_each_hot_tile_cell(
             }
         }
     }
+}
+
+/// Walk cells whose temperature tile is ≥ `min_c`.
+fn for_each_hot_tile_cell(
+    world: &World,
+    temp: &Temperature,
+    coord: ChunkCoord,
+    min_c: f32,
+    visit: impl FnMut(i32, i32, f32, crate::cell::Cell),
+) {
+    for_each_tile_cell_where(world, temp, coord, |t| t >= min_c, visit);
 }
 
 fn boil_hot_air(
@@ -1616,6 +1642,67 @@ fn hydrothermal_solute_pulse(world: &mut World, gx: i32, gy: i32, drive: u8) {
     add_dissolved(world, gx, gy, add.min(96 - cur));
 }
 
+/// Keep the same top-N the old collect-all + stable-sort would apply.
+///
+/// Pore boil walks every hot wet cell but only applies `max_work` (~16)
+/// jobs. Ranking is amount desc, then collect order — so a min-heap that
+/// rejects `amt <= cutoff` (keeping earlier ties) matches the old
+/// `sort_by` + take-N set and apply order.
+struct SteamAmtTopK {
+    items: Vec<(u8, u32, i32, i32)>,
+    cap: usize,
+    next_idx: u32,
+    cutoff: u8,
+}
+
+impl SteamAmtTopK {
+    fn new(cap: usize) -> Self {
+        Self {
+            items: Vec::with_capacity(cap.max(1)),
+            cap: cap.max(1),
+            next_idx: 0,
+            cutoff: 0,
+        }
+    }
+
+    fn push(&mut self, gx: i32, gy: i32, amt: u8) {
+        if amt == 0 {
+            return;
+        }
+        self.next_idx = self.next_idx.saturating_add(1);
+        let idx = self.next_idx;
+        if self.items.len() < self.cap {
+            self.items.push((amt, idx, gx, gy));
+            if self.items.len() == self.cap {
+                self.cutoff = self.items.iter().map(|i| i.0).min().unwrap_or(0);
+            }
+            return;
+        }
+        if amt <= self.cutoff {
+            return;
+        }
+        let worst = self
+            .items
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+            .map(|(i, _)| i);
+        if let Some(i) = worst {
+            self.items[i] = (amt, idx, gx, gy);
+            self.cutoff = self.items.iter().map(|it| it.0).min().unwrap_or(0);
+        }
+    }
+
+    fn into_sorted_jobs(mut self) -> Vec<(i32, i32, u8)> {
+        self.items
+            .sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        self.items
+            .into_iter()
+            .map(|(amt, _, gx, gy)| (gx, gy, amt))
+            .collect()
+    }
+}
+
 fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, max_cells: usize) {
     let boil = cfg.boil_point_c;
     let expand = cfg.phase_expansion_drive.max(1);
@@ -1625,7 +1712,8 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
         .max(1)
         .saturating_add(expand / 32)
         .min(32);
-    let mut jobs: Vec<(i32, i32, u8)> = Vec::new();
+    let max_work = cfg.max_escapes_per_tick.saturating_mul(3).max(16);
+    let mut top = SteamAmtTopK::new(max_work as usize);
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -1645,14 +1733,11 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
                 .round()
                 .clamp(1.0, 255.0) as u8;
             let amt = cell.sat.0.min(cap);
-            if amt > 0 {
-                jobs.push((gx, gy, amt));
-            }
+            top.push(gx, gy, amt);
         });
     }
-    jobs.sort_by(|a, b| b.2.cmp(&a.2));
+    let jobs = top.into_sorted_jobs();
     let mut work = 0u8;
-    let max_work = cfg.max_escapes_per_tick.saturating_mul(3).max(16);
     for (gx, gy, amt) in jobs {
         if work >= max_work {
             break;
@@ -3958,6 +4043,22 @@ mod tests {
             "hot confined water in a cold chunk must still boil"
         );
         assert_eq!(sat_totals(&w).cell_total, before, "tile-skip boil is mass-flat");
+    }
+
+    #[test]
+    fn steam_amt_topk_keeps_highest_then_earliest_ties() {
+        let mut top = SteamAmtTopK::new(3);
+        top.push(0, 0, 10);
+        top.push(1, 0, 40);
+        top.push(2, 0, 10);
+        top.push(3, 0, 30);
+        top.push(4, 0, 40);
+        top.push(5, 0, 20);
+        assert_eq!(
+            top.into_sorted_jobs(),
+            vec![(1, 0, 40), (4, 0, 40), (3, 0, 30)],
+            "top-K must match collect-all + stable amount sort"
+        );
     }
 
     #[test]
