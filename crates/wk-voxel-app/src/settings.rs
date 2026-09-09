@@ -1150,14 +1150,14 @@ impl SimSettings {
                         ui,
                         hash!(),
                         "Phase expansion drive (force)",
-                        1.0..64.0,
+                        1.0..192.0,
                         &mut phase_drive,
                     );
                     labeled_slider(
                         ui,
                         hash!(),
                         "Reverse seep hops",
-                        1.0..16.0,
+                        1.0..24.0,
                         &mut reverse_hops,
                     );
                     labeled_slider(
@@ -1206,8 +1206,8 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Steam period (ticks)", 1.0..30.0, &mut period);
                     self.steam.boil_max_per_cell = boil_max.round().clamp(1.0, 255.0) as u8;
                     self.steam.pore_boil_max_per_cell = pore_max.round().clamp(0.0, 255.0) as u8;
-                    self.steam.phase_expansion_drive = phase_drive.round().clamp(1.0, 64.0) as u8;
-                    self.steam.reverse_seep_hops = reverse_hops.round().clamp(1.0, 16.0) as u8;
+                    self.steam.phase_expansion_drive = phase_drive.round().clamp(1.0, 192.0) as u8;
+                    self.steam.reverse_seep_hops = reverse_hops.round().clamp(1.0, 24.0) as u8;
                     self.steam.rise_max_per_cell = rise_max.round().clamp(0.0, 255.0) as u8;
                     self.steam.surface_residual = residual.round().clamp(0.0, 255.0) as u8;
                     self.steam.max_escapes_per_tick = escapes.round().clamp(1.0, 64.0) as u8;
