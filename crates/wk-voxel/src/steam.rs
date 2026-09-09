@@ -1469,14 +1469,61 @@ fn chunk_overlaps_hot(temp: &Temperature, coord: ChunkCoord, min_c: f32) -> bool
     false
 }
 
+/// Walk cells whose temperature tile is ≥ `min_c`.
+///
+/// `Temperature::at_cell` is tile-constant, so a 64×64 wet geothermal
+/// chunk still paid 4096 hashmap reads after [`chunk_overlaps_hot`]
+/// let it in. Cold tiles (the usual case above the boil isotherm) are
+/// skipped entirely; hot tiles reuse one `at_tile` for the heat term.
+fn for_each_hot_tile_cell(
+    world: &World,
+    temp: &Temperature,
+    coord: ChunkCoord,
+    min_c: f32,
+    mut visit: impl FnMut(i32, i32, f32, crate::cell::Cell),
+) {
+    let Some(chunk) = world.chunks.get(&coord) else {
+        return;
+    };
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
+    let tc = temp.tile_cols.max(1);
+    let x0 = coord.cx * cw;
+    let y0 = coord.cy * ch;
+    let hx0 = x0.div_euclid(tc);
+    let hy0 = y0.div_euclid(tc);
+    let hx1 = (x0 + cw - 1).div_euclid(tc);
+    let hy1 = (y0 + ch - 1).div_euclid(tc);
+    for hy in hy0..=hy1 {
+        for hx in hx0..=hx1 {
+            let t_c = temp.at_tile(hx, hy);
+            if t_c < min_c {
+                continue;
+            }
+            let tx0 = hx * tc;
+            let ty0 = hy * tc;
+            let lx0 = (tx0 - x0).max(0) as u32;
+            let ly0 = (ty0 - y0).max(0) as u32;
+            let lx1 = (tx0 + tc - x0).min(cw) as u32;
+            let ly1 = (ty0 + tc - y0).min(ch) as u32;
+            for ly in ly0..ly1 {
+                for lx in lx0..lx1 {
+                    let cell = chunk.get(lx as usize, ly as usize);
+                    let gx = world.wrap_x(x0 + lx as i32);
+                    let gy = y0 + ly as i32;
+                    visit(gx, gy, t_c, cell);
+                }
+            }
+        }
+    }
+}
+
 fn boil_hot_air(
     world: &mut World,
     temp: &mut Temperature,
     cfg: &SteamConfig,
     max_cells: usize,
 ) {
-    let cw = CHUNK_CELLS_W as i32;
-    let ch = CHUNK_CELLS_H as i32;
     let boil = cfg.boil_point_c;
     let prefer_confined = world.steam.len() + 32 >= max_cells;
     let mut jobs: Vec<(i32, i32, u8)> = Vec::new();
@@ -1489,46 +1536,28 @@ fn boil_hot_air(
         .map(|(k, _)| *k)
         .collect();
     for coord in coords {
-        let Some(chunk) = world.chunks.get(&coord) else {
-            continue;
-        };
-        let base_gx = coord.cx * cw;
-        let base_gy = coord.cy * ch;
-        for ly in 0..CHUNK_CELLS_H {
-            for lx in 0..CHUNK_CELLS_W {
-                let cell = chunk.get(lx, ly);
-                if cell.material != MaterialId::Air || cell.sat.0 == 0 {
-                    continue;
-                }
-                let gx = world.wrap_x(base_gx + lx as i32);
-                let gy = base_gy + ly as i32;
-                let t_c = temp.at_cell(gx, gy);
-                if t_c < boil {
-                    continue;
-                }
-                let confined = void_is_confined(world, gx, gy);
-                // Open seats belong to accelerated evap → sky Humidity.
-                // Steam is sealed-flash only. Near cap, prefer confined seats.
-                if !confined {
-                    continue;
-                }
-                let _ = prefer_confined; // reserved if we later prioritize seats
-                let heat = ((t_c - boil) / 50.0).clamp(0.0, 2.0);
-                let cap = ((cfg.boil_max_per_cell as f32) * (1.0 + heat))
-                    .round()
-                    .clamp(1.0, 255.0) as u8;
-                let boil_amt = cell.sat.0.min(cap);
-                if boil_amt > 0 {
-                    jobs.push((gx, gy, boil_amt));
-                }
+        for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
+            if cell.material != MaterialId::Air || cell.sat.0 == 0 {
+                return;
             }
-        }
+            // Open seats belong to accelerated evap → sky Humidity.
+            // Steam is sealed-flash only. Near cap, prefer confined seats.
+            if !void_is_confined(world, gx, gy) {
+                return;
+            }
+            let _ = prefer_confined; // reserved if we later prioritize seats
+            let heat = ((t_c - boil) / 50.0).clamp(0.0, 2.0);
+            let cap = ((cfg.boil_max_per_cell as f32) * (1.0 + heat))
+                .round()
+                .clamp(1.0, 255.0) as u8;
+            let boil_amt = cell.sat.0.min(cap);
+            if boil_amt > 0 {
+                jobs.push((gx, gy, boil_amt));
+            }
+        });
     }
-    jobs.sort_by(|a, b| {
-        let ca = void_is_confined(world, a.0, a.1);
-        let cb = void_is_confined(world, b.0, b.1);
-        cb.cmp(&ca).then(b.2.cmp(&a.2))
-    });
+    // Collect already dropped open seats; rank remaining by flash size.
+    jobs.sort_by(|a, b| b.2.cmp(&a.2));
     for (gx, gy, amt) in jobs {
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
@@ -1588,8 +1617,6 @@ fn hydrothermal_solute_pulse(world: &mut World, gx: i32, gy: i32, drive: u8) {
 }
 
 fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, max_cells: usize) {
-    let cw = CHUNK_CELLS_W as i32;
-    let ch = CHUNK_CELLS_H as i32;
     let boil = cfg.boil_point_c;
     let expand = cfg.phase_expansion_drive.max(1);
     // Stronger expansion buys more reach: +1 hop per 32 drive units.
@@ -1606,36 +1633,22 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
         .map(|(k, _)| *k)
         .collect();
     for coord in coords {
-        let Some(chunk) = world.chunks.get(&coord) else {
-            continue;
-        };
-        let base_gx = coord.cx * cw;
-        let base_gy = coord.cy * ch;
-        for ly in 0..CHUNK_CELLS_H {
-            for lx in 0..CHUNK_CELLS_W {
-                let cell = chunk.get(lx, ly);
-                if cell.material == MaterialId::Air || cell.sat.0 == 0 {
-                    continue;
-                }
-                if permeability_cell(cell, &world.hydro) == 0 {
-                    continue;
-                }
-                let gx = world.wrap_x(base_gx + lx as i32);
-                let gy = base_gy + ly as i32;
-                let t_c = temp.at_cell(gx, gy);
-                if t_c < boil {
-                    continue;
-                }
-                let heat = ((t_c - boil) / 50.0).clamp(0.0, 2.0);
-                let cap = ((cfg.pore_boil_max_per_cell as f32) * (1.0 + heat))
-                    .round()
-                    .clamp(1.0, 255.0) as u8;
-                let amt = cell.sat.0.min(cap);
-                if amt > 0 {
-                    jobs.push((gx, gy, amt));
-                }
+        for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
+            if cell.material == MaterialId::Air || cell.sat.0 == 0 {
+                return;
             }
-        }
+            if permeability_cell(cell, &world.hydro) == 0 {
+                return;
+            }
+            let heat = ((t_c - boil) / 50.0).clamp(0.0, 2.0);
+            let cap = ((cfg.pore_boil_max_per_cell as f32) * (1.0 + heat))
+                .round()
+                .clamp(1.0, 255.0) as u8;
+            let amt = cell.sat.0.min(cap);
+            if amt > 0 {
+                jobs.push((gx, gy, amt));
+            }
+        });
     }
     jobs.sort_by(|a, b| b.2.cmp(&a.2));
     let mut work = 0u8;
@@ -3914,6 +3927,70 @@ mod tests {
             1.0,
             "far confined wells must not pay boiler pressure"
         );
+    }
+
+    #[test]
+    fn boil_hot_air_finds_hot_tile_in_mostly_cold_chunk() {
+        // 64×64 chunks are mostly cold above the isotherm; the boil
+        // walk must still flash a single hot confined pocket.
+        let mut w = World::new(131);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 40..48 {
+            for y in 40..48 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 41..47 {
+            for y in 41..46 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w.set_cell(44, 41, Cell::water());
+        assert!(void_is_confined(&w, 44, 41));
+        let mut temp = temp_fill(&w, 12.0);
+        let (hx, hy) = temp.tile_of(44, 41);
+        temp.set_tile_c(hx, hy, 118.0);
+        let before = sat_totals(&w).cell_total;
+        w.tick = STEAM_EVERY;
+        apply_steam(&mut w, &mut temp, &SteamConfig::default());
+        assert!(
+            steam_total(&w) > 0,
+            "hot confined water in a cold chunk must still boil"
+        );
+        assert_eq!(sat_totals(&w).cell_total, before, "tile-skip boil is mass-flat");
+    }
+
+    #[test]
+    fn boil_hot_pores_finds_hot_tile_in_mostly_cold_chunk() {
+        let mut w = World::new(132);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 8..16 {
+            for y in 48..56 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 9..15 {
+            for y in 49..54 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(crate::cell::water_capacity(MaterialId::Sand));
+        w.set_cell(12, 49, sand);
+        let mut temp = temp_fill(&w, 12.0);
+        let (hx, hy) = temp.tile_of(12, 49);
+        temp.set_tile_c(hx, hy, 140.0);
+        let before = sat_totals(&w).cell_total;
+        w.tick = STEAM_EVERY;
+        apply_steam(&mut w, &mut temp, &SteamConfig::default());
+        assert!(
+            steam_total(&w) > 0,
+            "hot wet pores in a cold chunk must still flash"
+        );
+        assert!(
+            w.get_cell(12, 49).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand)
+        );
+        assert_eq!(sat_totals(&w).cell_total, before, "tile-skip pore boil is mass-flat");
     }
 
 }
