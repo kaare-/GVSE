@@ -19,6 +19,8 @@
 //! **Look:** [`cave_humidity_haze_wash`] builds the same 4×4 soft white vapour
 //! grain as sky Humidity / steam haze — painted under the `H` overlay.
 
+use std::cell::RefCell;
+
 use crate::cell::{water_capacity_cell, Cell, Sat};
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
@@ -114,6 +116,18 @@ pub struct CaveHumidityHazeSample {
 /// Same 4×4 tile grain as sky Humidity and steam haze.
 pub const CAVE_HUMIDITY_HAZE_TILE: i32 = 4;
 
+struct CaveHazeMemo {
+    world_id: u64,
+    tick: u64,
+    topo: u64,
+    fp: (u64, u64, u64),
+    samples: Vec<CaveHumidityHazeSample>,
+}
+
+thread_local! {
+    static CAVE_HAZE_MEMO: RefCell<Option<CaveHazeMemo>> = const { RefCell::new(None) };
+}
+
 
 /// Free-water / standing pool — vapour wash must stop at the surface.
 #[inline]
@@ -142,6 +156,23 @@ fn is_cave_humidity_void(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
 pub fn cave_humidity_haze_wash(world: &World) -> Vec<CaveHumidityHazeSample> {
     if world.cave_humidity.is_empty() {
         return Vec::new();
+    }
+    let fp = crate::steam::sparse_amt_fp(&world.cave_humidity);
+    if let Some(hit) = CAVE_HAZE_MEMO.with(|slot| {
+        let m = slot.borrow();
+        m.as_ref().and_then(|m| {
+            if m.world_id == world.chunk_cache_id.get()
+                && m.tick == world.tick
+                && m.topo == world.sky_topo_gen
+                && m.fp == fp
+            {
+                Some(m.samples.clone())
+            } else {
+                None
+            }
+        })
+    }) {
+        return hit;
     }
     let tc = CAVE_HUMIDITY_HAZE_TILE.max(1);
     let mut tile_mass: FxHashMap<(i32, i32), f32> = FxHashMap::default();
@@ -262,6 +293,15 @@ pub fn cave_humidity_haze_wash(world: &World) -> Vec<CaveHumidityHazeSample> {
             }
         }
     }
+    CAVE_HAZE_MEMO.with(|slot| {
+        *slot.borrow_mut() = Some(CaveHazeMemo {
+            world_id: world.chunk_cache_id.get(),
+            tick: world.tick,
+            topo: world.sky_topo_gen,
+            fp,
+            samples: out.clone(),
+        });
+    });
     out
 }
 

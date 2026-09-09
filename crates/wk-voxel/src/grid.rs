@@ -43,6 +43,13 @@ impl Clone for ChunkCacheId {
     }
 }
 
+impl ChunkCacheId {
+    #[inline]
+    pub(crate) fn get(&self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LastChunk {
     id: u64,
@@ -231,6 +238,11 @@ pub struct World {
     /// Invalidates the thread-local last-chunk pointer after clone / insert.
     #[serde(skip, default)]
     pub(crate) chunk_cache_id: ChunkCacheId,
+    /// Bumps when Air ↔ solid connectivity may change. Thread-local sky
+    /// probes / haze memos key off this so a paused `[sim skip]` frame
+    /// does not re-BFS every steam / cave-humidity cell.
+    #[serde(skip, default)]
+    pub(crate) sky_topo_gen: u64,
     /// True after a buoyant occupancy pass has run this session.
     ///
     /// Legacy saves predate [`Chunk::has_buoyant`]; the first collect
@@ -277,6 +289,7 @@ impl World {
             competent_moved_cells: Vec::new(),
             competent_level_vacated: FxHashMap::default(),
             chunk_cache_id: ChunkCacheId::default(),
+            sky_topo_gen: 0,
             buoyant_flags_ready: false,
             water_head: crate::water_head::WaterHead::default(),
             confined: crate::confined::ConfinedStore::default(),
@@ -425,13 +438,10 @@ impl World {
             // SAFETY: exclusive `&mut self`; cached pointer matches this
             // world's current table generation.
             let chunk = unsafe { &mut *(ptr as *mut Chunk) };
-            let prev = if track_sleep {
-                Some(chunk.get(lx, ly))
-            } else {
-                None
-            };
+            let prev = chunk.get(lx, ly);
             chunk.set(lx, ly, cell);
-            if let Some(prev) = prev {
+            self.note_sky_topo(prev.material, cell.material);
+            if track_sleep {
                 self.maybe_wake_competent_for_solidity(gx, gy, prev.material, cell.material);
             }
             return;
@@ -439,16 +449,26 @@ impl World {
         if !self.chunks.contains_key(&coord) {
             self.invalidate_chunk_cache();
         }
-        let prev = if track_sleep {
-            self.chunks.get(&coord).map(|c| c.get(lx, ly))
-        } else {
-            None
-        };
+        let prev = self.chunks.get(&coord).map(|c| c.get(lx, ly));
         let chunk = self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord));
         chunk.set(lx, ly, cell);
         Self::remember_chunk_ptr(self.chunk_cache_id.0, coord, chunk);
         if let Some(prev) = prev {
-            self.maybe_wake_competent_for_solidity(gx, gy, prev.material, cell.material);
+            self.note_sky_topo(prev.material, cell.material);
+            if track_sleep {
+                self.maybe_wake_competent_for_solidity(gx, gy, prev.material, cell.material);
+            }
+        } else {
+            self.note_sky_topo(wk_material::MaterialId::Air, cell.material);
+        }
+    }
+
+    #[inline]
+    fn note_sky_topo(&mut self, prev: wk_material::MaterialId, next: wk_material::MaterialId) {
+        if prev != next
+            && (prev == wk_material::MaterialId::Air || next == wk_material::MaterialId::Air)
+        {
+            self.sky_topo_gen = self.sky_topo_gen.wrapping_add(1);
         }
     }
 
