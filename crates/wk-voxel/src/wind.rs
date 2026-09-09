@@ -102,6 +102,7 @@ struct ColOroTable {
 }
 
 impl ColOroTable {
+    #[allow(dead_code)]
     fn empty() -> Self {
         Self {
             hx0: 0,
@@ -1355,6 +1356,7 @@ impl Wind {
         (vx.clamp(-1.0, 1.0), vy.clamp(-1.0, 1.0))
     }
 
+    #[allow(dead_code)] // soft oro path unused; hard path is live
     fn orographic_soft(
         &self,
         world: Option<&World>,

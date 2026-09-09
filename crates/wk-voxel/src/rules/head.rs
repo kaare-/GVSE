@@ -61,6 +61,7 @@ pub(crate) fn sat_move_to_equalize_heads(
 
 /// Max sat transferred through a porous solid per seepage step,
 /// scaled by [`wk_material::MaterialProps::permeability`].
+#[allow(dead_code)] // material-level / test helper; live path uses *_cell
 pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) -> i32 {
     let p = MaterialRegistry::props_with(material, hydro).permeability;
     if p == 0 {
@@ -135,6 +136,7 @@ pub(crate) fn seepage_fire_odds_cell(cell: Cell, hydro: &HydroOverrides) -> f32 
 /// Full cells take nothing more (`free == 0`).
 ///
 /// Peer solid↔solid flow uses [`seepage_conduct_rate_with`] instead.
+#[allow(dead_code)] // material-level / test helper; live path uses *_cell
 pub(crate) fn seepage_uptake_rate_with(
     material: MaterialId,
     hydro: &HydroOverrides,
@@ -179,6 +181,7 @@ pub(crate) fn seepage_uptake_rate_cell(cell: Cell, hydro: &HydroOverrides, cap: 
 /// crawl, while a saturated pair runs at the slower material's full
 /// [`seepage_rate_with`]. Same dry-kick curve as surface uptake so dry
 /// sand does not flash-equalise an aquifer next to wet sand.
+#[allow(dead_code)] // material-level / test helper; live path uses *_cell
 pub(crate) fn seepage_conduct_rate_with(
     mat_a: MaterialId,
     hydro: &HydroOverrides,
@@ -227,6 +230,7 @@ pub(crate) fn seepage_conduct_rate_cells(
     ((base * num) / den).max(1).min(base)
 }
 
+#[allow(dead_code)] // material-level / test helper; live path uses *_cell
 pub(crate) fn is_porous_solid_with(material: MaterialId, hydro: &HydroOverrides) -> bool {
     material != MaterialId::Air && water_capacity_with(material, hydro) > 0
 }
@@ -241,6 +245,7 @@ pub(crate) const SAME_Y_SURFACE_SCAN: i32 = 12;
 
 /// True when the cell below can support a standing free surface
 /// (solid ground or a full water column).
+#[allow(dead_code)] // material-level / test helper; live path uses *_cell
 pub(crate) fn is_surface_support(world: &World, gx: i32, gy: i32) -> bool {
     match world.get_cell(gx, gy - 1) {
         Some(b) if b.material != MaterialId::Air => true,
@@ -336,6 +341,7 @@ pub(crate) fn plan_same_y_pairwise_edge_in(
 /// Pull only the head excess over the neighbour (half the delta) —
 /// dumping *all* remaining sat fought pairwise equalize and piled
 /// 1–2 cell shore spikes forever on otherwise flat lakes.
+#[allow(dead_code)] // material-level / test helper; live path uses *_cell
 pub(crate) fn same_y_cascade_pull(
     world: &World,
     gx: i32,

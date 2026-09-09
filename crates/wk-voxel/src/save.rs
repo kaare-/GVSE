@@ -354,6 +354,7 @@ impl WorldV11 {
 /// Pre-v12 postcard (no mycelium_strain_lineage).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV11 {
+    #[allow(dead_code)]
     schema_version: u32,
     params: WorldgenParams,
     world: WorldV11,
@@ -458,6 +459,7 @@ impl WorldV10 {
 /// Pre-v11 postcard (supply-only sym_net_flow).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV10 {
+    #[allow(dead_code)]
     schema_version: u32,
     params: WorldgenParams,
     world: WorldV10,
@@ -530,6 +532,7 @@ impl WorldV9 {
 /// Pre-v10 postcard (no sym_net_flow).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV9 {
+    #[allow(dead_code)]
     schema_version: u32,
     params: WorldgenParams,
     world: WorldV9,
@@ -545,6 +548,7 @@ struct SimSnapshotV9 {
 /// Pre-v9 postcard (no mycelium_energy).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV8 {
+    #[allow(dead_code)]
     schema_version: u32,
     params: WorldgenParams,
     world: WorldV8,
@@ -560,6 +564,7 @@ struct SimSnapshotV8 {
 /// Pre-v8 postcard (single strain id per cell).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV7 {
+    #[allow(dead_code)]
     schema_version: u32,
     params: WorldgenParams,
     world: WorldV7,
@@ -575,6 +580,7 @@ struct SimSnapshotV7 {
 /// Pre-v7 postcard shape (lineage, no strains).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV6 {
+    #[allow(dead_code)]
     schema_version: u32,
     params: WorldgenParams,
     world: WorldV6,
@@ -590,6 +596,7 @@ struct SimSnapshotV6 {
 /// Pre-v6 postcard shape (carbon, no mycelium_lineage).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV5 {
+    #[allow(dead_code)]
     schema_version: u32,
     params: WorldgenParams,
     world: WorldV5,
@@ -605,6 +612,7 @@ struct SimSnapshotV5 {
 /// Pre-v5 postcard shape (no carbon field).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV4 {
+    #[allow(dead_code)]
     schema_version: u32,
     params: WorldgenParams,
     world: WorldV5,
@@ -951,7 +959,8 @@ mod tests {
         }
         #[derive(Serialize)]
         struct V4Out {
-            schema_version: u32,
+            #[allow(dead_code)]
+    schema_version: u32,
             params: WorldgenParams,
             world: WorldOut,
             humidity: Humidity,
@@ -1009,7 +1018,8 @@ mod tests {
         }
         #[derive(Serialize)]
         struct V5Out {
-            schema_version: u32,
+            #[allow(dead_code)]
+    schema_version: u32,
             params: WorldgenParams,
             world: WorldOut,
             humidity: Humidity,

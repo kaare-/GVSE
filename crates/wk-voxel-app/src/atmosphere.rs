@@ -249,6 +249,7 @@ fn haze_cell_is_drop_cell(c: wk_voxel::Cell) -> bool {
     c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX
 }
 
+#[allow(dead_code)] // thin wrapper; paint path uses haze_cell_is_drop_cell
 fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
     match world.get_cell(gx, gy) {
         Some(c) => haze_cell_is_drop_cell(c),
@@ -257,6 +258,7 @@ fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Highest drop in each column. Haze below that cell is the open path.
+#[allow(dead_code)] // full-world helper; viewport uses collect_drop_tops_where
 fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
     collect_drop_tops_where(world, |_, _| true)
 }
@@ -606,6 +608,7 @@ fn haze_column_y0(y0: i32, y1: i32, drop_y: Option<i32>) -> Option<i32> {
 /// the three sibling columns. Skipping it is the 4-wide hole. Neighbour
 /// keys go through [`Humidity::wrap_tile_x`] — raw `hx-1` was the ring
 /// seam.
+#[allow(dead_code)] // full-field helper; viewport uses haze_paint_seats_where
 fn haze_paint_seats(humidity: &Humidity) -> Vec<(i32, i32)> {
     haze_paint_seats_where(humidity, |_, _| true)
 }
@@ -684,6 +687,7 @@ fn haze_resampled_cells(
 }
 
 /// Soft white vapor haze alpha (legacy helper for tests / diagnostics).
+#[allow(dead_code)] // legacy diagnostic helper
 pub fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     humidity_haze_alpha_cell(mass, max_mass, 0.12)
 }

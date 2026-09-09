@@ -483,7 +483,6 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
 pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
     use std::collections::HashMap;
     let ch = CHUNK_CELLS_H as i32;
-    let cw = CHUNK_CELLS_W as i32;
     let depth_lo = SEAM_SEEPAGE_DEPTH_LO.min(ch);
     let depth_hi = SEAM_SEEPAGE_DEPTH_HI.min(ch);
     let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
