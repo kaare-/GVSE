@@ -157,6 +157,7 @@ pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
     // pack still uses the rate-limited thaw below.
     if cfg.enable_thaw {
         thaw_airborne_snow(world, temp, cfg);
+        thaw_scalding_frozen(world, temp, cfg);
     }
     let period = cfg.period_ticks.max(1);
     if world.tick % period != 0 {
@@ -1048,6 +1049,42 @@ fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig
     }
 }
 
+/// Melt landed Ice/Snow that is already obviously warm (every tick).
+///
+/// Period-gated [`thaw_column`] plus steam-after-phase left 130 °C ice
+/// on lake vents and snow sitting in 12 °C water between cadence ticks.
+fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
+    let Some((y0, y1)) = y_bounds(world) else {
+        return;
+    };
+    let hot = cfg.freeze_point_c + 40.0;
+    for gx in column_xs(world) {
+        for y in (y0..=y1).rev() {
+            let Some(cell) = world.get_cell(gx, y) else {
+                continue;
+            };
+            if !is_frozen_solid(cell.material) {
+                continue;
+            }
+            let top_of_stack = match world.get_cell(gx, y + 1) {
+                None => true,
+                Some(above) if !is_frozen_solid(above.material) => true,
+                _ => false,
+            };
+            if !top_of_stack {
+                continue;
+            }
+            // Only the absurd case (vent ice at 100 °C+). Mild warm pack
+            // still uses period-gated [`thaw_column`] so hillside snaps
+            // stay rate-limited.
+            if temp.at_cell(gx, y) > hot {
+                world.set_cell(gx, y, Cell::water());
+            }
+            break;
+        }
+    }
+}
+
 /// Air above or free water above/below the pack is warmer than freeze.
 fn frozen_contact_is_warm(
     world: &World,
@@ -1064,15 +1101,26 @@ fn frozen_contact_is_warm(
             return true;
         }
     }
-    if let Some(below) = world.get_cell(gx, gy - 1) {
-        if below.material == MaterialId::Air && is_standing_water(world, gx, gy - 1)
-            && temp.at_cell(gx, gy - 1) > freeze
+    // Walk a thin lid so snow-on-ice-on-warm-lake still sees the water.
+    let mut y = gy - 1;
+    for _ in 0..2 {
+        let Some(below) = world.get_cell(gx, y) else {
+            break;
+        };
+        if is_frozen_solid(below.material) {
+            y -= 1;
+            continue;
+        }
+        if below.material == MaterialId::Air
+            && is_standing_water(world, gx, y)
+            && temp.at_cell(gx, y) > freeze
         {
             return true;
         }
-        if below.material == MaterialId::Water && temp.at_cell(gx, gy - 1) > freeze {
+        if below.material == MaterialId::Water && temp.at_cell(gx, y) > freeze {
             return true;
         }
+        break;
     }
     false
 }
@@ -2215,5 +2263,55 @@ mod tests {
                 "settled flake Y must be steady across phase periods (tail={tail:?})"
             );
         }
+    }
+
+    #[test]
+    fn scalding_ice_thaws_every_tick() {
+        let mut w = World::new(61);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::water());
+        w.set_cell(3, 2, Cell::solid(MaterialId::Ice));
+        let mut temp = cold_temp(16, 16, 130.0);
+        temp.cells.insert((0, 0), 130.0);
+        let cfg = PhaseConfig {
+            period_ticks: 64, // would skip thaw_column this tick
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        assert_ne!(
+            w.get_cell(3, 2).map(|c| c.material),
+            Some(MaterialId::Ice),
+            "130 °C ice must melt without waiting for the phase period"
+        );
+    }
+
+    #[test]
+    fn snow_on_ice_melts_when_lake_below_is_warm() {
+        let mut w = World::new(62);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::water());
+        w.set_cell(3, 2, Cell::solid(MaterialId::Ice));
+        w.set_cell(3, 3, Cell::solid(MaterialId::Snow));
+        let mut temp = cold_temp(16, 16, 12.0);
+        let tc = temp.tile_cols.max(1);
+        temp.cells.insert((0, 3i32.div_euclid(tc)), -2.0);
+        temp.cells.insert((0, 2i32.div_euclid(tc)), -2.0);
+        temp.cells.insert((0, 1i32.div_euclid(tc)), 12.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..6 {
+            w.tick = tick;
+            apply_phase(&mut w, &temp, &cfg);
+        }
+        assert_ne!(
+            w.get_cell(3, 3).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "snow on ice over 12 °C water must melt"
+        );
     }
 }

@@ -1217,7 +1217,9 @@ impl Temperature {
         let watery: Vec<(i32, i32)> = self
             .props_cache
             .iter()
-            .filter(|(_, p)| matches!(p.layer, TileLayer::Surface { watery: true }))
+            .filter(|(_, p)| {
+                matches!(p.layer, TileLayer::Surface { watery: true }) || p.free_water >= 0.5
+            })
             .map(|(&k, _)| k)
             .collect();
         if watery.is_empty() {
@@ -1231,6 +1233,9 @@ impl Temperature {
             let Some(rock_props) = self.props_cache.get(&(hx, rock_hy)).copied() else {
                 continue;
             };
+            if rock_props.free_water >= 0.5 {
+                continue;
+            }
             match rock_props.layer {
                 TileLayer::Buried { .. } | TileLayer::Surface { watery: false } => {}
                 _ => continue,
