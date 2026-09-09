@@ -2146,10 +2146,19 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], mut moves: Vec<(i
     }
     if displaced_water > 0 {
       let leftover = deposit_free_water(world, displaced_water, &vacated, &target_set);
-      debug_assert_eq!(
-        leftover, 0,
-        "competent roll could not redeposit {leftover}/{displaced_water} water; vacated={vacated:?}"
-      );
+      if leftover > 0 {
+        // Release builds used to drop this under `debug_assert` only.
+        let seed = vacated
+          .first()
+          .copied()
+          .or_else(|| sources.first().copied())
+          .unwrap_or((0, 0));
+        let still = crate::displace::park_orphan_water(world, seed.0, seed.1, leftover);
+        debug_assert_eq!(
+          still, 0,
+          "competent roll could not redeposit {still}/{displaced_water} water; vacated={vacated:?}"
+        );
+      }
     }
   }
   #[cfg(debug_assertions)]

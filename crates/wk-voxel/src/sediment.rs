@@ -243,29 +243,12 @@ fn sink_toward_bed(world: &mut World, gx: i32, gy: i32, amount: u16) -> u16 {
     0
 }
 
-/// Push displaced water up the Air column so a deposit never destroys it.
-fn push_water_up(world: &mut World, gx: i32, gy: i32, mut spill: u8) {
-    let mut y = gy;
-    for _ in 0..16 {
-        if spill == 0 {
-            return;
-        }
-        let Some(cell) = world.get_cell(gx, y) else {
-            return;
-        };
-        if cell.material != MaterialId::Air {
-            return;
-        }
-        let room = 255u8.saturating_sub(cell.sat.0);
-        let put = room.min(spill);
-        if put > 0 {
-            let mut next = cell;
-            next.sat = Sat(cell.sat.0 + put);
-            world.set_cell(gx, y, next);
-            spill -= put;
-        }
-        y += 1;
-    }
+/// Push displaced water up so a deposit never destroys it.
+///
+/// Vertical Air first, then lateral / porous room, then cave humidity — same
+/// contract as mineral sinter spill.
+fn push_water_up(world: &mut World, gx: i32, gy: i32, spill: u8) {
+    let _ = crate::displace::park_orphan_water(world, gx, gy, spill as u32);
 }
 
 /// Entrain fines where water moves, settle them where it slows.

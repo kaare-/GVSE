@@ -2108,10 +2108,26 @@ impl OrganismStore {
         self.step_corpses(world, tick, wind_vx);
 
         // Return drunk pore sat to atmospheric humidity (mass conservation).
-        if let Some(hum) = humidity {
-            for (gx, gy, sat) in transpired {
-                if sat > 0 {
-                    hum.add(gx, gy, sat as f32);
+        // Cap / OOB tiles may refuse vapour — park any remainder back into
+        // the world so plant drink never deletes water.
+        match humidity {
+            Some(hum) => {
+                for (gx, gy, sat) in transpired {
+                    if sat == 0 {
+                        continue;
+                    }
+                    let accepted = hum.try_add(gx, gy, sat as f32);
+                    let rejected = (sat as f32 - accepted).round().max(0.0) as u32;
+                    if rejected > 0 {
+                        let _ = crate::displace::park_orphan_water(world, gx, gy, rejected);
+                    }
+                }
+            }
+            None => {
+                for (gx, gy, sat) in transpired {
+                    if sat > 0 {
+                        let _ = crate::displace::park_orphan_water(world, gx, gy, sat as u32);
+                    }
                 }
             }
         }
