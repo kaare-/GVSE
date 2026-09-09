@@ -240,7 +240,9 @@ pub fn void_is_confined(world: &World, gx: i32, gy: i32) -> bool {
 /// looks for any neighbour that opens to sky (side entrance / skylight offset).
 /// Sealed pockets return false so they stay off the rain lottery.
 pub fn air_void_open_to_sky(world: &World, gx: i32, gy: i32) -> bool {
-    const BFS_BUDGET: usize = 96;
+    // Flank lakes / long flooded side channels need more than a tiny BFS —
+    // 96 steps missed many surface-connected vents the player can carve.
+    const BFS_BUDGET: usize = 192;
     let gx = world.wrap_x(gx);
     let Some(cell) = world.get_cell(gx, gy) else {
         return true;
@@ -452,6 +454,83 @@ fn spill_steam_across(
     amount
 }
 
+/// Recondense a slice of pocket vapour into surface-connected vent cells.
+///
+/// When flood equalize finds the pocket touches free sky (including via a
+/// flooded side channel), convert some steam → liquid on the open seats so
+/// pressure bleeds toward the vent. Liquid in the vent lake — never a dump
+/// into sky Humidity.
+fn bleed_steam_into_open_vent(world: &mut World, seats: &[(i32, i32)]) {
+    let mut open: Vec<(i32, i32)> = seats
+        .iter()
+        .copied()
+        .filter(|&(x, y)| air_void_open_to_sky(world, x, y))
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+    // Prefer higher seats (closer to daylight / the carved outlet).
+    open.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    // Pull from densest confined seats first, park into open vent seats.
+    let mut sources: Vec<(i32, i32, u8)> = seats
+        .iter()
+        .copied()
+        .filter_map(|(x, y)| {
+            let s = steam_at(world, x, y);
+            if s == 0 || air_void_open_to_sky(world, x, y) {
+                None
+            } else {
+                Some((x, y, s))
+            }
+        })
+        .collect();
+    if sources.is_empty() {
+        // Steam already sitting on open seats — recondense in place.
+        sources = open
+            .iter()
+            .copied()
+            .filter_map(|(x, y)| {
+                let s = steam_at(world, x, y);
+                (s > 0).then_some((x, y, s))
+            })
+            .collect();
+    }
+    sources.sort_by(|a, b| b.2.cmp(&a.2));
+
+    let mut budget: u32 = sources
+        .iter()
+        .map(|(_, _, s)| *s as u32)
+        .sum::<u32>()
+        .saturating_div(8)
+        .clamp(1, 48);
+    let mut oi = 0usize;
+    for (sx, sy, _) in sources {
+        if budget == 0 {
+            break;
+        }
+        let have = steam_at(world, sx, sy);
+        if have == 0 {
+            continue;
+        }
+        let take = (have as u32).min(budget).min(24) as u8;
+        let got = take_steam(world, sx, sy, take);
+        if got == 0 {
+            continue;
+        }
+        let (vx, vy) = open[oi % open.len()];
+        oi += 1;
+        let left = crate::displace::park_orphan_water(world, vx, vy, got as u32);
+        if left > 0 {
+            // Could not seat liquid — restore vapour so we stay mass-flat.
+            let _ = add_steam(world, sx, sy, left.min(255) as u8);
+            budget = budget.saturating_sub((got as u32).saturating_sub(left));
+        } else {
+            budget = budget.saturating_sub(got as u32);
+        }
+    }
+}
+
 /// Prefer injecting boiled steam into void Air above / beside the source.
 fn inject_steam_near(
     world: &mut World,
@@ -646,7 +725,13 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                         open_to_sky = true;
                     }
                     Some(n) if n.material == MaterialId::Air => {
-                        if is_steam_void(n) || steam_at(world, nx, ny) > 0 {
+                        // Confined pockets may cross standing-water Air to reach
+                        // a surface-connected flooded vent. Open plumes stay on
+                        // gas voids so they don't crawl through lakes.
+                        if seed_confined
+                            || is_steam_void(n)
+                            || steam_at(world, nx, ny) > 0
+                        {
                             queue.push((nx, ny));
                         }
                     }
@@ -656,6 +741,14 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
         }
         if component.is_empty() {
             continue;
+        }
+
+        // Mid-map hillside / flank vents never hit `get_cell(..+1) == None`
+        // (world top). Detect surface connectivity the same way rain does.
+        if !open_to_sky {
+            open_to_sky = component
+                .iter()
+                .any(|&(x, y)| air_void_open_to_sky(world, x, y));
         }
 
         let mut total: u32 = 0;
@@ -732,7 +825,21 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                     let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, left);
                 }
             }
-            let _ = open_to_sky;
+            // Surface-connected flooded vents: recondense a slice of pocket
+            // vapour into the open path so pressure bleeds toward daylight
+            // (liquid in the vent lake — not a dump into sky Humidity).
+            // Dry leaky chimneys still equalize as a field without this bleed.
+            if open_to_sky
+                && seats.iter().any(|&(x, y)| {
+                    world.get_cell(x, y).is_some_and(|c| {
+                        c.material == MaterialId::Air
+                            && c.sat.0 > STEAM_VOID_SAT_MAX
+                            && air_void_open_to_sky(world, x, y)
+                    })
+                })
+            {
+                bleed_steam_into_open_vent(world, &seats);
+            }
         } else {
             // Open plume: pack into the top of the climbed column.
             voids.retain(|&(x, y)| (x - sx).abs() <= 1 && y >= sy);
@@ -1555,25 +1662,29 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
         return (0, None);
     }
     let want = drive.min(src.sat.0).max(1);
-    let mut best: Option<(i32, i32, i32, Cell)> = None; // score, tx, ty, dst
+    let mut best: Option<(i32, i32, i32, Cell, bool)> = None; // score, tx, ty, dst, overflow_vent
     for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
         let tx = world.wrap_x(gx + dx);
         let ty = gy + dy;
         let Some(dst) = world.get_cell(tx, ty) else {
             continue;
         };
+        let open_sky_air =
+            dst.material == MaterialId::Air && air_void_open_to_sky(world, tx, ty);
         let cap = water_capacity_cell(dst, &world.hydro);
-        if cap == 0 {
+        if cap == 0 && !open_sky_air {
             continue;
         }
         let room = cap.saturating_sub(dst.sat.0);
-        if room == 0 {
+        // Full open-sky lakes still count as vents: reverse-seep overflows
+        // them via park_orphan_water so a flooded surface channel can discharge.
+        if room == 0 && !open_sky_air {
             continue;
         }
         let perm = if dst.material == MaterialId::Air {
             // Only free-sky Air is a preferred vent. Sealed cavity Air would
             // swallow reverse-seep back into the boiler and cancel the climb.
-            if !air_void_open_to_sky(world, tx, ty) {
+            if !open_sky_air {
                 continue;
             }
             255
@@ -1585,9 +1696,11 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
             p
         };
         // Least resistance: high perm + room, mild upward preference.
-        let score = (perm as i32) * 8 + (room as i32) * 2 + dy.max(0) * 40;
-        if best.is_none_or(|(s, _, _, _)| score > s) {
-            best = Some((score, tx, ty, dst));
+        // Overflow vents get a synthetic room bonus so full lakes still win.
+        let room_score = if room > 0 { room as i32 } else { 64 };
+        let score = (perm as i32) * 8 + room_score * 2 + dy.max(0) * 40;
+        if best.is_none_or(|(s, _, _, _, _)| score > s) {
+            best = Some((score, tx, ty, dst, open_sky_air && room == 0));
         }
     }
     // Full-sat deadlock: sinter grains + widen competent neighbours, then rescan.
@@ -1624,16 +1737,18 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
             let Some(dst) = world.get_cell(tx, ty) else {
                 continue;
             };
+            let open_sky_air =
+                dst.material == MaterialId::Air && air_void_open_to_sky(world, tx, ty);
             let cap = water_capacity_cell(dst, &world.hydro);
-            if cap == 0 {
+            if cap == 0 && !open_sky_air {
                 continue;
             }
             let room = cap.saturating_sub(dst.sat.0);
-            if room == 0 {
+            if room == 0 && !open_sky_air {
                 continue;
             }
             let perm = if dst.material == MaterialId::Air {
-                if !air_void_open_to_sky(world, tx, ty) {
+                if !open_sky_air {
                     continue;
                 }
                 255
@@ -1644,49 +1759,78 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
                 }
                 p
             };
-            let score = (perm as i32) * 8 + (room as i32) * 2 + dy.max(0) * 40;
-            if best.is_none_or(|(s, _, _, _)| score > s) {
-                best = Some((score, tx, ty, dst));
+            let room_score = if room > 0 { room as i32 } else { 64 };
+            let score = (perm as i32) * 8 + room_score * 2 + dy.max(0) * 40;
+            if best.is_none_or(|(s, _, _, _, _)| score > s) {
+                best = Some((score, tx, ty, dst, open_sky_air && room == 0));
             }
         }
     }
-    let Some((_, tx, ty, dst)) = best else {
+    let Some((_, tx, ty, dst, overflow_vent)) = best else {
         return (0, None);
     };
     let cap = water_capacity_cell(dst, &world.hydro);
     let room = cap.saturating_sub(dst.sat.0);
-    let moved = want.min(room);
+    let moved = if overflow_vent {
+        // Full open-sky lake: discharge by overflowing through the vent column.
+        want
+    } else {
+        want.min(room)
+    };
     if moved == 0 {
         return (0, None);
     }
     let before = src.sat.0;
     let mut s = world.get_cell(gx, gy).unwrap();
-    let mut d = dst;
     s.sat = Sat(s.sat.0 - moved);
-    d.sat = Sat(d.sat.0 + moved);
     world.set_cell(gx, gy, s);
-    world.set_cell(tx, ty, d);
-    carry_with_water(world, (gx, gy), (tx, ty), moved, before);
-    temp.advect_with_mass(gx, gy, tx, ty, moved);
+    let fit = moved.min(room);
+    let overflow = moved.saturating_sub(fit);
+    if fit > 0 {
+        let mut d = dst;
+        d.sat = Sat(d.sat.0 + fit);
+        world.set_cell(tx, ty, d);
+    }
+    if overflow > 0 {
+        let left = crate::displace::park_orphan_water(world, tx, ty + 1, overflow as u32);
+        if left > 0 {
+            // Put unplaced overflow back on the source — mass-flat.
+            if let Some(mut back) = world.get_cell(gx, gy) {
+                let put = left.min(255) as u8;
+                let room_back = u8::MAX.saturating_sub(back.sat.0);
+                let add = put.min(room_back);
+                back.sat = Sat(back.sat.0.saturating_add(add));
+                world.set_cell(gx, gy, back);
+            }
+        }
+    }
+    let actually_moved = {
+        let now = world.get_cell(gx, gy).map(|c| c.sat.0).unwrap_or(before);
+        before.saturating_sub(now)
+    };
+    if actually_moved == 0 {
+        return (0, None);
+    }
+    carry_with_water(world, (gx, gy), (tx, ty), actually_moved, before);
+    temp.advect_with_mass(gx, gy, tx, ty, actually_moved);
     // Self-amplifying steam conduit: pressurized throughput widens rock along
     // the reverse-seep path (mint_void=false — high-aperture rock, not Air pipes).
-    if d.material != MaterialId::Air && crate::cell::is_competent_rock(d.material) {
-        let thr = moved.max(12);
+    if dst.material != MaterialId::Air && crate::cell::is_competent_rock(dst.material) {
+        let thr = actually_moved.max(12);
         let _ = widen_aperture(world, tx, ty, thr, 3.2, 0x5EEF_u64, false);
     }
-    if crate::cell::is_competent_rock(s.material) {
-        let thr = moved.max(8);
+    if crate::cell::is_competent_rock(src.material) {
+        let thr = actually_moved.max(8);
         let _ = widen_aperture(world, gx, gy, thr, 1.6, 0x5EE0_u64, false);
     }
-    if d.material == MaterialId::Air {
+    if dst.material == MaterialId::Air || overflow_vent {
         // Warm vent: depressurising spring drops dissolved minerals.
         let warmth = steam_pressure_norm(world, gx, gy)
             .max(drive as f32 / 255.0)
             .clamp(0.35, 1.0);
         precipitate_artesian_warm(world, tx, ty, warmth);
-        // Second pass — vent mounds were crawling under the old step cap.
         precipitate_artesian_warm(world, tx, ty, warmth);
-    } else if dissolved_at(world, tx, ty) > 0 && moved >= 4 {
+    } else if dissolved_at(world, tx, ty) > 0 && actually_moved >= 4 {
         // Only shed into walls near a free vent. Sealed in-pipe precip was
         // self-sealing mountain boilers before they could climb to atmosphere.
         if near_open_air_vent(world, tx, ty) {
@@ -1694,7 +1838,7 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
             precipitate_artesian_warm(world, tx, ty, warmth);
         }
     }
-    (moved, Some((tx, ty)))
+    (actually_moved, Some((tx, ty)))
 }
 
 /// True when `(gx, gy)` borders Air that opens to free sky (a real vent).
@@ -1712,10 +1856,12 @@ fn near_open_air_vent(world: &World, gx: i32, gy: i32) -> bool {
     false
 }
 
-/// Crack dry competent rock above a stalled reverse-seep front.
+/// Crack dry competent rock at a stalled reverse-seep front (up + lateral).
 fn crack_dry_upward_frontier(world: &mut World, gx: i32, gy: i32, drive: u8) {
     let thr = drive.max(24);
-    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2)] {
+    // Include pure lateral cracks so flank vents (side caverns) can open —
+    // not only chimney climbs.
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
         let nx = world.wrap_x(gx + dx);
         let ny = gy + dy;
         let Some(c) = world.get_cell(nx, ny) else {
@@ -1728,7 +1874,8 @@ fn crack_dry_upward_frontier(world: &mut World, gx: i32, gy: i32, drive: u8) {
         if c.sat.0 > 0 && permeability_cell(c, &world.hydro) > 0 {
             continue;
         }
-        let _ = widen_aperture(world, nx, ny, thr, 2.8, 0xD41D_u64, false);
+        let scale = if dy > 0 { 2.8 } else { 2.2 };
+        let _ = widen_aperture(world, nx, ny, thr, scale, 0xD41D_u64, false);
     }
 }
 
@@ -2738,7 +2885,7 @@ mod tests {
     fn flood_equalize_share_above_255_is_not_cast_to_u8() {
         let mut w = World::new(5);
         w.ensure_chunk(ChunkCoord::new(0, 0));
-        for x in 2..7 {
+        for x in 2..8 {
             for y in 1..5 {
                 w.set_cell(x, y, Cell::solid(MaterialId::Stone));
             }
@@ -3361,6 +3508,110 @@ mod tests {
         let (p, kind) = cell_pressure_norm(&w, 4, 2, 120.0);
         assert!(p > 0.2, "dense cavity humidity must read pressure (got {p})");
         assert_eq!(kind, CellPressureKind::Cavity);
+    }
+
+    #[test]
+    fn flooded_side_channel_to_surface_bleeds_confined_steam() {
+        // Boiler pocket + flooded flank corridor opening on a mid-map hillside.
+        // Standing water used to block flood BFS; pressure must still bleed
+        // toward the open vent (steam → liquid in the channel).
+        let mut w = World::new(101);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..20 {
+            for y in 0..14 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Confined boiler chamber (roofed).
+        for x in 4..8 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Flooded corridor left to a hillside vent (open sky above x=1..2).
+        for x in 1..5 {
+            let mut lake = Cell::air();
+            lake.sat = Sat(255);
+            w.set_cell(x, 3, lake);
+        }
+        w.set_cell(1, 4, Cell::air());
+        w.set_cell(1, 5, Cell::air());
+        w.set_cell(2, 4, Cell::air());
+        w.set_cell(2, 5, Cell::air());
+        // Clear sky column above the hillside mouth.
+        for y in 6..14 {
+            w.set_cell(1, y, Cell::air());
+            w.set_cell(2, y, Cell::air());
+        }
+        assert!(void_is_confined(&w, 6, 3), "boiler must stay roofed");
+        assert!(
+            air_void_open_to_sky(&w, 1, 3),
+            "flooded hillside mouth must count as open to sky"
+        );
+        add_steam(&mut w, 6, 3, 200);
+        add_steam(&mut w, 5, 3, 180);
+        let steam0 = steam_total(&w);
+        let sat0 = sat_totals(&w).cell_total;
+        // Equalize only — boiling lake water would mint steam and mask bleed.
+        flood_equalize_steam(&mut w, &SteamConfig::default(), 4096);
+        let steam1 = steam_total(&w);
+        let sat1 = sat_totals(&w).cell_total;
+        assert!(
+            steam1 < steam0,
+            "open flooded vent must bleed confined steam ({steam0} → {steam1})"
+        );
+        // sat_totals already folds steam — bleed recondenses vapour into liquid
+        // seats / park without changing the water ledger.
+        assert_eq!(sat1, sat0, "bleed must stay mass-flat ({sat0} → {sat1})");
+        assert!(
+            (1..=4).any(|x| w.get_cell(x, 3).unwrap().sat.0 > 0)
+                || (1..=2).any(|x| (3..=6).any(|y| w.get_cell(x, y).unwrap().sat.0 > 0)),
+            "vent corridor must still hold liquid after bleed"
+        );
+    }
+
+    #[test]
+    fn reverse_push_discharges_into_full_open_sky_lake() {
+        // Full surface-connected lake used to be skipped (room==0). Overflow
+        // through the vent must still move pore water out of the boiler wall.
+        let mut w = World::new(103);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            for y in 0..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut rock = Cell::solid(MaterialId::Limestone);
+        rock.sat = Sat(200);
+        rock.pore = 180;
+        w.set_cell(5, 2, rock);
+        // Pack the whole open vent column full so the only discharge path is
+        // overflow (no empty Air seat to prefer over the lake).
+        for y in 2..8 {
+            let mut lake = Cell::air();
+            lake.sat = Sat(255);
+            w.set_cell(4, y, lake);
+        }
+        for y in 8..10 {
+            w.set_cell(4, y, Cell::air());
+        }
+        assert!(air_void_open_to_sky(&w, 4, 2));
+        let sat0 = sat_totals(&w).cell_total;
+        let src0 = w.get_cell(5, 2).unwrap().sat.0;
+        let mut temp = temp_fill(&w, 40.0);
+        let (moved, dest) = reverse_push_pore_water_to(&mut w, &mut temp, 5, 2, 80);
+        assert!(moved > 0, "full open-sky lake must accept reverse-seep discharge");
+        assert!(
+            dest.is_some_and(|(x, y)| x == 4 && (2..8).contains(&y)),
+            "must discharge into the open vent column, got {dest:?}"
+        );
+        let src1 = w.get_cell(5, 2).unwrap().sat.0;
+        assert!(src1 < src0, "source pore water must leave the wall");
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            sat0,
+            "overflow discharge must stay mass-flat"
+        );
     }
 
 }
