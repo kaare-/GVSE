@@ -162,6 +162,12 @@ pub struct Humidity {
     /// diffuse do not re-walk SipHash every tick. Evap / rain write
     /// through; serde still writes [`Self::cells`].
     slab: Option<HumiditySlab>,
+    /// Per-column rock crest from [`crate::worldgen::live_surface_at`].
+    /// Invalidated when Air↔solid topology changes. Standing-water
+    /// skin is re-walked every tick so a filling lake still lifts.
+    rock_hy: FxHashMap<i32, i32>,
+    rock_hy_world: u64,
+    rock_hy_topo: u64,
 }
 
 impl Serialize for Humidity {
@@ -189,6 +195,9 @@ impl<'de> Deserialize<'de> for Humidity {
             advect_rx: disk.advect_rx,
             advect_ry: disk.advect_ry,
             slab: None,
+            rock_hy: FxHashMap::default(),
+            rock_hy_world: 0,
+            rock_hy_topo: 0,
         })
     }
 }
@@ -203,6 +212,9 @@ impl Humidity {
             advect_rx: 0.0,
             advect_ry: 0.0,
             slab: None,
+            rock_hy: FxHashMap::default(),
+            rock_hy_world: 0,
+            rock_hy_topo: 0,
         }
     }
 
@@ -1469,12 +1481,26 @@ impl Humidity {
         cols
     }
 
+    fn sync_rock_hy_memo(&mut self, world: &crate::grid::World) {
+        let id = world.chunk_cache_id.get();
+        let topo = world.sky_topo_gen;
+        if id != self.rock_hy_world || topo != self.rock_hy_topo {
+            self.rock_hy.clear();
+            self.rock_hy_world = id;
+            self.rock_hy_topo = topo;
+        }
+    }
+
     /// Precompute [`Self::free_air_hy`] for every occupied column (±1).
+    ///
+    /// Rock crest is memoized across ticks until Air↔solid topology
+    /// changes. Standing-water / ice skin is always re-walked.
     fn build_free_air_cache(
-        &self,
+        &mut self,
         wind: &crate::wind::Wind,
         world: &crate::grid::World,
     ) -> FxHashMap<i32, i32> {
+        self.sync_rock_hy_memo(world);
         let mut cache = FxHashMap::default();
         for hx in self.occupied_columns() {
             for dx in -1..=1 {
@@ -1482,9 +1508,18 @@ impl Humidity {
                     Some(x) => x,
                     None => continue,
                 };
-                cache
-                    .entry(nx)
-                    .or_insert_with(|| self.free_air_hy(wind, world, nx));
+                if cache.contains_key(&nx) {
+                    continue;
+                }
+                let rock = match self.rock_hy.get(&nx).copied() {
+                    Some(r) => r,
+                    None => {
+                        let r = self.live_rock_y(wind, world, nx);
+                        self.rock_hy.insert(nx, r);
+                        r
+                    }
+                };
+                cache.insert(nx, self.free_air_hy_from_rock(world, nx, rock));
             }
         }
         cache
@@ -1731,6 +1766,25 @@ impl Humidity {
         self.prune_near_zero();
     }
 
+    fn live_rock_y(&self, wind: &crate::wind::Wind, world: &crate::grid::World, hx: i32) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let gx = world.wrap_x(hx * tc + tc / 2);
+        crate::worldgen::live_surface_at(
+            world,
+            wind.seed,
+            gx,
+            wind.sea_level_y,
+            wind.width_cols,
+        )
+    }
+
+    fn free_air_hy_from_rock(&self, world: &crate::grid::World, hx: i32, rock: i32) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let gx = world.wrap_x(hx * tc + tc / 2);
+        let base = crate::worldgen::live_skin_y(world, gx, rock);
+        ((base + 1 - tc / 2).max(0) + tc - 1) / tc
+    }
+
     /// First tile row whose centre sits in free air above the live crest.
     fn free_air_hy(
         &self,
@@ -1738,9 +1792,12 @@ impl Humidity {
         world: &crate::grid::World,
         hx: i32,
     ) -> i32 {
-        let tc = self.tile_cols.max(1);
-        let base = self.atmosphere_base_y(world, wind, hx);
-        ((base + 1 - tc / 2).max(0) + tc - 1) / tc
+        let rock = self
+            .rock_hy
+            .get(&hx)
+            .copied()
+            .unwrap_or_else(|| self.live_rock_y(wind, world, hx));
+        self.free_air_hy_from_rock(world, hx, rock)
     }
 
     /// Tile-centre Air connected to free sky (open cave / shaft).
@@ -1750,24 +1807,6 @@ impl Humidity {
         let gx = world.wrap_x(hx * tc + tc / 2);
         let gy = hy * tc + tc / 2;
         crate::steam::air_void_open_to_sky(world, gx, gy)
-    }
-
-    fn atmosphere_base_y(
-        &self,
-        world: &crate::grid::World,
-        wind: &crate::wind::Wind,
-        hx: i32,
-    ) -> i32 {
-        let tc = self.tile_cols.max(1);
-        let gx = world.wrap_x(hx * tc + tc / 2);
-        let rock = crate::worldgen::live_surface_at(
-            world,
-            wind.seed,
-            gx,
-            wind.sea_level_y,
-            wind.width_cols,
-        );
-        crate::worldgen::live_skin_y(world, gx, rock)
     }
 
     fn lift_buried_to_free_air(
@@ -2997,6 +3036,56 @@ mod convection_tests {
         assert!(
             loaded.slab.is_none(),
             "load must not resurrect the runtime slab"
+        );
+    }
+
+    #[test]
+    fn free_air_rock_memo_keeps_pond_skin_and_invalidates_on_carve() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+        use wk_material::MaterialId;
+
+        let p = WorldgenParams::default();
+        let wind = Wind::climate(
+            4,
+            0.0,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            false,
+        );
+        let mut world = World::new(p.seed);
+        world.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            world.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        h.add(4, 12, 40.0);
+        let first = h.build_free_air_cache(&wind, &world);
+        let second = h.build_free_air_cache(&wind, &world);
+        assert_eq!(first, second, "stable topology must reuse rock crests");
+        let before = *first.get(&1).expect("occupied neighbour column");
+        // Tile hx=1 is centred on gx=6 — pond must sit on that column.
+        for y in 1..=6 {
+            world.set_cell(6, y, Cell::water());
+        }
+        let pond = h.build_free_air_cache(&wind, &world);
+        assert!(
+            pond.get(&1).copied().unwrap_or(before) > before,
+            "standing pond must raise free-air (before={before} after={:?})",
+            pond.get(&1)
+        );
+        let topo = h.rock_hy_topo;
+        world.set_cell(6, 7, Cell::solid(MaterialId::Stone));
+        let _ = h.build_free_air_cache(&wind, &world);
+        assert_ne!(
+            h.rock_hy_topo, topo,
+            "Air↔solid carve must drop the rock memo"
         );
     }
 }

@@ -411,7 +411,10 @@ pub fn step_world(
 
     if geotech_due {
         if let Some(map) = geotech.as_mut() {
-            map.rebuild_smart(world);
+            // Incremental only — a second full sweep on the same due
+            // tick was the 14 ms geotech spike. CA dirty columns still
+            // refresh so the next period-20 failure pass is current.
+            map.rebuild_after_ca(world);
         }
     }
 
