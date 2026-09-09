@@ -323,12 +323,33 @@ fn apply_evap_deltas(
                 want_removed
             }
         } else {
-            crate::cave_humidity::try_add_cave_humidity(
-                world,
-                gx,
-                gy,
-                want_removed.clamp(0, 255) as u8,
-            ) as i32
+            // Prefer dry air seats; never park vapour inside a pool volume
+            // (`try_add_cave_humidity` refuses free-water Air).
+            let want = want_removed.clamp(0, 255) as u8;
+            let mut got = crate::cave_humidity::try_add_cave_humidity(world, gx, gy, want);
+            if got < want {
+                let mut rem = want - got;
+                for (dx, dy) in [
+                    (0, 1),
+                    (-1, 0),
+                    (1, 0),
+                    (0, -1),
+                    (0, 2),
+                    (-1, 1),
+                    (1, 1),
+                ] {
+                    if rem == 0 {
+                        break;
+                    }
+                    let nx = world.wrap_x(gx + dx);
+                    let ny = gy + dy;
+                    let put =
+                        crate::cave_humidity::try_add_cave_humidity(world, nx, ny, rem);
+                    got = got.saturating_add(put);
+                    rem = rem.saturating_sub(put);
+                }
+            }
+            got as i32
         };
         if accepted <= 0 {
             continue;
@@ -439,9 +460,17 @@ mod tests {
             "sealed film must lose sat"
         );
         assert_eq!(h.total_mass(), before_h, "sealed film must not feed sky Humidity");
+        assert_eq!(
+            cave_humidity_at(&w, 4, 2),
+            0,
+            "pool water itself must not hold cave humidity"
+        );
         assert!(
-            cave_humidity_at(&w, 4, 2) > 0,
-            "sealed film must deposit cave humidity"
+            cave_humidity_at(&w, 4, 3) > 0
+                || cave_humidity_at(&w, 3, 2) > 0
+                || cave_humidity_at(&w, 5, 2) > 0
+                || cave_humidity_at(&w, 4, 4) > 0,
+            "sealed film must deposit cave humidity into dry air above/beside the pool"
         );
         assert_eq!(steam_total(&w), 0, "ambient sealed film is not steam flash");
     }
