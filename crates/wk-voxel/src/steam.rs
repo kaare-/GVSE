@@ -998,6 +998,11 @@ fn sample_steam_tile_bilinear(
 /// Prefers the roof (up) so energy goes into escape tubes, not sideways leaks.
 /// Cavity humidity density keeps shoving pore water and depositing heat
 /// past the boil isotherm — pressure does not die the moment rock is <100 °C.
+///
+/// Below-boil boilers used to get only a **single** reverse-push hop, so a
+/// sintered mountain lid never saw the multi-hop carve motor that pore-boil
+/// enjoys. Dense cavity vapour now runs [`reverse_seep_chain`] with the Tab
+/// hop budget so warm mineral water can climb and bleed pressure.
 fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig) {
     if world.steam.is_empty() {
         return;
@@ -1018,6 +1023,12 @@ fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &Ste
         let target = boil + press * 35.0;
         let mix = (dens as f32 / 255.0) * 0.18;
         temp.deposit_heat_toward(gx, gy, target, mix);
+        // Pressure buys reach past the boil isotherm (same hop family as phase boil).
+        let hops = cfg
+            .reverse_seep_hops
+            .max(1)
+            .saturating_add((press * 10.0).round() as u8)
+            .min(32);
         for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0), (-1, 1), (1, 1)] {
             let tx = world.wrap_x(gx + dx);
             let ty = gy + dy;
@@ -1028,13 +1039,20 @@ fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &Ste
             if wall.material == MaterialId::Air || wall.material == MaterialId::Bedrock {
                 continue;
             }
-            if wall.sat.0 == 0 || permeability_cell(wall, &world.hydro) == 0 {
+            let drive = ((dens as f32) * (0.2 + press) * 0.85).round() as u8;
+            if drive < 4 {
                 continue;
             }
-            let drive = ((dens as f32) * (0.2 + press) * 0.85).round() as u8;
-            if drive >= 4 {
-                let moved = reverse_push_pore_water(world, temp, tx, ty, drive);
-                if moved > 0 {
+            if wall.sat.0 > 0 && permeability_cell(wall, &world.hydro) > 0 {
+                // Multi-hop climb — not a single shove that dies under a lid.
+                reverse_seep_chain(world, temp, tx, ty, drive, hops);
+                work = work.saturating_add(1);
+            } else if crate::cell::is_competent_rock(wall.material) && press >= 0.12 {
+                // Dry roof above a pressurized cavity: crack pore space so the
+                // next wet pulse has somewhere to climb (never mint Air).
+                let thr = drive.max(24);
+                let scale = 2.2 + press * 2.5;
+                if widen_aperture(world, tx, ty, thr, scale, 0xCA71_u64, false) {
                     work = work.saturating_add(1);
                 }
             }
@@ -1494,6 +1512,9 @@ fn reverse_seep_chain(
                 break;
             }
             if !hopped {
+                // Dry lid frontier: crack upward competent rock so the next
+                // cadence can wet/widen a climb path (never mint Air).
+                crack_dry_upward_frontier(world, gx, gy, drive);
                 return;
             }
             continue;
@@ -1550,7 +1571,11 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
             continue;
         }
         let perm = if dst.material == MaterialId::Air {
-            // Open void = free escape path (warm vent seat).
+            // Only free-sky Air is a preferred vent. Sealed cavity Air would
+            // swallow reverse-seep back into the boiler and cancel the climb.
+            if !air_void_open_to_sky(world, tx, ty) {
+                continue;
+            }
             255
         } else {
             let p = permeability_cell(dst, &world.hydro);
@@ -1608,6 +1633,9 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
                 continue;
             }
             let perm = if dst.material == MaterialId::Air {
+                if !air_void_open_to_sky(world, tx, ty) {
+                    continue;
+                }
                 255
             } else {
                 let p = permeability_cell(dst, &world.hydro);
@@ -1618,8 +1646,8 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
             };
             let score = (perm as i32) * 8 + (room as i32) * 2 + dy.max(0) * 40;
             if best.is_none_or(|(s, _, _, _)| score > s) {
-            best = Some((score, tx, ty, dst));
-        }
+                best = Some((score, tx, ty, dst));
+            }
         }
     }
     let Some((_, tx, ty, dst)) = best else {
@@ -1659,11 +1687,49 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
         // Second pass — vent mounds were crawling under the old step cap.
         precipitate_artesian_warm(world, tx, ty, warmth);
     } else if dissolved_at(world, tx, ty) > 0 && moved >= 4 {
-        // Supersaturated pressurized hops shed a little load into the conduit wall.
-        let warmth = (drive as f32 / 255.0).clamp(0.15, 0.7);
-        precipitate_artesian_warm(world, tx, ty, warmth);
+        // Only shed into walls near a free vent. Sealed in-pipe precip was
+        // self-sealing mountain boilers before they could climb to atmosphere.
+        if near_open_air_vent(world, tx, ty) {
+            let warmth = (drive as f32 / 255.0).clamp(0.15, 0.7);
+            precipitate_artesian_warm(world, tx, ty, warmth);
+        }
     }
     (moved, Some((tx, ty)))
+}
+
+/// True when `(gx, gy)` borders Air that opens to free sky (a real vent).
+fn near_open_air_vent(world: &World, gx: i32, gy: i32) -> bool {
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        let Some(c) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if c.material == MaterialId::Air && air_void_open_to_sky(world, nx, ny) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Crack dry competent rock above a stalled reverse-seep front.
+fn crack_dry_upward_frontier(world: &mut World, gx: i32, gy: i32, drive: u8) {
+    let thr = drive.max(24);
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2)] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        let Some(c) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if !crate::cell::is_competent_rock(c.material) {
+            continue;
+        }
+        // Already wet/permeable neighbours are handled by the wet hop path.
+        if c.sat.0 > 0 && permeability_cell(c, &world.hydro) > 0 {
+            continue;
+        }
+        let _ = widen_aperture(world, nx, ny, thr, 2.8, 0xD41D_u64, false);
+    }
 }
 
 fn escape_pressurized(
@@ -2794,6 +2860,59 @@ mod tests {
             after > before + 0.25,
             "dense cavity humidity should deposit heat into adjacent wet rock ({before} → {after})"
         );
+    }
+
+    #[test]
+    fn cavity_pressure_below_boil_climbs_wet_column() {
+        // Sealed wet limestone column under a dense cavity: below-boil vapour
+        // must multi-hop warm water upward (not die after one shove).
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Thick bedrock jacket — including far above — so a (0,2) hop cannot
+        // vent into free sky Air and short-circuit the climb.
+        for x in 0..16 {
+            for y in 0..16 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        for y in 3..9 {
+            let mut c = Cell::solid(MaterialId::Limestone);
+            c.sat = Sat(if y == 3 { 200 } else { 8 });
+            c.pore = 200;
+            w.set_cell(4, y, c);
+        }
+        add_steam(&mut w, 4, 2, 220);
+        let mut temp = temp_fill(&w, 80.0); // below boil
+        let sat_top0 = w.get_cell(4, 7).unwrap().sat.0;
+        let before = sat_totals(&w).cell_total;
+        let cfg = SteamConfig {
+            enable_escape: false,
+            enable_pore_boil: false,
+            reverse_seep_hops: 12,
+            ..SteamConfig::default()
+        };
+        for _ in 0..6 {
+            transmit_cavity_pressure(&mut w, &mut temp, &cfg);
+        }
+        let sat_top1 = w.get_cell(4, 7).unwrap().sat.0;
+        let column: Vec<u8> = (3..9).map(|y| w.get_cell(4, y).unwrap().sat.0).collect();
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "climb must stay mass-flat; column={column:?}"
+        );
+        assert!(
+            sat_top1 > sat_top0,
+            "below-boil cavity pressure must climb wet column ({sat_top0} → {sat_top1}, column={column:?})"
+        );
+        for y in 3..9 {
+            assert_ne!(
+                w.get_cell(4, y).unwrap().material,
+                MaterialId::Air,
+                "climb must not mint Air at y={y}"
+            );
+        }
     }
 
     fn count_mat(world: &World, mat: MaterialId) -> usize {
