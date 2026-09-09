@@ -22,7 +22,7 @@
 //! even through rock below boil. Confined pockets flood-equalize; overpressure
 //! assaults wet rock as **high-aperture conduits** (no instant Air pipes) and
 //! only bursts soft lids that open to free atmosphere. Cool → liquid + sinter.
-//! Buried grain lenses under competent rock are not treated as sand pillars.
+//! Buried grain lenses under competent rock are not treated as sand pillars; hot saturated grains sinter to competent rock and reverse-seep widens conduits without minting Air pipes.
 //!
 //! See docs/VOXEL_GEYSER.md + VOXEL_THERMAL.md.
 
@@ -38,7 +38,7 @@ use crate::grid::World;
 use crate::mineral::{
     add_dissolved, carry_with_water, dissolved_at, emit_from_dissolved_rock,
     is_soluble_rock, precipitate_artesian_warm, precipitate_at, precipitate_dry_cell,
-    widen_aperture, MINERAL_PER_CELL,
+    pressure_sinter_cell, widen_aperture, MINERAL_PER_CELL,
 };
 use crate::sediment::{add_suspended, is_suspendable, SEDIMENT_PER_CELL};
 use crate::temperature::Temperature;
@@ -1174,6 +1174,29 @@ fn boil_hot_air(
     }
 }
 
+/// Sparse geothermal solute for hot pore pulses. Real hydrothermal fluids
+/// carry dissolved load from depth; without a source term, silicate hot spots
+/// never cement or sinter-deposit. Caps locally so audits stay bounded.
+fn hydrothermal_solute_pulse(world: &mut World, gx: i32, gy: i32, drive: u8) {
+    if drive < 8 {
+        return;
+    }
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return;
+    };
+    // Silicate grain hosts only — carbonate rock already carries ledger mineral;
+    // injecting here would break assault conservation audits.
+    if !is_grain(cell.material) || cell.sat.0 == 0 {
+        return;
+    }
+    let cur = dissolved_at(world, gx, gy);
+    if cur >= 96 {
+        return;
+    }
+    let add = ((drive as u16) / 8).clamp(2, 12);
+    add_dissolved(world, gx, gy, add.min(96 - cur));
+}
+
 fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, max_cells: usize) {
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
@@ -1248,10 +1271,13 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
                     .or_else(|| open_pore_steam_seat(world, gx, gy, max_cells, expand))
             });
         let Some((sx, sy)) = seat else {
-            // Still no vapour seat: expansion still shoves remaining pore water
-            // along least-resistance seepage so the tube keeps growing.
+            // Still no vapour seat: sinter grain hosts, seed hydrothermal
+            // solute, then shove pore water so conduits can start in rock.
             let t_c = temp.at_cell(gx, gy);
             let drive = expansion_drive_units(take, expand, t_c, boil);
+            hydrothermal_solute_pulse(world, gx, gy, drive);
+            let _ = pressure_sinter_cell(world, gx, gy);
+            phase_crack_host(world, gx, gy, take, expand);
             reverse_seep_chain(world, temp, gx, gy, drive, hops);
             work = work.saturating_add(1);
             continue;
@@ -1488,6 +1514,63 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
             best = Some((score, tx, ty, dst));
         }
     }
+    // Full-sat deadlock: sinter grains + widen competent neighbours, then rescan.
+    if best.is_none() && drive > 0 {
+        let _ = pressure_sinter_cell(world, gx, gy);
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
+            let tx = world.wrap_x(gx + dx);
+            let ty = gy + dy;
+            let Some(dst) = world.get_cell(tx, ty) else {
+                continue;
+            };
+            if is_grain(dst.material) {
+                let _ = pressure_sinter_cell(world, tx, ty);
+            }
+            let Some(dst) = world.get_cell(tx, ty) else {
+                continue;
+            };
+            if crate::cell::is_competent_rock(dst.material) {
+                let thr = drive.max(24);
+                let _ = widen_aperture(world, tx, ty, thr, 2.5, 0x5EE1_u64, false);
+            }
+        }
+        if world
+            .get_cell(gx, gy)
+            .is_some_and(|c| crate::cell::is_competent_rock(c.material))
+        {
+            let thr = drive.max(24);
+            let _ = widen_aperture(world, gx, gy, thr, 2.0, 0x5EE2_u64, false);
+        }
+        // Rescan now that capacity may have opened.
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
+            let tx = world.wrap_x(gx + dx);
+            let ty = gy + dy;
+            let Some(dst) = world.get_cell(tx, ty) else {
+                continue;
+            };
+            let cap = water_capacity_cell(dst, &world.hydro);
+            if cap == 0 {
+                continue;
+            }
+            let room = cap.saturating_sub(dst.sat.0);
+            if room == 0 {
+                continue;
+            }
+            let perm = if dst.material == MaterialId::Air {
+                255
+            } else {
+                let p = permeability_cell(dst, &world.hydro);
+                if p == 0 {
+                    continue;
+                }
+                p
+            };
+            let score = (perm as i32) * 8 + (room as i32) * 2 + dy.max(0) * 40;
+            if best.is_none_or(|(s, _, _, _)| score > s) {
+            best = Some((score, tx, ty, dst));
+        }
+        }
+    }
     let Some((_, tx, ty, dst)) = best else {
         return (0, None);
     };
@@ -1524,7 +1607,7 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
         precipitate_artesian_warm(world, tx, ty, warmth);
         // Second pass — vent mounds were crawling under the old step cap.
         precipitate_artesian_warm(world, tx, ty, warmth);
-    } else if dissolved_at(world, tx, ty) > 0 && moved >= 8 {
+    } else if dissolved_at(world, tx, ty) > 0 && moved >= 4 {
         // Supersaturated pressurized hops shed a little load into the conduit wall.
         let warmth = (drive as f32 / 255.0).clamp(0.15, 0.7);
         precipitate_artesian_warm(world, tx, ty, warmth);
@@ -2854,6 +2937,122 @@ mod tests {
             "cold wet rock without cavity vapour stays quiet ({cold}, {cold_kind:?})"
         );
     }
+
+    #[test]
+    fn hot_loose_rock_sinters_and_moves_water_upward() {
+        // Buried hot saturated LooseRock must leave the grain stall: sinter to
+        // competent rock, shove water upward, and widen without Air pipes.
+        let mut w = World::new(101);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 0..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Fully saturated LooseRock column under competent roof — no Air seat.
+        for y in 1..6 {
+            let mut rock = Cell::solid(MaterialId::LooseRock);
+            rock.pore = 64;
+            let cap = water_capacity_cell(rock, &w.hydro).max(1);
+            rock.sat = Sat(cap);
+            w.set_cell(5, y, rock);
+        }
+        w.set_cell(5, 6, Cell::solid(MaterialId::Stone));
+        let mut hot = temp_fill(&w, 180.0);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            phase_expansion_drive: 48,
+            reverse_seep_hops: 10,
+            pore_boil_max_per_cell: 48,
+            ..SteamConfig::default()
+        };
+        for i in 1..40 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let host = w.get_cell(5, 1).unwrap();
+        assert!(
+            crate::cell::is_competent_rock(host.material),
+            "hot LooseRock must sinter to competent rock, got {:?}",
+            host.material
+        );
+        assert_ne!(host.material, MaterialId::Air, "must not mint Air pipes");
+        let upward = (2..=5).any(|y| {
+            w.get_cell(5, y).is_some_and(|c| {
+                c.sat.0 > 0 && (c.pore > 64 || crate::cell::is_competent_rock(c.material))
+            })
+        });
+        let carved = (1..=5).any(|y| {
+            w.get_cell(5, y)
+                .is_some_and(|c| crate::cell::is_competent_rock(c.material) && c.pore > 64)
+        });
+        assert!(
+            upward || carved,
+            "pressurized sinter path must move water or widen conduit upward"
+        );
+        // Soft-lid / assault must not have punched an Air column through the roof.
+        assert_ne!(
+            w.get_cell(5, 6).unwrap().material,
+            MaterialId::Air,
+            "roof must stay rock (no cheap sand/Air pipe)"
+        );
+    }
+
+    #[test]
+    fn hot_conduit_can_deposit_with_hydrothermal_solute() {
+        let mut w = World::new(103);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..7 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut rock = Cell::solid(MaterialId::LooseRock);
+        rock.pore = 80;
+        let cap = water_capacity_cell(rock, &w.hydro).max(1);
+        rock.sat = Sat(cap);
+        w.set_cell(5, 1, rock);
+        // Open vent above a short column so artesian deposit can seat.
+        for y in 2..5 {
+            let mut mid = Cell::solid(MaterialId::LooseRock);
+            mid.pore = 100;
+            let c = water_capacity_cell(mid, &w.hydro).max(1);
+            mid.sat = Sat(c / 2);
+            w.set_cell(5, y, mid);
+        }
+        w.set_cell(5, 5, Cell::air());
+        let mut hot = temp_fill(&w, 175.0);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            phase_expansion_drive: 48,
+            reverse_seep_hops: 10,
+            pore_boil_max_per_cell: 64,
+            ..SteamConfig::default()
+        };
+        let load0 = dissolved_at(&w, 5, 1) + dissolved_at(&w, 5, 5);
+        for i in 1..50 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let load1 = (0..8).map(|y| dissolved_at(&w, 5, y)).sum::<u16>();
+        let deposited = (0..8).any(|y| {
+            w.get_cell(5, y)
+                .is_some_and(|c| c.material == MaterialId::Flowstone)
+        });
+        let cemented = (1..=4).any(|y| {
+            w.get_cell(5, y).is_some_and(|c| {
+                matches!(
+                    c.material,
+                    MaterialId::Conglomerate | MaterialId::Stone | MaterialId::Sandstone
+                )
+            })
+        });
+        assert!(
+            load1 > load0 || deposited || cemented,
+            "hydrothermal solute should appear, cement, or deposit along the hot path"
+        );
+    }
+
 
     #[test]
     fn cavity_steam_pressure_reads_as_cavity_kind() {

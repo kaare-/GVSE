@@ -369,6 +369,40 @@ fn cement_cell(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
     used
 }
 
+/// Geothermal / pore-flash sinter: weld loose sediment into competent rock so
+/// pressurized conduits can persist without minting Air pipes.
+///
+/// Prefers true carbonate cement when dissolved load is present (ledger-safe).
+/// Otherwise silicate talus (`LooseRock` / `Gravel` / `Sand`) welds to `Stone`
+/// — competent, outside the mineral ledger — so phase crack + reverse-seep
+/// widen can run. Does **not** invent carbonate from silicate dissolve.
+pub fn pressure_sinter_cell(world: &mut World, gx: i32, gy: i32) -> bool {
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return false;
+    };
+    let load = dissolved_at(world, gx, gy);
+    if cemented_form(cell.material).is_some() && load >= CEMENT_MIN_LOAD {
+        return cement_cell(world, gx, gy, load) > 0;
+    }
+    // Silicate weld: competent host, no carbonate invent.
+    let welded = match cell.material {
+        MaterialId::LooseRock | MaterialId::Gravel | MaterialId::Sand => MaterialId::Stone,
+        _ => return false,
+    };
+    let mut next = cell;
+    next.material = welded;
+    // Keep existing pore/sat — capacity may change with material props.
+    let cap = water_capacity_cell(next, &world.hydro);
+    let spill = next.sat.0.saturating_sub(cap);
+    next.sat = Sat(next.sat.0.min(cap));
+    world.set_cell(gx, gy, next);
+    if spill > 0 {
+        push_water_up(world, gx, gy + 1, spill);
+    }
+    true
+}
+
+
 /// Rock that carries mineral mass for the audit: **carbonate only**.
 ///
 /// Driven purely by the material's `solubility`, which already says exactly
@@ -945,6 +979,38 @@ mod tests {
             after.pore
         );
     }
+
+    #[test]
+    fn pressure_sinter_welds_loose_rock_to_stone() {
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut rock = Cell::solid(MaterialId::LooseRock);
+        rock.sat = Sat(water_capacity_cell(rock, &w.hydro));
+        rock.pore = 64;
+        w.set_cell(4, 2, rock);
+        assert!(pressure_sinter_cell(&mut w, 4, 2));
+        let after = w.get_cell(4, 2).unwrap();
+        assert_eq!(after.material, MaterialId::Stone);
+        assert!(crate::cell::is_competent_rock(after.material));
+        assert!(!crate::cell::is_grain(after.material));
+    }
+
+    #[test]
+    fn pressure_sinter_prefers_true_cement_when_loaded() {
+        let mut w = World::new(13);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut rock = Cell::solid(MaterialId::LooseRock);
+        rock.sat = Sat(water_capacity_cell(rock, &w.hydro));
+        w.set_cell(4, 2, rock);
+        add_dissolved(&mut w, 4, 2, CEMENT_MIN_LOAD + 8);
+        assert!(pressure_sinter_cell(&mut w, 4, 2));
+        assert_eq!(
+            w.get_cell(4, 2).unwrap().material,
+            MaterialId::Conglomerate,
+            "dissolved load should carbonate-cement LooseRock"
+        );
+    }
+
 
     #[test]
     fn a_thin_load_leaves_sand_loose() {
