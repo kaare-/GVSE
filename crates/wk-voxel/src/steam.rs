@@ -26,6 +26,8 @@
 //!
 //! See docs/VOXEL_GEYSER.md + VOXEL_THERMAL.md.
 
+use std::cell::RefCell;
+
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
@@ -221,17 +223,87 @@ pub fn take_steam(world: &mut World, gx: i32, gy: i32, want: u8) -> u8 {
     took
 }
 
+/// Thread-local memo for sky / roof probes + steam haze.
+///
+/// `air_void_open_to_sky` used to BFS up to 192 Air cells **per call**.
+/// Haze wash + evap + reverse-seep + flood equalize all hammered it, so a
+/// paused `[sim skip]` frame with a 300-cell boiler still cost hundreds of
+/// milliseconds. One BFS now paints every visited seat.
+#[derive(Default)]
+struct SkyProbeCache {
+    world_id: u64,
+    topo: u64,
+    confined: FxHashMap<(i32, i32), bool>,
+    open: FxHashMap<(i32, i32), bool>,
+}
+
+struct SteamHazeMemo {
+    world_id: u64,
+    tick: u64,
+    topo: u64,
+    fp: (u64, u64, u64),
+    warm_fp: u64,
+    samples: Vec<SteamHazeSample>,
+}
+
+thread_local! {
+    static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
+    static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
+}
+
+fn bind_sky_probe(world: &World) {
+    SKY_PROBE.with(|slot| {
+        let mut c = slot.borrow_mut();
+        let id = world.chunk_cache_id.get();
+        let topo = world.sky_topo_gen;
+        if c.world_id != id || c.topo != topo {
+            c.world_id = id;
+            c.topo = topo;
+            c.confined.clear();
+            c.open.clear();
+        }
+    });
+}
+
+pub(crate) fn sparse_amt_fp(map: &FxHashMap<(i32, i32), u8>) -> (u64, u64, u64) {
+    let mut n = 0u64;
+    let mut k = 0u64;
+    let mut v = 0u64;
+    for (&(x, y), &amt) in map {
+        n += 1;
+        k = k
+            .wrapping_add(x as u64)
+            .wrapping_add((y as u64).wrapping_mul(0x9E37_79B9));
+        v = v.wrapping_add(amt as u64);
+    }
+    (n, k, v)
+}
+
 /// True when this Air void sits under a solid roof (cave / conduit).
 pub fn void_is_confined(world: &World, gx: i32, gy: i32) -> bool {
     let gx = world.wrap_x(gx);
+    bind_sky_probe(world);
+    if let Some(hit) = SKY_PROBE.with(|c| c.borrow().confined.get(&(gx, gy)).copied()) {
+        return hit;
+    }
+    let mut confined = false;
     for dy in 1..=ROOF_PROBE {
         match world.get_cell(gx, gy + dy) {
-            None => return false,
+            None => {
+                confined = false;
+                break;
+            }
             Some(c) if c.material == MaterialId::Air => continue,
-            Some(_) => return true,
+            Some(_) => {
+                confined = true;
+                break;
+            }
         }
     }
-    false
+    SKY_PROBE.with(|c| {
+        c.borrow_mut().confined.insert((gx, gy), confined);
+    });
+    confined
 }
 
 /// Sky-connected Air (open shaft / cave vent) — weather Humidity may sit here.
@@ -239,6 +311,9 @@ pub fn void_is_confined(world: &World, gx: i32, gy: i32) -> bool {
 /// Cheap path: upward probe ([`void_is_confined`]). If roofed, a short Air BFS
 /// looks for any neighbour that opens to sky (side entrance / skylight offset).
 /// Sealed pockets return false so they stay off the rain lottery.
+///
+/// The first miss for a pocket BFS-paints every visited Air seat so later
+/// calls in the same topology are O(1).
 pub fn air_void_open_to_sky(world: &World, gx: i32, gy: i32) -> bool {
     // Flank lakes / long flooded side channels need more than a tiny BFS —
     // 96 steps missed many surface-connected vents the player can carve.
@@ -250,17 +325,26 @@ pub fn air_void_open_to_sky(world: &World, gx: i32, gy: i32) -> bool {
     if cell.material != MaterialId::Air {
         return false;
     }
+    bind_sky_probe(world);
+    if let Some(hit) = SKY_PROBE.with(|c| c.borrow().open.get(&(gx, gy)).copied()) {
+        return hit;
+    }
     if !void_is_confined(world, gx, gy) {
+        SKY_PROBE.with(|c| {
+            c.borrow_mut().open.insert((gx, gy), true);
+        });
         return true;
     }
     let mut q: Vec<(i32, i32)> = vec![(gx, gy)];
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
     seen.insert((gx, gy));
     let mut steps = 0usize;
+    let mut opened = false;
     while let Some((x, y)) = q.pop() {
         steps += 1;
         if steps > BFS_BUDGET {
-            return false;
+            opened = false;
+            break;
         }
         for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
             let nx = world.wrap_x(x + dx);
@@ -269,18 +353,41 @@ pub fn air_void_open_to_sky(world: &World, gx: i32, gy: i32) -> bool {
                 continue;
             }
             match world.get_cell(nx, ny) {
-                None => return true,
+                None => {
+                    opened = true;
+                    break;
+                }
                 Some(c) if c.material == MaterialId::Air => {
                     if !void_is_confined(world, nx, ny) {
-                        return true;
+                        opened = true;
+                        break;
                     }
                     q.push((nx, ny));
                 }
                 Some(_) => {}
             }
         }
+        if opened {
+            break;
+        }
     }
-    false
+    // Budget miss: only cache the seed so we don't mark a nearby vent sealed.
+    SKY_PROBE.with(|c| {
+        let mut c = c.borrow_mut();
+        if opened || steps <= BFS_BUDGET {
+            for &(x, y) in &seen {
+                if world
+                    .get_cell(x, y)
+                    .is_some_and(|cell| cell.material == MaterialId::Air)
+                {
+                    c.open.insert((x, y), opened);
+                }
+            }
+        } else {
+            c.open.insert((gx, gy), false);
+        }
+    });
+    opened
 }
 
 /// Air that counts as gas volume (not a standing-water lake cell).
@@ -919,6 +1026,34 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
     if world.steam.is_empty() {
         return Vec::new();
     }
+    let fp = sparse_amt_fp(&world.steam);
+    let warm_fp = match temp {
+        None => 0,
+        Some(t) => world
+            .steam
+            .keys()
+            .next()
+            .map(|&(x, y)| t.at_cell(x, y).to_bits() as u64)
+            .unwrap_or(0)
+            ^ 1,
+    };
+    if let Some(hit) = STEAM_HAZE_MEMO.with(|slot| {
+        let m = slot.borrow();
+        m.as_ref().and_then(|m| {
+            if m.world_id == world.chunk_cache_id.get()
+                && m.tick == world.tick
+                && m.topo == world.sky_topo_gen
+                && m.fp == fp
+                && m.warm_fp == warm_fp
+            {
+                Some(m.samples.clone())
+            } else {
+                None
+            }
+        })
+    }) {
+        return hit;
+    }
     let tc = STEAM_HAZE_TILE.max(1);
     let mut tile_mass: FxHashMap<(i32, i32), f32> = FxHashMap::default();
     let mut tile_press: FxHashMap<(i32, i32), f32> = FxHashMap::default();
@@ -996,11 +1131,9 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
         if total <= 0.0 {
             continue;
         }
-        let press = voids
-            .iter()
-            .map(|&(x, y)| steam_pressure_norm(world, x, y))
-            .fold(0.0_f32, f32::max)
-            .max((total / voids.len() as f32) / 255.0);
+        // Marker bins already recorded per-tile pressure. Re-walking a
+        // 16-deep column for every void was an FPS cliff on big boilers.
+        let press = (total / voids.len() as f32) / 255.0;
         // Equalized pocket → each tile covering voids gets its share of mass
         // (humidity-shaped: coarse tiles, not per-cell plugs).
         let mut tile_void_n: FxHashMap<(i32, i32), u32> = FxHashMap::default();
@@ -1075,6 +1208,16 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
             }
         }
     }
+    STEAM_HAZE_MEMO.with(|slot| {
+        *slot.borrow_mut() = Some(SteamHazeMemo {
+            world_id: world.chunk_cache_id.get(),
+            tick: world.tick,
+            topo: world.sky_topo_gen,
+            fp,
+            warm_fp,
+            samples: out.clone(),
+        });
+    });
     out
 }
 
@@ -3612,6 +3755,60 @@ mod tests {
             sat0,
             "overflow discharge must stay mass-flat"
         );
+    }
+
+    #[test]
+    fn sky_probe_memo_matches_repeat_and_invalidates_on_carve() {
+        let mut w = World::new(111);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..7 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        assert!(void_is_confined(&w, 4, 3));
+        assert!(!air_void_open_to_sky(&w, 4, 3));
+        assert_eq!(
+            air_void_open_to_sky(&w, 4, 3),
+            air_void_open_to_sky(&w, 5, 3),
+            "connected seats must share the painted probe"
+        );
+        // Side vent to daylight — topology bump must drop the sealed memo.
+        w.set_cell(3, 5, Cell::air());
+        for y in 6..12 {
+            w.set_cell(3, y, Cell::air());
+        }
+        assert!(
+            air_void_open_to_sky(&w, 4, 3),
+            "carve to sky must invalidate the sealed probe memo"
+        );
+    }
+
+    #[test]
+    fn steam_haze_wash_is_stable_across_repeat_calls() {
+        let mut w = World::new(113);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..7 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        add_steam(&mut w, 4, 3, 180);
+        add_steam(&mut w, 5, 3, 160);
+        let a = steam_haze_wash(&w, None);
+        let b = steam_haze_wash(&w, None);
+        assert_eq!(a, b, "paused-frame haze memo must be identical");
+        assert!(!a.is_empty(), "boiler haze must paint");
     }
 
 }
