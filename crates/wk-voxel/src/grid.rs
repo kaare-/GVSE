@@ -446,6 +446,11 @@ impl World {
             let prev = chunk.get(lx, ly);
             chunk.set(lx, ly, cell);
             self.note_sky_topo(prev.material, cell.material);
+            if prev.material == wk_material::MaterialId::Air
+                && cell.material != wk_material::MaterialId::Air
+            {
+                crate::steam::evict_steam_seat(self, gx, gy);
+            }
             if track_sleep {
                 self.maybe_wake_competent_for_solidity(gx, gy, prev.material, cell.material);
             }
@@ -460,6 +465,11 @@ impl World {
         Self::remember_chunk_ptr(self.chunk_cache_id.0, coord, chunk);
         if let Some(prev) = prev {
             self.note_sky_topo(prev.material, cell.material);
+            if prev.material == wk_material::MaterialId::Air
+                && cell.material != wk_material::MaterialId::Air
+            {
+                crate::steam::evict_steam_seat(self, gx, gy);
+            }
             if track_sleep {
                 self.maybe_wake_competent_for_solidity(gx, gy, prev.material, cell.material);
             }

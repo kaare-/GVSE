@@ -258,6 +258,7 @@ struct PressMemo {
     world_id: u64,
     tick: u64,
     steam_rev: u64,
+    topo: u64,
     /// Inclusive padded influence box; `None` if steam is empty.
     bbox: Option<(i32, i32, i32, i32)>,
     map: FxHashMap<(i32, i32), f32>,
@@ -414,14 +415,112 @@ fn is_steam_void(cell: Cell) -> bool {
     cell.material == MaterialId::Air && cell.sat.0 <= STEAM_VOID_SAT_MAX
 }
 
+/// Sealed from weather: roofed **and** no lateral sky path.
+///
+/// [`void_is_confined`] is a 48-cell upward probe. A lake under a cliff
+/// slope is "roofed" even when it opens to the horizon; flash / cavity
+/// heat must not treat that as a boiler.
+pub fn steam_is_pressure_confined(world: &World, gx: i32, gy: i32) -> bool {
+    void_is_confined(world, gx, gy) && !air_void_open_to_sky(world, gx, gy)
+}
+
+/// Reverse-seep / steam discharge sink: free-sky Air **or** standing water.
+///
+/// Underwater hydrothermal vents dump into the lake even when the pool
+/// sits under a rock lid (`!air_void_open_to_sky`). Dry sealed voids stay
+/// boilers — they are not vents.
+fn is_steam_discharge_vent(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    if cell.material != MaterialId::Air {
+        return false;
+    }
+    if air_void_open_to_sky(world, gx, gy) {
+        return true;
+    }
+    cell.sat.0 > STEAM_VOID_SAT_MAX || crate::rules::is_standing_water(world, gx, gy)
+}
+
+/// Move steam off a cell that is no longer a void (editor brick, collapse).
+///
+/// Only touches [`World::steam`] — safe to call from [`World::set_cell`].
+pub fn evict_steam_seat(world: &mut World, gx: i32, gy: i32) {
+    let amt = take_steam(world, gx, gy, u8::MAX);
+    if amt == 0 {
+        return;
+    }
+    const DELTAS: [(i32, i32); 8] = [
+        (0, 1),
+        (0, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+    ];
+    for (dx, dy) in DELTAS {
+        let tx = world.wrap_x(gx + dx);
+        let ty = gy + dy;
+        if world.get_cell(tx, ty).is_some_and(is_steam_void) {
+            let _ = add_steam(world, tx, ty, amt);
+            return;
+        }
+    }
+    // No neighbour void: park on any remaining steam key so mass stays.
+    if let Some((&(x, y), slot)) = world.steam.iter_mut().next() {
+        let before = *slot;
+        *slot = before.saturating_add(amt);
+        if *slot != before {
+            world.steam_rev = world.steam_rev.wrapping_add(1);
+        }
+        let _ = (x, y);
+        return;
+    }
+    // Last resort: keep a ghost key one cell up so apply_steam can park
+    // liquid. Overlay ignores non-Air steam.
+    let _ = add_steam(world, gx, gy + 1, amt);
+}
+
+/// Relocate steam sitting on rock / missing cells (mass-flat).
+fn scrub_invalid_steam_seats(world: &mut World, max_cells: usize) {
+    if world.steam.is_empty() {
+        return;
+    }
+    let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    for (gx, gy) in keys {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            evict_steam_seat(world, gx, gy);
+            continue;
+        };
+        if cell.material != MaterialId::Air {
+            let amt = take_steam(world, gx, gy, u8::MAX);
+            if amt == 0 {
+                continue;
+            }
+            let placed = inject_steam_near(world, gx, gy, amt, max_cells);
+            let left = amt.saturating_sub(placed);
+            if left > 0 {
+                let parked = crate::displace::park_orphan_water(world, gx, gy, left as u32);
+                if parked > 0 {
+                    let _ = add_steam(world, gx, gy, parked.min(255) as u8);
+                }
+            }
+        }
+    }
+}
+
 fn bind_press_memo(world: &World) {
     PRESS_MEMO.with(|slot| {
         let mut c = slot.borrow_mut();
         let id = world.chunk_cache_id.get();
-        if c.world_id != id || c.tick != world.tick || c.steam_rev != world.steam_rev {
+        if c.world_id != id
+            || c.tick != world.tick
+            || c.steam_rev != world.steam_rev
+            || c.topo != world.sky_topo_gen
+        {
             c.world_id = id;
             c.tick = world.tick;
             c.steam_rev = world.steam_rev;
+            c.topo = world.sky_topo_gen;
             c.map.clear();
             c.bbox = steam_influence_bbox(world);
         }
@@ -475,7 +574,8 @@ pub fn steam_pressure_norm(world: &World, gx: i32, gy: i32) -> f32 {
         let x = world.wrap_x(gx + dx);
         for dy in 0..=PRESSURE_DEPTH {
             let y = gy - dy;
-            let s = steam_at(world, x, y) as u32;
+            let air = world.get_cell(x, y).is_some_and(|c| c.material == MaterialId::Air);
+            let s = if air { steam_at(world, x, y) as u32 } else { 0 };
             sum += s;
             if s > 0 || world.get_cell(x, y).is_some_and(is_steam_void) {
                 voids += 1;
@@ -527,10 +627,10 @@ pub fn cell_pressure_norm(world: &World, gx: i32, gy: i32, temp_c: f32) -> (f32,
         };
     };
 
-    if cell.material == MaterialId::Air || steam > 0 {
+    // Orphan steam on rock must not paint a cavity (bricked vent).
+    if cell.material == MaterialId::Air {
         let local = (steam as f32 / 255.0).max(cavity);
-        return if local > 0.02 || (cell.material == MaterialId::Air && cell.sat.0 > 0 && temp_c >= 95.0)
-        {
+        return if local > 0.02 || (cell.sat.0 > 0 && temp_c >= 95.0) {
             (local.clamp(0.0, 1.0), CellPressureKind::Cavity)
         } else {
             (0.0, CellPressureKind::None)
@@ -643,7 +743,11 @@ fn bleed_steam_into_open_vent(world: &mut World, seats: &[(i32, i32)]) {
     let mut open: Vec<(i32, i32)> = seats
         .iter()
         .copied()
-        .filter(|&(x, y)| air_void_open_to_sky(world, x, y))
+        .filter(|&(x, y)| {
+            world
+                .get_cell(x, y)
+                .is_some_and(|c| is_steam_discharge_vent(world, x, y, c))
+        })
         .collect();
     if open.is_empty() {
         return;
@@ -740,7 +844,7 @@ fn inject_steam_near(
         if is_steam_void(c) {
             return try_place_steam(world, gx, gy, amt, max_cells);
         }
-        if c.material == MaterialId::Air {
+        if c.material == MaterialId::Air && c.sat.0 <= STEAM_VOID_SAT_MAX {
             return try_place_steam(world, gx, gy, amt, max_cells);
         }
     }
@@ -768,6 +872,7 @@ pub fn apply_steam(
     let boil = cfg.boil_point_c;
     let recondense_below = boil - RECONDENSE_MARGIN_C;
 
+    scrub_invalid_steam_seats(world, max_cells);
     recondense_cool(world, temp, recondense_below);
     boil_hot_air(world, temp, cfg, max_cells);
     if cfg.enable_pore_boil {
@@ -1015,7 +1120,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                     world.get_cell(x, y).is_some_and(|c| {
                         c.material == MaterialId::Air
                             && c.sat.0 > STEAM_VOID_SAT_MAX
-                            && air_void_open_to_sky(world, x, y)
+                            && is_steam_discharge_vent(world, x, y, c)
                     })
                 })
             {
@@ -1156,7 +1261,7 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
         if !visited.insert((sx, sy)) {
             continue;
         }
-        let seed_confined = void_is_confined(world, sx, sy);
+        let seed_confined = steam_is_pressure_confined(world, sx, sy);
         let mut queue = vec![(sx, sy)];
         let mut voids: Vec<(i32, i32)> = Vec::new();
         let mut qi = 0;
@@ -1343,6 +1448,10 @@ fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &Ste
     for (gx, gy, dens) in keys {
         if work >= max_work {
             break;
+        }
+        // Laterally open lake / sky seats are weather, not a boiler lamp.
+        if !steam_is_pressure_confined(world, gx, gy) {
+            continue;
         }
         let press = steam_pressure_norm(world, gx, gy).max(dens as f32 / 255.0);
         let target = boil + press * 35.0;
@@ -1566,9 +1675,9 @@ fn boil_hot_air(
             if cell.material != MaterialId::Air || cell.sat.0 == 0 {
                 return;
             }
-            // Open seats belong to accelerated evap → sky Humidity.
-            // Steam is sealed-flash only. Near cap, prefer confined seats.
-            if !void_is_confined(world, gx, gy) {
+            // Open / laterally vented seats belong to accelerated evap →
+            // sky Humidity. Steam is sealed-flash only.
+            if !steam_is_pressure_confined(world, gx, gy) {
                 return;
             }
             let _ = prefer_confined; // reserved if we later prioritize seats
@@ -1595,8 +1704,8 @@ fn boil_hot_air(
         if take == 0 {
             continue;
         }
-        // Unroofed seats are filtered at collect time; belt-and-braces.
-        if !void_is_confined(world, gx, gy) {
+        // Unroofed / sky-connected seats are filtered at collect time.
+        if !steam_is_pressure_confined(world, gx, gy) {
             continue;
         }
         let placed = inject_steam_near(world, gx, gy, take, max_cells);
@@ -1839,6 +1948,9 @@ fn find_steam_seat(
         if c.material != MaterialId::Air {
             continue;
         }
+        if !is_steam_void(c) {
+            continue;
+        }
         if can_admit_new_steam_cell(world, tx, ty, max_cells) || steam_at(world, tx, ty) > 0 {
             return Some((tx, ty));
         }
@@ -1863,6 +1975,9 @@ fn open_pore_steam_seat(
             continue;
         };
         if wall.material == MaterialId::Air {
+            if !is_steam_void(wall) {
+                continue;
+            }
             if can_admit_new_steam_cell(world, tx, ty, max_cells) || steam_at(world, tx, ty) > 0
             {
                 return Some((tx, ty));
@@ -1986,22 +2101,21 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
         let Some(dst) = world.get_cell(tx, ty) else {
             continue;
         };
-        let open_sky_air =
-            dst.material == MaterialId::Air && air_void_open_to_sky(world, tx, ty);
+        let vent = is_steam_discharge_vent(world, tx, ty, dst);
         let cap = water_capacity_cell(dst, &world.hydro);
-        if cap == 0 && !open_sky_air {
+        if cap == 0 && !vent {
             continue;
         }
         let room = cap.saturating_sub(dst.sat.0);
-        // Full open-sky lakes still count as vents: reverse-seep overflows
-        // them via park_orphan_water so a flooded surface channel can discharge.
-        if room == 0 && !open_sky_air {
+        // Full lakes / underwater pools still count as vents: reverse-seep
+        // overflows them via park_orphan_water.
+        if room == 0 && !vent {
             continue;
         }
         let perm = if dst.material == MaterialId::Air {
-            // Only free-sky Air is a preferred vent. Sealed cavity Air would
-            // swallow reverse-seep back into the boiler and cancel the climb.
-            if !open_sky_air {
+            // Sealed dry cavity Air would swallow reverse-seep back into
+            // the boiler. Standing water and free-sky Air are vents.
+            if !vent {
                 continue;
             }
             255
@@ -2017,7 +2131,7 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
         let room_score = if room > 0 { room as i32 } else { 64 };
         let score = (perm as i32) * 8 + room_score * 2 + dy.max(0) * 40;
         if best.is_none_or(|(s, _, _, _, _)| score > s) {
-            best = Some((score, tx, ty, dst, open_sky_air && room == 0));
+            best = Some((score, tx, ty, dst, vent && room == 0));
         }
     }
     // Full-sat deadlock: sinter grains + widen competent neighbours, then rescan.
@@ -2054,18 +2168,17 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
             let Some(dst) = world.get_cell(tx, ty) else {
                 continue;
             };
-            let open_sky_air =
-                dst.material == MaterialId::Air && air_void_open_to_sky(world, tx, ty);
+            let vent = is_steam_discharge_vent(world, tx, ty, dst);
             let cap = water_capacity_cell(dst, &world.hydro);
-            if cap == 0 && !open_sky_air {
+            if cap == 0 && !vent {
                 continue;
             }
             let room = cap.saturating_sub(dst.sat.0);
-            if room == 0 && !open_sky_air {
+            if room == 0 && !vent {
                 continue;
             }
             let perm = if dst.material == MaterialId::Air {
-                if !open_sky_air {
+                if !vent {
                     continue;
                 }
                 255
@@ -2079,7 +2192,7 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
             let room_score = if room > 0 { room as i32 } else { 64 };
             let score = (perm as i32) * 8 + room_score * 2 + dy.max(0) * 40;
             if best.is_none_or(|(s, _, _, _, _)| score > s) {
-                best = Some((score, tx, ty, dst, open_sky_air && room == 0));
+                best = Some((score, tx, ty, dst, vent && room == 0));
             }
         }
     }
@@ -2166,7 +2279,7 @@ fn near_open_air_vent(world: &World, gx: i32, gy: i32) -> bool {
         let Some(c) = world.get_cell(nx, ny) else {
             continue;
         };
-        if c.material == MaterialId::Air && air_void_open_to_sky(world, nx, ny) {
+        if c.material == MaterialId::Air && is_steam_discharge_vent(world, nx, ny, c) {
             return true;
         }
     }
@@ -4092,6 +4205,115 @@ mod tests {
             w.get_cell(12, 49).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand)
         );
         assert_eq!(sat_totals(&w).cell_total, before, "tile-skip pore boil is mass-flat");
+    }
+
+    #[test]
+    fn overhang_open_lake_is_not_a_pressure_boiler() {
+        // Solid within 48 cells above (cliff slope) but a side column to sky.
+        let mut w = World::new(201);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=4 {
+                let mut lake = Cell::air();
+                lake.sat = Sat(255);
+                w.set_cell(x, y, lake);
+            }
+        }
+        // Overhang over x=2..6; x=8 is a clear sky column.
+        for x in 2..=6 {
+            w.set_cell(x, 10, Cell::solid(MaterialId::Stone));
+        }
+        assert!(void_is_confined(&w, 4, 4), "overhang roofs the column probe");
+        assert!(
+            air_void_open_to_sky(&w, 4, 4),
+            "lake must reach sky around the overhang"
+        );
+        assert!(
+            !steam_is_pressure_confined(&w, 4, 4),
+            "laterally open lake is not a boiler"
+        );
+        let mut temp = temp_fill(&w, 130.0);
+        let before_steam = steam_total(&w);
+        w.tick = STEAM_EVERY;
+        apply_steam(&mut w, &mut temp, &SteamConfig::default());
+        assert_eq!(
+            steam_total(&w),
+            before_steam,
+            "open overhang lake must not flash into World.steam"
+        );
+    }
+
+    #[test]
+    fn reverse_push_discharges_into_roofed_standing_water() {
+        // Underwater vent: full pool under a rock lid, no sky path.
+        let mut w = World::new(202);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..10 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut rock = Cell::solid(MaterialId::Limestone);
+        rock.sat = Sat(200);
+        rock.pore = 180;
+        w.set_cell(5, 2, rock);
+        for y in 2..=4 {
+            let mut lake = Cell::air();
+            lake.sat = Sat(255);
+            w.set_cell(4, y, lake);
+        }
+        // Solid lid — no sky column.
+        for x in 0..10 {
+            w.set_cell(x, 7, Cell::solid(MaterialId::Stone));
+        }
+        assert!(!air_void_open_to_sky(&w, 4, 3));
+        let src0 = w.get_cell(5, 2).unwrap().sat.0;
+        let sat0 = sat_totals(&w).cell_total;
+        let mut temp = temp_fill(&w, 80.0);
+        let (moved, dest) = reverse_push_pore_water_to(&mut w, &mut temp, 5, 2, 80);
+        assert!(moved > 0, "roofed standing water must accept a hydrothermal vent");
+        assert!(
+            dest.is_some_and(|(x, _)| x == 4),
+            "must discharge into the pool, got {dest:?}"
+        );
+        assert!(w.get_cell(5, 2).unwrap().sat.0 < src0);
+        assert_eq!(sat_totals(&w).cell_total, sat0, "underwater vent is mass-flat");
+    }
+
+    #[test]
+    fn brick_vent_clears_surface_cavity_pressure() {
+        let mut w = World::new(203);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..7 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Surface vent cell
+        w.set_cell(4, 5, Cell::air());
+        for y in 6..12 {
+            w.set_cell(4, y, Cell::air());
+        }
+        let _ = add_steam(&mut w, 4, 3, 200);
+        let _ = add_steam(&mut w, 4, 5, 80);
+        assert!(steam_at(&w, 4, 5) > 0);
+        w.set_cell(4, 5, Cell::solid(MaterialId::Stone));
+        assert_eq!(
+            steam_at(&w, 4, 5),
+            0,
+            "bricking the vent must evict steam from that cell"
+        );
+        let (p, kind) = cell_pressure_norm(&w, 4, 5, 20.0);
+        assert!(
+            kind != CellPressureKind::Cavity || p < 0.03,
+            "bricked rock must not keep a cavity overlay ({kind:?} p={p})"
+        );
     }
 
 }

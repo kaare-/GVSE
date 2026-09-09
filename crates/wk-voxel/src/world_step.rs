@@ -466,9 +466,11 @@ pub fn step_world(
 
     {
         let t0 = profile.then(Instant::now);
+        // Steam first so thaw sees cavity heat on the same tick (130 °C
+        // ice at a vent was phase-then-steam leftover).
+        apply_steam(world, temperature, cfg.steam);
         apply_phase(world, temperature, cfg.phase);
         apply_pore_ice(world, temperature, cfg.phase.freeze_point_c);
-        apply_steam(world, temperature, cfg.steam);
         apply_cave_humidity(world, temperature, humidity);
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
             t.phase += t0.elapsed();

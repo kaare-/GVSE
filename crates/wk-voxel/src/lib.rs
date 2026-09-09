@@ -146,7 +146,7 @@ pub use cave_humidity::{
 };
 pub use steam::{
     air_void_open_to_sky, apply_steam, cavity_humidity_at, cell_pressure_norm, expansion_drive_units,
-    phase_heat_drive_scale, steam_at, steam_haze_wash, steam_pressure_norm,
+    phase_heat_drive_scale, steam_at, steam_haze_wash, steam_is_pressure_confined, steam_pressure_norm,
     steam_pressure_rate_scale, steam_total, steam_vapour_field, void_is_confined, CellPressureKind,
     SteamConfig, SteamHazeSample, BOIL_POINT_C, MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
     STEAM_HAZE_TILE,
