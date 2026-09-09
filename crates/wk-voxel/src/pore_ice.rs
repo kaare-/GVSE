@@ -12,8 +12,9 @@
 use wk_material::MaterialId;
 
 use crate::cell::{water_capacity_cell, Cell};
-use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::ChunkCoord;
 use crate::grid::World;
+use crate::steam::{chunk_overlaps_cold, for_each_tile_cell_where};
 use crate::temperature::Temperature;
 
 /// Cadence for the freeze/thaw scan. Matches seepage-class amortisation.
@@ -83,35 +84,35 @@ pub fn apply_pore_ice(world: &mut World, temp: &Temperature, freeze_point_c: f32
         }
     }
 
-    let cw = CHUNK_CELLS_W as i32;
-    let ch = CHUNK_CELLS_H as i32;
+    // Hot wet geothermal chunks stay `has_wet_pores` forever but never
+    // freeze — skip them (and warm tiles inside mixed chunks) instead of
+    // walking 4096 cells for `temp.at_cell > freeze`.
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_pores)
+        .filter(|(coord, c)| {
+            c.has_wet_pores && chunk_overlaps_cold(temp, **coord, freeze_point_c)
+        })
         .map(|(k, _)| *k)
         .collect();
+    let mut freeze: Vec<(i32, i32, u8)> = Vec::new();
     for coord in coords {
-        let Some(chunk) = world.chunks.get(&coord) else {
-            continue;
-        };
-        let base_gx = coord.cx * cw;
-        let base_gy = coord.cy * ch;
-        for ly in 0..CHUNK_CELLS_H {
-            for lx in 0..CHUNK_CELLS_W {
-                let cell = chunk.get(lx, ly);
+        for_each_tile_cell_where(
+            world,
+            temp,
+            coord,
+            |t| t <= freeze_point_c,
+            |gx, gy, _t_c, cell| {
                 if cell.sat.0 == 0 || !can_host_pore_ice(cell, &world.hydro) {
-                    continue;
+                    return;
                 }
-                let gx = world.wrap_x(base_gx + lx as i32);
-                let gy = base_gy + ly as i32;
-                if temp.at_cell(gx, gy) > freeze_point_c {
-                    continue;
-                }
-                // Already frozen: refresh amount if sat changed.
-                world.pore_ice.insert((gx, gy), cell.sat.0);
-            }
-        }
+                freeze.push((gx, gy, cell.sat.0));
+            },
+        );
+    }
+    for (gx, gy, sat) in freeze {
+        // Already frozen: refresh amount if sat changed.
+        world.pore_ice.insert((gx, gy), sat);
     }
 }
 
@@ -266,6 +267,40 @@ mod tests {
         assert_eq!(
             after, before,
             "frozen aquifer pores must not transmit confined pressure (before={before} after={after})"
+        );
+    }
+
+    #[test]
+    fn hot_wet_chunk_skips_freeze_scan() {
+        let mut w = saturated_sand_pair();
+        let warm = warm_temp(&w);
+        w.tick = PORE_ICE_EVERY;
+        apply_pore_ice(&mut w, &warm, PhaseConfig::default().freeze_point_c);
+        assert!(
+            !is_frozen(&w, 4, 1),
+            "warm wet pores must not freeze, and the scan must not invent marks"
+        );
+        assert!(w.pore_ice.is_empty());
+    }
+
+    #[test]
+    fn freeze_finds_cold_tile_in_mostly_warm_chunk() {
+        let mut w = saturated_sand_pair();
+        let freeze = PhaseConfig::default().freeze_point_c;
+        let mut temp = warm_temp(&w);
+        let (hx, hy) = temp.tile_of(4, 1);
+        temp.set_tile_c(hx, hy, -8.0);
+        w.tick = PORE_ICE_EVERY;
+        apply_pore_ice(&mut w, &temp, freeze);
+        assert!(
+            is_frozen(&w, 4, 1),
+            "a cold tile in a warm chunk must still freeze"
+        );
+        let (hx2, hy2) = temp.tile_of(2, 1);
+        assert_ne!((hx, hy), (hx2, hy2), "fixture must span two tiles");
+        assert!(
+            !is_frozen(&w, 2, 1),
+            "warm tiles in the same chunk must stay liquid"
         );
     }
 
