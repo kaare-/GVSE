@@ -841,6 +841,7 @@ impl Temperature {
     }
 
     /// Ground-crest climate (mountain tops are colder). Not for air.
+    #[allow(dead_code)] // retained for climate diagnostics / future HUD
     fn climate_baseline(&self, world: Option<&World>, hx: i32) -> f32 {
         let surf = self.column_surface_y_estimate(world, hx);
         self.climate_at_height(world, hx, surf)

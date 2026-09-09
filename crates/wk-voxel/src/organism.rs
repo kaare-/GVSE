@@ -99,8 +99,10 @@ const PLANKTON_LIFE_CYCLES: u64 = 4;
 /// Land plants / fungi live longer — senescence is softer than plankton blooms.
 const PLANT_LIFE_CYCLES: u64 = 16;
 /// Default-climate plankton life (tests / docs). Live ticks use [`life_ticks`].
+#[allow(dead_code)]
 const LIFE_TICKS: u64 = DEMO_DAY_TICKS * PLANKTON_LIFE_CYCLES;
 /// Default-climate plant life. Live ticks scale with [`ClimateConfig::total_ticks`].
+#[allow(dead_code)]
 const PLANT_LIFE_TICKS: u64 = DEMO_DAY_TICKS * PLANT_LIFE_CYCLES;
 
 /// Soft age-cap in ticks for the active climate clock.
@@ -3306,11 +3308,11 @@ pub fn bake_tip_into_body(atom: &mut Atom) {
     let mut next: Vec<BodyModule> = Vec::with_capacity(atom.body.len());
     let mut used: HashSet<(i16, i16)> = HashSet::new();
 
-    let mut place = |next: &mut Vec<BodyModule>,
-                     used: &mut HashSet<(i16, i16)>,
-                     mut nx: i16,
-                     mut ny: i16,
-                     m: ModuleId| {
+    let place = |next: &mut Vec<BodyModule>,
+                 used: &mut HashSet<(i16, i16)>,
+                 nx: i16,
+                 mut ny: i16,
+                 m: ModuleId| {
         let mut guard = 0;
         while !used.insert((nx, ny)) && guard < 32 {
             // Prefer a small droop/rise over stretching the log longer.

@@ -570,6 +570,7 @@ fn raft_rests_on_float_water_world(world: &World, gx: i32, litter_y: i32) -> boo
     false
 }
 
+#[allow(dead_code)] // float-raft rest probe; path uses other gate today
 fn raft_rests_on_float_water_ptrs(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,

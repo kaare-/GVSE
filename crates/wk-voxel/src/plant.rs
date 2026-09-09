@@ -2289,7 +2289,6 @@ fn module_dedupe_priority(m: ModuleId) -> u8 {
         ModuleId::Symbiont | ModuleId::ReproSpore => 1,
         ModuleId::Stem | ModuleId::Root | ModuleId::Digest | ModuleId::Hypha => 2,
         ModuleId::Photosystem => 3,
-        _ => 4,
     }
 }
 

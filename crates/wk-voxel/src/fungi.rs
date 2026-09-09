@@ -1827,7 +1827,7 @@ pub fn colonize_and_compost_cfg(
     };
     let threshold = cfg.soil_mycelium_threshold;
     let convert_odds = cfg.soil_convert_odds.max(1);
-    if let Some(mut c) = world.get_cell(ox, oy) {
+    if let Some(c) = world.get_cell(ox, oy) {
         let before = c.mycelium();
         if before < 255 {
             // Closer to the fungus → thicker threads (visible local change).

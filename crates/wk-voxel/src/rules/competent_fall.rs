@@ -338,16 +338,6 @@ struct Component {
   tag: u8,
 }
 
-/// Cheap "could this cell ever start moving?" gate used to seed body floods.
-///
-/// A buried or flat-seated cell whose only open neighbour is **above** can
-/// never fall, tip, or slide, so it must not seed a rigid-body flood. Without
-/// this, every surface cell of a natural ridge seeds a flood + morphological
-/// open every tick — that alone cost ~60 ms/tick on the demo world.
-///
-/// Deliberately a *superset* of the truly movable set: it only needs somewhere
-/// to go down (below, or a side with room below it).
-#[inline]
 /// True when `neighbor` is space this cell may move into.
 ///
 /// Untagged strata only fall into **Air**. Treating sand/soil as void made
@@ -363,6 +353,16 @@ fn seed_space_open(seed: &Cell, neighbor: &Cell) -> bool {
   detached && is_roll_displaceable(neighbor.material)
 }
 
+/// Cheap "could this cell ever start moving?" gate used to seed body floods.
+///
+/// A buried or flat-seated cell whose only open neighbour is **above** can
+/// never fall, tip, or slide, so it must not seed a rigid-body flood. Without
+/// this, every surface cell of a natural ridge seeds a flood + morphological
+/// open every tick — that alone cost ~60 ms/tick on the demo world.
+///
+/// Deliberately a *superset* of the truly movable set: it only needs somewhere
+/// to go down (below, or a side with room below it).
+#[inline]
 fn body_can_seed(world: &World, gx: i32, gy: i32, cell: &Cell) -> bool {
   // NOTE: deliberately does *not* short-circuit on MOBILE_ROCK. That flag is a
   // permanent flood-compatibility class, so treating it as "live" kept every
@@ -909,7 +909,7 @@ fn push_component_pieces(
   // was ~163 wake cells and ~4.7 k re-flooded cells per tick on a quiet world.
   //
   // Hanging pieces are never slept here: they are airborne and must retry.
-  let mut sleep_piece = |piece: &Vec<(i32, i32, Cell)>, settle: &mut Vec<(i32, i32)>| {
+  let sleep_piece = |piece: &Vec<(i32, i32, Cell)>, settle: &mut Vec<(i32, i32)>| {
     if hanging {
       return;
     }
@@ -1910,6 +1910,7 @@ fn impact_shatter(
   applied
 }
 
+#[allow(dead_code)] // cheese-grater soft embed parked; keep for retune
 fn soft_embed(_world: &mut World, _comp: &Component, _cfg: &CompetentFallConfig) -> u32 {
   0
 }
@@ -2432,6 +2433,7 @@ fn slide_would_rebound(world: &World, comp: &Component, dx: i32) -> bool {
 }
 
 /// True when a seated body still has a downhill neighbor and should stay awake.
+#[allow(dead_code)] // tip/slide probe retained for diagnostics
 fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
   let Some(below) = world.get_cell(gx, gy - 1) else {
     return true;
@@ -3331,7 +3333,6 @@ fn apply_competent_fall_inner(
     let mut to_sleep: Vec<(i32, i32)> = Vec::new();
     for comp in components {
       let anchor = comp_anchor(&comp);
-      let mut comp_moved = false;
       let floating = is_floating(world, &comp);
       // Constant fall speed: split the per-tick terminal velocity across
       // the topology passes so a body descends at a steady rate instead of
@@ -3361,7 +3362,6 @@ fn apply_competent_fall_inner(
           probe::bump(&probe::comp_fell);
           advance_streak(&mut fall_streak, anchor, 0, -drop);
           moved = true;
-          comp_moved = true;
         } else {
           probe::bump(&probe::comp_fall_refused);
         }
@@ -3452,7 +3452,6 @@ fn apply_competent_fall_inner(
           RollOutcome::Moved => {
             probe::bump(&probe::comp_rolled);
             moved = true;
-            comp_moved = true;
             continue;
           }
           RollOutcome::OutOfBudget => {
@@ -3468,7 +3467,6 @@ fn apply_competent_fall_inner(
           stats.impacts += 1;
           fall_streak.remove(&anchor);
           moved = true;
-          comp_moved = true;
           // Thin remnants often need a second snap after face shatter.
           if is_long_thin(&comp) {
             let _ = fracture_thin_necks(world, &comp);
@@ -3483,7 +3481,8 @@ fn apply_competent_fall_inner(
       // direction or was refused one. `starved` is the sole exception — it
       // only means the per-tick roll budget ran out, which says nothing about
       // this body, so it is retried next tick.
-      if !comp_moved && !starved {
+      // Reach here only when this body did not continue after a move.
+      if !starved {
         probe::bump(&probe::comp_slept);
         for &(x, y, _) in &comp.cells {
           to_sleep.push((x, y));
@@ -3531,6 +3530,7 @@ fn apply_competent_fall_inner(
 }
 
 /// True when roof collapse should defer to the body fall pass (air below).
+#[allow(dead_code)] // failure.rs hook; not wired this build
 pub fn roof_defer_to_competent_fall(
   enable: bool,
   material: MaterialId,
