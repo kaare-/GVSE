@@ -63,14 +63,13 @@ pub const PORE_BOIL_MAX_PER_CELL: u8 = 40;
 
 /// Liquid→gas expansion stand-in for pore boil drive.
 ///
-/// Real steam is ~1000–1700× liquid volume; we use a capped sim factor so each
-/// boiled sat unit budgets this many units of reverse seepage + aperture
-/// work. Mass stays flat (boiled sat ↔ sparse vapour); the factor is *force*,
-/// not minted water. Low values feel inert; dozens read as flash without
-/// pretending full 1700×. Heat above boil further scales the pulse
-/// ([`phase_heat_drive_scale`]) — a significant spike, still not Clausius
-/// full expansion.
-pub const PHASE_EXPANSION_DRIVE: u8 = 48;
+/// Real steam is ~1000–1700× liquid volume; we use a capped sim factor as
+/// *force* (reverse seepage + aperture work), not minted water. The old
+/// `boiled × expand` product saturated a `u8` drive at expand≈6 for any
+/// real pore flash, so Tab's 64× ceiling did nothing on hot cores. Expand
+/// is now the primary force knob (default 96); heat scales it; boiled mass
+/// only mildly amplifies. Still deliberately far below Clausius 1700×.
+pub const PHASE_EXPANSION_DRIVE: u8 = 96;
 
 /// Heat multiplier on phase-expansion force above boil.
 ///
@@ -92,12 +91,20 @@ pub fn expansion_drive_units(boiled: u8, expand: u8, temp_c: f32, boil_c: f32) -
         return 0;
     }
     let heat = phase_heat_drive_scale(temp_c, boil_c);
-    let raw = (boiled as f32) * (expand.max(1) as f32) * heat;
+    // Expand is the force knob (sim volume-ratio stand-in). Heat scales it.
+    // Boiled mass only swings ±50% so a token flash does not shove like a
+    // full pore — without `boiled * expand`, which hit the u8 ceiling at
+    // tiny expand values and made Tab 64× identical to 16× on hot rock.
+    let boil_amp = 0.5 + 0.5 * ((boiled as f32) / 40.0).clamp(0.0, 1.0);
+    let raw = (expand.max(1) as f32) * heat * boil_amp;
     raw.round().clamp(1.0, 255.0) as u8
 }
 
 /// How many reverse-seepage hops a phase-expansion pulse may travel.
-pub const REVERSE_SEEP_HOPS: u8 = 10;
+///
+/// Hot sealed cores need range after sinter; 10 left pipes stubby. Extra
+/// hops scale further from expand in [`boil_hot_pores`].
+pub const REVERSE_SEEP_HOPS: u8 = 16;
 
 /// Legacy rise knob (open vents still use buoyant pour after flood).
 pub const RISE_MAX_PER_CELL: u8 = 64;
@@ -1202,7 +1209,12 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
     let ch = CHUNK_CELLS_H as i32;
     let boil = cfg.boil_point_c;
     let expand = cfg.phase_expansion_drive.max(1);
-    let hops = cfg.reverse_seep_hops.max(1);
+    // Stronger expansion buys more reach: +1 hop per 32 drive units.
+    let hops = cfg
+        .reverse_seep_hops
+        .max(1)
+        .saturating_add(expand / 32)
+        .min(32);
     let mut jobs: Vec<(i32, i32, u8)> = Vec::new();
     let coords: Vec<ChunkCoord> = world
         .chunks
@@ -2436,15 +2448,21 @@ mod tests {
     #[test]
     fn phase_expansion_drive_exceeds_boiled_mass() {
         // Expansion factor is force: reverse push budget ≫ sat converted.
-        assert!(PHASE_EXPANSION_DRIVE >= 8);
+        assert!(PHASE_EXPANSION_DRIVE >= 64);
         let boiled = 10u8;
-        let drive = (boiled as u16)
-            .saturating_mul(PHASE_EXPANSION_DRIVE as u16)
-            .min(255) as u8;
+        let drive = expansion_drive_units(boiled, PHASE_EXPANSION_DRIVE, 100.0, 100.0);
         assert!(
             drive > boiled.saturating_mul(4),
             "drive={drive} must dwarf boiled={boiled}"
         );
+        // Hotter rock must push harder (until the u8 ceiling).
+        let cool = expansion_drive_units(10, 64, 100.0, 100.0);
+        let hot = expansion_drive_units(10, 64, 180.0, 100.0);
+        assert!(hot > cool, "superheat must raise drive ({cool} → {hot})");
+        // Tab-high expand must out-shove a token expand at the same heat.
+        let low = expansion_drive_units(20, 16, 100.0, 100.0);
+        let high = expansion_drive_units(20, 96, 100.0, 100.0);
+        assert!(high > low, "expand knob must matter ({low} → {high})");
     }
 
     #[test]
@@ -2835,11 +2853,11 @@ mod tests {
     #[test]
     fn reverse_seep_hops_default_reaches_farther() {
         assert!(
-            REVERSE_SEEP_HOPS >= 8,
+            REVERSE_SEEP_HOPS >= 12,
             "default reverse-seep range must be long enough to feed conduits"
         );
         assert!(
-            PHASE_EXPANSION_DRIVE >= 40,
+            PHASE_EXPANSION_DRIVE >= 64,
             "default phase drive must shove more than a token pulse"
         );
         let mut w = World::new(67);
@@ -2961,7 +2979,7 @@ mod tests {
         let mut hot = temp_fill(&w, 180.0);
         let cfg = SteamConfig {
             enable_pore_boil: true,
-            phase_expansion_drive: 48,
+            phase_expansion_drive: 96,
             reverse_seep_hops: 10,
             pore_boil_max_per_cell: 48,
             ..SteamConfig::default()
@@ -3024,7 +3042,7 @@ mod tests {
         let mut hot = temp_fill(&w, 175.0);
         let cfg = SteamConfig {
             enable_pore_boil: true,
-            phase_expansion_drive: 48,
+            phase_expansion_drive: 96,
             reverse_seep_hops: 10,
             pore_boil_max_per_cell: 64,
             ..SteamConfig::default()
