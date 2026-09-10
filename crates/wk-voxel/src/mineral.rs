@@ -97,6 +97,12 @@ const STANDING_BED_HOLD: u16 = 16;
 /// lake column can grow Flowstone without banking a full cell of load first.
 const SINTER_MIN_LOAD: u16 = 16;
 
+/// Aperture a vent mouth must leave open in the floor conduit.
+///
+/// Walls may line; the lumen stays a pipe. Reverse-seep uses the same
+/// cut so throat precip cannot plug a working chimney.
+pub const VENT_PIPE_LUMEN: u8 = 176;
+
 /// Dissolved load carried by the water in this cell.
 #[inline]
 pub fn dissolved_at(world: &World, gx: i32, gy: i32) -> u16 {
@@ -494,6 +500,92 @@ pub fn precipitate_artesian_warm(world: &mut World, gx: i32, gy: i32, warmth: f3
     let div = ARTESIAN_CEILING_DIVISOR as f32 + warmth * ARTESIAN_WARM_DIVISOR_SPAN;
     let ceiling = (base / div).floor() as u16;
     precipitate_over(world, gx, gy, ceiling)
+}
+
+/// Depressurising spring / underwater vent: grow sinter at the mouth.
+///
+/// [`precipitate_over`] cements the floor first. That plugs an already-open
+/// limestone conduit before a chimney can form. This path prefers minting
+/// Flowstone in the vent Air (or lake) and only lines neighbours that are
+/// already tighter than [`VENT_PIPE_LUMEN`].
+pub fn precipitate_vent_mouth(world: &mut World, gx: i32, gy: i32, warmth: f32) -> u16 {
+    let warmth = warmth.clamp(0.0, 1.0);
+    let base = carrying_capacity(world, gx, gy) as f32;
+    let div = ARTESIAN_CEILING_DIVISOR as f32 + warmth * ARTESIAN_WARM_DIVISOR_SPAN;
+    let ceiling = (base / div).floor() as u16;
+    let gx = world.wrap_x(gx);
+    let load = dissolved_at(world, gx, gy);
+    if load == 0 || load <= ceiling {
+        return 0;
+    }
+    let excess = load - ceiling;
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return 0;
+    };
+    if cell.material != MaterialId::Air {
+        return precipitate_over(world, gx, gy, ceiling);
+    }
+    if excess >= MINERAL_PER_CELL {
+        let seated = matches!(
+            world.get_cell(gx, gy - 1),
+            Some(b) if b.material != MaterialId::Air
+        );
+        if seated {
+            let used = take_dissolved(world, gx, gy, MINERAL_PER_CELL);
+            let mut deposit = Cell::solid(DEPOSIT_MATERIAL);
+            deposit.pore = 0;
+            let cap = water_capacity_cell(deposit, &world.hydro);
+            let keep = cell.sat.0.min(cap);
+            let spill = cell.sat.0.saturating_sub(keep);
+            deposit.sat = Sat(keep);
+            world.set_cell(gx, gy, deposit);
+            if spill > 0 {
+                push_water_up(world, gx, gy + 1, spill);
+            }
+            return used;
+        }
+    }
+    let minted = mint_seated_sinter(world, gx, gy, excess);
+    if minted > 0 {
+        return minted;
+    }
+    deposit_vent_apron(world, gx, gy, excess)
+}
+
+/// Cement loose grains around a vent; line only a tight floor.
+///
+/// Lateral competent rock is the approaching conduit — occluding it from
+/// the mouth is how springs used to plug themselves. Open floors
+/// (`pore > VENT_PIPE_LUMEN`) stay a lumen so sinter can grow in the vent.
+fn deposit_vent_apron(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
+    if let Some(floor) = world.get_cell(gx, gy - 1) {
+        if cemented_form(floor.material).is_some() {
+            let used = cement_cell(world, gx, gy - 1, excess);
+            if used > 0 {
+                return used;
+            }
+        }
+        if is_soluble_rock(floor.material) && floor.pore <= VENT_PIPE_LUMEN {
+            let used = occlude_pore(world, gx, gy - 1, excess);
+            if used > 0 {
+                return used;
+            }
+        }
+    }
+    for (dx, dy) in [(-1, 0), (1, 0), (-1, -1), (1, -1)] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        let Some(n) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if cemented_form(n.material).is_some() {
+            let used = cement_cell(world, nx, ny, excess);
+            if used > 0 {
+                return used;
+            }
+        }
+    }
+    0
 }
 
 /// Shared core: drop whatever load exceeds `ceiling`.
@@ -1044,6 +1136,38 @@ mod tests {
             crate::audit::mineral_total(&cold),
             baseline,
             "cold artesian must conserve mineral"
+        );
+    }
+
+    #[test]
+    fn vent_mouth_grows_sinter_without_plugging_open_floor() {
+        let mut w = bed(23);
+        let mut floor = Cell::solid(MaterialId::Limestone);
+        floor.pore = 200;
+        w.set_cell(4, 1, floor);
+        let mut vent = Cell::air();
+        vent.sat = Sat(200);
+        w.set_cell(4, 2, vent);
+        add_dissolved(&mut w, 4, 2, 120);
+        let before = crate::audit::mineral_total(&w);
+        let used = precipitate_vent_mouth(&mut w, 4, 2, 1.0);
+        assert!(used > 0, "vent mouth must drop load");
+        assert_eq!(crate::audit::mineral_total(&w), before);
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().pore,
+            200,
+            "open conduit floor must stay a lumen"
+        );
+        let mouth = w.get_cell(4, 2).unwrap();
+        assert_eq!(
+            mouth.material,
+            MaterialId::Flowstone,
+            "load should mint sinter in the vent, got {mouth:?}"
+        );
+        assert!(
+            mouth.pore > 128,
+            "fresh sinter chimney should stay porous, pore={}",
+            mouth.pore
         );
     }
 
