@@ -1397,6 +1397,7 @@ async fn main() {
                                 y,
                                 temp_c,
                                 settings.steam.boil_point_c,
+                                settings.steam.phase_expansion_drive,
                             );
                             if kind == wk_voxel::CellPressureKind::None || p < 0.03 {
                                 continue;
@@ -1706,6 +1707,7 @@ async fn main() {
                     corpse,
                     sw,
                     settings.steam.boil_point_c,
+                    settings.steam.phase_expansion_drive,
                 );
             }
         }

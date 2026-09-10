@@ -205,6 +205,7 @@ pub fn draw_block_inspector(
     corpse: Option<(usize, &Corpse)>,
     sw: f32,
     boil_c: f32,
+    expand: u8,
 ) {
     let hum = humidity.at_cell(gx, gy);
     let temp_c = temperature.at_cell(gx, gy);
@@ -261,7 +262,7 @@ pub fn draw_block_inspector(
             lines.push(format!("flags=0x{:02X}", c.flags.0));
             let steam = steam_at(world, gx, gy);
             let (press, press_kind) =
-                cell_pressure_norm_with_boil(world, gx, gy, temp_c, boil_c);
+                cell_pressure_norm_with_boil(world, gx, gy, temp_c, boil_c, expand);
             // Hot saturated rock used to hide pressure entirely — cavity_h only
             // fired for steam seats / hot wet Air. Pore flash + cavity share one line.
             if steam > 0 || press_kind != CellPressureKind::None || press > 0.02 {
