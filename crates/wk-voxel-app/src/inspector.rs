@@ -5,7 +5,7 @@ use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     is_fungus, is_land_plant, permeability_cell, soft_litter_at, cave_humidity_at,
-    cell_pressure_norm_with_boil,
+    cell_pressure_norm_with_boil, prepare_leftover_pressure,
     steam_at, steam_pressure_norm, vessel_is_boiler, void_is_confined, water_capacity_cell,
     Atom, Cell, CellPressureKind,
     Corpse, GeotechMap, Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS,
@@ -261,6 +261,7 @@ pub fn draw_block_inspector(
             }
             lines.push(format!("flags=0x{:02X}", c.flags.0));
             let steam = steam_at(world, gx, gy);
+            prepare_leftover_pressure(world, temperature, boil_c, expand);
             let (press, press_kind) =
                 cell_pressure_norm_with_boil(world, gx, gy, temp_c, boil_c, expand);
             // Hot saturated rock used to hide pressure entirely — cavity_h only

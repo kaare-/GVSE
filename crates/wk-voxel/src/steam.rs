@@ -24,23 +24,26 @@
 //! See docs/VOXEL_GEYSER.md + VOXEL_THERMAL.md.
 
 use std::cell::RefCell;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::{
-    is_flow_erodible, is_grain, permeability_cell, water_capacity_cell, Cell, Sat,
+    is_flow_erodible, is_grain, permeability_cell, retained_sat_cell, water_capacity_cell, Cell,
+    Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
+use crate::humidity::Humidity;
 use crate::mineral::{
-    add_dissolved, carry_with_water, dissolved_at, emit_from_dissolved_rock,
-    is_soluble_rock, precipitate_artesian_warm, precipitate_at, precipitate_dry_cell,
-    precipitate_vent_mouth, pressure_sinter_cell, widen_aperture, VENT_PIPE_LUMEN,
+    add_dissolved, carry_with_water, dissolved_at, emit_from_dissolved_rock, is_soluble_rock,
+    precipitate_artesian_warm, precipitate_at, precipitate_dry_cell, precipitate_vent_mouth,
+    pressure_sinter_cell, widen_aperture, VENT_PIPE_LUMEN,
 };
 use crate::sediment::{add_suspended, is_suspendable, SEDIMENT_PER_CELL};
-use crate::humidity::Humidity;
 use crate::temperature::Temperature;
 
 /// Cadence for boil / flood / assault / recondense (FPS: not every tick).
@@ -265,10 +268,29 @@ struct PressMemo {
     map: FxHashMap<(i32, i32), f32>,
 }
 
+/// Leftover volume spreading from boiling pores along least resistance.
+#[derive(Default)]
+struct LeftoverMemo {
+    world_id: u64,
+    tick: u64,
+    boil_bits: u32,
+    expand: u8,
+    map: FxHashMap<(i32, i32), f32>,
+}
+
+/// One boiling cell at expand N may charge about N neighbour seats.
+const LEFTOVER_FIELD_CELLS: usize = 4096;
+
+/// Fade leftover *display* by path cost. Surplus volume still reaches
+/// ~expand seats; without this every charged cell paints ~0.99 and P
+/// reads as a thermal blob instead of a mound or a vein.
+const LEFTOVER_COST_FADE: f32 = 32.0;
+
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
     static PRESS_MEMO: RefCell<PressMemo> = RefCell::new(PressMemo::default());
+    static LEFTOVER_MEMO: RefCell<LeftoverMemo> = RefCell::new(LeftoverMemo::default());
 }
 
 fn bind_sky_probe(world: &World) {
@@ -861,6 +883,250 @@ pub enum CellPressureKind {
     None,
 }
 
+/// Rebuild the leftover-volume field for P overlay + water-table shove.
+///
+/// Each boiling wet cell injects `mass × expand − seat`. Neighbours absorb
+/// one seat of that volume along the cheapest perm / upward path, so a
+/// single cell at expand 192 can press about 192 seats — a mound in
+/// homogeneous rock, a finger in a vein. Display fades by path cost so
+/// P is not a flat 0.99 thermal blob.
+pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32, expand: u8) {
+    let boil = if boil_c.is_finite() {
+        boil_c
+    } else {
+        BOIL_POINT_C
+    };
+    let expand = expand.max(1);
+    let boil_bits = boil.to_bits();
+    let id = world.chunk_cache_id.get();
+    LEFTOVER_MEMO.with(|slot| {
+        let mut memo = slot.borrow_mut();
+        if memo.world_id == id
+            && memo.tick == world.tick
+            && memo.boil_bits == boil_bits
+            && memo.expand == expand
+        {
+            return;
+        }
+        memo.world_id = id;
+        memo.tick = world.tick;
+        memo.boil_bits = boil_bits;
+        memo.expand = expand;
+        rebuild_leftover_field(world, temp, boil, expand, &mut memo);
+    });
+}
+
+fn leftover_field_lookup(world: &World, gx: i32, gy: i32, boil_c: f32, expand: u8) -> f32 {
+    let boil_bits = if boil_c.is_finite() {
+        boil_c.to_bits()
+    } else {
+        BOIL_POINT_C.to_bits()
+    };
+    let expand = expand.max(1);
+    let id = world.chunk_cache_id.get();
+    let gx = world.wrap_x(gx);
+    LEFTOVER_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        if memo.world_id != id || memo.boil_bits != boil_bits || memo.expand != expand {
+            return 0.0;
+        }
+        memo.map.get(&(gx, gy)).copied().unwrap_or(0.0)
+    })
+}
+
+fn leftover_step_cost(perm: u8, dy: i32) -> u32 {
+    let resist = 1u32 + (256 / (perm.max(1) as u32));
+    let vert = if dy > 0 {
+        0
+    } else if dy < 0 {
+        6
+    } else {
+        2
+    };
+    resist + vert
+}
+
+fn rebuild_leftover_field(
+    world: &World,
+    temp: &Temperature,
+    boil: f32,
+    expand: u8,
+    memo: &mut LeftoverMemo,
+) {
+    memo.map.clear();
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
+        .map(|(k, _)| *k)
+        .collect();
+    let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
+    for coord in coords {
+        for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
+            if cell.material == MaterialId::Air || cell.sat.0 == 0 {
+                return;
+            }
+            let cap = water_capacity_cell(cell, &world.hydro) as u32;
+            if cap == 0 {
+                return;
+            }
+            let vol = vapor_volume_units(cell.sat.0 as u32, t_c, boil, expand);
+            let surplus = overpressure_units(vol, cap);
+            if surplus == 0 {
+                return;
+            }
+            heap.push((Reverse(0), world.wrap_x(gx), gy, surplus));
+        });
+    }
+    let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
+    while let Some((Reverse(cost), gx, gy, remaining)) = heap.pop() {
+        if remaining == 0 || !seen.insert((gx, gy)) {
+            continue;
+        }
+        if memo.map.len() >= LEFTOVER_FIELD_CELLS {
+            break;
+        }
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if cell.material == MaterialId::Air {
+            continue;
+        }
+        let seat = water_capacity_cell(cell, &world.hydro).max(1) as u32;
+        let fade = LEFTOVER_COST_FADE / (LEFTOVER_COST_FADE + cost as f32);
+        let pack = leftover_pack_norm(remaining.saturating_add(seat), seat) * fade;
+        if pack > 0.02 {
+            memo.map.insert((gx, gy), pack);
+        }
+        let next = remaining.saturating_sub(seat);
+        if next == 0 {
+            continue;
+        }
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            if seen.contains(&(nx, ny)) {
+                continue;
+            }
+            let Some(n) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if n.material == MaterialId::Air || n.material == MaterialId::Bedrock {
+                continue;
+            }
+            let perm = permeability_cell(n, &world.hydro);
+            if perm == 0 && water_capacity_cell(n, &world.hydro) == 0 {
+                continue;
+            }
+            let step = leftover_step_cost(perm.max(1), dy);
+            heap.push((Reverse(cost.saturating_add(step)), nx, ny, next));
+        }
+    }
+}
+
+fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
+    let charged: Vec<(i32, i32, f32)> = LEFTOVER_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        let mut v: Vec<(i32, i32, f32)> = memo.map.iter().map(|(&(x, y), &p)| (x, y, p)).collect();
+        v.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    });
+    if charged.is_empty() {
+        return;
+    }
+    let in_field: FxHashSet<(i32, i32)> = charged.iter().map(|&(x, y, _)| (x, y)).collect();
+    for _ in 0..8 {
+        for &(gx, gy, _) in &charged {
+            let Some(src) = world.get_cell(gx, gy) else {
+                continue;
+            };
+            if src.material == MaterialId::Air || src.sat.0 == 0 {
+                continue;
+            }
+            let retain = retained_sat_cell(src, &world.hydro);
+            let mobile = src.sat.0.saturating_sub(retain);
+            if mobile == 0 {
+                continue;
+            }
+            let mut best_rock: Option<(i32, i32, i32, u8)> = None;
+            let mut best_vent: Option<(i32, i32, i32, u8)> = None;
+            for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
+                let tx = world.wrap_x(gx + dx);
+                let ty = gy + dy;
+                let Some(dst) = world.get_cell(tx, ty) else {
+                    continue;
+                };
+                let vent = is_steam_discharge_vent(world, tx, ty, dst);
+                if dst.material == MaterialId::Air {
+                    if vent {
+                        let s = 100 + dy.max(0) * 40;
+                        if best_vent.is_none_or(|(sc, _, _, _)| s > sc) {
+                            best_vent = Some((s, tx, ty, mobile));
+                        }
+                    }
+                    continue;
+                }
+                let cap = water_capacity_cell(dst, &world.hydro);
+                let room = cap.saturating_sub(dst.sat.0);
+                if room == 0 {
+                    continue;
+                }
+                if permeability_cell(dst, &world.hydro) == 0 {
+                    continue;
+                }
+                let mut s = room as i32 + permeability_cell(dst, &world.hydro) as i32 * 8;
+                s += dy.max(0) * 8_000;
+                if in_field.contains(&(tx, ty)) {
+                    s += 3_000;
+                }
+                if best_rock.is_none_or(|(sc, _, _, _)| s > sc) {
+                    best_rock = Some((s, tx, ty, room));
+                }
+            }
+            let Some((_, tx, ty, room)) = best_rock.or(best_vent) else {
+                continue;
+            };
+            let moved = mobile.min(room).min(24);
+            if moved == 0 {
+                continue;
+            }
+            let before = src.sat.0;
+            let mut s = src;
+            s.sat = Sat(s.sat.0 - moved);
+            world.set_cell(gx, gy, s);
+            if let Some(mut d) = world.get_cell(tx, ty) {
+                if d.material == MaterialId::Air {
+                    let left = crate::displace::park_orphan_water(world, tx, ty, moved as u32);
+                    if left > 0 {
+                        if let Some(mut back) = world.get_cell(gx, gy) {
+                            back.sat = Sat(back.sat.0.saturating_add(left.min(255) as u8));
+                            world.set_cell(gx, gy, back);
+                        }
+                    }
+                } else {
+                    let put =
+                        moved.min(water_capacity_cell(d, &world.hydro).saturating_sub(d.sat.0));
+                    d.sat = Sat(d.sat.0.saturating_add(put));
+                    world.set_cell(tx, ty, d);
+                    if put < moved {
+                        if let Some(mut back) = world.get_cell(gx, gy) {
+                            back.sat = Sat(back.sat.0.saturating_add(moved - put));
+                            world.set_cell(gx, gy, back);
+                        }
+                    }
+                }
+            }
+            let now = world.get_cell(gx, gy).map(|c| c.sat.0).unwrap_or(before);
+            let actually = before.saturating_sub(now);
+            if actually == 0 {
+                continue;
+            }
+            carry_with_water(world, (gx, gy), (tx, ty), actually, before);
+            temp.advect_with_mass(gx, gy, tx, ty, actually);
+        }
+    }
+}
+
 /// How much expanded volume does not fit the equilibrium seat (0..=1).
 ///
 /// `1 - seat/volume` so 7/14 rock at expand 100 is nearly as packed as
@@ -918,7 +1184,8 @@ pub fn cell_pressure_norm_with_boil(
         };
     }
 
-    // Rock / pores: the cell is the vessel. No Air seat required.
+    // Rock / pores: local leftover plus the transmitted field (least
+    // resistance / water-table mound), not a per-cell thermal average.
     let cap = water_capacity_cell(cell, &world.hydro);
     let vol = vapor_volume_units(cell.sat.0 as u32, temp_c, boil, expand);
     let mut pack = leftover_pack_norm(vol, cap as u32);
@@ -926,6 +1193,7 @@ pub fn cell_pressure_norm_with_boil(
         let gas_vol = vapor_volume_units(steam as u32, temp_c, boil, expand);
         pack = pack.max(leftover_pack_norm(gas_vol, cap.max(1) as u32));
     }
+    pack = pack.max(leftover_field_lookup(world, gx, gy, boil, expand));
     if pack < 0.02 {
         return (0.0, CellPressureKind::None);
     }
@@ -1078,13 +1346,7 @@ fn bleed_steam_into_open_vent(world: &mut World, seats: &[(i32, i32)]) {
 }
 
 /// Prefer injecting boiled steam into void Air above / beside the source.
-fn inject_steam_near(
-    world: &mut World,
-    gx: i32,
-    gy: i32,
-    amt: u8,
-    max_cells: usize,
-) -> u8 {
+fn inject_steam_near(world: &mut World, gx: i32, gy: i32, amt: u8, max_cells: usize) -> u8 {
     if amt == 0 {
         return 0;
     }
@@ -1118,11 +1380,7 @@ fn inject_steam_near(
 ///
 /// **Hard rule:** sealed / roofed vapour never dumps into the rain lottery.
 /// Unroofed hot free water is left for accelerated evap → sky Humidity.
-pub fn apply_steam(
-    world: &mut World,
-    temp: &mut Temperature,
-    cfg: &SteamConfig,
-) {
+pub fn apply_steam(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig) {
     apply_steam_with_weather(world, temp, cfg, None);
 }
 
@@ -1151,9 +1409,13 @@ pub fn apply_steam_with_weather(
     scrub_invalid_steam_seats(world, max_cells);
     recondense_cool(world, temp, recondense_below);
     boil_hot_air(world, temp, cfg, max_cells);
+    // Build the leftover mound before pore shove so reverse-seep can
+    // prefer charged rock seats over a side-lake magnet.
+    prepare_leftover_pressure(world, temp, boil, cfg.phase_expansion_drive);
     if cfg.enable_pore_boil {
         boil_hot_pores(world, temp, cfg, max_cells);
     }
+    shove_phreatic_bump(world, temp);
     // Flood + assault only on cadence (every-tick flood crushed FPS).
     if !world.steam.is_empty() {
         flood_equalize_steam(world, cfg, max_cells);
@@ -1313,10 +1575,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                         // Confined pockets may cross standing-water Air to reach
                         // a surface-connected flooded vent. Open plumes stay on
                         // gas voids so they don't crawl through lakes.
-                        if seed_confined
-                            || is_steam_void(n)
-                            || steam_at(world, nx, ny) > 0
-                        {
+                        if seed_confined || is_steam_void(n) || steam_at(world, nx, ny) > 0 {
                             queue.push((nx, ny));
                         }
                     }
@@ -1481,13 +1740,15 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
     let fp = sparse_amt_fp(&world.steam);
     let warm_fp = match temp {
         None => 0,
-        Some(t) => world
-            .steam
-            .keys()
-            .next()
-            .map(|&(x, y)| t.at_cell(x, y).to_bits() as u64)
-            .unwrap_or(0)
-            ^ 1,
+        Some(t) => {
+            world
+                .steam
+                .keys()
+                .next()
+                .map(|&(x, y)| t.at_cell(x, y).to_bits() as u64)
+                .unwrap_or(0)
+                ^ 1
+        }
     };
     if let Some(hit) = STEAM_HAZE_MEMO.with(|slot| {
         let m = slot.borrow();
@@ -1572,10 +1833,10 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
                 if !visited.insert((nx, ny)) {
                     continue;
                 }
-                if world
-                    .get_cell(nx, ny)
-                    .is_some_and(|n| n.material == MaterialId::Air && (is_steam_void(n) || steam_at(world, nx, ny) > 0))
-                {
+                if world.get_cell(nx, ny).is_some_and(|n| {
+                    n.material == MaterialId::Air
+                        && (is_steam_void(n) || steam_at(world, nx, ny) > 0)
+                }) {
                     queue.push((nx, ny));
                 }
             }
@@ -1622,7 +1883,16 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
     let mut seats: FxHashSet<(i32, i32)> = tile_mass.keys().copied().collect();
     let occupied: Vec<(i32, i32)> = seats.iter().copied().collect();
     for (hx, hy) in occupied {
-        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+        for (dx, dy) in [
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (1, 1),
+        ] {
             seats.insert((hx + dx, hy + dy));
         }
     }
@@ -1644,12 +1914,14 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
                 if !void_is_confined(world, gx, gy) {
                     continue;
                 }
-                let mass = sample_steam_tile_bilinear(&tile_mass, tc, gx as f32 + 0.5, gy as f32 + 0.5);
+                let mass =
+                    sample_steam_tile_bilinear(&tile_mass, tc, gx as f32 + 0.5, gy as f32 + 0.5);
                 if mass <= 0.05 {
                     continue;
                 }
-                let press = sample_steam_tile_bilinear(&tile_press, tc, gx as f32 + 0.5, gy as f32 + 0.5)
-                    .clamp(0.0, 1.0);
+                let press =
+                    sample_steam_tile_bilinear(&tile_press, tc, gx as f32 + 0.5, gy as f32 + 0.5)
+                        .clamp(0.0, 1.0);
                 // Pressure acts like denser humidity — raises visual mass, not opacity ceiling.
                 let boosted = mass * (1.0 + press * 1.25);
                 let norm = (boosted / peak).clamp(0.0, 1.0);
@@ -1829,20 +2101,9 @@ fn assault_steam_walls(world: &mut World, temp: &mut Temperature, cfg: &SteamCon
                 let up_bias = if dy > 0 { 0.85 } else { 0.4 };
                 let throughput = ((80.0 + press * 90.0) * up_bias) as u8;
                 let scale = (1.6 + press * 2.8) * up_bias;
-                if widen_aperture(
-                    world,
-                    tx,
-                    ty,
-                    throughput.max(1),
-                    scale,
-                    0x0A51_u64,
-                    false,
-                ) {
+                if widen_aperture(world, tx, ty, throughput.max(1), scale, 0x0A51_u64, false) {
                     assaults = assaults.saturating_add(1);
-                } else if world
-                    .get_cell(tx, ty)
-                    .is_some_and(|c| c.pore > wall.pore)
-                {
+                } else if world.get_cell(tx, ty).is_some_and(|c| c.pore > wall.pore) {
                     assaults = assaults.saturating_add(1);
                 }
             }
@@ -1850,11 +2111,7 @@ fn assault_steam_walls(world: &mut World, temp: &mut Temperature, cfg: &SteamCon
     }
 }
 
-fn chunk_tiles_any(
-    temp: &Temperature,
-    coord: ChunkCoord,
-    pred: impl Fn(f32) -> bool,
-) -> bool {
+fn chunk_tiles_any(temp: &Temperature, coord: ChunkCoord, pred: impl Fn(f32) -> bool) -> bool {
     let tc = temp.tile_cols.max(1);
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
@@ -1946,12 +2203,7 @@ fn for_each_hot_tile_cell(
     for_each_tile_cell_where(world, temp, coord, |t| t >= min_c, visit);
 }
 
-fn boil_hot_air(
-    world: &mut World,
-    temp: &mut Temperature,
-    cfg: &SteamConfig,
-    max_cells: usize,
-) {
+fn boil_hot_air(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, max_cells: usize) {
     let boil = cfg.boil_point_c;
     let prefer_confined = world.steam.len() + 32 >= max_cells;
     let mut jobs: Vec<(u16, i32, i32, u8)> = Vec::new();
@@ -2096,8 +2348,7 @@ impl SteamAmtTopK {
     }
 
     fn into_sorted_jobs(mut self) -> Vec<(i32, i32, u8)> {
-        self.items
-            .sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        self.items.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         self.items
             .into_iter()
             .map(|(_, _, gx, gy, amt)| (gx, gy, amt))
@@ -2183,20 +2434,18 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
         // Roofed void may take distilled gas (cavity flash). Then leftover
         // shoves the groundwater straw. Dry-rock fumaroles are last.
         let flashed = try_gas_climb(world, gx, gy, take, max_cells, false);
-        reverse_seep_chain(world, temp, gx, gy, drive, hops);
-        let sat_left = world
-            .get_cell(gx, gy)
-            .map(|c| c.sat.0)
-            .unwrap_or(0);
-        if sat_left > 0 && flashed == 0 {
+        let seeped = reverse_seep_chain(world, temp, gx, gy, drive, hops);
+        let sat_left = world.get_cell(gx, gy).map(|c| c.sat.0).unwrap_or(0);
+        // Dry-rock fumarole only when liquid could not leave. Otherwise
+        // leftover is a groundwater shove, not a steam chimney through
+        // the dry seats the water table should occupy.
+        if sat_left > 0 && flashed == 0 && seeped == 0 {
             let _ = try_gas_climb(world, gx, gy, take.min(sat_left), max_cells, true);
         }
-        if world.get_cell(gx, gy).is_some_and(|c| {
-            matches!(
-                c.material,
-                MaterialId::LooseRock | MaterialId::Gravel
-            )
-        }) {
+        if world
+            .get_cell(gx, gy)
+            .is_some_and(|c| matches!(c.material, MaterialId::LooseRock | MaterialId::Gravel))
+        {
             let _ = pressure_sinter_cell(world, gx, gy);
             hydrothermal_solute_pulse(world, gx, gy, drive);
         }
@@ -2376,12 +2625,7 @@ fn find_sky_mouth(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
 
 /// Prefer nearby Air (especially above) for freshly boiled pore steam.
 #[allow(dead_code)]
-fn find_steam_seat(
-    world: &World,
-    gx: i32,
-    gy: i32,
-    max_cells: usize,
-) -> Option<(i32, i32)> {
+fn find_steam_seat(world: &World, gx: i32, gy: i32, max_cells: usize) -> Option<(i32, i32)> {
     const DELTAS: [(i32, i32); 10] = [
         (0, 1),
         (0, 2),
@@ -2434,8 +2678,7 @@ fn open_pore_steam_seat(
             if !is_steam_void(wall) {
                 continue;
             }
-            if can_admit_new_steam_cell(world, tx, ty, max_cells) || steam_at(world, tx, ty) > 0
-            {
+            if can_admit_new_steam_cell(world, tx, ty, max_cells) || steam_at(world, tx, ty) > 0 {
                 return Some((tx, ty));
             }
             continue;
@@ -2479,12 +2722,15 @@ fn reverse_seep_chain(
     mut gy: i32,
     mut drive: u8,
     hops: u8,
-) {
+) -> u8 {
+    let mut total = 0u8;
     for _ in 0..hops {
         if drive == 0 {
-            return;
+            return total;
         }
-        let (moved, dest) = reverse_push_pore_water_to(world, temp, gx, gy, drive);
+        let mut seen = FxHashSet::default();
+        let (moved, dest, parked_in_room) =
+            reverse_push_pore_water_inner(world, temp, gx, gy, drive, 16, &mut seen);
         if moved == 0 {
             // Host may have flashed dry after boil — keep the pulse moving
             // through a wet neighbour so conduits still lengthen.
@@ -2510,24 +2756,31 @@ fn reverse_seep_chain(
                 // Dry lid frontier: crack upward competent rock so the next
                 // cadence can wet/widen a climb path (never mint Air).
                 crack_dry_upward_frontier(world, gx, gy, drive);
-                return;
+                return total;
             }
             continue;
         }
+        total = total.saturating_add(moved);
         let Some((nx, ny)) = dest else {
-            return;
+            return total;
         };
         if world
             .get_cell(nx, ny)
             .is_some_and(|c| c.material == MaterialId::Air)
         {
             // Reached a void — remaining drive vents next cadence.
-            return;
+            return total;
+        }
+        // Unsaturated rock seat: leftover parked as a local water-table
+        // rise. Do not keep hopping toward a distant lake magnet.
+        if parked_in_room {
+            return total;
         }
         gx = nx;
         gy = ny;
         drive = drive.saturating_sub(moved / 2).max(moved / 4);
     }
+    total
 }
 
 /// Score one reverse-seep neighbour. Higher = easier path.
@@ -2620,13 +2873,26 @@ fn consider_reverse_seep_step(
 /// conduits. Throughput widens that path so the next pulse follows it.
 /// Venting into Air or a lake drops dissolved load as a warm spring /
 /// underwater sinter. Returns how much moved.
-fn reverse_push_pore_water(world: &mut World, temp: &mut Temperature, gx: i32, gy: i32, drive: u8) -> u8 {
+fn reverse_push_pore_water(
+    world: &mut World,
+    temp: &mut Temperature,
+    gx: i32,
+    gy: i32,
+    drive: u8,
+) -> u8 {
     reverse_push_pore_water_to(world, temp, gx, gy, drive).0
 }
 
-fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32, gy: i32, drive: u8) -> (u8, Option<(i32, i32)>) {
+fn reverse_push_pore_water_to(
+    world: &mut World,
+    temp: &mut Temperature,
+    gx: i32,
+    gy: i32,
+    drive: u8,
+) -> (u8, Option<(i32, i32)>) {
     let mut seen = FxHashSet::default();
-    reverse_push_pore_water_inner(world, temp, gx, gy, drive, 16, &mut seen)
+    let (moved, dest, _) = reverse_push_pore_water_inner(world, temp, gx, gy, drive, 16, &mut seen);
+    (moved, dest)
 }
 
 fn reverse_push_pore_water_inner(
@@ -2637,15 +2903,15 @@ fn reverse_push_pore_water_inner(
     drive: u8,
     depth: u8,
     seen: &mut FxHashSet<(i32, i32)>,
-) -> (u8, Option<(i32, i32)>) {
+) -> (u8, Option<(i32, i32)>, bool) {
     if drive == 0 || !seen.insert((gx, gy)) {
-        return (0, None);
+        return (0, None, false);
     }
     let Some(src) = world.get_cell(gx, gy) else {
-        return (0, None);
+        return (0, None, false);
     };
     if src.material == MaterialId::Air || src.sat.0 == 0 {
-        return (0, None);
+        return (0, None, false);
     }
     let want = drive.min(src.sat.0).max(1);
     let mut best: Option<(i32, i32, i32, Cell, bool)> = None; // score, tx, ty, dst, overflow_vent
@@ -2700,16 +2966,32 @@ fn reverse_push_pore_water_inner(
             consider_reverse_seep_step(world, &mut best, tx, ty, dy, dst);
         }
     }
+    // Leftover mound: fill / shove charged rock before a side lake.
+    // Vent scores stay 50_000 so an adjacent open-sky lake still wins
+    // when this cell is not carrying leftover (lake-discharge tests).
+    if leftover_cell_charged(world, gx, gy) {
+        if best
+            .as_ref()
+            .is_some_and(|(_, _, _, d, v)| *v || d.material == MaterialId::Air)
+        {
+            if let Some(rock) = leftover_rock_seep_dest(world, gx, gy, seen) {
+                best = Some(rock);
+            }
+        }
+    }
     let Some((_, tx, ty, mut dst, mut overflow_vent)) = best else {
-        return (0, None);
+        return (0, None, false);
     };
+    let started_with_room = !overflow_vent
+        && dst.material != MaterialId::Air
+        && water_capacity_cell(dst, &world.hydro).saturating_sub(dst.sat.0) > 0;
     let mut cap = water_capacity_cell(dst, &world.hydro);
     let mut room = cap.saturating_sub(dst.sat.0);
     // Full wet seat: shove its marble onward first, then occupy the hole.
     if room == 0 && !overflow_vent && dst.material != MaterialId::Air && depth > 0 {
         let _ = reverse_push_pore_water_inner(world, temp, tx, ty, drive, depth - 1, seen);
         let Some(now) = world.get_cell(tx, ty) else {
-            return (0, None);
+            return (0, None, false);
         };
         dst = now;
         cap = water_capacity_cell(dst, &world.hydro);
@@ -2723,7 +3005,7 @@ fn reverse_push_pore_water_inner(
         want.min(room)
     };
     if moved == 0 {
-        return (0, None);
+        return (0, None, false);
     }
     let before = src.sat.0;
     let mut s = world.get_cell(gx, gy).unwrap();
@@ -2754,7 +3036,7 @@ fn reverse_push_pore_water_inner(
         before.saturating_sub(now)
     };
     if actually_moved == 0 {
-        return (0, None);
+        return (0, None, false);
     }
     carry_with_water(world, (gx, gy), (tx, ty), actually_moved, before);
     temp.advect_with_mass(gx, gy, tx, ty, actually_moved);
@@ -2771,8 +3053,7 @@ fn reverse_push_pore_water_inner(
     }
     // Loose / sand path: scour opens the same way rock widening does, so
     // the next pulse prefers this lens over a dry neighbour.
-    if dst.material != MaterialId::Air
-        && (is_grain(dst.material) || is_flow_erodible(dst.material))
+    if dst.material != MaterialId::Air && (is_grain(dst.material) || is_flow_erodible(dst.material))
     {
         if let Some(mut g) = world.get_cell(tx, ty) {
             if g.pore < 220 {
@@ -2804,7 +3085,49 @@ fn reverse_push_pore_water_inner(
             let _ = precipitate_artesian_warm(world, tx, ty, warmth);
         }
     }
-    (actually_moved, Some((tx, ty)))
+    (actually_moved, Some((tx, ty)), started_with_room)
+}
+
+fn leftover_cell_charged(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    let id = world.chunk_cache_id.get();
+    LEFTOVER_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        memo.world_id == id && memo.map.contains_key(&(gx, gy))
+    })
+}
+
+/// Best non-vent rock neighbour for leftover groundwater (room or packed).
+fn leftover_rock_seep_dest(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    seen: &FxHashSet<(i32, i32)>,
+) -> Option<(i32, i32, i32, Cell, bool)> {
+    let mut best = None;
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
+        let tx = world.wrap_x(gx + dx);
+        let ty = gy + dy;
+        if seen.contains(&(tx, ty)) {
+            continue;
+        }
+        let Some(dst) = world.get_cell(tx, ty) else {
+            continue;
+        };
+        if dst.material == MaterialId::Air {
+            continue;
+        }
+        let Some((score, overflow_vent)) = reverse_seep_path_score(world, dst, tx, ty, dy) else {
+            continue;
+        };
+        if overflow_vent {
+            continue;
+        }
+        if best.is_none_or(|(s, _, _, _, _)| score > s) {
+            best = Some((score, tx, ty, dst, false));
+        }
+    }
+    best
 }
 
 /// True when `(gx, gy)` borders Air that opens to free sky (a real vent).
@@ -2924,15 +3247,7 @@ fn escape_pressurized(
             let throughput = (90.0 + press * 100.0) as u8;
             let scale = 2.2 + press * 3.5;
             // Pore conduit only — do not mint Air roofs as sand/void pipes.
-            let _ = widen_aperture(
-                world,
-                gx,
-                gy + 1,
-                throughput,
-                scale,
-                0x57EA_u64,
-                false,
-            );
+            let _ = widen_aperture(world, gx, gy + 1, throughput, scale, 0x57EA_u64, false);
             let pore_grew = world
                 .get_cell(gx, gy + 1)
                 .is_some_and(|c| c.pore > above.pore);
@@ -3027,7 +3342,12 @@ fn burst_grain_tube(
         return false;
     }
     // Take vapour first; debris must land *outside* the pressure chamber.
-    let moved = take_steam(world, from_x, from_y, steam_at(world, from_x, from_y).min(200));
+    let moved = take_steam(
+        world,
+        from_x,
+        from_y,
+        steam_at(world, from_x, from_y).min(200),
+    );
     if !bank_burst_solid(world, from_x, from_y, tx, ty, cell) {
         if moved > 0 {
             add_steam(world, from_x, from_y, moved);
@@ -3166,24 +3486,14 @@ pub fn steam_total(world: &World) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::humidity::Humidity;
     use crate::audit::{mineral_total, sat_totals};
     use crate::chunk::ChunkCoord;
+    use crate::humidity::Humidity;
     use crate::mineral::add_dissolved;
     use crate::rules::wake_confined_head;
 
     fn temp_fill(world: &World, celsius: f32) -> Temperature {
-        let mut t = Temperature::with_world_bounds(
-            4,
-            0,
-            0,
-            64,
-            64,
-            world.seed.0,
-            64,
-            20,
-            false,
-        );
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 64, 64, world.seed.0, 64, 20, false);
         for v in t.cells.values_mut() {
             *v = celsius;
         }
@@ -3277,8 +3587,16 @@ mod tests {
         let before = sat_totals(&w).cell_total;
         apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0, "roofed hot water must boil to steam");
-        assert_eq!(h.total_mass(), h_before, "sealed boil must not touch Humidity");
-        assert_eq!(sat_totals(&w).cell_total, before, "steam boil must be mass-flat");
+        assert_eq!(
+            h.total_mass(),
+            h_before,
+            "sealed boil must not touch Humidity"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "steam boil must be mass-flat"
+        );
     }
 
     #[test]
@@ -3363,7 +3681,9 @@ mod tests {
         );
         let field = steam_vapour_field(&w);
         assert!(
-            field.iter().any(|&(x, y, d)| y <= 4 && (3..7).contains(&x) && d >= 28),
+            field
+                .iter()
+                .any(|&(x, y, d)| y <= 4 && (3..7).contains(&x) && d >= 28),
             "vapour wash must cover the chamber"
         );
     }
@@ -3394,13 +3714,13 @@ mod tests {
         let mut by_tile: std::collections::HashMap<(i32, i32), Vec<u8>> =
             std::collections::HashMap::new();
         for s in &haze {
-            let key = (s.gx.div_euclid(STEAM_HAZE_TILE), s.gy.div_euclid(STEAM_HAZE_TILE));
+            let key = (
+                s.gx.div_euclid(STEAM_HAZE_TILE),
+                s.gy.div_euclid(STEAM_HAZE_TILE),
+            );
             by_tile.entry(key).or_default().push(s.density);
         }
-        assert!(
-            by_tile.len() >= 1,
-            "haze must occupy coarse tiles"
-        );
+        assert!(by_tile.len() >= 1, "haze must occupy coarse tiles");
         let max_density = haze.iter().map(|s| s.density).max().unwrap_or(0);
         assert!(
             max_density <= 200,
@@ -3554,9 +3874,7 @@ mod tests {
         let before = sat_totals(&w).cell_total;
         apply_steam(&mut w, &mut hot, &SteamConfig::default());
         assert!(steam_total(&w) > 0);
-        assert!(
-            w.get_cell(4, 1).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand)
-        );
+        assert!(w.get_cell(4, 1).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand));
         assert_eq!(sat_totals(&w).cell_total, before);
     }
 
@@ -3682,8 +4000,8 @@ mod tests {
         w.set_cell(4, 3, top);
         // Solid roof — no Air seat beside the boiling cell.
         w.set_cell(4, 4, Cell::solid(MaterialId::Stone));
-        let sat_above0 = w.get_cell(4, 2).unwrap().sat.0 as i32
-            + w.get_cell(4, 3).unwrap().sat.0 as i32;
+        let sat_above0 =
+            w.get_cell(4, 2).unwrap().sat.0 as i32 + w.get_cell(4, 3).unwrap().sat.0 as i32;
         let pore0 = w.get_cell(4, 1).unwrap().pore;
         let before = sat_totals(&w).cell_total;
         let mut hot = temp_fill(&w, 160.0);
@@ -3698,8 +4016,8 @@ mod tests {
             w.tick = STEAM_EVERY * i;
             apply_steam(&mut w, &mut hot, &cfg);
         }
-        let sat_above1 = w.get_cell(4, 2).unwrap().sat.0 as i32
-            + w.get_cell(4, 3).unwrap().sat.0 as i32;
+        let sat_above1 =
+            w.get_cell(4, 2).unwrap().sat.0 as i32 + w.get_cell(4, 3).unwrap().sat.0 as i32;
         let host = w.get_cell(4, 1).unwrap();
         let reverse_or_crack = sat_above1 > sat_above0
             || host.pore > pore0
@@ -3714,7 +4032,11 @@ mod tests {
             host.sat.0,
             steam_total(&w)
         );
-        assert_eq!(sat_totals(&w).cell_total, before, "phase boil must stay mass-flat");
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "phase boil must stay mass-flat"
+        );
     }
 
     #[test]
@@ -3745,7 +4067,10 @@ mod tests {
         let hot = phase_heat_drive_scale(180.0, 100.0);
         assert!(warm > 1.5, "over-boil must raise drive (warm={warm})");
         assert!(hot >= warm, "hotter must not weaken drive");
-        assert!(hot <= 3.0 + 1e-3, "must stay well below Clausius 1700× (hot={hot})");
+        assert!(
+            hot <= 3.0 + 1e-3,
+            "must stay well below Clausius 1700× (hot={hot})"
+        );
         let cool_drive = expansion_drive_units(10, 16, 100.0, 100.0);
         let hot_drive = expansion_drive_units(10, 16, 180.0, 100.0);
         assert!(
@@ -3830,11 +4155,16 @@ mod tests {
         w.set_cell(3, 8, Cell::air());
         let sand_s = reverse_seep_path_score(&w, sand, 3, 2, 0).unwrap().0;
         let tight_s = reverse_seep_path_score(&w, tight, 4, 2, 0).unwrap().0;
-        let open_s = reverse_seep_path_score(&w, open_limestone, 5, 2, 0).unwrap().0;
+        let open_s = reverse_seep_path_score(&w, open_limestone, 5, 2, 0)
+            .unwrap()
+            .0;
         let packed_s = reverse_seep_path_score(&w, packed_pore, 6, 2, 0).unwrap().0;
         let pipe_s = reverse_seep_path_score(&w, sinter_pipe, 7, 2, 0).unwrap().0;
         let vent_s = reverse_seep_path_score(&w, Cell::air(), 3, 8, 1).unwrap().0;
-        assert!(sand_s > tight_s, "sand should beat tight stone ({sand_s} vs {tight_s})");
+        assert!(
+            sand_s > tight_s,
+            "sand should beat tight stone ({sand_s} vs {tight_s})"
+        );
         assert!(
             open_s > sand_s,
             "already-open high-pore limestone should lock in over sand ({open_s} vs {sand_s})"
@@ -3889,7 +4219,11 @@ mod tests {
             "open throat should drop load or line ({load0}→{load1}, pore {pore0}→{})",
             after.pore
         );
-        assert_ne!(after.material, MaterialId::Air, "lining must not mint an Air pipe");
+        assert_ne!(
+            after.material,
+            MaterialId::Air,
+            "lining must not mint an Air pipe"
+        );
         assert!(
             after.pore > 128,
             "lining must keep a lumen, got pore {}",
@@ -4015,7 +4349,10 @@ mod tests {
             add_steam(&mut w, x, 2, 251);
         }
         let before = steam_total(&w);
-        assert!(before > 255 * 2, "fixture must stress the old u8 truncate path");
+        assert!(
+            before > 255 * 2,
+            "fixture must stress the old u8 truncate path"
+        );
         let cfg = SteamConfig {
             enable_escape: false,
             enable_pore_boil: false,
@@ -4552,8 +4889,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn hot_saturated_rock_reports_pore_flash_pressure() {
         let mut w = World::new(91);
@@ -4643,7 +4978,8 @@ mod tests {
         rock.sat = Sat(cap);
         w.set_cell(5, 3, rock);
         let (hot, kind) = cell_pressure_norm_with_boil(&w, 5, 3, 120.0, 60.0, 100);
-        let expect = leftover_pack_norm(vapor_volume_units(cap as u32, 120.0, 60.0, 100), cap as u32);
+        let expect =
+            leftover_pack_norm(vapor_volume_units(cap as u32, 120.0, 60.0, 100), cap as u32);
         assert!(
             (hot - expect).abs() < 0.02 && kind == CellPressureKind::PoreFlash,
             "full pore ×100 at 120 °C must read leftover pack {expect} (got {hot}, {kind:?})"
@@ -4666,8 +5002,10 @@ mod tests {
         rock.sat = Sat(mass);
         w.set_cell(5, 3, rock);
         let (p, kind) = cell_pressure_norm_with_boil(&w, 5, 3, 120.0, 60.0, 100);
-        let expect =
-            leftover_pack_norm(vapor_volume_units(mass as u32, 120.0, 60.0, 100), cap as u32);
+        let expect = leftover_pack_norm(
+            vapor_volume_units(mass as u32, 120.0, 60.0, 100),
+            cap as u32,
+        );
         assert!(
             (p - expect).abs() < 0.02 && p > 0.85 && kind == CellPressureKind::PoreFlash,
             "half-full ×100 is leftover volume {expect}, not half-wetness (got {p}, {kind:?})"
@@ -4735,7 +5073,11 @@ mod tests {
             "choked boiler must flash cavity mass, not dump the pocket as evap"
         );
         assert_eq!(sat_totals(&w).cell_total, before, "flash is mass-flat");
-        assert_eq!(mineral_total(&w), minerals, "flash must not mint or eat mineral");
+        assert_eq!(
+            mineral_total(&w),
+            minerals,
+            "flash must not mint or eat mineral"
+        );
     }
 
     #[test]
@@ -4766,11 +5108,7 @@ mod tests {
         let mut hot = temp_fill(&w, 210.0);
         w.tick = STEAM_EVERY;
         apply_steam(&mut w, &mut hot, &SteamConfig::default());
-        assert_eq!(
-            steam_total(&w),
-            0,
-            "open U must not mint boiler steam"
-        );
+        assert_eq!(steam_total(&w), 0, "open U must not mint boiler steam");
     }
 
     #[test]
@@ -4818,7 +5156,11 @@ mod tests {
             dest1 > dest0 || host1 < host0,
             "surplus must shove groundwater along the straw (dest {dest0}→{dest1}, host {host0}→{host1})"
         );
-        assert_eq!(sat_totals(&w).cell_total, water0, "marble tube is mass-flat");
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "marble tube is mass-flat"
+        );
         assert_eq!(mineral_total(&w), min0, "solute rides liquid, never minted");
     }
 
@@ -4860,10 +5202,146 @@ mod tests {
         }
         let bot1 = w.get_cell(5, 1).unwrap().sat.0;
         let mouth1 = w.get_cell(5, 6).unwrap().sat.0;
-        assert_eq!(sat_totals(&w).cell_total, water0, "packed straw is mass-flat");
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "packed straw is mass-flat"
+        );
         assert!(
             mouth1 > mouth0 || bot1 < bot0,
             "leftover must shove a marble through the full column (mouth {mouth0}→{mouth1}, base {bot0}→{bot1})"
+        );
+    }
+
+    #[test]
+    fn leftover_field_presses_cool_rock_above_one_boiler_cell() {
+        // P used to light every hot wet cell (thermal blob). One 192×
+        // boiler should charge ~192 seats along least resistance, including
+        // cool rock above the source.
+        let mut w = World::new(223);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..10 {
+            for y in 0..14 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        let mut src = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(src, &w.hydro).max(1);
+        src.sat = Sat(cap);
+        w.set_cell(5, 1, src);
+        let mut temp = temp_fill(&w, 20.0);
+        let (hx, hy) = temp.tile_of(5, 1);
+        temp.set_tile_c(hx, hy, 122.0);
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &temp, 100.0, 192);
+        let (p_src, kind) = cell_pressure_norm_with_boil(&w, 5, 1, 122.0, 100.0, 192);
+        assert!(
+            p_src > 0.5 && kind == CellPressureKind::PoreFlash,
+            "boiler cell must still pack ({p_src}, {kind:?})"
+        );
+        let (p_up, up_kind) = cell_pressure_norm_with_boil(&w, 5, 8, 20.0, 100.0, 192);
+        assert!(
+            p_up > 0.02 && up_kind == CellPressureKind::PoreFlash,
+            "cool rock 7 seats above a 192× boiler must show leftover ({p_up}, {up_kind:?})"
+        );
+        let (p_far, far_kind) = cell_pressure_norm_with_boil(&w, 5, 13, 20.0, 100.0, 192);
+        assert!(
+            p_far < p_up || far_kind == CellPressureKind::None,
+            "pressure must decay with resistance, not paint the whole hill ({p_far} vs {p_up})"
+        );
+    }
+
+    #[test]
+    fn leftover_raises_a_water_table_bump_not_the_side_lake() {
+        let mut w = World::new(225);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..10 {
+            for y in 0..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        let mut src = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(src, &w.hydro).max(1);
+        src.sat = Sat(cap);
+        w.set_cell(5, 1, src);
+        // Side lake — the old reverse-seep magnet.
+        for y in 1..6 {
+            let mut lake = Cell::air();
+            lake.sat = Sat(255);
+            w.set_cell(3, y, lake);
+        }
+        for y in 6..10 {
+            w.set_cell(3, y, Cell::air());
+        }
+        let water0 = sat_totals(&w).cell_total;
+        let up0: u16 = (2..=6)
+            .map(|y| w.get_cell(5, y).unwrap().sat.0 as u16)
+            .sum();
+        let mut hot = temp_fill(&w, 20.0);
+        let (hx, hy) = hot.tile_of(5, 1);
+        hot.set_tile_c(hx, hy, 122.0);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for i in 1..12 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let up1: u16 = (2..=6)
+            .map(|y| w.get_cell(5, y).unwrap().sat.0 as u16)
+            .sum();
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "water-table bump is mass-flat"
+        );
+        assert!(
+            up1 > up0,
+            "leftover must raise the column above the hotspot, not only dump into the lake (up {up0}→{up1})"
+        );
+    }
+
+    #[test]
+    fn leftover_field_follows_a_sand_vein() {
+        let mut w = World::new(227);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..12 {
+            for y in 0..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        let mut src = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(src, &w.hydro).max(1);
+        src.sat = Sat(cap);
+        w.set_cell(5, 1, src);
+        for y in 2..10 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.pore = 200;
+            w.set_cell(8, y, sand);
+        }
+        // Open the first hop into the vein.
+        let mut gate = Cell::solid(MaterialId::Sand);
+        gate.pore = 200;
+        w.set_cell(6, 2, gate);
+        w.set_cell(7, 2, gate);
+        let mut temp = temp_fill(&w, 20.0);
+        let (hx, hy) = temp.tile_of(5, 1);
+        temp.set_tile_c(hx, hy, 122.0);
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &temp, 100.0, 192);
+        let (vein, _) = cell_pressure_norm_with_boil(&w, 8, 8, 20.0, 100.0, 192);
+        let (tight, _) = cell_pressure_norm_with_boil(&w, 3, 8, 20.0, 100.0, 192);
+        assert!(
+            vein > tight + 0.05,
+            "leftover must follow the sand vein, not smear both flanks ({vein} vs {tight})"
         );
     }
 
@@ -4896,7 +5374,11 @@ mod tests {
                 ..SteamConfig::default()
             },
         );
-        assert_eq!(mineral_total(&w), min0, "gas hop must not mint or drop solute");
+        assert_eq!(
+            mineral_total(&w),
+            min0,
+            "gas hop must not mint or drop solute"
+        );
         assert_eq!(sat_totals(&w).cell_total, water0, "gas hop is mass-flat");
         assert_eq!(
             crate::mineral::dissolved_at(&w, 5, 4) + crate::mineral::dissolved_at(&w, 5, 5),
@@ -5020,7 +5502,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn cavity_steam_pressure_reads_as_cavity_kind() {
         let mut w = World::new(93);
@@ -5034,7 +5515,10 @@ mod tests {
         w.set_cell(4, 3, Cell::air());
         add_steam(&mut w, 4, 2, 180);
         let (p, kind) = cell_pressure_norm(&w, 4, 2, 120.0);
-        assert!(p > 0.2, "dense cavity humidity must read pressure (got {p})");
+        assert!(
+            p > 0.2,
+            "dense cavity humidity must read pressure (got {p})"
+        );
         assert_eq!(kind, CellPressureKind::Cavity);
         let density = 180.0 / 255.0;
         assert!(
@@ -5171,7 +5655,10 @@ mod tests {
         let src0 = w.get_cell(5, 2).unwrap().sat.0;
         let mut temp = temp_fill(&w, 40.0);
         let (moved, dest) = reverse_push_pore_water_to(&mut w, &mut temp, 5, 2, 80);
-        assert!(moved > 0, "full open-sky lake must accept reverse-seep discharge");
+        assert!(
+            moved > 0,
+            "full open-sky lake must accept reverse-seep discharge"
+        );
         assert!(
             dest.is_some_and(|(x, y)| x == 4 && (2..8).contains(&y)),
             "must discharge into the open vent column, got {dest:?}"
@@ -5287,7 +5774,10 @@ mod tests {
         let under = steam_pressure_norm(&w, 4, 3);
         let far = steam_pressure_norm(&w, 10, 3);
         let mid = steam_pressure_norm(&w, 7, 2);
-        assert!(under > 0.15, "steam seat must read pocket pressure ({under})");
+        assert!(
+            under > 0.15,
+            "steam seat must read pocket pressure ({under})"
+        );
         assert!(
             (under - far).abs() < 0.02,
             "far side of the same cave must equalize (under={under} far={far})"
@@ -5420,7 +5910,11 @@ mod tests {
             steam_total(&w) > 0,
             "hot confined water in a cold chunk must still boil"
         );
-        assert_eq!(sat_totals(&w).cell_total, before, "tile-skip boil is mass-flat");
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "tile-skip boil is mass-flat"
+        );
     }
 
     #[test]
@@ -5466,10 +5960,12 @@ mod tests {
             steam_total(&w) > 0,
             "hot wet pores in a cold chunk must still flash"
         );
-        assert!(
-            w.get_cell(12, 49).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand)
+        assert!(w.get_cell(12, 49).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand));
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "tile-skip pore boil is mass-flat"
         );
-        assert_eq!(sat_totals(&w).cell_total, before, "tile-skip pore boil is mass-flat");
     }
 
     #[test]
@@ -5525,7 +6021,11 @@ mod tests {
             "85 °C drier core must flash before 61 °C swamps ({sat0}→{sat1}, steam {})",
             steam_total(&w)
         );
-        assert_eq!(sat_totals(&w).cell_total, before, "ranked pore boil is mass-flat");
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "ranked pore boil is mass-flat"
+        );
     }
 
     #[test]
@@ -5545,7 +6045,10 @@ mod tests {
         for x in 2..=6 {
             w.set_cell(x, 10, Cell::solid(MaterialId::Stone));
         }
-        assert!(void_is_confined(&w, 4, 4), "overhang roofs the column probe");
+        assert!(
+            void_is_confined(&w, 4, 4),
+            "overhang roofs the column probe"
+        );
         assert!(
             air_void_open_to_sky(&w, 4, 4),
             "lake must reach sky around the overhang"
@@ -5593,13 +6096,20 @@ mod tests {
         let sat0 = sat_totals(&w).cell_total;
         let mut temp = temp_fill(&w, 80.0);
         let (moved, dest) = reverse_push_pore_water_to(&mut w, &mut temp, 5, 2, 80);
-        assert!(moved > 0, "roofed standing water must accept a hydrothermal vent");
+        assert!(
+            moved > 0,
+            "roofed standing water must accept a hydrothermal vent"
+        );
         assert!(
             dest.is_some_and(|(x, _)| x == 4),
             "must discharge into the pool, got {dest:?}"
         );
         assert!(w.get_cell(5, 2).unwrap().sat.0 < src0);
-        assert_eq!(sat_totals(&w).cell_total, sat0, "underwater vent is mass-flat");
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            sat0,
+            "underwater vent is mass-flat"
+        );
     }
 
     #[test]
@@ -5636,5 +6146,4 @@ mod tests {
             "bricked rock must not keep a cavity overlay ({kind:?} p={p})"
         );
     }
-
 }

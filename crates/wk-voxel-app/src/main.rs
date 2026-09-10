@@ -1363,8 +1363,15 @@ async fn main() {
         }
 
 
-        // Pore / cavity leftover volume (P): mass×expand − seat. No cave required.
+        // Leftover volume field (P): boiling seats shove ~expand neighbour
+        // seats along least resistance — a mound or a finger, not a thermal blob.
         if pressure_overlay && overlay_k > 0.01 {
+            wk_voxel::prepare_leftover_pressure(
+                &scene.world,
+                &scene.temperature,
+                settings.steam.boil_point_c,
+                settings.steam.phase_expansion_drive,
+            );
             let (xr, xn) = view_cell_x_ranges(
                 origin_x,
                 cell_px,
