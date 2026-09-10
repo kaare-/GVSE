@@ -276,6 +276,9 @@ struct LeftoverMemo {
     boil_bits: u32,
     expand: u8,
     map: FxHashMap<(i32, i32), f32>,
+    /// Peak injectors `(x, y, surplus volume)`. Overlay fades; the
+    /// groundwater straw uses these so one 192× seat still shoves.
+    seeds: Vec<(i32, i32, u32)>,
 }
 
 /// One boiling cell at expand N may charge about N neighbour seats.
@@ -297,6 +300,7 @@ thread_local! {
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
     static PRESS_MEMO: RefCell<PressMemo> = RefCell::new(PressMemo::default());
     static LEFTOVER_MEMO: RefCell<LeftoverMemo> = RefCell::new(LeftoverMemo::default());
+    static LEFTOVER_STRAW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn bind_sky_probe(world: &World) {
@@ -968,6 +972,7 @@ fn rebuild_leftover_field(
     memo: &mut LeftoverMemo,
 ) {
     memo.map.clear();
+    memo.seeds.clear();
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -1009,6 +1014,7 @@ fn rebuild_leftover_field(
             continue;
         }
         seeds.push((gx, gy));
+        memo.seeds.push((gx, gy, surplus));
         heap.push((Reverse(0), gx, gy, surplus));
     }
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
@@ -1057,106 +1063,98 @@ fn rebuild_leftover_field(
     }
 }
 
+/// Standing leftover head: shove groundwater every tick from each seed.
+///
+/// Surplus volume (`mass × expand − seat`) is the hop budget — one
+/// boiling seat at expand 192 presses about 192 seats along cheapest
+/// perm / upward rock. Packed wet rock is a marble straw. Already-wet
+/// seats are not a "bump"; the straw climbs until it fills vadose /
+/// dry rock (a table mound or a vein). Lakes only if no rock dest.
 fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
-    let charged: Vec<(i32, i32, f32)> = LEFTOVER_MEMO.with(|slot| {
-        let memo = slot.borrow();
-        let mut v: Vec<(i32, i32, f32)> = memo.map.iter().map(|(&(x, y), &p)| (x, y, p)).collect();
-        v.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        v
-    });
-    if charged.is_empty() {
+    let seeds: Vec<(i32, i32, u32)> = LEFTOVER_MEMO.with(|slot| slot.borrow().seeds.clone());
+    if seeds.is_empty() {
         return;
     }
-    let in_field: FxHashSet<(i32, i32)> = charged.iter().map(|&(x, y, _)| (x, y)).collect();
-    for _ in 0..8 {
-        for &(gx, gy, _) in &charged {
-            let Some(src) = world.get_cell(gx, gy) else {
-                continue;
-            };
-            if src.material == MaterialId::Air || src.sat.0 == 0 {
-                continue;
-            }
-            let retain = retained_sat_cell(src, &world.hydro);
-            let mobile = src.sat.0.saturating_sub(retain);
-            if mobile == 0 {
-                continue;
-            }
-            let mut best_rock: Option<(i32, i32, i32, u8)> = None;
-            let mut best_vent: Option<(i32, i32, i32, u8)> = None;
-            for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
-                let tx = world.wrap_x(gx + dx);
-                let ty = gy + dy;
-                let Some(dst) = world.get_cell(tx, ty) else {
+    for (sx, sy, surplus) in seeds {
+        if surplus == 0 {
+            continue;
+        }
+        let hops = (surplus / 12).clamp(12, 32) as u8;
+        leftover_straw_chain(world, temp, sx, sy, hops);
+    }
+}
+
+struct LeftoverStrawGuard;
+
+impl Drop for LeftoverStrawGuard {
+    fn drop(&mut self) {
+        LEFTOVER_STRAW.with(|f| f.set(false));
+    }
+}
+
+fn leftover_straw_chain(
+    world: &mut World,
+    temp: &mut Temperature,
+    mut gx: i32,
+    mut gy: i32,
+    hops: u8,
+) {
+    LEFTOVER_STRAW.with(|f| f.set(true));
+    let _guard = LeftoverStrawGuard;
+    let mut drive = 255u8;
+    for _ in 0..hops {
+        let Some(here) = world.get_cell(gx, gy) else {
+            return;
+        };
+        if here.material == MaterialId::Air || here.sat.0 <= retained_sat_cell(here, &world.hydro) {
+            let mut stepped = false;
+            for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1), (0, 2)] {
+                let nx = world.wrap_x(gx + dx);
+                let ny = gy + dy;
+                let Some(n) = world.get_cell(nx, ny) else {
                     continue;
                 };
-                let vent = is_steam_discharge_vent(world, tx, ty, dst);
-                if dst.material == MaterialId::Air {
-                    if vent {
-                        let s = 100 + dy.max(0) * 40;
-                        if best_vent.is_none_or(|(sc, _, _, _)| s > sc) {
-                            best_vent = Some((s, tx, ty, mobile));
-                        }
-                    }
+                if n.material == MaterialId::Air || n.sat.0 == 0 {
                     continue;
                 }
-                let cap = water_capacity_cell(dst, &world.hydro);
-                let room = cap.saturating_sub(dst.sat.0);
-                if room == 0 {
+                if permeability_cell(n, &world.hydro) == 0 {
                     continue;
                 }
-                if permeability_cell(dst, &world.hydro) == 0 {
+                if n.sat.0 <= retained_sat_cell(n, &world.hydro) {
                     continue;
                 }
-                let mut s = room as i32 + permeability_cell(dst, &world.hydro) as i32 * 8;
-                s += dy.max(0) * 8_000;
-                if in_field.contains(&(tx, ty)) {
-                    s += 3_000;
-                }
-                if best_rock.is_none_or(|(sc, _, _, _)| s > sc) {
-                    best_rock = Some((s, tx, ty, room));
-                }
+                gx = nx;
+                gy = ny;
+                stepped = true;
+                break;
             }
-            let Some((_, tx, ty, room)) = best_rock.or(best_vent) else {
-                continue;
-            };
-            let moved = mobile.min(room).min(24);
-            if moved == 0 {
-                continue;
+            if !stepped {
+                return;
             }
-            let before = src.sat.0;
-            let mut s = src;
-            s.sat = Sat(s.sat.0 - moved);
-            world.set_cell(gx, gy, s);
-            if let Some(mut d) = world.get_cell(tx, ty) {
-                if d.material == MaterialId::Air {
-                    let left = crate::displace::park_orphan_water(world, tx, ty, moved as u32);
-                    if left > 0 {
-                        if let Some(mut back) = world.get_cell(gx, gy) {
-                            back.sat = Sat(back.sat.0.saturating_add(left.min(255) as u8));
-                            world.set_cell(gx, gy, back);
-                        }
-                    }
-                } else {
-                    let put =
-                        moved.min(water_capacity_cell(d, &world.hydro).saturating_sub(d.sat.0));
-                    d.sat = Sat(d.sat.0.saturating_add(put));
-                    world.set_cell(tx, ty, d);
-                    if put < moved {
-                        if let Some(mut back) = world.get_cell(gx, gy) {
-                            back.sat = Sat(back.sat.0.saturating_add(moved - put));
-                            world.set_cell(gx, gy, back);
-                        }
-                    }
-                }
-            }
-            let now = world.get_cell(gx, gy).map(|c| c.sat.0).unwrap_or(before);
-            let actually = before.saturating_sub(now);
-            if actually == 0 {
-                continue;
-            }
-            carry_with_water(world, (gx, gy), (tx, ty), actually, before);
-            temp.advect_with_mass(gx, gy, tx, ty, actually);
         }
+        let mut seen = FxHashSet::default();
+        let (moved, dest, parked_vadose) =
+            reverse_push_pore_water_inner(world, temp, gx, gy, drive, 24, &mut seen);
+        if moved == 0 {
+            return;
+        }
+        let Some((nx, ny)) = dest else {
+            return;
+        };
+        if world
+            .get_cell(nx, ny)
+            .is_some_and(|c| c.material == MaterialId::Air)
+        {
+            return;
+        }
+        // Vadose / dry seat: that water IS the table rise. Leave it.
+        // Keep hopping only through packed aquifer (marble straw).
+        if parked_vadose {
+            return;
+        }
+        gx = nx;
+        gy = ny;
+        drive = 255;
     }
 }
 
@@ -1444,23 +1442,26 @@ pub fn apply_steam_with_weather(
     }
     let period = cfg.period_ticks.max(1);
     let due = world.tick % period == 0;
-    if !due {
-        return;
-    }
     let max_cells = cfg.max_steam_cells.max(1) as usize;
     let boil = cfg.boil_point_c;
     let recondense_below = boil - RECONDENSE_MARGIN_C;
 
-    scrub_invalid_steam_seats(world, max_cells);
-    recondense_cool(world, temp, recondense_below);
-    boil_hot_air(world, temp, cfg, max_cells);
-    // Build the leftover mound before pore shove so reverse-seep can
-    // prefer charged rock seats over a side-lake magnet.
+    // Leftover is a standing head. Rebuild + shove every tick so
+    // seepage cannot erase the water-table bump on the 4 ticks the
+    // boil cadence is idle. Flood / boil stay periodic (FPS).
     prepare_leftover_pressure(world, temp, boil, cfg.phase_expansion_drive);
-    if cfg.enable_pore_boil {
-        boil_hot_pores(world, temp, cfg, max_cells);
+    if due {
+        scrub_invalid_steam_seats(world, max_cells);
+        recondense_cool(world, temp, recondense_below);
+        boil_hot_air(world, temp, cfg, max_cells);
+        if cfg.enable_pore_boil {
+            boil_hot_pores(world, temp, cfg, max_cells);
+        }
     }
     shove_phreatic_bump(world, temp);
+    if !due {
+        return;
+    }
     // Flood + assault only on cadence (every-tick flood crushed FPS).
     if !world.steam.is_empty() {
         flood_equalize_steam(world, cfg, max_cells);
@@ -3011,25 +3012,23 @@ fn reverse_push_pore_water_inner(
             consider_reverse_seep_step(world, &mut best, tx, ty, dy, dst);
         }
     }
-    // Leftover mound: fill / shove charged rock before a side lake.
-    // Vent scores stay 50_000 so an adjacent open-sky lake still wins
-    // when this cell is not carrying leftover (lake-discharge tests).
+    // Leftover mound: pick cheapest rock / vadose dest. Vent scores
+    // stay 50_000 so an adjacent open-sky lake still wins when this
+    // cell is not carrying leftover (lake-discharge tests).
     if leftover_cell_charged(world, gx, gy) {
-        if best
-            .as_ref()
-            .is_some_and(|(_, _, _, d, v)| *v || d.material == MaterialId::Air)
-        {
-            if let Some(rock) = leftover_rock_seep_dest(world, gx, gy, seen) {
-                best = Some(rock);
-            }
+        if let Some(rock) = leftover_rock_seep_dest(world, gx, gy, seen) {
+            best = Some(rock);
         }
     }
     let Some((_, tx, ty, mut dst, mut overflow_vent)) = best else {
         return (0, None, false);
     };
+    // Park only at the vadose / dry seat (true water-table rise).
+    // Topping an already-wet hill (22/25 → 25/25) is not a bump and
+    // used to stop the straw before it could swell.
     let started_with_room = !overflow_vent
         && dst.material != MaterialId::Air
-        && water_capacity_cell(dst, &world.hydro).saturating_sub(dst.sat.0) > 0;
+        && dst.sat.0 <= retained_sat_cell(dst, &world.hydro);
     let mut cap = water_capacity_cell(dst, &world.hydro);
     let mut room = cap.saturating_sub(dst.sat.0);
     // Full wet seat: shove its marble onward first, then occupy the hole.
@@ -3134,6 +3133,9 @@ fn reverse_push_pore_water_inner(
 }
 
 fn leftover_cell_charged(world: &World, gx: i32, gy: i32) -> bool {
+    if LEFTOVER_STRAW.with(|f| f.get()) {
+        return true;
+    }
     let gx = world.wrap_x(gx);
     let id = world.chunk_cache_id.get();
     LEFTOVER_MEMO.with(|slot| {
@@ -3168,8 +3170,17 @@ fn leftover_rock_seep_dest(
         if overflow_vent {
             continue;
         }
-        if best.is_none_or(|(s, _, _, _, _)| score > s) {
-            best = Some((score, tx, ty, dst, false));
+        let perm = permeability_cell(dst, &world.hydro).max(1);
+        let cost = leftover_step_cost(perm, dy) as i32;
+        let mut s = score + 8_000 - cost.min(7_500);
+        if dy > 0 {
+            s += 3_000;
+        }
+        if dst.sat.0 <= retained_sat_cell(dst, &world.hydro) {
+            s += 6_000;
+        }
+        if best.is_none_or(|(sc, _, _, _, _)| s > sc) {
+            best = Some((s, tx, ty, dst, false));
         }
     }
     best
@@ -5350,6 +5361,115 @@ mod tests {
         assert!(
             up1 > up0,
             "leftover must raise the column above the hotspot, not only dump into the lake (up {up0}→{up1})"
+        );
+    }
+
+    #[test]
+    fn leftover_shoves_groundwater_on_off_cadence_ticks() {
+        // Seepage runs every tick; boil does not. The standing head must
+        // still push on tick 3 or the table never holds.
+        let mut w = World::new(231);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..9 {
+            for y in 0..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        let mut src = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(src, &w.hydro).max(1);
+        src.sat = Sat(cap);
+        w.set_cell(5, 1, src);
+        let up0: u16 = (2..=6)
+            .map(|y| w.get_cell(5, y).unwrap().sat.0 as u16)
+            .sum();
+        let mut hot = temp_fill(&w, 20.0);
+        let (hx, hy) = hot.tile_of(5, 1);
+        hot.set_tile_c(hx, hy, 122.0);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            ..SteamConfig::default()
+        };
+        w.tick = 3;
+        apply_steam(&mut w, &mut hot, &cfg);
+        let up1: u16 = (2..=6)
+            .map(|y| w.get_cell(5, y).unwrap().sat.0 as u16)
+            .sum();
+        assert!(
+            up1 > up0,
+            "off-cadence leftover must still raise the table (up {up0}→{up1})"
+        );
+    }
+
+    #[test]
+    fn leftover_swells_a_wet_hill_through_seepage_and_a_side_lake() {
+        // Playtest: saturated aquifer, dry cap, 122 °C core, ocean magnet.
+        // Leftover volume must swell the vadose column, not dump into the lake,
+        // and the bump must survive seepage ticks between boil pulses.
+        let mut w = World::new(233);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 4..13 {
+            for y in 0..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(8, 0, Cell::solid(MaterialId::Bedrock));
+        let mut aquifer = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(aquifer, &w.hydro).max(1);
+        aquifer.sat = Sat(cap);
+        for x in 4..13 {
+            for y in 1..6 {
+                w.set_cell(x, y, aquifer);
+            }
+        }
+        for y in 1..8 {
+            let mut lake = Cell::air();
+            lake.sat = Sat(255);
+            w.set_cell(2, y, lake);
+        }
+        for y in 8..12 {
+            w.set_cell(2, y, Cell::air());
+        }
+        let vadose0: u16 = (6..=10)
+            .map(|y| w.get_cell(8, y).unwrap().sat.0 as u16)
+            .sum();
+        let lake0: u32 = (1..8).map(|y| w.get_cell(2, y).unwrap().sat.0 as u32).sum();
+        let water0 = sat_totals(&w).cell_total;
+        let mut hot = temp_fill(&w, 20.0);
+        let (hx, hy) = hot.tile_of(8, 2);
+        hot.set_tile_c(hx, hy, 122.0);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=36 {
+            w.tick = t;
+            crate::apply_seepage(&mut w);
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let vadose1: u16 = (6..=10)
+            .map(|y| w.get_cell(8, y).unwrap().sat.0 as u16)
+            .sum();
+        let lake1: u32 = (1..8).map(|y| w.get_cell(2, y).unwrap().sat.0 as u32).sum();
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "leftover swell is mass-flat"
+        );
+        assert!(
+            vadose1 > vadose0,
+            "leftover must swell the dry cap above the wet hill (vadose {vadose0}→{vadose1})"
+        );
+        assert!(
+            lake1 <= lake0 + 40,
+            "side lake must not swallow the leftover head (lake {lake0}→{lake1})"
         );
     }
 
