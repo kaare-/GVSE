@@ -20,7 +20,7 @@
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity vapour wash (default on)
 //! - `V` — toggle wind + water-current streak overlay (default off)
-//! - `T` — toggle temperature heatmap overlay
+//! - `T` — toggle temperature heatmap overlay (Tab → Climate: cold / mid / hot)
 //! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
 //! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
@@ -52,6 +52,7 @@ mod quit;
 mod scene;
 mod settings;
 mod spore_fx;
+mod temp_overlay;
 mod terrain;
 
 use std::time::Instant;
@@ -139,38 +140,6 @@ fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
-/// Fixed °C stops so freezing and below stay readable.
-///
-/// −40 ice-white · −20 indigo · 0 cyan · 12 green · 18 yellow-green ·
-/// 28 orange · 36 red. Mild 18 °C is not buried in blue.
-fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
-}
-
-fn temp_overlay_color(temp_c: f32) -> Color {
-    const STOPS: &[(f32, u8, u8, u8)] = &[
-        (-40.0, 230, 240, 255),
-        (-20.0, 70, 90, 200),
-        (0.0, 40, 190, 230),
-        (12.0, 70, 200, 120),
-        (18.0, 210, 215, 70),
-        (28.0, 235, 140, 35),
-        (36.0, 220, 40, 30),
-    ];
-    let t = temp_c.clamp(STOPS[0].0, STOPS[STOPS.len() - 1].0);
-    let mut i = 0;
-    while i + 1 < STOPS.len() && t > STOPS[i + 1].0 {
-        i += 1;
-    }
-    let (t0, r0, g0, b0) = STOPS[i];
-    let (t1, r1, g1, b1) = STOPS[(i + 1).min(STOPS.len() - 1)];
-    let u = if (t1 - t0).abs() < 1e-3 {
-        0.0
-    } else {
-        ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
-    };
-    Color::from_rgba(lerp_u8(r0, r1, u), lerp_u8(g0, g1, u), lerp_u8(b0, b1, u), 135)
-}
 
 /// Dry tan → wet deep blue for ground pore / free-water saturation.
 fn sat_overlay_color(wet: f32) -> Color {
@@ -1273,7 +1242,15 @@ async fn main() {
                         sy,
                         tile_px,
                         tile_px,
-                        scale_color_alpha(temp_overlay_color(temp_c), overlay_k),
+                        scale_color_alpha(
+                            crate::temp_overlay::color(
+                                temp_c,
+                                settings.temp_overlay_lo,
+                                settings.temp_overlay_mid,
+                                settings.temp_overlay_hi,
+                            ),
+                            overlay_k,
+                        ),
                     );
                 }
             };
