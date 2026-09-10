@@ -178,8 +178,8 @@ fn is_soluble(material: MaterialId) -> bool {
 /// (frame-shell Phase 1).
 ///
 /// Chunks without [`Chunk::has_soluble`] are skipped. The flag is
-/// sticky on any soluble write (limestone, flowstone, sandstone,
-/// conglomerate) and cleared here when a scan finds none left. Rain-
+/// sticky on any soluble write (limestone, LooseLimestone, flowstone,
+/// sandstone, conglomerate) and cleared here when a scan finds none left. Rain-
 /// soaked sand / soil used to enter via `has_wet_pores` and pay a
 /// full-chunk walk with nothing to dissolve — that is the soak-age
 /// leftover. Buried saturated carbonate still wakes: worldgen writes

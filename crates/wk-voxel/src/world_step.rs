@@ -19,7 +19,7 @@
 //! 4. CloudStore leftover parcel dump / buoyant rise
 //! 5. Thermal surplus → water (must not wait on the drizzle lottery)
 //! 6. C condensation (falling rain, or a flake below freeze)
-//! 7. K karst
+//! 7. K karst + standing-water mineral settle / bed dump
 //! 8. Geotech map (if due) → support / landscape fall
 //! 9. `tick_with_life` (CA; increments `world.tick`)
 //! 10. Shift organisms that rode competent rock
@@ -261,6 +261,13 @@ pub fn step_world(
         let t0 = profile.then(Instant::now);
         if cfg.karst_on {
             apply_karst_dissolution(world, cfg.karst);
+        }
+        // Same geology cadence as karst: dissolved load that reached a
+        // standing pool falls to the bed and becomes Flowstone / cement.
+        // Pore-water travel stays generous; this is only the lake dump.
+        let period = cfg.karst.period_ticks.max(1);
+        if world.tick % period == 0 {
+            crate::mineral::settle_and_precip_standing_load(world);
         }
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
             t.karst += t0.elapsed();
