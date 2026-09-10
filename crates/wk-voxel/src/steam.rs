@@ -707,6 +707,21 @@ pub enum CellPressureKind {
 /// - **Hot saturated rock:** pore flash drive from wetness × superheat above
 ///   boil, blended with cavity fill on wet walls that actually face the void.
 pub fn cell_pressure_norm(world: &World, gx: i32, gy: i32, temp_c: f32) -> (f32, CellPressureKind) {
+    cell_pressure_norm_with_boil(world, gx, gy, temp_c, BOIL_POINT_C)
+}
+
+/// [`cell_pressure_norm`] against the live Tab boil point.
+///
+/// The HUD used to hardcode 100 °C, so dropping boil to 60 °C lit the new
+/// isotherm (steam + cavity) while an 85 °C source still looked dead —
+/// pore flash was waiting for 100 °C.
+pub fn cell_pressure_norm_with_boil(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    temp_c: f32,
+    boil_c: f32,
+) -> (f32, CellPressureKind) {
     let steam = steam_at(world, gx, gy);
     let cavity = steam_pressure_norm(world, gx, gy);
     let Some(cell) = world.get_cell(gx, gy) else {
@@ -717,10 +732,16 @@ pub fn cell_pressure_norm(world: &World, gx: i32, gy: i32, temp_c: f32) -> (f32,
         };
     };
 
+    let boil = if boil_c.is_finite() {
+        boil_c
+    } else {
+        BOIL_POINT_C
+    };
+
     // Orphan steam on rock must not paint a cavity (bricked vent).
     if cell.material == MaterialId::Air {
         let local = (steam as f32 / 255.0).max(cavity);
-        return if local > 0.02 || (cell.sat.0 > 0 && temp_c >= 95.0) {
+        return if local > 0.02 || (cell.sat.0 > 0 && temp_c >= boil - 5.0) {
             (local.clamp(0.0, 1.0), CellPressureKind::Cavity)
         } else {
             (0.0, CellPressureKind::None)
@@ -736,7 +757,6 @@ pub fn cell_pressure_norm(world: &World, gx: i32, gy: i32, temp_c: f32) -> (f32,
     if wet < 0.05 && cavity < 0.02 {
         return (0.0, CellPressureKind::None);
     }
-    let boil = BOIL_POINT_C;
     let heat = if !temp_c.is_finite() {
         0.0
     } else if temp_c >= boil {
@@ -1751,7 +1771,7 @@ fn boil_hot_air(
 ) {
     let boil = cfg.boil_point_c;
     let prefer_confined = world.steam.len() + 32 >= max_cells;
-    let mut jobs: Vec<(i32, i32, u8)> = Vec::new();
+    let mut jobs: Vec<(u16, i32, i32, u8)> = Vec::new();
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -1777,13 +1797,13 @@ fn boil_hot_air(
                 .clamp(1.0, 255.0) as u8;
             let boil_amt = cell.sat.0.min(cap);
             if boil_amt > 0 {
-                jobs.push((gx, gy, boil_amt));
+                jobs.push((pore_boil_priority(t_c, boil, boil_amt), gx, gy, boil_amt));
             }
         });
     }
-    // Collect already dropped open seats; rank remaining by flash size.
-    jobs.sort_by(|a, b| b.2.cmp(&a.2));
-    for (gx, gy, amt) in jobs {
+    // Open seats already dropped; hotter superheat wins the steam-cell budget.
+    jobs.sort_by(|a, b| b.0.cmp(&a.0).then(b.3.cmp(&a.3)));
+    for (_, gx, gy, amt) in jobs {
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
         };
@@ -1840,14 +1860,13 @@ fn hydrothermal_solute_pulse(world: &mut World, gx: i32, gy: i32, drive: u8) {
 /// Keep the same top-N the old collect-all + stable-sort would apply.
 ///
 /// Pore boil walks every hot wet cell but only applies `max_work` (~16)
-/// jobs. Ranking is amount desc, then collect order — so a min-heap that
-/// rejects `amt <= cutoff` (keeping earlier ties) matches the old
-/// `sort_by` + take-N set and apply order.
+/// jobs. `push` ranks by amount (legacy tests). Pore/air boil use
+/// [`push_scored`] so superheat beats raw wetness when Tab boil drops.
 struct SteamAmtTopK {
-    items: Vec<(u8, u32, i32, i32)>,
+    items: Vec<(u16, u32, i32, i32, u8)>,
     cap: usize,
     next_idx: u32,
-    cutoff: u8,
+    cutoff: u16,
 }
 
 impl SteamAmtTopK {
@@ -1860,20 +1879,25 @@ impl SteamAmtTopK {
         }
     }
 
+    #[cfg(test)]
     fn push(&mut self, gx: i32, gy: i32, amt: u8) {
-        if amt == 0 {
+        self.push_scored(gx, gy, amt, amt as u16);
+    }
+
+    fn push_scored(&mut self, gx: i32, gy: i32, amt: u8, score: u16) {
+        if amt == 0 || score == 0 {
             return;
         }
         self.next_idx = self.next_idx.saturating_add(1);
         let idx = self.next_idx;
         if self.items.len() < self.cap {
-            self.items.push((amt, idx, gx, gy));
+            self.items.push((score, idx, gx, gy, amt));
             if self.items.len() == self.cap {
                 self.cutoff = self.items.iter().map(|i| i.0).min().unwrap_or(0);
             }
             return;
         }
-        if amt <= self.cutoff {
+        if score <= self.cutoff {
             return;
         }
         let worst = self
@@ -1883,7 +1907,7 @@ impl SteamAmtTopK {
             .min_by(|(_, a), (_, b)| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
             .map(|(i, _)| i);
         if let Some(i) = worst {
-            self.items[i] = (amt, idx, gx, gy);
+            self.items[i] = (score, idx, gx, gy, amt);
             self.cutoff = self.items.iter().map(|it| it.0).min().unwrap_or(0);
         }
     }
@@ -1893,9 +1917,24 @@ impl SteamAmtTopK {
             .sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         self.items
             .into_iter()
-            .map(|(amt, _, gx, gy)| (gx, gy, amt))
+            .map(|(_, _, gx, gy, amt)| (gx, gy, amt))
             .collect()
     }
+}
+
+/// Rank a pore-boil candidate so superheat beats raw wetness.
+///
+/// When Tab boil drops (60 °C), most of a wet mountain becomes eligible.
+/// Ranking by `sat` alone lets lukewarm swamps take the whole job budget
+/// while an 85 °C core sits idle. A quarter-degree of superheat outranks
+/// a full saturation difference.
+fn pore_boil_priority(temp_c: f32, boil_c: f32, amt: u8) -> u16 {
+    if amt == 0 || !temp_c.is_finite() || temp_c < boil_c {
+        return 0;
+    }
+    let over = (temp_c - boil_c).max(0.0);
+    let heat = (over * 4.0).round() as u16;
+    heat.saturating_mul(256).saturating_add(amt as u16)
 }
 
 fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, max_cells: usize) {
@@ -1928,7 +1967,7 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
                 .round()
                 .clamp(1.0, 255.0) as u8;
             let amt = cell.sat.0.min(cap);
-            top.push(gx, gy, amt);
+            top.push_scored(gx, gy, amt, pore_boil_priority(t_c, boil, amt));
         });
     }
     let jobs = top.into_sorted_jobs();
@@ -4170,6 +4209,50 @@ mod tests {
     }
 
     #[test]
+    fn pore_flash_follows_live_boil_point() {
+        // Tab boil 60 °C used to keep HUD flash glued to 100 °C, so an 85 °C
+        // wet source looked dead while a 60 °C source that had already
+        // flashed painted cavity pressure.
+        let mut w = World::new(91);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut rock = Cell::solid(MaterialId::LooseRock);
+        rock.pore = 64;
+        let cap = water_capacity_cell(rock, &w.hydro).max(1);
+        rock.sat = Sat(cap);
+        w.set_cell(5, 3, rock);
+        let (p60, kind60) = cell_pressure_norm_with_boil(&w, 5, 3, 85.0, 60.0);
+        assert!(
+            p60 > 0.05 && kind60 == CellPressureKind::PoreFlash,
+            "85 °C wet rock must flash against boil=60 (got {p60}, {kind60:?})"
+        );
+        let (p100, kind100) = cell_pressure_norm_with_boil(&w, 5, 3, 85.0, 100.0);
+        assert!(
+            p100 < p60 * 0.5,
+            "same 85 °C cell stays quiet against boil=100 (got {p100} vs {p60})"
+        );
+        assert!(
+            kind100 != CellPressureKind::PoreFlash || p100 < 0.05,
+            "85 °C must not look like a 100 °C boiler ({p100}, {kind100:?})"
+        );
+        let (at_isotherm, _) = cell_pressure_norm_with_boil(&w, 5, 3, 60.0, 60.0);
+        assert!(
+            at_isotherm < p60,
+            "exactly-at-boil flash must be weaker than 25 °C of superheat ({at_isotherm} vs {p60})"
+        );
+    }
+
+    #[test]
+    fn pore_boil_priority_ranks_superheat_above_wetness() {
+        let luke = pore_boil_priority(61.0, 60.0, 255);
+        let hot = pore_boil_priority(85.0, 60.0, 1);
+        assert!(
+            hot > luke,
+            "0.25 °C of superheat must outrank a full sat swing ({hot} vs {luke})"
+        );
+        assert_eq!(pore_boil_priority(50.0, 60.0, 255), 0);
+    }
+
+    #[test]
     fn hot_loose_rock_sinters_and_moves_water_upward() {
         // Buried hot saturated LooseRock must leave the grain stall: sinter to
         // competent rock, shove water upward, and widen without Air pipes.
@@ -4691,6 +4774,62 @@ mod tests {
             w.get_cell(12, 49).unwrap().sat.0 < crate::cell::water_capacity(MaterialId::Sand)
         );
         assert_eq!(sat_totals(&w).cell_total, before, "tile-skip pore boil is mass-flat");
+    }
+
+    #[test]
+    fn boil_hot_pores_prefers_superheat_over_wet_lukewarm() {
+        // When Tab boil drops, a wet mountain lights up. Sat-only ranking
+        // spends the ~16-job budget on lukewarm swamps and starves an 85 °C
+        // core. Superheat ranking must flash the hot cell first.
+        let mut w = World::new(141);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 4..28 {
+            for y in 40..56 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 10..16 {
+            for y in 46..52 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let sand_cap = crate::cell::water_capacity(MaterialId::Sand);
+        let mut luke_n = 0u32;
+        for x in 6..10 {
+            for y in 42..54 {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = Sat(sand_cap);
+                w.set_cell(x, y, sand);
+                luke_n += 1;
+            }
+        }
+        assert!(luke_n > 16, "need more lukewarm cells than the job budget");
+        let mut hot_sand = Cell::solid(MaterialId::Sand);
+        hot_sand.sat = Sat(8);
+        // Adjacent to the cave so a selected job can actually seat vapour.
+        w.set_cell(16, 48, hot_sand);
+        let mut temp = temp_fill(&w, 61.0);
+        let (hx, hy) = temp.tile_of(16, 48);
+        temp.set_tile_c(hx, hy, 85.0);
+        let sat0 = w.get_cell(16, 48).unwrap().sat.0;
+        let before = sat_totals(&w).cell_total;
+        w.tick = STEAM_EVERY;
+        apply_steam(
+            &mut w,
+            &mut temp,
+            &SteamConfig {
+                boil_point_c: 60.0,
+                max_escapes_per_tick: 1,
+                ..SteamConfig::default()
+            },
+        );
+        let sat1 = w.get_cell(16, 48).unwrap().sat.0;
+        assert!(
+            sat1 < sat0,
+            "85 °C drier core must flash before 61 °C swamps ({sat0}→{sat1}, steam {})",
+            steam_total(&w)
+        );
+        assert_eq!(sat_totals(&w).cell_total, before, "ranked pore boil is mass-flat");
     }
 
     #[test]

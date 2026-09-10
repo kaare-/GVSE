@@ -1391,8 +1391,13 @@ async fn main() {
                                 continue;
                             }
                             let temp_c = scene.temperature.at_cell(x, y);
-                            let (p, kind) =
-                                wk_voxel::cell_pressure_norm(&scene.world, x, y, temp_c);
+                            let (p, kind) = wk_voxel::cell_pressure_norm_with_boil(
+                                &scene.world,
+                                x,
+                                y,
+                                temp_c,
+                                settings.steam.boil_point_c,
+                            );
                             if kind == wk_voxel::CellPressureKind::None || p < 0.03 {
                                 continue;
                             }
@@ -1700,6 +1705,7 @@ async fn main() {
                     org,
                     corpse,
                     sw,
+                    settings.steam.boil_point_c,
                 );
             }
         }
