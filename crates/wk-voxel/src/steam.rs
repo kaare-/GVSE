@@ -2180,12 +2180,17 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
             boil,
         );
 
-        // Marble tube: surplus shoves groundwater. Mass stays liquid unless
-        // a dry/open seat actually takes vapour (no mineral on that hop).
-        let _gas = try_gas_climb(world, gx, gy, take, max_cells);
-        // Shove groundwater first — welding the host before the pulse
-        // emptied the marble tube into a zero-perm stone cell.
+        // Marble tube first: surplus shoves groundwater (one in, one out).
+        // Dry-roof gas is only the leftover when the liquid straw cannot move.
+        let sat_before = cell.sat.0;
         reverse_seep_chain(world, temp, gx, gy, drive, hops);
+        let sat_after = world
+            .get_cell(gx, gy)
+            .map(|c| c.sat.0)
+            .unwrap_or(0);
+        if sat_after >= sat_before {
+            let _gas = try_gas_climb(world, gx, gy, take.min(sat_after), max_cells);
+        }
         if world.get_cell(gx, gy).is_some_and(|c| {
             matches!(
                 c.material,
@@ -2538,7 +2543,14 @@ fn reverse_seep_path_score(
         return None;
     }
     let room = cap.saturating_sub(dst.sat.0);
-    if room == 0 && !vent {
+    // Packed wet rock is the marble straw: leftover at the hot end
+    // shoves the next marble through a full seat. Dry / empty seats
+    // still need room (or a vent) so we do not invent water.
+    let packed = room == 0
+        && dst.sat.0 > 0
+        && dst.material != MaterialId::Air
+        && permeability_cell(dst, &world.hydro) > 0;
+    if room == 0 && !vent && !packed {
         return None;
     }
     if dst.material == MaterialId::Air && !vent {
@@ -2605,7 +2617,20 @@ fn reverse_push_pore_water(world: &mut World, temp: &mut Temperature, gx: i32, g
 }
 
 fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32, gy: i32, drive: u8) -> (u8, Option<(i32, i32)>) {
-    if drive == 0 {
+    let mut seen = FxHashSet::default();
+    reverse_push_pore_water_inner(world, temp, gx, gy, drive, 16, &mut seen)
+}
+
+fn reverse_push_pore_water_inner(
+    world: &mut World,
+    temp: &mut Temperature,
+    gx: i32,
+    gy: i32,
+    drive: u8,
+    depth: u8,
+    seen: &mut FxHashSet<(i32, i32)>,
+) -> (u8, Option<(i32, i32)>) {
+    if drive == 0 || !seen.insert((gx, gy)) {
         return (0, None);
     }
     let Some(src) = world.get_cell(gx, gy) else {
@@ -2619,6 +2644,9 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
     for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
         let tx = world.wrap_x(gx + dx);
         let ty = gy + dy;
+        if seen.contains(&(tx, ty)) {
+            continue;
+        }
         let Some(dst) = world.get_cell(tx, ty) else {
             continue;
         };
@@ -2655,17 +2683,31 @@ fn reverse_push_pore_water_to(world: &mut World, temp: &mut Temperature, gx: i32
         for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
             let tx = world.wrap_x(gx + dx);
             let ty = gy + dy;
+            if seen.contains(&(tx, ty)) {
+                continue;
+            }
             let Some(dst) = world.get_cell(tx, ty) else {
                 continue;
             };
             consider_reverse_seep_step(world, &mut best, tx, ty, dy, dst);
         }
     }
-    let Some((_, tx, ty, dst, overflow_vent)) = best else {
+    let Some((_, tx, ty, mut dst, mut overflow_vent)) = best else {
         return (0, None);
     };
-    let cap = water_capacity_cell(dst, &world.hydro);
-    let room = cap.saturating_sub(dst.sat.0);
+    let mut cap = water_capacity_cell(dst, &world.hydro);
+    let mut room = cap.saturating_sub(dst.sat.0);
+    // Full wet seat: shove its marble onward first, then occupy the hole.
+    if room == 0 && !overflow_vent && dst.material != MaterialId::Air && depth > 0 {
+        let _ = reverse_push_pore_water_inner(world, temp, tx, ty, drive, depth - 1, seen);
+        let Some(now) = world.get_cell(tx, ty) else {
+            return (0, None);
+        };
+        dst = now;
+        cap = water_capacity_cell(dst, &world.hydro);
+        room = cap.saturating_sub(dst.sat.0);
+        overflow_vent = is_steam_discharge_vent(world, tx, ty, dst) && room == 0;
+    }
     let moved = if overflow_vent {
         // Full open-sky lake: discharge by overflowing through the vent column.
         want
@@ -4770,6 +4812,51 @@ mod tests {
         );
         assert_eq!(sat_totals(&w).cell_total, water0, "marble tube is mass-flat");
         assert_eq!(mineral_total(&w), min0, "solute rides liquid, never minted");
+    }
+
+    #[test]
+    fn marble_tube_shoves_through_a_saturated_column() {
+        // Full seats used to reject reverse-seep (needed room). A packed
+        // groundwater straw must still spit a marble at the mouth.
+        let mut w = World::new(221);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..8 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=5 {
+            let mut rock = Cell::solid(MaterialId::Stone);
+            let cap = water_capacity_cell(rock, &w.hydro).max(1);
+            rock.sat = Sat(cap);
+            w.set_cell(5, y, rock);
+        }
+        w.set_cell(5, 6, Cell::air());
+        let water0 = sat_totals(&w).cell_total;
+        let bot0 = w.get_cell(5, 1).unwrap().sat.0;
+        let mouth0 = w.get_cell(5, 6).unwrap().sat.0;
+        let mut hot = temp_fill(&w, 110.0);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 96,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            pore_boil_max_per_cell: 48,
+            ..SteamConfig::default()
+        };
+        for i in 1..16 {
+            w.tick = STEAM_EVERY * i;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let bot1 = w.get_cell(5, 1).unwrap().sat.0;
+        let mouth1 = w.get_cell(5, 6).unwrap().sat.0;
+        assert_eq!(sat_totals(&w).cell_total, water0, "packed straw is mass-flat");
+        assert!(
+            mouth1 > mouth0 || bot1 < bot0,
+            "leftover must shove a marble through the full column (mouth {mouth0}→{mouth1}, base {bot0}→{bot1})"
+        );
     }
 
     #[test]
