@@ -1363,7 +1363,7 @@ async fn main() {
         }
 
 
-        // Pore / cavity pressure gradient (P): flash drive + pressurized vapour.
+        // Pore / cavity leftover volume (P): mass×expand − seat. No cave required.
         if pressure_overlay && overlay_k > 0.01 {
             let (xr, xn) = view_cell_x_ranges(
                 origin_x,

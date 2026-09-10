@@ -147,7 +147,8 @@ pub use cave_humidity::{
 pub use steam::{
     air_void_open_to_sky, apply_steam, apply_steam_with_weather, cavity_humidity_at,
     cell_pressure_norm, cell_pressure_norm_with_boil, choke_leak_mass, classify_air_vessel,
-    expansion_drive_units, overpressure_units, phase_heat_drive_scale, steam_at, steam_haze_wash,
+    expansion_drive_units, leftover_pack_norm, overpressure_units, phase_heat_drive_scale,
+    steam_at, steam_haze_wash,
     steam_is_pressure_confined, steam_pressure_norm, steam_pressure_rate_scale, steam_total,
     steam_vapour_field, vapor_volume_units, vessel_is_boiler, void_is_confined, CellPressureKind,
     SteamConfig, SteamHazeSample, VesselKind, BOIL_POINT_C, MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE,

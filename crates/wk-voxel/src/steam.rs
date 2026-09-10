@@ -855,27 +855,34 @@ pub fn steam_pressure_rate_scale(world: &World, gx: i32, gy: i32) -> f32 {
 pub enum CellPressureKind {
     /// Sparse pressurized cavity humidity (wire: `World.steam`).
     Cavity,
-    /// Hot wet rock / pore water — flash drive + nearby cavity influence.
+    /// Leftover pore volume in rock — no cave required.
     PoreFlash,
     /// Negligible.
     None,
 }
 
+/// How much expanded volume does not fit the equilibrium seat (0..=1).
+///
+/// `1 - seat/volume` so 7/14 rock at expand 100 is nearly as packed as
+/// 14/14. Cool collapse (`volume == mass`) is zero leftover.
+#[inline]
+pub fn leftover_pack_norm(volume: u32, seat: u32) -> f32 {
+    if seat == 0 || volume <= seat {
+        return 0.0;
+    }
+    (1.0 - seat as f32 / volume as f32).clamp(0.0, 1.0)
+}
+
 /// Unified 0..=1 pressure readout for inspector + overlay.
 ///
-/// - **Air / steam seats:** equalized fill of the connected confined pocket
-///   ([`steam_pressure_norm`]) — cave-shaped, not a downward candle.
-/// - **Hot saturated rock:** pore flash drive from wetness × superheat above
-///   boil, blended with cavity fill on wet walls that actually face the void.
+/// Leftover volume (`mass × expand − seat`) while T ≥ boil. Saturated
+/// stone does **not** need a cave. Weather air (open ground, wide U)
+/// stays unlit even when hot.
 pub fn cell_pressure_norm(world: &World, gx: i32, gy: i32, temp_c: f32) -> (f32, CellPressureKind) {
     cell_pressure_norm_with_boil(world, gx, gy, temp_c, BOIL_POINT_C, PHASE_EXPANSION_DRIVE)
 }
 
 /// [`cell_pressure_norm`] against the live Tab boil point and expand.
-///
-/// Pore flash is leftover volume (`mass × expand − seat`) while hot, so
-/// a 14/14 cell at expand 100 reads packed. Cool collapse is automatic:
-/// volume returns to mass and surplus is zero.
 pub fn cell_pressure_norm_with_boil(
     world: &World,
     gx: i32,
@@ -885,13 +892,8 @@ pub fn cell_pressure_norm_with_boil(
     expand: u8,
 ) -> (f32, CellPressureKind) {
     let steam = steam_at(world, gx, gy);
-    let cavity = steam_pressure_norm(world, gx, gy);
     let Some(cell) = world.get_cell(gx, gy) else {
-        return if cavity > 0.02 {
-            (cavity, CellPressureKind::Cavity)
-        } else {
-            (0.0, CellPressureKind::None)
-        };
+        return (0.0, CellPressureKind::None);
     };
 
     let boil = if boil_c.is_finite() {
@@ -901,57 +903,33 @@ pub fn cell_pressure_norm_with_boil(
     };
     let expand = expand.max(1);
 
-    // Orphan steam on rock must not paint a cavity (bricked vent).
     if cell.material == MaterialId::Air {
-        let seat = 255u32;
+        // Open landscape / wide U: weather, not a pressure overlay.
+        if !vessel_is_boiler(world, gx, gy) {
+            return (0.0, CellPressureKind::None);
+        }
+        let seat = water_capacity_cell(cell, &world.hydro).max(1) as u32;
         let vol = vapor_volume_units(steam as u32, temp_c, boil, expand);
-        let pack = overpressure_units(vol, seat) as f32 / (seat as f32 * expand as f32).max(1.0);
-        let local = (steam as f32 / 255.0).max(cavity).max(pack);
-        return if local > 0.02 || (cell.sat.0 > 0 && temp_c >= boil - 5.0) {
-            (local.clamp(0.0, 1.0), CellPressureKind::Cavity)
+        let pack = leftover_pack_norm(vol, seat);
+        return if pack > 0.02 {
+            (pack.clamp(0.0, 1.0), CellPressureKind::Cavity)
         } else {
             (0.0, CellPressureKind::None)
         };
     }
 
+    // Rock / pores: the cell is the vessel. No Air seat required.
     let cap = water_capacity_cell(cell, &world.hydro);
-    let wet = if cap == 0 {
-        0.0
-    } else {
-        (cell.sat.0 as f32 / cap as f32).clamp(0.0, 1.0)
-    };
-    if wet < 0.05 && cavity < 0.02 && steam == 0 {
-        return (0.0, CellPressureKind::None);
-    }
     let vol = vapor_volume_units(cell.sat.0 as u32, temp_c, boil, expand);
-    let surplus = overpressure_units(vol, cap as u32);
-    let pack = if cap == 0 {
-        0.0
-    } else {
-        (surplus as f32 / (cap as f32 * expand as f32).max(1.0)).clamp(0.0, 1.0)
-    };
-    let heat = if !temp_c.is_finite() {
-        0.0
-    } else if temp_c >= boil {
-        ((temp_c - boil) / 80.0).clamp(0.0, 1.0)
-    } else if temp_c >= boil - 15.0 {
-        (((temp_c - (boil - 15.0)) / 15.0).clamp(0.0, 1.0)) * 0.2
-    } else {
-        0.0
-    };
-    let pore_flash = (wet * heat).max(pack);
-    let blended = (pore_flash * 0.9 + cavity * (0.35 + 0.65 * wet)).clamp(0.0, 1.0);
-    if blended < 0.02 {
+    let mut pack = leftover_pack_norm(vol, cap as u32);
+    if steam > 0 {
+        let gas_vol = vapor_volume_units(steam as u32, temp_c, boil, expand);
+        pack = pack.max(leftover_pack_norm(gas_vol, cap.max(1) as u32));
+    }
+    if pack < 0.02 {
         return (0.0, CellPressureKind::None);
     }
-    let kind = if pore_flash >= cavity * 0.5 && pore_flash > 0.02 {
-        CellPressureKind::PoreFlash
-    } else if cavity > 0.02 {
-        CellPressureKind::Cavity
-    } else {
-        CellPressureKind::PoreFlash
-    };
-    (blended, kind)
+    (pack, CellPressureKind::PoreFlash)
 }
 
 fn can_admit_new_steam_cell(world: &World, gx: i32, gy: i32, max_cells: usize) -> bool {
@@ -4598,6 +4576,9 @@ mod tests {
         assert_eq!(vapor_volume_units(14, 20.0, 60.0, 100), 14);
         assert_eq!(overpressure_units(1400, 14), 1386);
         assert_eq!(overpressure_units(14, 14), 0);
+        assert!((leftover_pack_norm(1400, 14) - (1.0 - 14.0 / 1400.0)).abs() < 1e-5);
+        assert!((leftover_pack_norm(700, 14) - (1.0 - 14.0 / 700.0)).abs() < 1e-5);
+        assert_eq!(leftover_pack_norm(14, 14), 0.0);
         assert!(choke_leak_mass(1386, 100, 1) <= 24);
         assert!(choke_leak_mass(1386, 100, 1) > 0);
     }
@@ -4608,17 +4589,58 @@ mod tests {
         w.ensure_chunk(ChunkCoord::new(0, 0));
         let mut rock = Cell::solid(MaterialId::LooseRock);
         rock.pore = 14;
-        rock.sat = Sat(14);
+        let cap = water_capacity_cell(rock, &w.hydro).max(1);
+        rock.sat = Sat(cap);
         w.set_cell(5, 3, rock);
         let (hot, kind) = cell_pressure_norm_with_boil(&w, 5, 3, 120.0, 60.0, 100);
+        let expect = leftover_pack_norm(vapor_volume_units(cap as u32, 120.0, 60.0, 100), cap as u32);
         assert!(
-            hot > 0.55 && kind == CellPressureKind::PoreFlash,
-            "14/14 ×100 at 120 °C must read packed (got {hot}, {kind:?})"
+            (hot - expect).abs() < 0.02 && kind == CellPressureKind::PoreFlash,
+            "full pore ×100 at 120 °C must read leftover pack {expect} (got {hot}, {kind:?})"
         );
         let (cold, cold_kind) = cell_pressure_norm_with_boil(&w, 5, 3, 20.0, 60.0, 100);
         assert!(
             cold < 0.02 && cold_kind == CellPressureKind::None,
             "cool collapse must drop surplus ({cold}, {cold_kind:?})"
+        );
+    }
+
+    #[test]
+    fn half_full_hot_pore_is_still_packed_leftover() {
+        let mut w = World::new(91);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut rock = Cell::solid(MaterialId::LooseRock);
+        rock.pore = 14;
+        let cap = water_capacity_cell(rock, &w.hydro).max(2);
+        let mass = (cap / 2).max(1);
+        rock.sat = Sat(mass);
+        w.set_cell(5, 3, rock);
+        let (p, kind) = cell_pressure_norm_with_boil(&w, 5, 3, 120.0, 60.0, 100);
+        let expect =
+            leftover_pack_norm(vapor_volume_units(mass as u32, 120.0, 60.0, 100), cap as u32);
+        assert!(
+            (p - expect).abs() < 0.02 && p > 0.85 && kind == CellPressureKind::PoreFlash,
+            "half-full ×100 is leftover volume {expect}, not half-wetness (got {p}, {kind:?})"
+        );
+    }
+
+    #[test]
+    fn open_weather_air_does_not_paint_pressure() {
+        let mut w = World::new(215);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        let mut puddle = Cell::air();
+        puddle.sat = Sat(200);
+        w.set_cell(4, 1, puddle);
+        for y in 2..12 {
+            w.set_cell(4, y, Cell::air());
+        }
+        add_steam(&mut w, 4, 1, 80);
+        let (p, kind) = cell_pressure_norm_with_boil(&w, 4, 1, 180.0, 60.0, 100);
+        assert_eq!(
+            kind,
+            CellPressureKind::None,
+            "open hot puddle is weather, not a P overlay ({p}, {kind:?})"
         );
     }
 
@@ -4919,6 +4941,49 @@ mod tests {
         let (p, kind) = cell_pressure_norm(&w, 4, 2, 120.0);
         assert!(p > 0.2, "dense cavity humidity must read pressure (got {p})");
         assert_eq!(kind, CellPressureKind::Cavity);
+        let density = 180.0 / 255.0;
+        assert!(
+            p > density + 0.1,
+            "boiler P is leftover pack, not steam/255 density ({p} vs {density})"
+        );
+        let (cold, cold_kind) = cell_pressure_norm(&w, 4, 2, 20.0);
+        assert!(
+            cold < 0.02 && cold_kind == CellPressureKind::None,
+            "cool vessel leftover must collapse ({cold}, {cold_kind:?})"
+        );
+    }
+
+    #[test]
+    fn wide_u_weather_does_not_paint_pressure() {
+        let mut w = World::new(219);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 4..12 {
+            for y in 2..6 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 4..12 {
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        add_steam(&mut w, 8, 3, 80);
+        assert_eq!(
+            classify_air_vessel(&w, 8, 3),
+            VesselKind::Weather,
+            "wide U is weather, not a pinprick boiler"
+        );
+        let (p, kind) = cell_pressure_norm_with_boil(&w, 8, 3, 180.0, 60.0, 100);
+        assert_eq!(
+            kind,
+            CellPressureKind::None,
+            "wide U must stay dark on P ({p}, {kind:?})"
+        );
     }
 
     #[test]

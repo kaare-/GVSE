@@ -1163,7 +1163,7 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Cavity humidity / pressure", |ui| {
                     ui.label(
                         None,
-                        "Closed / semi-closed cavity humidity under pressure (wire: steam; not sky H). Hot water carries heat into channels; vapour density keeps pushing past the boil isotherm. Cool → drip/sinter.",
+                        "Closed / semi-closed leftover volume (P overlay; wire: steam; not sky H). Saturated stone lights without a cave. Open ground / a wide U is weather and stays dark. Cool collapses mass×expand back to mass.",
                     );
                     ui.checkbox(hash!(), "Cavity humidity enabled", &mut self.steam.enabled);
                     ui.checkbox(hash!(), "Pore boil (wet rock)", &mut self.steam.enable_pore_boil);

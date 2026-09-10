@@ -6,7 +6,7 @@ use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     is_fungus, is_land_plant, permeability_cell, soft_litter_at, cave_humidity_at,
     cell_pressure_norm_with_boil,
-    steam_at, steam_is_pressure_confined, steam_pressure_norm, void_is_confined, water_capacity_cell,
+    steam_at, steam_pressure_norm, vessel_is_boiler, void_is_confined, water_capacity_cell,
     Atom, Cell, CellPressureKind,
     Corpse, GeotechMap, Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS,
     CORPSE_SETTLE_WATER_TICKS,
@@ -271,23 +271,22 @@ pub fn draw_block_inspector(
                 } else {
                     false
                 };
-                let boiler = c.material == MaterialId::Air
-                    && steam_is_pressure_confined(world, gx, gy);
+                let boiler = c.material == MaterialId::Air && vessel_is_boiler(world, gx, gy);
                 let cavity = steam_pressure_norm(world, gx, gy);
                 let kind = match press_kind {
-                    CellPressureKind::Cavity => "cavity vapour",
-                    CellPressureKind::PoreFlash => "pore flash",
+                    CellPressureKind::Cavity => "vessel leftover",
+                    CellPressureKind::PoreFlash => "pore leftover",
                     CellPressureKind::None => "trace",
                 };
                 if steam > 0 || c.material == MaterialId::Air {
                     lines.push(format!(
-                        "cavity_h={steam}/255  roofed={}  boiler={}  pressure={press:.2} ({kind}; not sky H)",
+                        "cavity_h={steam}/255  roofed={}  boiler={}  pressure={press:.2} ({kind}; mass×expand, not sky H)",
                         if confined { "yes" } else { "no" },
                         if boiler { "yes" } else { "no" },
                     ));
                 } else {
                     lines.push(format!(
-                        "pressure={press:.2} ({kind}; wet={pct:.0}% T={temp_c:.0}C cavity_P={cavity:.2})"
+                        "pressure={press:.2} ({kind}; wet={pct:.0}% T={temp_c:.0}C expand={expand} cavity_P={cavity:.2})"
                     ));
                 }
             }
