@@ -2180,16 +2180,16 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
             boil,
         );
 
-        // Marble tube first: surplus shoves groundwater (one in, one out).
-        // Dry-roof gas is only the leftover when the liquid straw cannot move.
-        let sat_before = cell.sat.0;
+        // Roofed void may take distilled gas (cavity flash). Then leftover
+        // shoves the groundwater straw. Dry-rock fumaroles are last.
+        let flashed = try_gas_climb(world, gx, gy, take, max_cells, false);
         reverse_seep_chain(world, temp, gx, gy, drive, hops);
-        let sat_after = world
+        let sat_left = world
             .get_cell(gx, gy)
             .map(|c| c.sat.0)
             .unwrap_or(0);
-        if sat_after >= sat_before {
-            let _gas = try_gas_climb(world, gx, gy, take.min(sat_after), max_cells);
+        if sat_left > 0 && flashed == 0 {
+            let _ = try_gas_climb(world, gx, gy, take.min(sat_left), max_cells, true);
         }
         if world.get_cell(gx, gy).is_some_and(|c| {
             matches!(
@@ -2208,7 +2208,14 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
 /// Move **mass** (not volume) into a dry/open upward seat as pore/cavity gas.
 ///
 /// Distilled: no [`carry_with_water`]. A pure gas hop cannot rain mineral.
-fn try_gas_climb(world: &mut World, gx: i32, gy: i32, want: u8, max_cells: usize) -> u8 {
+fn try_gas_climb(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    want: u8,
+    max_cells: usize,
+    allow_dry_rock: bool,
+) -> u8 {
     if want == 0 {
         return 0;
     }
@@ -2227,7 +2234,8 @@ fn try_gas_climb(world: &mut World, gx: i32, gy: i32, want: u8, max_cells: usize
         };
         let score = if dst.material == MaterialId::Air && is_steam_void(dst) {
             8_000 + dy.max(0) * 80
-        } else if crate::cell::is_competent_rock(dst.material)
+        } else if allow_dry_rock
+            && crate::cell::is_competent_rock(dst.material)
             && dst.sat.0 == 0
             && permeability_cell(dst, &world.hydro) > 0
         {
