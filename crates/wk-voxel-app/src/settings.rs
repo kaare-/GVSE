@@ -119,6 +119,10 @@ pub struct SimSettings {
     pub atmosphere: AtmosphereLookConfig,
     /// 0 = landscape only, 1 = heatmap only (when U/T/M/G overlays are on).
     pub heatmap_blend: f32,
+    /// T overlay three-point window (°C): cold / mid / hot.
+    pub temp_overlay_lo: f32,
+    pub temp_overlay_mid: f32,
+    pub temp_overlay_hi: f32,
     /// How dark a fully waterlogged cell renders (Tab → World → Look).
     /// Measured against the cell's own capacity, quantized so merged terrain
     /// runs survive.
@@ -265,6 +269,9 @@ impl SimSettings {
             climate: ClimateConfig::default(),
             atmosphere: AtmosphereLookConfig::default(),
             heatmap_blend: 0.55,
+            temp_overlay_lo: crate::temp_overlay::DEFAULT_LO,
+            temp_overlay_mid: crate::temp_overlay::DEFAULT_MID,
+            temp_overlay_hi: crate::temp_overlay::DEFAULT_HI,
             wet_darken: crate::palette::WET_DARKEN_DEFAULT,
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
@@ -691,6 +698,55 @@ impl SimSettings {
                         0.0..1.0,
                         &mut self.heatmap_blend,
                     );
+                    ui.separator();
+                    ui.label(None, "T overlay — three-point window (°C)");
+                    ui.label(
+                        None,
+                        "Cold / mid / hot stretch the colour ramp. Pull them in to zoom a band (boil, freeze).",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "T cold (°C)",
+                        crate::temp_overlay::SLIDER_MIN..crate::temp_overlay::SLIDER_MAX,
+                        &mut self.temp_overlay_lo,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "T mid (°C)",
+                        crate::temp_overlay::SLIDER_MIN..crate::temp_overlay::SLIDER_MAX,
+                        &mut self.temp_overlay_mid,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "T hot (°C)",
+                        crate::temp_overlay::SLIDER_MIN..crate::temp_overlay::SLIDER_MAX,
+                        &mut self.temp_overlay_hi,
+                    );
+                    crate::temp_overlay::order_stops(
+                        &mut self.temp_overlay_lo,
+                        &mut self.temp_overlay_mid,
+                        &mut self.temp_overlay_hi,
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "Window  {:.0}  ·  {:.0}  ·  {:.0} °C",
+                            self.temp_overlay_lo, self.temp_overlay_mid, self.temp_overlay_hi
+                        ),
+                    );
+                    if ui.button(None, "T window: climate (−40 / 18 / 36)") {
+                        self.temp_overlay_lo = crate::temp_overlay::DEFAULT_LO;
+                        self.temp_overlay_mid = crate::temp_overlay::DEFAULT_MID;
+                        self.temp_overlay_hi = crate::temp_overlay::DEFAULT_HI;
+                    }
+                    if ui.button(None, "T window: boil (80 / 100 / 140)") {
+                        self.temp_overlay_lo = crate::temp_overlay::BOIL_LO;
+                        self.temp_overlay_mid = crate::temp_overlay::BOIL_MID;
+                        self.temp_overlay_hi = crate::temp_overlay::BOIL_HI;
+                    }
                 });
 
                 ui.tree_node(hash!(), "Sky look / atmosphere", |ui| {
