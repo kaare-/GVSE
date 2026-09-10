@@ -286,6 +286,12 @@ const LEFTOVER_FIELD_CELLS: usize = 4096;
 /// reads as a thermal blob instead of a mound or a vein.
 const LEFTOVER_COST_FADE: f32 = 32.0;
 
+/// Chebyshev spacing between leftover seeds. Every wet cell on a hot
+/// tile used to inject at cost 0, so a geothermal hill painted a solid
+/// yellow disk. One peak per neighbourhood keeps the arms and drops
+/// the maxed-out blob.
+const LEFTOVER_SEED_RADIUS: i32 = 6;
+
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
@@ -917,21 +923,29 @@ pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32,
 }
 
 fn leftover_field_lookup(world: &World, gx: i32, gy: i32, boil_c: f32, expand: u8) -> f32 {
+    let gx = world.wrap_x(gx);
+    LEFTOVER_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        if !leftover_memo_bound(&memo, world, boil_c, expand) {
+            return 0.0;
+        }
+        memo.map.get(&(gx, gy)).copied().unwrap_or(0.0)
+    })
+}
+
+fn leftover_field_bound(world: &World, boil_c: f32, expand: u8) -> bool {
+    LEFTOVER_MEMO.with(|slot| leftover_memo_bound(&slot.borrow(), world, boil_c, expand))
+}
+
+fn leftover_memo_bound(memo: &LeftoverMemo, world: &World, boil_c: f32, expand: u8) -> bool {
     let boil_bits = if boil_c.is_finite() {
         boil_c.to_bits()
     } else {
         BOIL_POINT_C.to_bits()
     };
-    let expand = expand.max(1);
-    let id = world.chunk_cache_id.get();
-    let gx = world.wrap_x(gx);
-    LEFTOVER_MEMO.with(|slot| {
-        let memo = slot.borrow();
-        if memo.world_id != id || memo.boil_bits != boil_bits || memo.expand != expand {
-            return 0.0;
-        }
-        memo.map.get(&(gx, gy)).copied().unwrap_or(0.0)
-    })
+    memo.world_id == world.chunk_cache_id.get()
+        && memo.boil_bits == boil_bits
+        && memo.expand == expand.max(1)
 }
 
 fn leftover_step_cost(perm: u8, dy: i32) -> u32 {
@@ -960,7 +974,7 @@ fn rebuild_leftover_field(
         .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
         .map(|(k, _)| *k)
         .collect();
-    let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
+    let mut cands: Vec<(i32, i32, f32, u32)> = Vec::new();
     for coord in coords {
         for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
             if cell.material == MaterialId::Air || cell.sat.0 == 0 {
@@ -975,8 +989,27 @@ fn rebuild_leftover_field(
             if surplus == 0 {
                 return;
             }
-            heap.push((Reverse(0), world.wrap_x(gx), gy, surplus));
+            cands.push((world.wrap_x(gx), gy, t_c, surplus));
         });
+    }
+    cands.sort_by(|a, b| {
+        b.2.partial_cmp(&a.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.3.cmp(&a.3))
+            .then(b.1.cmp(&a.1))
+            .then(a.0.cmp(&b.0))
+    });
+    let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
+    let mut seeds: Vec<(i32, i32)> = Vec::new();
+    for &(gx, gy, _, surplus) in &cands {
+        if seeds
+            .iter()
+            .any(|&(sx, sy)| (gx - sx).abs().max((gy - sy).abs()) <= LEFTOVER_SEED_RADIUS)
+        {
+            continue;
+        }
+        seeds.push((gx, gy));
+        heap.push((Reverse(0), gx, gy, surplus));
     }
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
     while let Some((Reverse(cost), gx, gy, remaining)) = heap.pop() {
@@ -1184,8 +1217,11 @@ pub fn cell_pressure_norm_with_boil(
         };
     }
 
-    // Rock / pores: local leftover plus the transmitted field (least
-    // resistance / water-table mound), not a per-cell thermal average.
+    // Rock / pores: the transmitted leftover field (least-resistance
+    // arms / mound) once it has been built this tick. Local
+    // leftover_pack_norm is ~0.99 on every hot wet cell and paints a
+    // yellow disk over the whole isotherm — keep it only as a fallback
+    // when the field has not been prepared.
     let cap = water_capacity_cell(cell, &world.hydro);
     let vol = vapor_volume_units(cell.sat.0 as u32, temp_c, boil, expand);
     let mut pack = leftover_pack_norm(vol, cap as u32);
@@ -1193,7 +1229,16 @@ pub fn cell_pressure_norm_with_boil(
         let gas_vol = vapor_volume_units(steam as u32, temp_c, boil, expand);
         pack = pack.max(leftover_pack_norm(gas_vol, cap.max(1) as u32));
     }
-    pack = pack.max(leftover_field_lookup(world, gx, gy, boil, expand));
+    let field = leftover_field_lookup(world, gx, gy, boil, expand);
+    if leftover_field_bound(world, boil, expand) {
+        pack = field;
+        if steam > 0 {
+            let gas_vol = vapor_volume_units(steam as u32, temp_c, boil, expand);
+            pack = pack.max(leftover_pack_norm(gas_vol, cap.max(1) as u32));
+        }
+    } else {
+        pack = pack.max(field);
+    }
     if pack < 0.02 {
         return (0.0, CellPressureKind::None);
     }
@@ -5342,6 +5387,56 @@ mod tests {
         assert!(
             vein > tight + 0.05,
             "leftover must follow the sand vein, not smear both flanks ({vein} vs {tight})"
+        );
+    }
+
+    #[test]
+    fn leftover_field_does_not_paint_a_hot_wet_plateau() {
+        // A geothermal hill used to light every wet cell at ~0.99 (yellow
+        // blob). Seeds are spaced; P follows faded arms, not the isotherm.
+        let mut w = World::new(229);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..10 {
+            for y in 1..9 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        let mut temp = temp_fill(&w, 20.0);
+        for x in 2..10 {
+            for y in 1..9 {
+                let (hx, hy) = temp.tile_of(x, y);
+                temp.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &temp, 100.0, 192);
+        let mut maxed = 0u32;
+        let mut max_p = 0.0f32;
+        for x in 2..10 {
+            for y in 1..9 {
+                let (p, _) = cell_pressure_norm_with_boil(&w, x, y, 122.0, 100.0, 192);
+                max_p = max_p.max(p);
+                if p > 0.85 {
+                    maxed += 1;
+                }
+            }
+        }
+        let (mid_p, _) = cell_pressure_norm_with_boil(&w, 5, 4, 122.0, 100.0, 192);
+        assert!(
+            max_p > 0.5,
+            "a leftover seed must still read packed ({max_p})"
+        );
+        assert!(
+            maxed <= 6,
+            "must not max-paint the whole hot wet plateau ({maxed} cells >0.85)"
+        );
+        assert!(
+            mid_p < max_p - 0.2,
+            "interior of the plateau must fade vs the seed ({mid_p} vs {max_p})"
         );
     }
 
