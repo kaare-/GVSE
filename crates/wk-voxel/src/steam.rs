@@ -970,7 +970,8 @@ fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32)
 /// Flood-fill connected void Air and redistribute steam like a gas.
 ///
 /// Cave / under-roof pockets (including leaky ones) equalize as a vapour
-/// field. Only a fully open shaft uses a buoyant plume.
+/// field. A fully open shaft parks as liquid — it must not pack a plume
+/// into free sky (leftover puffs on the humidity field).
 fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) {
     if world.steam.is_empty() {
         return;
