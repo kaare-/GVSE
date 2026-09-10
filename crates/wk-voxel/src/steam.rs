@@ -1429,8 +1429,13 @@ fn sample_steam_tile_bilinear(
 
 /// Steam pressure assaults neighbouring wet rock: reverse push + fast widen.
 /// Prefers the roof (up) so energy goes into escape tubes, not sideways leaks.
-/// Cavity humidity density keeps shoving pore water and depositing heat
-/// past the boil isotherm — pressure does not die the moment rock is <100 °C.
+/// Cavity humidity density keeps shoving pore water past the boil isotherm —
+/// pressure does not die the moment rock is <100 °C.
+///
+/// Heat is **not** invented here. A previous `boil + press × 35` lamp
+/// (135 °C at default boil) made a self-sustaining boiler on maps whose
+/// overburden never reaches 100 °C. Existing heat may ride water
+/// ([`Temperature::advect_with_mass`]); geothermal is the only source.
 ///
 /// Below-boil boilers used to get only a **single** reverse-push hop, so a
 /// sintered mountain lid never saw the multi-hop carve motor that pore-boil
@@ -1440,7 +1445,6 @@ fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &Ste
     if world.steam.is_empty() {
         return;
     }
-    let boil = cfg.boil_point_c;
     let mut keys: Vec<(i32, i32, u8)> = world
         .steam
         .iter()
@@ -1458,9 +1462,7 @@ fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &Ste
             continue;
         }
         let press = steam_pressure_norm(world, gx, gy).max(dens as f32 / 255.0);
-        let target = boil + press * 35.0;
-        let mix = (dens as f32 / 255.0) * 0.18;
-        temp.deposit_heat_toward(gx, gy, target, mix);
+        let src_t = temp.at_cell(gx, gy);
         // Pressure buys reach past the boil isotherm (same hop family as phase boil).
         let hops = cfg
             .reverse_seep_hops
@@ -1470,7 +1472,14 @@ fn transmit_cavity_pressure(world: &mut World, temp: &mut Temperature, cfg: &Ste
         for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0), (-1, 1), (1, 1)] {
             let tx = world.wrap_x(gx + dx);
             let ty = gy + dy;
-            temp.deposit_heat_toward(tx, ty, target, mix * 0.65);
+            // Share heat the cavity already has — never mix toward an
+            // invented boil+superheat target.
+            if src_t > temp.at_cell(tx, ty) + 0.05 {
+                let carry = ((dens as f32) * 0.12).round() as u8;
+                if carry > 0 {
+                    temp.advect_with_mass(gx, gy, tx, ty, carry);
+                }
+            }
             let Some(wall) = world.get_cell(tx, ty) else {
                 continue;
             };
@@ -1724,11 +1733,7 @@ fn boil_hot_air(
         } else {
             let _ = precipitate_at(world, gx, gy);
         }
-        let src_t = temp.at_cell(gx, gy).max(cfg.boil_point_c);
-        temp.deposit_heat_toward(gx, gy, src_t, 0.2);
-        for (dx, dy) in [(0, 1), (0, 2), (-1, 1), (1, 1)] {
-            temp.deposit_heat_toward(world.wrap_x(gx + dx), gy + dy, src_t, 0.12);
-        }
+        // No heat lamp: flashing does not mix the roof toward max(T, boil).
     }
 }
 
@@ -1909,9 +1914,9 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
         } else {
             let _ = precipitate_at(world, gx, gy);
         }
-        // Flash vapour / hot liquid carry heat into the seat and channel.
+        // Flash vapour carries the host's existing heat into the seat.
+        // Do not mix toward max(T, boil) — that minted energy.
         temp.advect_with_mass(gx, gy, sx, sy, placed);
-        temp.deposit_heat_toward(sx, sy, temp.at_cell(gx, gy).max(boil), 0.35);
 
         // Phase-change pressure: shove after flash. Chain hops into wet
         // neighbours if the host was emptied by the boil take.
@@ -3447,7 +3452,10 @@ mod tests {
     }
 
     #[test]
-    fn cavity_pressure_warms_cold_wall_below_boil() {
+    fn cavity_pressure_does_not_mint_a_heat_lamp() {
+        // `boil + press × 35` used to pull every steam tile toward 135 °C.
+        // A 60 °C bootstrap then a 100 °C reload kept the boiler running
+        // on maps whose overburden never supplies that heat.
         let mut w = World::new(5);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         for x in 2..7 {
@@ -3461,15 +3469,60 @@ mod tests {
             c.sat = Sat(120);
             c
         });
-        add_steam(&mut w, 4, 2, 180);
-        let mut temp = temp_fill(&w, 40.0); // well below boil
-        let before = temp.at_cell(4, 3);
+        add_steam(&mut w, 4, 2, 220);
+        let mut temp = temp_fill(&w, 40.0);
+        let before = temp.at_cell(4, 2);
         let cfg = SteamConfig::default();
         transmit_cavity_pressure(&mut w, &mut temp, &cfg);
-        let after = temp.at_cell(4, 3);
+        let after = temp.at_cell(4, 2);
         assert!(
-            after > before + 0.25,
-            "dense cavity humidity should deposit heat into adjacent wet rock ({before} → {after})"
+            after < before + 0.05,
+            "cavity pressure must not invent heat ({before:.2} → {after:.2})"
+        );
+        assert!(
+            after < 50.0,
+            "must stay near the rock temperature, not climb toward boil+35 ({after:.1})"
+        );
+    }
+
+    #[test]
+    fn cavity_pressure_shares_existing_heat_into_a_cold_wall() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..10 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(3, 2, Cell::air());
+        w.set_cell(4, 2, {
+            let mut c = Cell::solid(MaterialId::Limestone);
+            c.sat = Sat(120);
+            c
+        });
+        add_steam(&mut w, 3, 2, 200);
+        let mut temp = temp_fill(&w, 20.0);
+        let (shx, shy) = temp.tile_of(3, 2);
+        let (whx, why) = temp.tile_of(4, 2);
+        assert_ne!((shx, shy), (whx, why), "precondition: wall is another tile");
+        temp.set_tile_c(shx, shy, 90.0);
+        temp.set_tile_c(whx, why, 20.0);
+        let before_src = temp.at_cell(3, 2);
+        let before_wall = temp.at_cell(4, 2);
+        transmit_cavity_pressure(&mut w, &mut temp, &SteamConfig::default());
+        let after_src = temp.at_cell(3, 2);
+        let after_wall = temp.at_cell(4, 2);
+        assert!(
+            after_wall > before_wall + 0.2,
+            "hot cavity should share heat into the wall ({before_wall:.1} → {after_wall:.1})"
+        );
+        assert!(
+            after_src < before_src - 0.05,
+            "source tile must cool (not a lamp) ({before_src:.1} → {after_src:.1})"
+        );
+        assert!(
+            after_wall < before_src,
+            "wall must not exceed the heat the cavity already had"
         );
     }
 

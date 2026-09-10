@@ -590,6 +590,12 @@ impl Temperature {
     }
 
     /// Nudge the tile covering `(gx, gy)` toward `target_c` by `mix` (0..=1).
+    ///
+    /// This **mints or destroys** heat when `target_c` is not the tile's
+    /// current temperature. Do not pass an invented ceiling (boil +
+    /// pressure, max(T, boil), …) — that was the self-sustaining 135 °C
+    /// boiler lamp. Prefer [`Self::advect_with_mass`] when heat should
+    /// move from a hotter source.
     pub fn deposit_heat_toward(&mut self, gx: i32, gy: i32, target_c: f32, mix: f32) {
         if !target_c.is_finite() {
             return;
