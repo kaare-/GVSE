@@ -504,6 +504,19 @@ fn scrub_invalid_steam_seats(world: &mut World, max_cells: usize) {
                     let _ = add_steam(world, gx, gy, parked.min(255) as u8);
                 }
             }
+            continue;
+        }
+        // Free sky is sky Humidity / evap, not cavity steam. Leftover
+        // markers here paint puffy clouds on top of the H field.
+        if !void_is_confined(world, gx, gy) {
+            let amt = take_steam(world, gx, gy, u8::MAX);
+            if amt > 0 {
+                let parked = crate::displace::park_orphan_water(world, gx, gy, amt as u32);
+                if parked > 0 {
+                    // Could not seat liquid — only restore into a roofed void.
+                    let _ = inject_steam_near(world, gx, gy, parked.min(255) as u8, max_cells);
+                }
+            }
         }
     }
 }
@@ -683,6 +696,11 @@ fn can_admit_new_steam_cell(world: &World, gx: i32, gy: i32, max_cells: usize) -
 
 fn try_place_steam(world: &mut World, gx: i32, gy: i32, amt: u8, max_cells: usize) -> u8 {
     if amt == 0 {
+        return 0;
+    }
+    // Cavity humidity stays under a roof. Open-sky seats become the
+    // little steam puffs on top of the humidity wash.
+    if !void_is_confined(world, gx, gy) {
         return 0;
     }
     if !can_admit_new_steam_cell(world, gx, gy, max_cells) && steam_at(world, gx, gy) == 0 {
@@ -1072,8 +1090,18 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
         let as_field = seed_confined || confined_n * 2 >= voids.len();
 
         if as_field {
-            // Seat across the whole pocket (voids first), never `as u8` share.
-            let mut seats = seats_all;
+            // Seat across the roofed pocket only. Vent-column / free-sky
+            // Air used to take a share and draw as puffs above the H field.
+            let mut seats: Vec<(i32, i32)> = seats_all
+                .iter()
+                .copied()
+                .filter(|&(x, y)| void_is_confined(world, x, y))
+                .collect();
+            if seats.is_empty() {
+                let seed = seats_all.first().copied().unwrap_or((sx, sy));
+                let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, total);
+                continue;
+            }
             seats.sort_by(|a, b| {
                 let va = world.get_cell(a.0, a.1).is_some_and(is_steam_void);
                 let vb = world.get_cell(b.0, b.1).is_some_and(is_steam_void);
@@ -1127,47 +1155,11 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                 bleed_steam_into_open_vent(world, &seats);
             }
         } else {
-            // Open plume: pack into the top of the climbed column.
-            voids.retain(|&(x, y)| (x - sx).abs() <= 1 && y >= sy);
-            if voids.is_empty() {
-                voids = component
-                    .iter()
-                    .copied()
-                    .filter(|&(x, y)| {
-                        (x - sx).abs() <= 1
-                            && y >= sy
-                            && world.get_cell(x, y).is_some_and(is_steam_void)
-                    })
-                    .collect();
-            }
-            voids.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            let mut left = total;
-            for &(x, y) in &voids {
-                if left == 0 {
-                    break;
-                }
-                let room = 255u32.saturating_sub(steam_at(world, x, y) as u32);
-                if room == 0 {
-                    continue;
-                }
-                let put = left.min(room).min(255) as u8;
-                let placed = try_place_steam(world, x, y, put, max_cells) as u32;
-                left -= placed;
-            }
-            if left > 0 {
-                // Fall back to the whole component (incl. wet Air), not only
-                // the dry plume seats — otherwise leftover vapour vanishes.
-                let seats = if seats_all.is_empty() {
-                    vec![(sx, sy)]
-                } else {
-                    seats_all
-                };
-                let left = spill_steam_across(world, &seats, left, max_cells);
-                if left > 0 {
-                    let seed = seats.first().copied().unwrap_or((sx, sy));
-                    let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, left);
-                }
-            }
+            // Free open shaft: do not pack a buoyant steam plume into the
+            // sky. That was the leftover puffy clouds sitting on the
+            // humidity field. Park as liquid at the seed (mass-flat).
+            let seed = seats_all.first().copied().unwrap_or((sx, sy));
+            let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, total);
         }
     }
 }
@@ -1243,6 +1235,10 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
             continue;
         }
         let gx = world.wrap_x(gx);
+        // Open-sky leftover must not seed a wash above the humidity field.
+        if !void_is_confined(world, gx, gy) {
+            continue;
+        }
         let hx = gx.div_euclid(tc);
         let hy = gy.div_euclid(tc);
         *tile_mass.entry((hx, hy)).or_insert(0.0) += amt as f32;
@@ -1259,6 +1255,9 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
     for (sx, sy) in seeds {
         let sx = world.wrap_x(sx);
         if !visited.insert((sx, sy)) {
+            continue;
+        }
+        if !void_is_confined(world, sx, sy) {
             continue;
         }
         let seed_confined = steam_is_pressure_confined(world, sx, sy);
@@ -1356,8 +1355,12 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
                 let Some(cell) = world.get_cell(gx, gy) else {
                     continue;
                 };
-                // Humidity of the conduit: only Air vapour volume, not rock / lake plugs.
+                // Humidity of the conduit: only roofed Air vapour, not rock /
+                // lake plugs or free sky above the H field.
                 if cell.material != MaterialId::Air || !is_steam_void(cell) {
+                    continue;
+                }
+                if !void_is_confined(world, gx, gy) {
                     continue;
                 }
                 let mass = sample_steam_tile_bilinear(&tile_mass, tc, gx as f32 + 0.5, gy as f32 + 0.5);
@@ -2659,6 +2662,47 @@ mod tests {
     }
 
     #[test]
+    fn open_sky_steam_does_not_paint_puffs_on_the_humidity_field() {
+        // Leftover markers in free air used to bloom a 4×4 plume above the
+        // ridge — little steam clouds sitting on the H wash.
+        let mut w = World::new(17);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+        }
+        for y in 2..20 {
+            w.set_cell(4, y, Cell::air());
+        }
+        add_steam(&mut w, 4, 8, 200);
+        add_steam(&mut w, 4, 12, 180);
+        let haze = steam_haze_wash(&w, None);
+        assert!(
+            haze.iter().all(|s| void_is_confined(&w, s.gx, s.gy)),
+            "steam haze must not paint unroofed sky cells"
+        );
+        assert!(
+            !haze.iter().any(|s| s.gy >= 2),
+            "no puffy steam above the ridge"
+        );
+
+        let before = sat_totals(&w).cell_total;
+        let mut cool = temp_fill(&w, 20.0);
+        w.tick = STEAM_EVERY;
+        apply_steam(&mut w, &mut cool, &SteamConfig::default());
+        assert_eq!(
+            steam_total(&w),
+            0,
+            "open-sky leftover must leave the steam map"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "scrub must park vapour as liquid, not dump sky Humidity"
+        );
+    }
+
+    #[test]
     fn roofed_cave_water_boils_into_steam() {
         // Sealed / roofed void keeps underground humidity on World.steam.
         let mut w = World::new(5);
@@ -2902,6 +2946,8 @@ mod tests {
 
     #[test]
     fn open_steam_rises_toward_sky() {
+        // Free shafts used to pack a buoyant steam plume. That painted
+        // leftover puffs on the humidity field. Open air is evap / sky H.
         let mut w = World::new(9);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
@@ -2910,25 +2956,15 @@ mod tests {
         }
         add_steam(&mut w, 5, 2, 40);
         assert!(!void_is_confined(&w, 5, 2));
+        let before = sat_totals(&w).cell_total;
         let mut hot = temp_fill(&w, 110.0);
         w.tick = STEAM_EVERY;
         apply_steam(&mut w, &mut hot, &SteamConfig::default());
-        assert!(steam_total(&w) > 0, "open steam must remain");
+        assert_eq!(steam_total(&w), 0, "open-sky steam must leave the map");
+        assert_eq!(sat_totals(&w).cell_total, before, "mass stays as liquid");
         assert!(
-            steam_at(&w, 5, 2) < 40,
-            "open steam must leave the floor (left={})",
-            steam_at(&w, 5, 2)
-        );
-        let highest = w
-            .steam
-            .keys()
-            .filter(|(x, _)| *x == 5)
-            .map(|(_, y)| *y)
-            .max()
-            .unwrap_or(2);
-        assert!(
-            highest > 2,
-            "open steam must climb the shaft (highest={highest})"
+            steam_haze_wash(&w, None).is_empty(),
+            "no leftover steam wash in free sky"
         );
     }
 
@@ -2959,10 +2995,9 @@ mod tests {
         let mut sand = Cell::solid(MaterialId::Sand);
         sand.sat = Sat(crate::cell::water_capacity(MaterialId::Sand));
         w.set_cell(4, 1, sand);
+        // Roofed void so pore flash stays cavity humidity, not a sky puff.
         w.set_cell(4, 2, Cell::air());
-        for y in 3..10 {
-            w.set_cell(4, y, Cell::air());
-        }
+        w.set_cell(4, 3, Cell::solid(MaterialId::Stone));
         let mut hot = temp_fill(&w, 140.0);
         w.tick = STEAM_EVERY;
         let before = sat_totals(&w).cell_total;
@@ -3019,6 +3054,7 @@ mod tests {
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
         w.set_cell(3, 1, Cell::air());
+        w.set_cell(3, 2, Cell::solid(MaterialId::Stone));
         add_steam(&mut w, 3, 1, 100);
         add_dissolved(&mut w, 3, 1, 400);
         let before_min = crate::audit::mineral_total(&w);
@@ -3222,6 +3258,7 @@ mod tests {
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(2, 2, Cell::air());
+        w.set_cell(2, 3, Cell::solid(MaterialId::Stone));
         add_steam(&mut w, 2, 2, 250);
         let accepted = try_place_steam(&mut w, 2, 2, 20, 64);
         assert_eq!(accepted, 5, "must report only what fit under 255");

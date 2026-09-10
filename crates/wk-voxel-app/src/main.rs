@@ -1185,7 +1185,9 @@ async fn main() {
 
         // Steam as humidity-shaped haze (4×4 tiles, soft white; pressure/heat tint).
         // Sparse steam mass stays the conduit store — not dumped into sky H/rain.
-        if !scene.world.steam.is_empty() {
+        // Hidden when the steam pass is off so leftover markers cannot sit
+        // as puffs on top of the humidity field.
+        if settings.steam.enabled && !scene.world.steam.is_empty() {
             let bedrock_y = scene.params.bedrock_floor_y;
             for sample in wk_voxel::steam_haze_wash(&scene.world, Some(&scene.temperature)) {
                 if sample.density == 0 || sample.gy < y_min_vis || sample.gy >= y_max_vis {
