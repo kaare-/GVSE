@@ -133,9 +133,6 @@ pub const STEAM_VOID_SAT_MAX: u8 = 160;
 /// How far up we walk to decide "open sky" vs solid roof.
 const ROOF_PROBE: i32 = 48;
 
-/// How far down a shaft we sum steam for pressure.
-const PRESSURE_DEPTH: i32 = 16;
-
 /// Confined-rise multiplier span at full steam pressure (stacks with geo).
 pub const STEAM_PRESSURE_RATE_SPAN: f32 = 0.85;
 
@@ -538,35 +535,132 @@ fn bind_press_memo(world: &World) {
             c.tick = world.tick;
             c.steam_rev = world.steam_rev;
             c.topo = world.sky_topo_gen;
-            c.map.clear();
-            c.bbox = steam_influence_bbox(world);
+            rebuild_press_field(world, &mut c);
         }
     });
 }
 
-fn steam_influence_bbox(world: &World) -> Option<(i32, i32, i32, i32)> {
-    if world.steam.is_empty() {
-        return None;
+fn press_bbox_include(bbox: &mut Option<(i32, i32, i32, i32)>, x: i32, y: i32) {
+    match bbox {
+        None => *bbox = Some((x, x, y, y)),
+        Some((x0, x1, y0, y1)) => {
+            *x0 = (*x0).min(x);
+            *x1 = (*x1).max(x);
+            *y0 = (*y0).min(y);
+            *y1 = (*y1).max(y);
+        }
     }
-    let mut min_x = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut min_y = i32::MAX;
-    let mut max_y = i32::MIN;
-    for &(x, y) in world.steam.keys() {
-        min_x = min_x.min(x);
-        max_x = max_x.max(x);
-        min_y = min_y.min(y);
-        max_y = max_y.max(y);
-    }
-    Some((
-        min_x - 1,
-        max_x + 1,
-        min_y - PRESSURE_DEPTH,
-        max_y,
-    ))
 }
 
-/// 0..=1 pressure — local steam density in the column (gas fill, not a liquid stack).
+/// Equalized cavity fill on the connected void, plus wet rock that faces it.
+///
+/// The old 3×16 downward box painted a candle that punched through granite
+/// and ignored cave walls. Pressure here is the pocket mean (same idea as
+/// flood-equalize) so a large chamber reads as one field in the cave's shape.
+fn rebuild_press_field(world: &World, memo: &mut PressMemo) {
+    memo.map.clear();
+    memo.bbox = None;
+    if world.steam.is_empty() {
+        return;
+    }
+    let budget = VOID_FLOOD_BUDGET;
+    let mut visited: FxHashSet<(i32, i32)> = FxHashSet::default();
+    let seeds: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    for (sx, sy) in seeds {
+        let sx = world.wrap_x(sx);
+        if !visited.insert((sx, sy)) {
+            continue;
+        }
+        let Some(seed) = world.get_cell(sx, sy) else {
+            continue;
+        };
+        if seed.material != MaterialId::Air || !void_is_confined(world, sx, sy) {
+            continue;
+        }
+        let mut queue = vec![(sx, sy)];
+        let mut voids: Vec<(i32, i32)> = Vec::new();
+        let mut qi = 0;
+        while qi < queue.len() && voids.len() < budget {
+            let (cx, cy) = queue[qi];
+            qi += 1;
+            let Some(cell) = world.get_cell(cx, cy) else {
+                continue;
+            };
+            if cell.material != MaterialId::Air {
+                continue;
+            }
+            voids.push((cx, cy));
+            // Vent lip / well next to the pocket counts, but do not walk
+            // free sky or the overlay grows a candle up the shaft.
+            let expand = void_is_confined(world, cx, cy) || steam_at(world, cx, cy) > 0;
+            if !expand {
+                continue;
+            }
+            for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0)] {
+                let nx = world.wrap_x(cx + dx);
+                let ny = cy + dy;
+                if !visited.insert((nx, ny)) {
+                    continue;
+                }
+                match world.get_cell(nx, ny) {
+                    Some(n) if n.material == MaterialId::Air => {
+                        queue.push((nx, ny));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if voids.is_empty() {
+            continue;
+        }
+        let total: u32 = voids
+            .iter()
+            .map(|&(x, y)| steam_at(world, x, y) as u32)
+            .sum();
+        if total == 0 {
+            continue;
+        }
+        let peak = voids
+            .iter()
+            .map(|&(x, y)| steam_at(world, x, y) as u32)
+            .max()
+            .unwrap_or(0) as f32
+            / 255.0;
+        let mean = (total as f32 / (voids.len() as f32 * 255.0)).clamp(0.0, 1.0);
+        // Volume-mean, but a sealed room stays readable: the old candle
+        // hid the cave and made one column look packed.
+        let fill = mean.max(peak * 0.35).clamp(0.0, 1.0);
+        for &(x, y) in &voids {
+            let e = memo.map.entry((x, y)).or_insert(0.0);
+            *e = (*e).max(fill);
+            press_bbox_include(&mut memo.bbox, x, y);
+            // Wet permeable walls / floor inherit the pocket — not dry granite.
+            for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0)] {
+                let nx = world.wrap_x(x + dx);
+                let ny = y + dy;
+                let Some(n) = world.get_cell(nx, ny) else {
+                    continue;
+                };
+                if n.material == MaterialId::Air {
+                    continue;
+                }
+                if permeability_cell(n, &world.hydro) == 0 || n.sat.0 == 0 {
+                    continue;
+                }
+                let cap = water_capacity_cell(n, &world.hydro).max(1);
+                let wet = (n.sat.0 as f32 / cap as f32).clamp(0.0, 1.0);
+                if wet < 0.05 {
+                    continue;
+                }
+                let e = memo.map.entry((nx, ny)).or_insert(0.0);
+                *e = (*e).max(fill);
+                press_bbox_include(&mut memo.bbox, nx, ny);
+            }
+        }
+    }
+}
+
+/// 0..=1 pressure — equalized fill of the connected confined pocket.
 pub fn steam_pressure_norm(world: &World, gx: i32, gy: i32) -> f32 {
     if world.steam.is_empty() {
         return 0.0;
@@ -585,29 +679,8 @@ pub fn steam_pressure_norm(world: &World, gx: i32, gy: i32) -> f32 {
     if let Some(hit) = PRESS_MEMO.with(|c| c.borrow().map.get(&(gx, gy)).copied()) {
         return hit;
     }
-    let mut sum = 0u32;
-    let mut voids = 0u32;
-    for dx in [-1_i32, 0, 1] {
-        let x = world.wrap_x(gx + dx);
-        for dy in 0..=PRESSURE_DEPTH {
-            let y = gy - dy;
-            let air = world.get_cell(x, y).is_some_and(|c| c.material == MaterialId::Air);
-            let s = if air { steam_at(world, x, y) as u32 } else { 0 };
-            sum += s;
-            if s > 0 || world.get_cell(x, y).is_some_and(is_steam_void) {
-                voids += 1;
-            }
-        }
-    }
-    let norm = if voids == 0 {
-        0.0
-    } else {
-        (sum as f32 / (voids as f32 * 255.0)).clamp(0.0, 1.0)
-    };
-    PRESS_MEMO.with(|c| {
-        c.borrow_mut().map.insert((gx, gy), norm);
-    });
-    norm
+    // Orphan / unroofed marker: local density only — never a downward smear.
+    steam_at(world, gx, gy) as f32 / 255.0
 }
 
 /// Confined-rise rate boost from underground steam (1 + span * norm).
@@ -629,10 +702,10 @@ pub enum CellPressureKind {
 
 /// Unified 0..=1 pressure readout for inspector + overlay.
 ///
-/// - **Air / steam seats:** column cavity fill ([`steam_pressure_norm`]).
+/// - **Air / steam seats:** equalized fill of the connected confined pocket
+///   ([`steam_pressure_norm`]) — cave-shaped, not a downward candle.
 /// - **Hot saturated rock:** pore flash drive from wetness × superheat above
-///   boil, blended with nearby cavity pressure so conduits read as gradients
-///   without inventing a continuum PDE.
+///   boil, blended with cavity fill on wet walls that actually face the void.
 pub fn cell_pressure_norm(world: &World, gx: i32, gy: i32, temp_c: f32) -> (f32, CellPressureKind) {
     let steam = steam_at(world, gx, gy);
     let cavity = steam_pressure_norm(world, gx, gy);
@@ -4412,6 +4485,131 @@ mod tests {
             steam_pressure_rate_scale(&w, 40, 3),
             1.0,
             "far confined wells must not pay boiler pressure"
+        );
+    }
+
+    #[test]
+    fn steam_pressure_equalizes_across_a_wide_cavity() {
+        // A 3-wide downward candle would light only the steam column.
+        // The pocket mean must fill the whole roofed chamber.
+        let mut w = World::new(141);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..12 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..11 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        add_steam(&mut w, 4, 3, 200);
+        let under = steam_pressure_norm(&w, 4, 3);
+        let far = steam_pressure_norm(&w, 10, 3);
+        let mid = steam_pressure_norm(&w, 7, 2);
+        assert!(under > 0.15, "steam seat must read pocket pressure ({under})");
+        assert!(
+            (under - far).abs() < 0.02,
+            "far side of the same cave must equalize (under={under} far={far})"
+        );
+        assert!(
+            (under - mid).abs() < 0.02,
+            "roof and floor of the pocket must match (under={under} mid={mid})"
+        );
+    }
+
+    #[test]
+    fn steam_pressure_does_not_cross_a_stone_wall() {
+        let mut w = World::new(143);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..12 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 3..6 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 7..10 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // x=6 stays stone — a wall between two chambers.
+        add_steam(&mut w, 4, 3, 200);
+        assert!(steam_pressure_norm(&w, 4, 3) > 0.05);
+        assert_eq!(
+            steam_pressure_norm(&w, 8, 3),
+            0.0,
+            "pressure must not punch through the stone wall"
+        );
+        // Dry stone in the wall stays dark (the old column walk lit it).
+        assert_eq!(
+            steam_pressure_norm(&w, 6, 3),
+            0.0,
+            "dry impermeable wall must not inherit cavity fill"
+        );
+    }
+
+    #[test]
+    fn steam_pressure_does_not_paint_a_sky_candle() {
+        let mut w = World::new(147);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..9 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 4..8 {
+            for y in 2..5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Shaft opening on a confined roof cell — lip only, no sky walk.
+        w.set_cell(5, 5, Cell::air());
+        for y in 6..14 {
+            w.set_cell(5, y, Cell::air());
+        }
+        add_steam(&mut w, 6, 3, 200);
+        assert!(steam_pressure_norm(&w, 6, 3) > 0.1);
+        assert!(
+            steam_pressure_norm(&w, 5, 4) > 0.0,
+            "the vent lip may inherit"
+        );
+        assert_eq!(
+            steam_pressure_norm(&w, 5, 10),
+            0.0,
+            "free sky above the vent must not grow a candle"
+        );
+    }
+
+    #[test]
+    fn steam_pressure_wets_the_facing_floor_not_dry_granite() {
+        let mut w = World::new(145);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(5, 3, Cell::air());
+        w.set_cell(5, 4, Cell::air());
+        add_steam(&mut w, 5, 4, 180);
+        let mut floor = Cell::solid(MaterialId::Limestone);
+        floor.sat = Sat(30);
+        floor.pore = 160;
+        w.set_cell(5, 2, floor);
+        assert!(
+            steam_pressure_norm(&w, 5, 2) > 0.05,
+            "wet limestone floor facing the pocket must inherit fill"
+        );
+        assert_eq!(
+            steam_pressure_norm(&w, 4, 3),
+            0.0,
+            "dry stone beside the pocket must stay dark"
         );
     }
 
