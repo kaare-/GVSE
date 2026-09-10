@@ -1150,6 +1150,36 @@ mod tests {
     }
 
     #[test]
+    fn roof_collapse_limestone_keeps_mineral_total() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        bed(&mut w, 0, CHUNK_CELLS_W as i32 * 2 - 1);
+        let limit = roof_span_limit_cells(MaterialId::Limestone);
+        let span = limit + 2;
+        let x0 = 2;
+        let x1 = x0 + span - 1;
+        for x in x0..=x1 {
+            w.set_cell(x, 1, Cell::air());
+            w.set_cell(x, 2, Cell::solid(MaterialId::Limestone));
+        }
+        w.set_cell(x0 - 1, 1, Cell::solid(MaterialId::Limestone));
+        w.set_cell(x1 + 1, 1, Cell::solid(MaterialId::Limestone));
+        let before = crate::audit::mineral_total(&w);
+        let cfg = FailureConfig {
+            max_roof_events: 64,
+            enable_competent_fall: false,
+            ..FailureConfig::default()
+        };
+        apply_roof_collapse(&mut w, &cfg);
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "Limestone → LooseLimestone must stay on the carbonate ledger"
+        );
+    }
+
+    #[test]
     fn roof_collapse_moves_mycelium_strain_with_debris() {
         use crate::fungi::{alloc_mycelium_strain, mycelium_shares_at};
 

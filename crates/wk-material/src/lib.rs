@@ -576,7 +576,10 @@ impl MaterialRegistry {
                 thermal_diffusivity: 0.0014,
                 heat_capacity: 3.0,
                 albedo: 0.32,
-                solubility: 0,
+                // Carbonate scree: slower than bedded limestone, but it is
+                // still on the mineral ledger. solubility 0 made every
+                // Limestone → LooseLimestone collapse delete 255−pore units.
+                solubility: 20,
                 roof_span_max_m: 1.5,
                 // coarse carbonate scree, as LooseRock
                 field_capacity: 38,

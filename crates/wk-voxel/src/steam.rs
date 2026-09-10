@@ -2545,11 +2545,6 @@ fn bank_burst_solid(
         emit_from_dissolved_rock(world, tx, ty, was);
         return true;
     }
-    // LooseLimestone is outside solubility props but is still carbonate.
-    if was.material == MaterialId::LooseLimestone {
-        add_dissolved(world, tx, ty, MINERAL_PER_CELL);
-        return true;
-    }
     // No exterior bedload seat: fluidize grains into suspended load rather
     // than dumping them into the chamber (collapsing sand pillar).
     if is_grain(was.material) || is_flow_erodible(was.material) {
