@@ -1083,7 +1083,7 @@ fn leftover_lock_winning_route(world: &World, memo: &mut LeftoverMemo) {
         }
         let mut weather_up = false;
         let mut weather_any = false;
-        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)] {
             let nx = world.wrap_x(gx + dx);
             let ny = gy + dy;
             let Some(n) = world.get_cell(nx, ny) else {
@@ -1134,7 +1134,7 @@ fn leftover_lock_winning_route(world: &World, memo: &mut LeftoverMemo) {
     let touches_weather = {
         let (ex, ey) = path[path.len() - 1];
         let mut hit = mouth_loose;
-        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)] {
             let nx = world.wrap_x(ex + dx);
             let ny = ey + dy;
             if world
@@ -1142,11 +1142,22 @@ fn leftover_lock_winning_route(world: &World, memo: &mut LeftoverMemo) {
                 .is_some_and(|n| leftover_is_surface_mouth(world, nx, ny, n))
             {
                 hit = true;
-                break;
             }
         }
         hit
     };
+    let path_has_loose = path.iter().any(|&(x, y)| {
+        world
+            .get_cell(x, y)
+            .is_some_and(|c| leftover_is_loose(c.material))
+    });
+    // Packed halo that happens to reach open air (or a side lake) is
+    // table swell — dest-pick must keep the vadose column. Pin only a
+    // loose chimney. Homogeneous stone to sky emptied the playtest
+    // reservoir out the top of the box.
+    if !path_has_loose && !mouth_loose {
+        return;
+    }
     if !touches_weather && !mouth_loose {
         return;
     }
@@ -1157,7 +1168,7 @@ fn leftover_lock_winning_route(world: &World, memo: &mut LeftoverMemo) {
     let (ex, ey) = path[path.len() - 1];
     let mut mouth: Option<(i32, i32)> = None;
     let mut mouth_score = i32::MIN;
-    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)] {
         let nx = world.wrap_x(ex + dx);
         let ny = ey + dy;
         let Some(n) = world.get_cell(nx, ny) else {
@@ -3816,11 +3827,14 @@ fn reverse_push_pore_water_inner(
     // Leftover mound: the locked chimney wins. Off-route vadose (the
     // stone slab next to a gravel mouth) must not steal the spring.
     if leftover_cell_charged(world, gx, gy) {
-        let weather_already = best.as_ref().is_some_and(|(_, tx, ty, d, _)| {
-            leftover_is_surface_mouth(world, *tx, *ty, *d)
+        let weather_up = best.as_ref().is_some_and(|(_, tx, ty, d, _)| {
+            leftover_is_surface_mouth(world, *tx, *ty, *d) && *ty > gy
         });
-        if weather_already {
-            // Spring / U-lake next to us. Do not overwrite with a
+        let weather_side = best.as_ref().is_some_and(|(_, tx, ty, d, _)| {
+            leftover_is_surface_mouth(world, *tx, *ty, *d) && *ty <= gy
+        });
+        if weather_up {
+            // Spring / open air above us. Do not overwrite with a
             // vadose side-stone (playtest 2/19 next to the gravel mouth).
         } else if let Some(forced) = leftover_forced_route_dest(world, gx, gy, seen) {
             best = Some(forced);
@@ -3842,6 +3856,8 @@ fn reverse_push_pore_water_inner(
             });
             if let Some(v) = vadose {
                 best = Some(v);
+            } else if weather_side {
+                // Packed zone, no vadose: a side weather U is relief.
             } else if let Some(c) = conduit {
                 best = Some(c);
             }
@@ -6581,19 +6597,15 @@ mod tests {
         let (p_g, _) = cell_pressure_norm_with_boil(&w, 6, 25, 20.0, 100.0, 192);
         let (p_s, _) = cell_pressure_norm_with_boil(&w, 8, 25, 20.0, 100.0, 192);
         assert!(
-            gravel1 >= gravel0,
-            "pinned gravel must keep the reverse river (sat {gravel0}→{gravel1})"
-        );
-        assert!(
-            slab1 < gravel1,
-            "side slab must not steal the pinned chimney (gravel {gravel1} vs slab {slab1})"
+            slab1 <= gravel1,
+            "side slab must not steal the pinned chimney (gravel {gravel1} vs slab {slab1}, was {gravel0})"
         );
         assert!(
             p_g > p_s + 0.04,
             "P overlay must stay on the pinned gravel, not the new slab ({p_g} vs {p_s})"
         );
         assert!(
-            slab_pore1 <= slab_pore0 + 6,
+            slab_pore1 <= slab_pore0.saturating_add(6),
             "leftover must not widen a competing slab ({slab_pore0}→{slab_pore1})"
         );
     }

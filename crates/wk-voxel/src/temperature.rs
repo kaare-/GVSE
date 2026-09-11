@@ -696,7 +696,9 @@ impl Temperature {
         }
         let mix = ((moved as f32) / 12.0).clamp(0.55, 0.95);
         self.set_tile_c(thx, thy, dest + (src - dest) * mix);
-        self.set_tile_c(fhx, fhy, src + (dest - src) * (mix * 0.45));
+        // Cool the last rock tile, but keep the boiler hot enough to
+        // stay at boil. The stream carries the heat from here.
+        self.set_tile_c(fhx, fhy, src + (dest - src) * (mix * 0.22));
     }
 
     pub fn mean(&self) -> f32 {
