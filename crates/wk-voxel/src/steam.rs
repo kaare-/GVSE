@@ -316,6 +316,13 @@ const LEFTOVER_FIELD_CELLS: usize = 4096;
 /// Fade leftover *display* by path cost along relief arms.
 const LEFTOVER_COST_FADE: f32 = 32.0;
 
+/// Temperature / humidity tile side. Wet neighbours in this box used to
+/// join the leftover zone and paint a pink sausage.
+const LEFTOVER_OVERLAY_TILE: i32 = 4;
+
+/// Floor so the pinned chimney reads as a magenta front, not a 3px scratch.
+const LEFTOVER_PIN_PACK: f32 = 0.46;
+
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
@@ -1451,6 +1458,13 @@ fn leftover_commit_pin(world: &World, memo: &mut LeftoverMemo) {
     memo.pin_id = memo.seed_zone.first().copied().unwrap_or(seed);
 }
 
+fn leftover_overlay_tile(gx: i32, gy: i32) -> (i32, i32) {
+    (
+        gx.div_euclid(LEFTOVER_OVERLAY_TILE),
+        gy.div_euclid(LEFTOVER_OVERLAY_TILE),
+    )
+}
+
 fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
     if memo.pin_path.len() < 2 {
         return;
@@ -1463,20 +1477,40 @@ fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
         .chain(memo.pin_next.values().copied())
         .collect();
     // Temperature tiles are 4×4, so every wet neighbour of the gravel
-    // vein is "boiling" and used to paint a pink sausage. Keep the
-    // loose chimney (and the pin, which may include packed hops);
-    // hide the competent 4×4 smear.
+    // vein is "boiling". Hide that chimney-side smear. Do **not** hide
+    // the leftover boiler body — those competent seats are the mound
+    // the P overlay is for, and blanking them left a broken hairline.
+    let mut vein_tiles: FxHashSet<(i32, i32)> = FxHashSet::default();
+    for &(x, y) in &on_pin {
+        vein_tiles.insert(leftover_overlay_tile(x, y));
+    }
+    for &(x, y) in memo.map.keys() {
+        if world
+            .get_cell(x, y)
+            .is_some_and(|c| leftover_is_loose(c.material))
+        {
+            vein_tiles.insert(leftover_overlay_tile(x, y));
+        }
+    }
+    for &cell in &memo.pin_path {
+        let e = memo.map.entry(cell).or_insert(0.0);
+        *e = (*e).max(LEFTOVER_PIN_PACK);
+    }
     for (cell, pack) in memo.map.iter_mut() {
         if on_pin.contains(cell) {
+            *pack = (*pack).max(LEFTOVER_PIN_PACK);
             continue;
         }
         if world
             .get_cell(cell.0, cell.1)
             .is_some_and(|c| leftover_is_loose(c.material))
         {
+            *pack = (*pack).max(LEFTOVER_PIN_PACK * 0.85);
             continue;
         }
-        *pack = 0.02;
+        if vein_tiles.contains(&leftover_overlay_tile(cell.0, cell.1)) {
+            *pack = 0.02;
+        }
     }
 }
 
@@ -6695,6 +6729,11 @@ mod tests {
         assert!(
             p_r < 0.04 && p_l < 0.04,
             "same-tile wet stone must not paint a 4×4 leftover blob (path {p_path} L {p_l} R {p_r})"
+        );
+        let (p_body, _) = cell_pressure_norm_with_boil(&w, 5, 2, 122.0, 100.0, 192);
+        assert!(
+            p_body > 0.20,
+            "leftover boiler body must stay on P (got {p_body})"
         );
     }
 
