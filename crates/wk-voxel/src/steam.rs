@@ -316,12 +316,8 @@ const LEFTOVER_FIELD_CELLS: usize = 4096;
 /// Fade leftover *display* by path cost along relief arms.
 const LEFTOVER_COST_FADE: f32 = 32.0;
 
-/// Temperature / humidity tile side. Wet neighbours in this box used to
-/// join the leftover zone and paint a pink sausage.
-const LEFTOVER_OVERLAY_TILE: i32 = 4;
-
-/// Floor so the pinned chimney reads as a magenta front, not a 3px scratch.
-const LEFTOVER_PIN_PACK: f32 = 0.46;
+/// Magenta pin floor (under the overlay amber cut at 0.72).
+const LEFTOVER_PIN_PACK: f32 = 0.58;
 
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
@@ -1458,59 +1454,66 @@ fn leftover_commit_pin(world: &World, memo: &mut LeftoverMemo) {
     memo.pin_id = memo.seed_zone.first().copied().unwrap_or(seed);
 }
 
-fn leftover_overlay_tile(gx: i32, gy: i32) -> (i32, i32) {
-    (
-        gx.div_euclid(LEFTOVER_OVERLAY_TILE),
-        gy.div_euclid(LEFTOVER_OVERLAY_TILE),
-    )
+/// 4-connected cells from `a` to `b` so a dy=2 leftover hop is not a gap.
+fn leftover_pin_segment(world: &World, a: (i32, i32), b: (i32, i32)) -> Vec<(i32, i32)> {
+    let mut out = vec![a];
+    let mut cur = a;
+    for _ in 0..8 {
+        if cur == b {
+            break;
+        }
+        let dx = b.0 - cur.0;
+        let dy = b.1 - cur.1;
+        cur = if dy.abs() >= dx.abs() {
+            (cur.0, cur.1 + dy.signum())
+        } else {
+            (world.wrap_x(cur.0 + dx.signum()), cur.1)
+        };
+        out.push(cur);
+    }
+    if *out.last().unwrap_or(&a) != b {
+        out.push(b);
+    }
+    out
 }
 
 fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
     if memo.pin_path.len() < 2 {
         return;
     }
-    let on_pin: FxHashSet<(i32, i32)> = memo
-        .pin_path
-        .iter()
-        .copied()
-        .chain(memo.pin_next.keys().copied())
-        .chain(memo.pin_next.values().copied())
-        .collect();
-    // Temperature tiles are 4×4, so every wet neighbour of the gravel
-    // vein is "boiling". Hide that chimney-side smear. Do **not** hide
-    // the leftover boiler body — those competent seats are the mound
-    // the P overlay is for, and blanking them left a broken hairline.
-    let mut vein_tiles: FxHashSet<(i32, i32)> = FxHashSet::default();
-    for &(x, y) in &on_pin {
-        vein_tiles.insert(leftover_overlay_tile(x, y));
+    // One-cell pressure head: paint the pinned chimney as a continuous
+    // magenta line. Hide the leftover mound and the 4×4 wet-stone smear
+    // that made P look sad and glitchy. Loose cells stay so a gravel
+    // vein that joined the hot zone is not erased. Cells stay in the
+    // map (pack 0.02) so dest-pick does not wander.
+    let mut line: Vec<(i32, i32)> = Vec::new();
+    for w in memo.pin_path.windows(2) {
+        line.extend(leftover_pin_segment(world, w[0], w[1]));
     }
-    for &(x, y) in memo.map.keys() {
-        if world
-            .get_cell(x, y)
-            .is_some_and(|c| leftover_is_loose(c.material))
-        {
-            vein_tiles.insert(leftover_overlay_tile(x, y));
-        }
+    for &p in memo.pin_next.keys().chain(memo.pin_next.values()) {
+        line.push(p);
     }
-    for &cell in &memo.pin_path {
+    let mut on_line: FxHashSet<(i32, i32)> = FxHashSet::default();
+    let n = line.len().max(1);
+    for (i, cell) in line.iter().copied().enumerate() {
+        on_line.insert(cell);
+        let t = i as f32 / n.saturating_sub(1).max(1) as f32;
+        let pack = (0.40 + t * 0.26).min(LEFTOVER_PIN_PACK);
         let e = memo.map.entry(cell).or_insert(0.0);
-        *e = (*e).max(LEFTOVER_PIN_PACK);
+        *e = (*e).max(pack);
     }
     for (cell, pack) in memo.map.iter_mut() {
-        if on_pin.contains(cell) {
-            *pack = (*pack).max(LEFTOVER_PIN_PACK);
+        if on_line.contains(cell) {
             continue;
         }
         if world
             .get_cell(cell.0, cell.1)
             .is_some_and(|c| leftover_is_loose(c.material))
         {
-            *pack = (*pack).max(LEFTOVER_PIN_PACK * 0.85);
+            *pack = (*pack).max(0.40).min(LEFTOVER_PIN_PACK);
             continue;
         }
-        if vein_tiles.contains(&leftover_overlay_tile(cell.0, cell.1)) {
-            *pack = 0.02;
-        }
+        *pack = 0.02;
     }
 }
 
@@ -6732,8 +6735,8 @@ mod tests {
         );
         let (p_body, _) = cell_pressure_norm_with_boil(&w, 5, 2, 122.0, 100.0, 192);
         assert!(
-            p_body > 0.20,
-            "leftover boiler body must stay on P (got {p_body})"
+            p_body < 0.04,
+            "leftover mound must stay off P — only the pin line (got {p_body})"
         );
     }
 
