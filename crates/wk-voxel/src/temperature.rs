@@ -671,6 +671,34 @@ impl Temperature {
         self.set_tile_c(fhx, fhy, src + (dest - src) * (mix * 0.18));
     }
 
+    /// Mouth dump: leftover heat enters flowing / standing water and
+    /// should leave the rock, not keep punching through the stream.
+    pub fn advect_leftover_into_water(
+        &mut self,
+        from_gx: i32,
+        from_gy: i32,
+        to_gx: i32,
+        to_gy: i32,
+        moved: u8,
+    ) {
+        if moved == 0 {
+            return;
+        }
+        let (fhx, fhy) = self.tile_of(from_gx, from_gy);
+        let (thx, thy) = self.tile_of(to_gx, to_gy);
+        if fhx == thx && fhy == thy {
+            return;
+        }
+        let src = self.at_tile_packed(fhx, fhy);
+        let dest = self.at_tile_packed(thx, thy);
+        if src <= dest + 0.2 {
+            return;
+        }
+        let mix = ((moved as f32) / 12.0).clamp(0.55, 0.95);
+        self.set_tile_c(thx, thy, dest + (src - dest) * mix);
+        self.set_tile_c(fhx, fhy, src + (dest - src) * (mix * 0.45));
+    }
+
     pub fn mean(&self) -> f32 {
         if self.cells.is_empty() {
             return self.config.base_temp_c;
