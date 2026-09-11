@@ -276,24 +276,21 @@ struct LeftoverMemo {
     boil_bits: u32,
     expand: u8,
     map: FxHashMap<(i32, i32), f32>,
-    /// Peak injectors `(x, y, surplus volume)`. Overlay fades; the
-    /// groundwater straw uses these so one 192× seat still shoves.
+    /// Zone outlets `(x, y, zone head)`. Adjacent boiling cells share
+    /// one head — not a grid of tiny seeds.
     seeds: Vec<(i32, i32, u32)>,
+    seed_zone: Vec<(i32, i32)>,
+    /// Undischarged leftover per zone id (deepest cell). Grows until
+    /// relief; drops when a straw vents or fills vadose.
+    heads: FxHashMap<(i32, i32), u32>,
+    released: FxHashMap<(i32, i32), u32>,
 }
 
-/// One boiling cell at expand N may charge about N neighbour seats.
+/// Exterior leftover arms from a zone boundary.
 const LEFTOVER_FIELD_CELLS: usize = 4096;
 
-/// Fade leftover *display* by path cost. Surplus volume still reaches
-/// ~expand seats; without this every charged cell paints ~0.99 and P
-/// reads as a thermal blob instead of a mound or a vein.
+/// Fade leftover *display* by path cost along relief arms.
 const LEFTOVER_COST_FADE: f32 = 32.0;
-
-/// Chebyshev spacing between leftover seeds. Every wet cell on a hot
-/// tile used to inject at cost 0, so a geothermal hill painted a solid
-/// yellow disk. One peak per neighbourhood keeps the arms and drops
-/// the maxed-out blob.
-const LEFTOVER_SEED_RADIUS: i32 = 6;
 
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
@@ -895,11 +892,11 @@ pub enum CellPressureKind {
 
 /// Rebuild the leftover-volume field for P overlay + water-table shove.
 ///
-/// Each boiling wet cell injects `mass × expand − seat`. Neighbours absorb
-/// one seat of that volume along the cheapest perm / upward path, so a
-/// single cell at expand 192 can press about 192 seats — a mound in
-/// homogeneous rock, a finger in a vein. Display fades by path cost so
-/// P is not a flat 0.99 thermal blob.
+/// Adjacent boiling wet cells are **one vessel**. The zone head is the
+/// sum of every cell's leftover (`mass × expand − seat`) and keeps
+/// growing until a straw finds vadose or a sky-open vent. Exterior
+/// arms follow cheap perm / loose / confined cavities. Display keeps
+/// the vessel magenta; only the escape path may go amber.
 pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32, expand: u8) {
     let boil = if boil_c.is_finite() {
         boil_c
@@ -952,7 +949,16 @@ fn leftover_memo_bound(memo: &LeftoverMemo, world: &World, boil_c: f32, expand: 
         && memo.expand == expand.max(1)
 }
 
+#[allow(dead_code)]
 fn leftover_step_cost(perm: u8, dy: i32) -> u32 {
+    leftover_step_cost_ex(perm, dy, false)
+}
+
+fn leftover_is_loose(mat: MaterialId) -> bool {
+    is_grain(mat) || matches!(mat, MaterialId::LooseRock | MaterialId::Gravel)
+}
+
+fn leftover_step_cost_ex(perm: u8, dy: i32, loose: bool) -> u32 {
     let resist = 1u32 + (256 / (perm.max(1) as u32));
     let vert = if dy > 0 {
         0
@@ -961,7 +967,63 @@ fn leftover_step_cost(perm: u8, dy: i32) -> u32 {
     } else {
         2
     };
-    resist + vert
+    let mut cost = resist + vert;
+    if loose {
+        cost = cost / 4 + 1;
+    }
+    cost
+}
+
+fn leftover_push_exterior_neighbors(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    remaining: u32,
+    cost: u32,
+    in_zone: &FxHashSet<(i32, i32)>,
+    heap: &mut BinaryHeap<(Reverse<u32>, i32, i32, u32)>,
+) {
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if in_zone.contains(&(nx, ny)) {
+            continue;
+        }
+        let Some(n) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if n.material == MaterialId::Bedrock {
+            continue;
+        }
+        if n.material == MaterialId::Air {
+            if is_steam_discharge_vent(world, nx, ny, n) {
+                continue;
+            }
+            if is_steam_void(n) && void_is_confined(world, nx, ny) {
+                heap.push((Reverse(cost.saturating_add(1)), nx, ny, remaining));
+            }
+            continue;
+        }
+        let perm = permeability_cell(n, &world.hydro);
+        if perm == 0 && water_capacity_cell(n, &world.hydro) == 0 {
+            continue;
+        }
+        let step = leftover_step_cost_ex(perm.max(1), dy, leftover_is_loose(n.material));
+        heap.push((Reverse(cost.saturating_add(step)), nx, ny, remaining));
+    }
+}
+
+fn leftover_is_surface_relief(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    cell.material == MaterialId::Air && air_void_open_to_sky(world, gx, gy)
+}
+
+fn leftover_zone_body_pack(head: u32, seats: u32, expand: u8) -> f32 {
+    let denom = seats.saturating_mul(expand.max(1) as u32).saturating_mul(2);
+    let t = (head as f32 / denom.max(1) as f32).clamp(0.0, 1.0);
+    // One vessel: magenta body that brightens as undischarged head grows.
+    // Stay under the overlay amber cut (0.72) so the hotspot is not a
+    // yellow disk. Escape arms may go brighter.
+    (0.38 + t * 0.30).clamp(0.0, 0.68)
 }
 
 fn rebuild_leftover_field(
@@ -971,15 +1033,18 @@ fn rebuild_leftover_field(
     expand: u8,
     memo: &mut LeftoverMemo,
 ) {
+    let old_heads = std::mem::take(&mut memo.heads);
+    let old_released = std::mem::take(&mut memo.released);
     memo.map.clear();
     memo.seeds.clear();
+    memo.seed_zone.clear();
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
         .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
         .map(|(k, _)| *k)
         .collect();
-    let mut cands: Vec<(i32, i32, f32, u32)> = Vec::new();
+    let mut cands: FxHashMap<(i32, i32), (u32, u32)> = FxHashMap::default();
     for coord in coords {
         for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
             if cell.material == MaterialId::Air || cell.sat.0 == 0 {
@@ -994,50 +1059,169 @@ fn rebuild_leftover_field(
             if surplus == 0 {
                 return;
             }
-            cands.push((world.wrap_x(gx), gy, t_c, surplus));
+            cands.insert((world.wrap_x(gx), gy), (surplus, cap));
         });
     }
-    cands.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(b.3.cmp(&a.3))
-            .then(b.1.cmp(&a.1))
-            .then(a.0.cmp(&b.0))
-    });
-    let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
-    let mut seeds: Vec<(i32, i32)> = Vec::new();
-    for &(gx, gy, _, surplus) in &cands {
-        if seeds
-            .iter()
-            .any(|&(sx, sy)| (gx - sx).abs().max((gy - sy).abs()) <= LEFTOVER_SEED_RADIUS)
-        {
-            continue;
-        }
-        seeds.push((gx, gy));
-        memo.seeds.push((gx, gy, surplus));
-        heap.push((Reverse(0), gx, gy, surplus));
+    if cands.is_empty() {
+        return;
     }
-    let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
+    let mut unvisited: FxHashSet<(i32, i32)> = cands.keys().copied().collect();
+    let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
+    while let Some(&start) = unvisited.iter().next() {
+        let mut stack = vec![start];
+        unvisited.remove(&start);
+        let mut cells: Vec<(i32, i32)> = Vec::new();
+        let mut surplus = 0u32;
+        let mut seats = 0u32;
+        while let Some((gx, gy)) = stack.pop() {
+            if let Some(&(s, cap)) = cands.get(&(gx, gy)) {
+                surplus = surplus.saturating_add(s);
+                seats = seats.saturating_add(cap);
+            }
+            cells.push((gx, gy));
+            for (dx, dy) in [
+                (0, 1),
+                (0, -1),
+                (-1, 0),
+                (1, 0),
+                (-1, 1),
+                (1, 1),
+                (-1, -1),
+                (1, -1),
+            ] {
+                let nx = world.wrap_x(gx + dx);
+                let ny = gy + dy;
+                if unvisited.remove(&(nx, ny)) {
+                    stack.push((nx, ny));
+                }
+            }
+        }
+        let id = *cells.iter().min_by_key(|(x, y)| (*y, *x)).unwrap_or(&start);
+        let mut head = surplus;
+        if let Some(&prev) = old_heads.get(&id) {
+            head = prev.saturating_add(surplus);
+        } else {
+            for &(x, y) in &cells {
+                if let Some(&prev) = old_heads.get(&(x, y)) {
+                    head = head.max(prev.saturating_add(surplus));
+                    break;
+                }
+            }
+        }
+        if let Some(&rel) = old_released.get(&id) {
+            head = head.saturating_sub(rel);
+        }
+        let cap_head = surplus.saturating_mul(8).max(surplus);
+        head = head.min(cap_head);
+        memo.heads.insert(id, head);
+        let body = leftover_zone_body_pack(head, seats.max(1), expand);
+        let mut in_zone: FxHashSet<(i32, i32)> = FxHashSet::default();
+        for &(gx, gy) in &cells {
+            in_zone.insert((gx, gy));
+            if body > 0.02 {
+                memo.map.insert((gx, gy), body);
+            }
+        }
+        let mut outlets: Vec<(i32, i32, i32)> = Vec::new();
+        for &(gx, gy) in &cells {
+            let mut face = 0i32;
+            let mut rim = false;
+            for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
+                let nx = world.wrap_x(gx + dx);
+                let ny = gy + dy;
+                if in_zone.contains(&(nx, ny)) {
+                    continue;
+                }
+                rim = true;
+                let Some(n) = world.get_cell(nx, ny) else {
+                    continue;
+                };
+                if n.material == MaterialId::Air {
+                    if is_steam_discharge_vent(world, nx, ny, n) {
+                        face = face.max(30_000 + dy.max(0) * 200);
+                    } else if is_steam_void(n) && void_is_confined(world, nx, ny) {
+                        face = face.max(18_000 + dy.max(0) * 120);
+                    }
+                    continue;
+                }
+                if n.material == MaterialId::Bedrock {
+                    continue;
+                }
+                let perm = permeability_cell(n, &world.hydro);
+                if leftover_is_loose(n.material) {
+                    face = face.max(14_000 + perm as i32 * 20 + dy.max(0) * 100);
+                }
+                if n.sat.0 <= retained_sat_cell(n, &world.hydro) && perm > 0 {
+                    face = face.max(10_000 + dy.max(0) * 80);
+                } else if perm > 0 {
+                    face = face.max(perm as i32 + dy.max(0) * 40);
+                }
+            }
+            if face > 0 {
+                outlets.push((face, gx, gy));
+            }
+            if rim {
+                leftover_push_exterior_neighbors(
+                    world,
+                    gx,
+                    gy,
+                    head.max(1),
+                    0,
+                    &in_zone,
+                    &mut heap,
+                );
+            }
+        }
+        outlets.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)).then(a.1.cmp(&b.1)));
+        let n_out = (cells.len() / 160).clamp(8, 24);
+        for &(_, gx, gy) in outlets.iter().take(n_out) {
+            memo.seeds.push((gx, gy, head.max(surplus)));
+            memo.seed_zone.push(id);
+        }
+        if outlets.is_empty() {
+            if let Some(&(gx, gy)) = cells.iter().max_by_key(|(_, y)| *y) {
+                memo.seeds.push((gx, gy, head.max(surplus)));
+                memo.seed_zone.push(id);
+            }
+        }
+    }
+    let mut seen: FxHashSet<(i32, i32)> = memo.map.keys().copied().collect();
+    let zone_painted = seen.len();
     while let Some((Reverse(cost), gx, gy, remaining)) = heap.pop() {
         if remaining == 0 || !seen.insert((gx, gy)) {
             continue;
         }
-        if memo.map.len() >= LEFTOVER_FIELD_CELLS {
+        if memo.map.len() >= zone_painted.saturating_add(LEFTOVER_FIELD_CELLS) {
             break;
         }
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
         };
-        if cell.material == MaterialId::Air {
+        if cell.material == MaterialId::Bedrock {
             continue;
+        }
+        if cell.material == MaterialId::Air {
+            if is_steam_discharge_vent(world, gx, gy, cell) {
+                continue;
+            }
+            if !(is_steam_void(cell) && void_is_confined(world, gx, gy)) {
+                continue;
+            }
         }
         let seat = water_capacity_cell(cell, &world.hydro).max(1) as u32;
         let fade = LEFTOVER_COST_FADE / (LEFTOVER_COST_FADE + cost as f32);
-        let pack = leftover_pack_norm(remaining.saturating_add(seat), seat) * fade;
-        if pack > 0.02 {
-            memo.map.insert((gx, gy), pack);
+        let mut pack = leftover_pack_norm(remaining.saturating_add(seat), seat) * fade;
+        let escape = leftover_is_loose(cell.material)
+            || (cell.material == MaterialId::Air && void_is_confined(world, gx, gy));
+        if !escape {
+            // Homogeneous stone halo stays in the magenta body range.
+            pack = pack.min(0.62);
         }
-        let next = remaining.saturating_sub(seat);
+        if pack > 0.02 {
+            let e = memo.map.entry((gx, gy)).or_insert(0.0);
+            *e = (*e).max(pack);
+        }
+        let next = remaining.saturating_sub(seat.min(remaining / 8 + 1));
         if next == 0 {
             continue;
         }
@@ -1050,14 +1234,23 @@ fn rebuild_leftover_field(
             let Some(n) = world.get_cell(nx, ny) else {
                 continue;
             };
-            if n.material == MaterialId::Air || n.material == MaterialId::Bedrock {
+            if n.material == MaterialId::Bedrock {
+                continue;
+            }
+            if n.material == MaterialId::Air {
+                if is_steam_discharge_vent(world, nx, ny, n) {
+                    continue;
+                }
+                if is_steam_void(n) && void_is_confined(world, nx, ny) {
+                    heap.push((Reverse(cost.saturating_add(1)), nx, ny, next));
+                }
                 continue;
             }
             let perm = permeability_cell(n, &world.hydro);
             if perm == 0 && water_capacity_cell(n, &world.hydro) == 0 {
                 continue;
             }
-            let step = leftover_step_cost(perm.max(1), dy);
+            let step = leftover_step_cost_ex(perm.max(1), dy, leftover_is_loose(n.material));
             heap.push((Reverse(cost.saturating_add(step)), nx, ny, next));
         }
     }
@@ -1071,17 +1264,28 @@ fn rebuild_leftover_field(
 /// seats are not a "bump"; the straw climbs until it fills vadose /
 /// dry rock (a table mound or a vein). Lakes only if no rock dest.
 fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
-    let seeds: Vec<(i32, i32, u32)> = LEFTOVER_MEMO.with(|slot| slot.borrow().seeds.clone());
+    let (seeds, ids): (Vec<(i32, i32, u32)>, Vec<(i32, i32)>) = LEFTOVER_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        (memo.seeds.clone(), memo.seed_zone.clone())
+    });
     if seeds.is_empty() {
         return;
     }
-    for (sx, sy, surplus) in seeds {
+    let mut released: FxHashMap<(i32, i32), u32> = FxHashMap::default();
+    for (i, &(sx, sy, surplus)) in seeds.iter().enumerate() {
         if surplus == 0 {
             continue;
         }
-        let hops = (surplus / 12).clamp(12, 32) as u8;
-        leftover_straw_chain(world, temp, sx, sy, hops);
+        let hops = (surplus / 4_000).clamp(24, 72) as u8;
+        let got = leftover_straw_chain(world, temp, sx, sy, hops);
+        if let Some(&id) = ids.get(i) {
+            *released.entry(id).or_insert(0) =
+                released.get(&id).copied().unwrap_or(0).saturating_add(got);
+        }
     }
+    LEFTOVER_MEMO.with(|slot| {
+        slot.borrow_mut().released = released;
+    });
 }
 
 struct LeftoverStrawGuard;
@@ -1098,15 +1302,19 @@ fn leftover_straw_chain(
     mut gx: i32,
     mut gy: i32,
     hops: u8,
-) {
+) -> u32 {
     LEFTOVER_STRAW.with(|f| f.set(true));
     let _guard = LeftoverStrawGuard;
     let mut drive = 255u8;
+    let released = 0u32;
     for _ in 0..hops {
         let Some(here) = world.get_cell(gx, gy) else {
-            return;
+            return released;
         };
-        if here.material == MaterialId::Air || here.sat.0 <= retained_sat_cell(here, &world.hydro) {
+        if leftover_is_surface_relief(world, gx, gy, here) {
+            return released;
+        }
+        if here.material != MaterialId::Air && here.sat.0 <= retained_sat_cell(here, &world.hydro) {
             let mut stepped = false;
             for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1), (0, 2)] {
                 let nx = world.wrap_x(gx + dx);
@@ -1129,33 +1337,34 @@ fn leftover_straw_chain(
                 break;
             }
             if !stepped {
-                return;
+                return released;
             }
         }
         let mut seen = FxHashSet::default();
         let (moved, dest, parked_vadose) =
             reverse_push_pore_water_inner(world, temp, gx, gy, drive, 24, &mut seen);
         if moved == 0 {
-            return;
+            return released;
         }
         let Some((nx, ny)) = dest else {
-            return;
+            return released;
         };
         if world
             .get_cell(nx, ny)
-            .is_some_and(|c| c.material == MaterialId::Air)
+            .is_some_and(|c| leftover_is_surface_relief(world, nx, ny, c))
         {
-            return;
+            return released.saturating_add(moved as u32);
         }
         // Vadose / dry seat: that water IS the table rise. Leave it.
-        // Keep hopping only through packed aquifer (marble straw).
+        // Keep hopping through packed aquifer and confined cavities.
         if parked_vadose {
-            return;
+            return released.saturating_add(moved as u32);
         }
         gx = nx;
         gy = ny;
         drive = 255;
     }
+    released
 }
 
 /// How much expanded volume does not fit the equilibrium seat (0..=1).
@@ -2956,7 +3165,11 @@ fn reverse_push_pore_water_inner(
     let Some(src) = world.get_cell(gx, gy) else {
         return (0, None, false);
     };
-    if src.material == MaterialId::Air || src.sat.0 == 0 {
+    if src.material == MaterialId::Air {
+        if src.sat.0 == 0 || !LEFTOVER_STRAW.with(|f| f.get()) {
+            return (0, None, false);
+        }
+    } else if src.sat.0 == 0 {
         return (0, None, false);
     }
     let want = drive.min(src.sat.0).max(1);
@@ -2973,7 +3186,7 @@ fn reverse_push_pore_water_inner(
         consider_reverse_seep_step(world, &mut best, tx, ty, dy, dst);
     }
     // Full-sat deadlock: sinter grains + widen competent neighbours, then rescan.
-    if best.is_none() && drive > 0 {
+    if best.is_none() && drive > 0 && src.material != MaterialId::Air {
         let _ = pressure_sinter_cell(world, gx, gy);
         for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
             let tx = world.wrap_x(gx + dx);
@@ -3016,8 +3229,21 @@ fn reverse_push_pore_water_inner(
     // stay 50_000 so an adjacent open-sky lake still wins when this
     // cell is not carrying leftover (lake-discharge tests).
     if leftover_cell_charged(world, gx, gy) {
-        if let Some(rock) = leftover_rock_seep_dest(world, gx, gy, seen) {
-            best = Some(rock);
+        let conduit = leftover_conduit_dest(world, gx, gy, seen);
+        let vadose = conduit.as_ref().and_then(|r| {
+            let d = r.3;
+            (d.material != MaterialId::Air && d.sat.0 <= retained_sat_cell(d, &world.hydro))
+                .then_some(*r)
+        });
+        if let Some(v) = vadose {
+            best = Some(v);
+        } else if best
+            .as_ref()
+            .is_some_and(|(_, tx, ty, d, _)| leftover_is_surface_relief(world, *tx, *ty, *d))
+        {
+            // Full zone, neighbour is sky-open / lake: that is relief.
+        } else if let Some(c) = conduit {
+            best = Some(c);
         }
     }
     let Some((_, tx, ty, mut dst, mut overflow_vent)) = best else {
@@ -3032,7 +3258,9 @@ fn reverse_push_pore_water_inner(
     let mut cap = water_capacity_cell(dst, &world.hydro);
     let mut room = cap.saturating_sub(dst.sat.0);
     // Full wet seat: shove its marble onward first, then occupy the hole.
-    if room == 0 && !overflow_vent && dst.material != MaterialId::Air && depth > 0 {
+    // Leftover straw also walks a flooded confined cave as a pipe.
+    let packed_pipe = dst.material != MaterialId::Air || LEFTOVER_STRAW.with(|f| f.get());
+    if room == 0 && !overflow_vent && packed_pipe && depth > 0 {
         let _ = reverse_push_pore_water_inner(world, temp, tx, ty, drive, depth - 1, seen);
         let Some(now) = world.get_cell(tx, ty) else {
             return (0, None, false);
@@ -3144,8 +3372,9 @@ fn leftover_cell_charged(world: &World, gx: i32, gy: i32) -> bool {
     })
 }
 
-/// Best non-vent rock neighbour for leftover groundwater (room or packed).
-fn leftover_rock_seep_dest(
+/// Best leftover conduit: vadose / loose / packed rock, or a confined cavity.
+/// Sky-open vents are relief, not a walk — dest-pick keeps those separately.
+fn leftover_conduit_dest(
     world: &World,
     gx: i32,
     gy: i32,
@@ -3162,6 +3391,15 @@ fn leftover_rock_seep_dest(
             continue;
         };
         if dst.material == MaterialId::Air {
+            if leftover_is_surface_relief(world, tx, ty, dst) {
+                continue;
+            }
+            if void_is_confined(world, tx, ty) {
+                let s = 20_000 + dy.max(0) * 250;
+                if best.is_none_or(|(sc, _, _, _, _)| s > sc) {
+                    best = Some((s, tx, ty, dst, false));
+                }
+            }
             continue;
         }
         let Some((score, overflow_vent)) = reverse_seep_path_score(world, dst, tx, ty, dy) else {
@@ -3171,10 +3409,14 @@ fn leftover_rock_seep_dest(
             continue;
         }
         let perm = permeability_cell(dst, &world.hydro).max(1);
-        let cost = leftover_step_cost(perm, dy) as i32;
+        let loose = leftover_is_loose(dst.material);
+        let cost = leftover_step_cost_ex(perm, dy, loose) as i32;
         let mut s = score + 8_000 - cost.min(7_500);
         if dy > 0 {
             s += 3_000;
+        }
+        if loose {
+            s += 4_000;
         }
         if dst.sat.0 <= retained_sat_cell(dst, &world.hydro) {
             s += 6_000;
@@ -5511,9 +5753,9 @@ mod tests {
     }
 
     #[test]
-    fn leftover_field_does_not_paint_a_hot_wet_plateau() {
-        // A geothermal hill used to light every wet cell at ~0.99 (yellow
-        // blob). Seeds are spaced; P follows faded arms, not the isotherm.
+    fn leftover_adjacent_boilers_share_one_zone() {
+        // Playtest: a grid of yellow seed lights. Adjacent boiling wet
+        // cells are one vessel — same body pressure, not 0.99 dots.
         let mut w = World::new(229);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         let mut wet = Cell::solid(MaterialId::Stone);
@@ -5534,29 +5776,192 @@ mod tests {
         }
         w.tick = STEAM_EVERY;
         prepare_leftover_pressure(&w, &temp, 100.0, 192);
-        let mut maxed = 0u32;
-        let mut max_p = 0.0f32;
+        let (a, _) = cell_pressure_norm_with_boil(&w, 3, 3, 122.0, 100.0, 192);
+        let (b, _) = cell_pressure_norm_with_boil(&w, 8, 7, 122.0, 100.0, 192);
+        let mut yellow = 0u32;
         for x in 2..10 {
             for y in 1..9 {
                 let (p, _) = cell_pressure_norm_with_boil(&w, x, y, 122.0, 100.0, 192);
-                max_p = max_p.max(p);
-                if p > 0.85 {
-                    maxed += 1;
+                if p > 0.88 {
+                    yellow += 1;
                 }
             }
         }
-        let (mid_p, _) = cell_pressure_norm_with_boil(&w, 5, 4, 122.0, 100.0, 192);
         assert!(
-            max_p > 0.5,
-            "a leftover seed must still read packed ({max_p})"
+            a > 0.35 && b > 0.35,
+            "connected boilers must share a visible zone ({a}, {b})"
         );
         assert!(
-            maxed <= 6,
-            "must not max-paint the whole hot wet plateau ({maxed} cells >0.85)"
+            (a - b).abs() < 0.16,
+            "adjacent leftover must be one vessel, not a seed grid ({a} vs {b})"
+        );
+        assert_eq!(
+            yellow, 0,
+            "zone body stays out of maxed yellow ({yellow} cells >0.88)"
+        );
+    }
+
+    #[test]
+    fn leftover_head_grows_until_relief() {
+        // No outlet: the vessel keeps packing. Pulse is a function of release.
+        let mut w = World::new(241);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..11 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 3..10 {
+            for y in 1..7 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 3..10 {
+            for y in 1..7 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            ..SteamConfig::default()
+        };
+        w.tick = 1;
+        apply_steam(&mut w, &mut hot, &cfg);
+        let (p0, _) = cell_pressure_norm_with_boil(&w, 6, 3, 122.0, 100.0, 192);
+        for t in 2..=8 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let (p1, _) = cell_pressure_norm_with_boil(&w, 6, 3, 122.0, 100.0, 192);
+        assert!(
+            p1 > p0 + 0.04,
+            "sealed leftover head must grow until relief ({p0}→{p1})"
         );
         assert!(
-            mid_p < max_p - 0.2,
-            "interior of the plateau must fade vs the seed ({mid_p} vs {max_p})"
+            p1 < 0.72,
+            "growing head must stay a magenta vessel, not a yellow disk ({p1})"
+        );
+    }
+
+    #[test]
+    fn leftover_full_zone_vents_through_loose_to_open_air() {
+        // Playtest: 80×50 packed boiling body. No vadose inside the
+        // vessel — relief is the cheapest loose path to sky.
+        let mut w = World::new(243);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 3..11 {
+            for y in 1..8 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        w.set_cell(6, 0, Cell::solid(MaterialId::Bedrock));
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.pore = 200;
+        let sand_cap = water_capacity_cell(sand, &w.hydro).max(1);
+        sand.sat = Sat(sand_cap);
+        for y in 8..13 {
+            w.set_cell(8, y, sand);
+        }
+        for y in 13..18 {
+            w.set_cell(8, y, Cell::air());
+        }
+        let water0 = sat_totals(&w).cell_total;
+        let air0 = w.get_cell(8, 13).unwrap().sat.0;
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 3..11 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=20 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let air1 = w.get_cell(8, 13).unwrap().sat.0;
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "loose relief is mass-flat"
+        );
+        assert!(
+            air1 > air0,
+            "packed leftover must find the sand chimney and vent ({air0}→{air1})"
+        );
+    }
+
+    #[test]
+    fn leftover_full_zone_walks_a_confined_cavity_to_sky() {
+        let mut w = World::new(245);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        // Bedrock mass so the only cheap path is the carved cave.
+        for x in 2..13 {
+            for y in 0..15 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 3..10 {
+            for y in 1..8 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        // Roofed pocket that side-opens to sky.
+        for &(x, y) in &[(6, 8), (7, 8), (8, 8), (8, 9), (8, 10), (8, 11), (8, 12)] {
+            w.set_cell(x, y, Cell::air());
+        }
+        let water0 = sat_totals(&w).cell_total;
+        let mouth0 = w.get_cell(8, 10).unwrap().sat.0;
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 3..10 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=24 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let mouth1 = w.get_cell(8, 10).unwrap().sat.0;
+        let cave1 = w.get_cell(6, 8).unwrap().sat.0;
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "cavity relief is mass-flat"
+        );
+        assert!(
+            mouth1 > mouth0 || cave1 > 0,
+            "leftover must walk the confined cave toward sky (mouth {mouth0}→{mouth1}, cave {cave1})"
         );
     }
 
