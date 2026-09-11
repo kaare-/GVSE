@@ -13,11 +13,55 @@
 //! Conserved quantity: `rock cells × MINERAL_PER_CELL + Σ dissolved load`.
 //! See [`crate::audit::mineral_total`] and docs/VOXEL_GROUNDWATER_VEINS.md.
 
+use std::cell::RefCell;
+
 use wk_material::{MaterialId, MaterialRegistry};
 
 use crate::cell::{water_capacity_cell, Cell, Sat};
 use crate::chunk::STANDING_AIR_SAT;
+use crate::fasthash::FxHashSet;
 use crate::grid::World;
+
+thread_local! {
+    /// Leftover straw mouths into a weather lake. Flow at the vent keeps
+    /// dissolved load in solution; settle / lake dump skip these cells.
+    static LEFTOVER_LAKE_VENTS: RefCell<(u64, FxHashSet<(i32, i32)>)> =
+        RefCell::new((0, FxHashSet::default()));
+}
+
+/// Drop leftover-lake vent marks (start of a steam tick).
+pub fn clear_leftover_lake_vents(world_id: u64) {
+    LEFTOVER_LAKE_VENTS.with(|slot| {
+        let mut s = slot.borrow_mut();
+        s.0 = world_id;
+        s.1.clear();
+    });
+}
+
+/// Mark a weather-lake cell as an active leftover discharge mouth.
+pub fn note_leftover_lake_vent(world_id: u64, gx: i32, gy: i32) {
+    LEFTOVER_LAKE_VENTS.with(|slot| {
+        let mut s = slot.borrow_mut();
+        if s.0 != world_id {
+            s.0 = world_id;
+            s.1.clear();
+        }
+        s.1.insert((gx, gy));
+    });
+}
+
+/// True when standing-lake settle / sediment drop should skip this cell.
+///
+/// Hydrothermal leftover discharge: flow and pressure keep minerals in
+/// solution at the mouth. Edges and the lake body take the load instead.
+pub fn leftover_lake_vent_skip(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    let id = world.chunk_cache_id.get();
+    LEFTOVER_LAKE_VENTS.with(|slot| {
+        let s = slot.borrow();
+        s.0 == id && s.1.contains(&(gx, gy))
+    })
+}
 
 /// Load units produced by dissolving one full cell of soluble rock.
 ///
@@ -256,8 +300,8 @@ pub fn widen_aperture(
             MECHANICAL_ABRASION_REF
         }
     };
-    let over = (throughput - APERTURE_MIN_THROUGHPUT) as f32
-        / (255 - APERTURE_MIN_THROUGHPUT) as f32;
+    let over =
+        (throughput - APERTURE_MIN_THROUGHPUT) as f32 / (255 - APERTURE_MIN_THROUGHPUT) as f32;
     // **Superlinear** in throughput. This is what channelizes: a cell carrying
     // twice the water opens roughly four times faster, so a small head start
     // compounds into a conduit while its neighbours stay effectively solid.
@@ -448,7 +492,6 @@ pub fn pressure_sinter_cell(world: &mut World, gx: i32, gy: i32) -> bool {
     }
     true
 }
-
 
 /// Rock that carries mineral mass for the audit: **carbonate only**.
 ///
@@ -738,6 +781,9 @@ pub fn settle_and_precip_standing_load(world: &mut World) {
             }
             continue;
         }
+        if leftover_lake_vent_skip(world, gx, gy) {
+            continue;
+        }
         if cell.sat.0 < STANDING_AIR_SAT {
             continue;
         }
@@ -799,7 +845,6 @@ fn occlude_pore(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
 fn push_water_up(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
     crate::displace::park_orphan_water(world, gx, gy, amount as u32).min(255) as u8
 }
-
 
 /// Drop the entire load of a cell whose water has left (evaporation, drainage).
 ///
@@ -1114,9 +1159,11 @@ mod tests {
             dissolved_at(&cold, 4, 2),
             dissolved_at(&warm, 4, 2)
         );
-        let cold_solid = crate::audit::mineral_total(&cold) - dissolved_at(&cold, 4, 2) as i64
+        let cold_solid = crate::audit::mineral_total(&cold)
+            - dissolved_at(&cold, 4, 2) as i64
             - dissolved_at(&cold, 4, 1) as i64;
-        let warm_solid = crate::audit::mineral_total(&warm) - dissolved_at(&warm, 4, 2) as i64
+        let warm_solid = crate::audit::mineral_total(&warm)
+            - dissolved_at(&warm, 4, 2) as i64
             - dissolved_at(&warm, 4, 1) as i64;
         // Warm may mint Flowstone in the Air seat or occlude the floor —
         // either way more of the ledger must leave solution into solid.
@@ -1266,7 +1313,6 @@ mod tests {
             "dissolved load should carbonate-cement LooseRock"
         );
     }
-
 
     #[test]
     fn a_thin_load_leaves_sand_loose() {
