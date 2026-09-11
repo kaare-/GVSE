@@ -1451,7 +1451,7 @@ fn leftover_commit_pin(world: &World, memo: &mut LeftoverMemo) {
     memo.pin_id = memo.seed_zone.first().copied().unwrap_or(seed);
 }
 
-fn leftover_dim_off_pin_arms(memo: &mut LeftoverMemo) {
+fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
     if memo.pin_path.len() < 2 {
         return;
     }
@@ -1463,11 +1463,17 @@ fn leftover_dim_off_pin_arms(memo: &mut LeftoverMemo) {
         .chain(memo.pin_next.values().copied())
         .collect();
     // Temperature tiles are 4×4, so every wet neighbour of the gravel
-    // vein is "boiling" and used to paint a pink sausage. The pin is
-    // the one-cell front; keep those cells in the map so dest-pick
-    // still treats them as leftover-charged.
+    // vein is "boiling" and used to paint a pink sausage. Keep the
+    // loose chimney (and the pin, which may include packed hops);
+    // hide the competent 4×4 smear.
     for (cell, pack) in memo.map.iter_mut() {
         if on_pin.contains(cell) {
+            continue;
+        }
+        if world
+            .get_cell(cell.0, cell.1)
+            .is_some_and(|c| leftover_is_loose(c.material))
+        {
             continue;
         }
         *pack = 0.02;
@@ -1740,11 +1746,11 @@ fn rebuild_leftover_field(
         }
     }
     if leftover_try_reuse_pin(world, memo) {
-        leftover_dim_off_pin_arms(memo);
+        leftover_dim_off_pin_arms(world, memo);
     } else {
         leftover_lock_winning_route(world, memo);
         leftover_commit_pin(world, memo);
-        leftover_dim_off_pin_arms(memo);
+        leftover_dim_off_pin_arms(world, memo);
     }
 }
 
