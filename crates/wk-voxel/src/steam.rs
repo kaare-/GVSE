@@ -291,6 +291,9 @@ struct LeftoverMemo {
     /// Boiling wet cells that share a leftover vessel. Vadose park
     /// inside this set is not relief — the hole is still the boiler.
     zone: FxHashSet<(i32, i32)>,
+    /// Exterior leftover-arm parents (child → parent). Same tree the
+    /// P overlay paints — heat and the straw follow this channel.
+    parents: FxHashMap<(i32, i32), (i32, i32)>,
 }
 
 /// Exterior leftover arms from a zone boundary.
@@ -981,6 +984,14 @@ fn leftover_step_cost_ex(perm: u8, dy: i32, loose: bool) -> u32 {
     cost
 }
 
+fn leftover_note_parent(
+    parents: &mut FxHashMap<(i32, i32), (i32, i32)>,
+    child: (i32, i32),
+    parent: (i32, i32),
+) {
+    parents.entry(child).or_insert(parent);
+}
+
 fn leftover_push_exterior_neighbors(
     world: &World,
     gx: i32,
@@ -989,6 +1000,7 @@ fn leftover_push_exterior_neighbors(
     cost: u32,
     in_zone: &FxHashSet<(i32, i32)>,
     heap: &mut BinaryHeap<(Reverse<u32>, i32, i32, u32)>,
+    parents: &mut FxHashMap<(i32, i32), (i32, i32)>,
 ) {
     for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
         let nx = world.wrap_x(gx + dx);
@@ -1007,6 +1019,7 @@ fn leftover_push_exterior_neighbors(
                 continue;
             }
             if leftover_is_boiler_path(world, nx, ny, n) {
+                leftover_note_parent(parents, (nx, ny), (gx, gy));
                 heap.push((Reverse(cost.saturating_add(1)), nx, ny, remaining));
             }
             continue;
@@ -1016,6 +1029,7 @@ fn leftover_push_exterior_neighbors(
             continue;
         }
         let step = leftover_step_cost_ex(perm.max(1), dy, leftover_is_loose(n.material));
+        leftover_note_parent(parents, (nx, ny), (gx, gy));
         heap.push((Reverse(cost.saturating_add(step)), nx, ny, remaining));
     }
 }
@@ -1074,6 +1088,7 @@ fn rebuild_leftover_field(
     memo.seeds.clear();
     memo.seed_zone.clear();
     memo.zone.clear();
+    memo.parents.clear();
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -1206,6 +1221,7 @@ fn rebuild_leftover_field(
                     0,
                     &in_zone,
                     &mut heap,
+                    &mut memo.parents,
                 );
             }
         }
@@ -1279,6 +1295,7 @@ fn rebuild_leftover_field(
                     continue;
                 }
                 if leftover_is_boiler_path(world, nx, ny, n) {
+                    leftover_note_parent(&mut memo.parents, (nx, ny), (gx, gy));
                     heap.push((Reverse(cost.saturating_add(1)), nx, ny, next));
                 }
                 continue;
@@ -1288,6 +1305,7 @@ fn rebuild_leftover_field(
                 continue;
             }
             let step = leftover_step_cost_ex(perm.max(1), dy, leftover_is_loose(n.material));
+            leftover_note_parent(&mut memo.parents, (nx, ny), (gx, gy));
             heap.push((Reverse(cost.saturating_add(step)), nx, ny, next));
         }
     }
@@ -1301,6 +1319,7 @@ fn rebuild_leftover_field(
 /// seats are not a "bump"; the straw climbs until it fills vadose /
 /// dry rock (a table mound or a vein). Lakes only if no rock dest.
 fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
+    leftover_conduct_route_heat(temp);
     let (seeds, ids): (Vec<(i32, i32, u32)>, Vec<(i32, i32)>) = LEFTOVER_MEMO.with(|slot| {
         let memo = slot.borrow();
         (memo.seeds.clone(), memo.seed_zone.clone())
@@ -1379,8 +1398,12 @@ fn leftover_straw_chain(
             }
         }
         let mut seen = FxHashSet::default();
+        // Loose chimneys (playtest gravel cheat path) are routinely
+        // longer than 24. Packed rock keeps the short hop so a sealed
+        // vessel does not recirculate itself into fake relief.
+        let depth = leftover_packed_depth(world, gx, gy, hops);
         let (moved, dest, parked_vadose) =
-            reverse_push_pore_water_inner(world, temp, gx, gy, drive, 24, &mut seen);
+            reverse_push_pore_water_inner(world, temp, gx, gy, drive, depth, &mut seen);
         if moved == 0 {
             return released;
         }
@@ -1395,10 +1418,20 @@ fn leftover_straw_chain(
         {
             return released.saturating_add(moved as u32);
         }
-        // Vadose / dry seat outside the vessel: that water IS the table
-        // rise. A hole we just punched inside the zone is not relief.
-        if parked_vadose && !leftover_in_zone(world, nx, ny) {
+        // Fill holes on a loose chimney, then keep walking. Parking at
+        // the first vadose gravel cell was why a cheat path lit up on P
+        // but never became a spring. Packed-rock vadose is still a
+        // water-table swell.
+        let dest_loose = world
+            .get_cell(nx, ny)
+            .is_some_and(|c| leftover_is_loose(c.material));
+        if parked_vadose && !leftover_in_zone(world, nx, ny) && !dest_loose {
             return released.saturating_add(moved as u32);
+        }
+        // Do not recirculate the boiler. 192 hops inside the zone empties
+        // the id cell, resets head, and never becomes a spring.
+        if leftover_in_zone(world, nx, ny) && !dest_loose {
+            return released;
         }
         gx = nx;
         gy = ny;
@@ -1415,6 +1448,20 @@ pub fn leftover_straw_hops(surplus: u32, expand: u16) -> u8 {
     from_head.max(from_expand).clamp(32, 192) as u8
 }
 
+fn leftover_packed_depth(world: &World, gx: i32, gy: i32, hops: u8) -> u8 {
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        let Some(n) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if leftover_is_loose(n.material) || leftover_is_weather_relief(world, nx, ny, n) {
+            return hops.max(1);
+        }
+    }
+    24
+}
+
 fn leftover_boost_route_heat(
     temp: &mut Temperature,
     from_gx: i32,
@@ -1424,6 +1471,40 @@ fn leftover_boost_route_heat(
     moved: u8,
 ) {
     temp.advect_leftover_route(from_gx, from_gy, to_gx, to_gy, moved);
+}
+
+/// Pull zone heat along the leftover P-channel, not an isotropic pyramid.
+///
+/// Temperature is tile-grained, so a one-cell gravel path still paints a
+/// 4-wide strip — but the strip follows the arm the overlay already found.
+fn leftover_conduct_route_heat(temp: &mut Temperature) {
+    let (zone, parents) = LEFTOVER_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        (memo.zone.clone(), memo.parents.clone())
+    });
+    if zone.is_empty() || parents.is_empty() {
+        return;
+    }
+    let mut kids: FxHashMap<(i32, i32), Vec<(i32, i32)>> = FxHashMap::default();
+    for (&child, &parent) in &parents {
+        kids.entry(parent).or_default().push(child);
+    }
+    let mut q: Vec<(i32, i32)> = zone.iter().copied().collect();
+    let mut seen: FxHashSet<(i32, i32)> = zone;
+    let mut i = 0;
+    while i < q.len() {
+        let p = q[i];
+        i += 1;
+        let Some(cs) = kids.get(&p) else {
+            continue;
+        };
+        for &c in cs {
+            leftover_boost_route_heat(temp, p.0, p.1, c.0, c.1, 16);
+            if seen.insert(c) {
+                q.push(c);
+            }
+        }
+    }
 }
 
 /// How much expanded volume does not fit the equilibrium seat (0..=1).
@@ -3343,6 +3424,10 @@ fn reverse_push_pore_water_inner(
     }
     let before = src.sat.0;
     let mut s = world.get_cell(gx, gy).unwrap();
+    let moved = moved.min(s.sat.0);
+    if moved == 0 {
+        return (0, None, false);
+    }
     s.sat = Sat(s.sat.0 - moved);
     world.set_cell(gx, gy, s);
     let fit = moved.min(room);
@@ -3446,6 +3531,15 @@ fn leftover_in_zone(world: &World, gx: i32, gy: i32) -> bool {
     LEFTOVER_MEMO.with(|slot| {
         let memo = slot.borrow();
         memo.world_id == id && memo.zone.contains(&(gx, gy))
+    })
+}
+
+fn leftover_on_arm(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    let id = world.chunk_cache_id.get();
+    LEFTOVER_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        memo.world_id == id && memo.map.contains_key(&(gx, gy))
     })
 }
 
@@ -3559,6 +3653,10 @@ fn leftover_conduit_dest(
         }
         if loose {
             s += 4_000;
+        }
+        if leftover_on_arm(world, tx, ty) {
+            // Stay on the channel the P overlay already committed to.
+            s += 5_000;
         }
         if dst.sat.0 <= retained_sat_cell(dst, &world.hydro) {
             s += 6_000;
@@ -5742,6 +5840,125 @@ mod tests {
         assert!(
             t_up1 > t_up0 + 4.0,
             "leftover reverse river must carry heat up the winning route ({t_up0}→{t_up1})"
+        );
+    }
+
+    #[test]
+    fn leftover_gravel_chimney_springs_to_open_sky() {
+        // Playtest: leftover stalled mid-mountain even at 1400× until a
+        // gravel cheat path was carved. P followed the gravel; the straw
+        // parked at the first vadose cell / died at packed-hop 24.
+        let mut w = World::new(271);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..12 {
+            for y in 0..48 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..9 {
+            for y in 1..5 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 5..40 {
+            w.set_cell(6, y, gravel);
+        }
+        for y in 40..46 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let water0 = sat_totals(&w).cell_total;
+        let mouth0 = w.get_cell(6, 40).unwrap().sat.0;
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..9 {
+            for y in 1..5 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=8 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let mouth1 = w.get_cell(6, 40).unwrap().sat.0;
+        let column: u32 = (30..40)
+            .map(|y| w.get_cell(6, y).unwrap().sat.0 as u32)
+            .sum();
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "gravel spring is mass-flat"
+        );
+        assert!(
+            mouth1 > mouth0 || column > 0,
+            "leftover must walk the gravel chimney to sky (mouth {mouth0}→{mouth1}, top {column})"
+        );
+    }
+
+    #[test]
+    fn leftover_heat_follows_gravel_channel_not_side_rock() {
+        let mut w = World::new(273);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..16 {
+            for y in 0..40 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..8 {
+            for y in 1..5 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 5..36 {
+            w.set_cell(6, y, gravel);
+        }
+        for y in 36..40 {
+            w.set_cell(6, y, Cell::air());
+        }
+        // Isolated stone column at the same height — geothermal pyramid
+        // would warm it; leftover heat must not, because it is off-channel.
+        for y in 5..36 {
+            w.set_cell(12, y, Cell::solid(MaterialId::Stone));
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..8 {
+            for y in 1..5 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 160.0);
+            }
+        }
+        let t_side0 = hot.at_cell(12, 28);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            ..SteamConfig::default()
+        };
+        w.tick = 1;
+        apply_steam(&mut w, &mut hot, &cfg);
+        let t_path = hot.at_cell(6, 28);
+        let t_side = hot.at_cell(12, 28);
+        assert!(
+            t_path > t_side + 8.0,
+            "leftover heat must follow the gravel channel, not a heat pyramid ({t_path} vs side {t_side}, side0 {t_side0})"
         );
     }
 
