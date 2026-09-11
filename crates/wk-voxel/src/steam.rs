@@ -39,7 +39,7 @@ use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::mineral::{
-    add_dissolved, carry_with_water, clear_leftover_lake_vents, dissolved_at,
+    add_dissolved, carry_with_water, clear_leftover_lake_vents, dissolved_at, dump_dry_air_load,
     emit_from_dissolved_rock, is_soluble_rock, note_leftover_lake_vent, precipitate_artesian_warm,
     precipitate_at, precipitate_dry_cell, precipitate_vent_mouth, pressure_sinter_cell,
     take_dissolved, widen_aperture, VENT_PIPE_LUMEN,
@@ -3986,11 +3986,16 @@ fn reverse_push_pore_water_inner(
         // Surface / underwater vent: depressurising spring drops load.
         // A few pulses so a slow steady route can grow sinter / pipes
         // instead of banking dissolved mineral in the lake.
+        // Hanging leftover dests (open-sky Air, no seat) used to keep the
+        // whole spray in solution — dump the excess onto the apron.
         let warmth = steam_pressure_norm(world, gx, gy)
             .max(drive as f32 / 255.0)
             .clamp(0.35, 1.0);
         for _ in 0..3 {
             let _ = precipitate_vent_mouth(world, tx, ty, warmth);
+        }
+        if leftover_cell_charged(world, gx, gy) {
+            let _ = dump_dry_air_load(world, tx, ty);
         }
     } else if dissolved_at(world, tx, ty) > 0 && actually_moved >= 4 {
         // Line the last hops before daylight / a pool — not the sealed
@@ -7383,6 +7388,93 @@ mod tests {
                     .is_some_and(|c| c.material != MaterialId::Air && c.pore < 180)
                 || crate::mineral::leftover_lake_vent_skip(&w, 4, 2),
             "load should rim the shore or float into the lake, not sit as a vent sinter"
+        );
+    }
+
+    #[test]
+    fn leftover_dry_air_mouth_does_not_bank_unbounded_load() {
+        // Playtest: leftover dest was open-sky Air (sat=0, holds 0) and
+        // dissolved just ticked up. Hanging spray must drop on the apron,
+        // not bank thousands of units in mid-air. Lake mouths stay open.
+        let mut w = World::new(297);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Limestone);
+        wet.pore = 80;
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..14 {
+            for y in 0..48 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 5..10 {
+            for y in 1..5 {
+                w.set_cell(x, y, wet);
+                crate::mineral::add_dissolved(&mut w, x, y, 140);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 5..39 {
+            w.set_cell(6, y, gravel);
+        }
+        // Hanging leftover dest: Air beside the last gravel, Air below
+        // that, stone ledge to the side so the apron has a seat.
+        for y in 37..46 {
+            w.set_cell(7, y, Cell::air());
+        }
+        w.set_cell(8, 37, Cell::solid(MaterialId::Stone));
+        w.set_cell(8, 38, Cell::air());
+        for y in 39..46 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let min0 = mineral_total(&w);
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 5..10 {
+            for y in 1..5 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=16 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+            crate::mineral::settle_and_precip_standing_load(&mut w);
+        }
+        assert_eq!(mineral_total(&w), min0, "leftover mouth dump is mineral-flat");
+        let mouth_air = [(6, 39), (6, 40), (7, 38), (7, 39), (7, 40), (8, 38)];
+        let bank = mouth_air
+            .iter()
+            .filter(|&&(x, y)| w.get_cell(x, y).is_some_and(|c| c.material == MaterialId::Air))
+            .map(|&(x, y)| dissolved_at(&w, x, y))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            bank < 200,
+            "dry leftover mouth must not bank spray (max {bank})"
+        );
+        let mid = w.get_cell(6, 20).unwrap();
+        assert!(
+            mid.material == MaterialId::Gravel || mid.pore > crate::mineral::VENT_PIPE_LUMEN,
+            "mid-chimney must stay an open conduit ({:?} pore {})",
+            mid.material,
+            mid.pore
+        );
+        let sintered = mouth_air.iter().any(|&(x, y)| {
+            w.get_cell(x, y)
+                .is_some_and(|c| c.material == MaterialId::Flowstone)
+        });
+        assert!(
+            sintered || bank == 0,
+            "spray should leave the hanging dest as sinter, not an air bank"
         );
     }
 

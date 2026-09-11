@@ -595,14 +595,23 @@ pub fn precipitate_vent_mouth(world: &mut World, gx: i32, gy: i32, warmth: f32) 
     deposit_vent_apron(world, gx, gy, excess)
 }
 
+/// True when this solid is the leftover chimney lumen — do not line it.
+fn vent_open_lumen(cell: Cell) -> bool {
+    cell.material != MaterialId::Air
+        && cell.material != MaterialId::Bedrock
+        && cell.pore > VENT_PIPE_LUMEN
+}
+
 /// Cement loose grains around a vent; line only a tight floor.
 ///
 /// Lateral competent rock is the approaching conduit — occluding it from
 /// the mouth is how springs used to plug themselves. Open floors
 /// (`pore > VENT_PIPE_LUMEN`) stay a lumen so sinter can grow in the vent.
+/// A hanging leftover dest (Air with Air below) used to return 0 here and
+/// bank thousands of load units in mid-air; side seats take that apron.
 fn deposit_vent_apron(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
     if let Some(floor) = world.get_cell(gx, gy - 1) {
-        if cemented_form(floor.material).is_some() {
+        if cemented_form(floor.material).is_some() && !vent_open_lumen(floor) {
             let used = cement_cell(world, gx, gy - 1, excess);
             if used > 0 {
                 return used;
@@ -621,6 +630,15 @@ fn deposit_vent_apron(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
         let Some(n) = world.get_cell(nx, ny) else {
             continue;
         };
+        if n.material == MaterialId::Air {
+            if let Some(used) = mint_side_vent_sinter(world, gx, gy, nx, ny, excess) {
+                return used;
+            }
+            continue;
+        }
+        if vent_open_lumen(n) {
+            continue;
+        }
         if cemented_form(n.material).is_some() {
             let used = cement_cell(world, nx, ny, excess);
             if used > 0 {
@@ -629,6 +647,139 @@ fn deposit_vent_apron(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
         }
     }
     0
+}
+
+/// Grow Flowstone in a seated neighbour, not in the chimney column.
+///
+/// Same-column Air sitting on an open lumen is the leftover pipe — skip it.
+/// A side seat (even on open gravel) is the terrace the spray should build.
+fn mint_side_vent_sinter(
+    world: &mut World,
+    from_x: i32,
+    from_y: i32,
+    nx: i32,
+    ny: i32,
+    excess: u16,
+) -> Option<u16> {
+    if excess < SINTER_MIN_LOAD {
+        return None;
+    }
+    let Some(n) = world.get_cell(nx, ny) else {
+        return None;
+    };
+    if n.material != MaterialId::Air {
+        return None;
+    }
+    let Some(floor) = world.get_cell(nx, ny - 1) else {
+        return None;
+    };
+    if floor.material == MaterialId::Air || floor.material == MaterialId::Bedrock {
+        return None;
+    }
+    if nx == from_x && vent_open_lumen(floor) {
+        return None;
+    }
+    let take = excess.min(MINERAL_PER_CELL);
+    let got = take_dissolved(world, from_x, from_y, take);
+    if got == 0 {
+        return None;
+    }
+    add_dissolved(world, nx, ny, got);
+    let used = mint_seated_sinter(world, nx, ny, got);
+    if used == 0 {
+        let back = take_dissolved(world, nx, ny, got);
+        add_dissolved(world, from_x, from_y, back);
+        return None;
+    }
+    Some(used)
+}
+
+/// Dry / thin-film Air cannot hold leftover spray. Dump the excess onto
+/// the apron instead of banking an inspector load that only ticks up.
+///
+/// Lake leftover mouths stay in solution ([`leftover_lake_vent_skip`]).
+/// Open-lumen solids stay a pipe. Side seats and tight rock take the rest.
+pub fn dump_dry_air_load(world: &mut World, gx: i32, gy: i32) -> u16 {
+    if leftover_lake_vent_skip(world, gx, gy) {
+        return 0;
+    }
+    let gx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return 0;
+    };
+    if cell.material != MaterialId::Air {
+        return 0;
+    }
+    let cap = carrying_capacity(world, gx, gy);
+    let load = dissolved_at(world, gx, gy);
+    if load == 0 || load <= cap {
+        return 0;
+    }
+    let mut used = precipitate_vent_mouth(world, gx, gy, 0.7);
+    let mut left = dissolved_at(world, gx, gy).saturating_sub(cap);
+    if left == 0 {
+        return used;
+    }
+    for (dx, dy) in [
+        (-1, 0),
+        (1, 0),
+        (-1, -1),
+        (1, -1),
+        (0, -1),
+        (-1, 1),
+        (1, 1),
+        (0, -2),
+        (-1, -2),
+        (1, -2),
+        (0, -3),
+        (0, 1),
+    ] {
+        if left == 0 {
+            break;
+        }
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if leftover_lake_vent_skip(world, nx, ny) {
+            continue;
+        }
+        let Some(n) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if n.material == MaterialId::Bedrock {
+            continue;
+        }
+        if n.material == MaterialId::Air {
+            if let Some(minted) = mint_side_vent_sinter(world, gx, gy, nx, ny, left) {
+                used += minted;
+                left = dissolved_at(world, gx, gy).saturating_sub(cap);
+            }
+            continue;
+        }
+        if vent_open_lumen(n) {
+            continue;
+        }
+        let take = left.min(CEMENT_MIN_LOAD.max(PRECIPITATE_MAX_STEP));
+        let got = take_dissolved(world, gx, gy, take);
+        if got == 0 {
+            break;
+        }
+        add_dissolved(world, nx, ny, got);
+        let dropped = if cemented_form(n.material).is_some() {
+            cement_cell(world, nx, ny, got)
+        } else if is_soluble_rock(n.material) {
+            occlude_pore(world, nx, ny, got)
+        } else {
+            0
+        };
+        if dropped == 0 {
+            let back = take_dissolved(world, nx, ny, got);
+            add_dissolved(world, gx, gy, back);
+        } else {
+            used += dropped;
+        }
+        left = dissolved_at(world, gx, gy).saturating_sub(cap);
+    }
+    used
 }
 
 /// Shared core: drop whatever load exceeds `ceiling`.
@@ -785,6 +936,11 @@ pub fn settle_and_precip_standing_load(world: &mut World) {
             continue;
         }
         if cell.sat.0 < STANDING_AIR_SAT {
+            // Thin-film / hanging leftover mouths have no standing water to
+            // hold spray. Dump the excess onto the apron instead of banking.
+            if dissolved_at(world, gx, gy) > carrying_capacity(world, gx, gy) {
+                let _ = dump_dry_air_load(world, gx, gy);
+            }
             continue;
         }
         match world.get_cell(gx, gy - 1) {
@@ -873,6 +1029,7 @@ pub fn precipitate_dry_cell(world: &mut World, gx: i32, gy: i32) {
             Some(b) if b.material != MaterialId::Air
         );
         if !seated {
+            let _ = dump_dry_air_load(world, gx, gy);
             return;
         }
         let _ = take_dissolved(world, gx, gy, MINERAL_PER_CELL);
@@ -954,6 +1111,74 @@ mod tests {
             w.get_cell(4, 6).unwrap().material,
             MaterialId::Air,
             "flowstone must not form in mid-air"
+        );
+    }
+
+    #[test]
+    fn hanging_vent_mouth_dumps_load_onto_a_side_seat() {
+        // Playtest leftover dest: open-sky Air, sat=0, floor is more Air.
+        // Load was ticking up because settle skipped thin-film cells and
+        // the apron refused a hanging mint. Side ledge takes the spray.
+        let mut w = bed(19);
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(5, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 3, Cell::air());
+        add_dissolved(&mut w, 4, 3, 400);
+        let before = crate::audit::mineral_total(&w);
+        settle_and_precip_standing_load(&mut w);
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "hanging-mouth dump is mineral-flat"
+        );
+        assert!(
+            dissolved_at(&w, 4, 3) < 80,
+            "dry leftover mouth must not bank spray (left {})",
+            dissolved_at(&w, 4, 3)
+        );
+        assert_eq!(
+            w.get_cell(4, 3).unwrap().material,
+            MaterialId::Air,
+            "hanging mouth stays open sky"
+        );
+        assert_eq!(
+            w.get_cell(5, 3).unwrap().material,
+            DEPOSIT_MATERIAL,
+            "spray should sinter on the seated side ledge"
+        );
+        assert_eq!(
+            w.get_cell(5, 2).unwrap().material,
+            MaterialId::Stone,
+            "apron seat stays stone"
+        );
+    }
+
+    #[test]
+    fn hanging_vent_mouth_does_not_plug_an_open_gravel_lumen() {
+        let mut w = bed(21);
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        w.set_cell(4, 2, gravel);
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(4, 4, Cell::air());
+        w.set_cell(5, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 3, Cell::air());
+        add_dissolved(&mut w, 4, 4, 360);
+        let before = crate::audit::mineral_total(&w);
+        let used = dump_dry_air_load(&mut w, 4, 4);
+        assert!(used > 0, "hanging leftover dest must drop load");
+        assert_eq!(crate::audit::mineral_total(&w), before);
+        assert_eq!(
+            w.get_cell(4, 2).unwrap().material,
+            MaterialId::Gravel,
+            "open chimney gravel must stay a lumen, not conglomerate"
+        );
+        assert_eq!(w.get_cell(4, 2).unwrap().pore, 200);
+        assert_eq!(
+            w.get_cell(4, 3).unwrap().material,
+            MaterialId::Air,
+            "air directly above the lumen stays the pipe"
         );
     }
 
