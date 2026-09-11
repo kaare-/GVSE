@@ -4,12 +4,10 @@
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    is_fungus, is_land_plant, permeability_cell, soft_litter_at, cave_humidity_at,
-    cell_pressure_norm_with_boil, prepare_leftover_pressure,
-    steam_at, steam_pressure_norm, vessel_is_boiler, void_is_confined, water_capacity_cell,
-    Atom, Cell, CellPressureKind,
-    Corpse, GeotechMap, Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS,
+    cave_humidity_at, cell_pressure_norm_with_boil, is_fungus, is_land_plant, permeability_cell,
+    prepare_leftover_pressure, soft_litter_at, steam_at, steam_pressure_norm, vessel_is_boiler,
+    void_is_confined, water_capacity_cell, Atom, Cell, CellPressureKind, Corpse, GeotechMap,
+    Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
 };
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -205,7 +203,7 @@ pub fn draw_block_inspector(
     corpse: Option<(usize, &Corpse)>,
     sw: f32,
     boil_c: f32,
-    expand: u8,
+    expand: u16,
 ) {
     let hum = humidity.at_cell(gx, gy);
     let temp_c = temperature.at_cell(gx, gy);

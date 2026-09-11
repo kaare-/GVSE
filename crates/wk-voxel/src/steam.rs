@@ -72,8 +72,11 @@ pub const PORE_BOIL_MAX_PER_CELL: u8 = 40;
 /// `boiled × expand` product saturated a `u8` drive at expand≈6 for any
 /// real pore flash, so Tab's 64× ceiling did nothing on hot cores. Expand
 /// is now the primary force knob (default 96); heat scales it; boiled mass
-/// only mildly amplifies. Still deliberately far below Clausius 1700×.
-pub const PHASE_EXPANSION_DRIVE: u8 = 96;
+/// only mildly amplifies. Tab may go to ~1400× (Clausius-ish steam).
+pub const PHASE_EXPANSION_DRIVE: u16 = 96;
+
+/// Tab ceiling: leftover volume `mass × expand`. Real steam is ~1600×.
+pub const PHASE_EXPANSION_DRIVE_MAX: u16 = 1400;
 
 /// Heat multiplier on phase-expansion force above boil.
 ///
@@ -90,7 +93,7 @@ pub fn phase_heat_drive_scale(temp_c: f32, boil_c: f32) -> f32 {
 
 /// Reverse-seepage + crack budget for a boiled pore pulse (force, not mass).
 #[inline]
-pub fn expansion_drive_units(boiled: u8, expand: u8, temp_c: f32, boil_c: f32) -> u8 {
+pub fn expansion_drive_units(boiled: u8, expand: u16, temp_c: f32, boil_c: f32) -> u8 {
     if boiled == 0 {
         return 0;
     }
@@ -147,7 +150,7 @@ pub struct SteamConfig {
     pub boil_max_per_cell: u8,
     pub pore_boil_max_per_cell: u8,
     /// Force multiplier from liquid→gas expansion (not minted mass).
-    pub phase_expansion_drive: u8,
+    pub phase_expansion_drive: u16,
     /// Max hops for reverse seepage driven by phase expansion.
     pub reverse_seep_hops: u8,
     pub rise_max_per_cell: u8,
@@ -275,7 +278,7 @@ struct LeftoverMemo {
     world_id: u64,
     tick: u64,
     boil_bits: u32,
-    expand: u8,
+    expand: u16,
     map: FxHashMap<(i32, i32), f32>,
     /// Zone outlets `(x, y, zone head)`. Adjacent boiling cells share
     /// one head — not a grid of tiny seeds.
@@ -477,7 +480,7 @@ pub enum VesselKind {
 /// Mass is never multiplied. 14 liquid becomes 1400 volume units above
 /// boil and collapses back to 14 when cool. Do not write this into `sat`.
 #[inline]
-pub fn vapor_volume_units(mass: u32, temp_c: f32, boil_c: f32, expand: u8) -> u32 {
+pub fn vapor_volume_units(mass: u32, temp_c: f32, boil_c: f32, expand: u16) -> u32 {
     if mass == 0 || !temp_c.is_finite() {
         return 0;
     }
@@ -499,7 +502,7 @@ pub fn overpressure_units(volume: u32, seat: u32) -> u32 {
 /// Huge surplus + tiny hole keeps the vessel packed. Never larger than
 /// the vapour **mass** that produced the surplus.
 #[inline]
-pub fn choke_leak_mass(surplus_volume: u32, expand: u8, throat: u8) -> u8 {
+pub fn choke_leak_mass(surplus_volume: u32, expand: u16, throat: u8) -> u8 {
     if surplus_volume == 0 {
         return 0;
     }
@@ -901,7 +904,7 @@ pub enum CellPressureKind {
 /// growing until a straw finds vadose or a sky-open vent. Exterior
 /// arms follow cheap perm / loose / confined cavities. Display keeps
 /// the vessel magenta; only the escape path may go amber.
-pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32, expand: u8) {
+pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32, expand: u16) {
     let boil = if boil_c.is_finite() {
         boil_c
     } else {
@@ -927,7 +930,7 @@ pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32,
     });
 }
 
-fn leftover_field_lookup(world: &World, gx: i32, gy: i32, boil_c: f32, expand: u8) -> f32 {
+fn leftover_field_lookup(world: &World, gx: i32, gy: i32, boil_c: f32, expand: u16) -> f32 {
     let gx = world.wrap_x(gx);
     LEFTOVER_MEMO.with(|slot| {
         let memo = slot.borrow();
@@ -938,11 +941,11 @@ fn leftover_field_lookup(world: &World, gx: i32, gy: i32, boil_c: f32, expand: u
     })
 }
 
-fn leftover_field_bound(world: &World, boil_c: f32, expand: u8) -> bool {
+fn leftover_field_bound(world: &World, boil_c: f32, expand: u16) -> bool {
     LEFTOVER_MEMO.with(|slot| leftover_memo_bound(&slot.borrow(), world, boil_c, expand))
 }
 
-fn leftover_memo_bound(memo: &LeftoverMemo, world: &World, boil_c: f32, expand: u8) -> bool {
+fn leftover_memo_bound(memo: &LeftoverMemo, world: &World, boil_c: f32, expand: u16) -> bool {
     let boil_bits = if boil_c.is_finite() {
         boil_c.to_bits()
     } else {
@@ -1049,7 +1052,7 @@ fn leftover_is_boiler_path(world: &World, gx: i32, gy: i32, cell: Cell) -> bool 
             && (cell.sat.0 > STEAM_VOID_SAT_MAX || crate::rules::is_standing_water(world, gx, gy)))
 }
 
-fn leftover_zone_body_pack(head: u32, seats: u32, expand: u8) -> f32 {
+fn leftover_zone_body_pack(head: u32, seats: u32, expand: u16) -> f32 {
     let denom = seats.saturating_mul(expand.max(1) as u32).saturating_mul(2);
     let t = (head as f32 / denom.max(1) as f32).clamp(0.0, 1.0);
     // One vessel: magenta body that brightens as undischarged head grows.
@@ -1062,7 +1065,7 @@ fn rebuild_leftover_field(
     world: &World,
     temp: &Temperature,
     boil: f32,
-    expand: u8,
+    expand: u16,
     memo: &mut LeftoverMemo,
 ) {
     let old_heads = std::mem::take(&mut memo.heads);
@@ -1305,12 +1308,13 @@ fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
     if seeds.is_empty() {
         return;
     }
+    let expand = LEFTOVER_MEMO.with(|slot| slot.borrow().expand.max(1));
     let mut released: FxHashMap<(i32, i32), u32> = FxHashMap::default();
     for (i, &(sx, sy, surplus)) in seeds.iter().enumerate() {
         if surplus == 0 {
             continue;
         }
-        let hops = (surplus / 4_000).clamp(24, 72) as u8;
+        let hops = leftover_straw_hops(surplus, expand);
         let got = leftover_straw_chain(world, temp, sx, sy, hops);
         if let Some(&id) = ids.get(i) {
             *released.entry(id).or_insert(0) =
@@ -1383,6 +1387,8 @@ fn leftover_straw_chain(
         let Some((nx, ny)) = dest else {
             return released;
         };
+        // Leftover is leftover heat: the reverse river must stay a hot vein.
+        leftover_boost_route_heat(temp, gx, gy, nx, ny, moved);
         if world
             .get_cell(nx, ny)
             .is_some_and(|c| leftover_is_weather_relief(world, nx, ny, c))
@@ -1399,6 +1405,25 @@ fn leftover_straw_chain(
         drive = 255;
     }
     released
+}
+
+/// Hop budget for one leftover straw. Expand 192 used to cap at 72 and
+/// die underground; 1400× must be able to punch a deep column to sky.
+pub fn leftover_straw_hops(surplus: u32, expand: u16) -> u8 {
+    let from_head = surplus / 2_000;
+    let from_expand = 32 + (expand as u32 / 6);
+    from_head.max(from_expand).clamp(32, 192) as u8
+}
+
+fn leftover_boost_route_heat(
+    temp: &mut Temperature,
+    from_gx: i32,
+    from_gy: i32,
+    to_gx: i32,
+    to_gy: i32,
+    moved: u8,
+) {
+    temp.advect_leftover_route(from_gx, from_gy, to_gx, to_gy, moved);
 }
 
 /// How much expanded volume does not fit the equilibrium seat (0..=1).
@@ -1429,7 +1454,7 @@ pub fn cell_pressure_norm_with_boil(
     gy: i32,
     temp_c: f32,
     boil_c: f32,
-    expand: u8,
+    expand: u16,
 ) -> (f32, CellPressureKind) {
     let steam = steam_at(world, gx, gy);
     let Some(cell) = world.get_cell(gx, gy) else {
@@ -2665,11 +2690,8 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
     let boil = cfg.boil_point_c;
     let expand = cfg.phase_expansion_drive.max(1);
     // Stronger expansion buys more reach: +1 hop per 32 drive units.
-    let hops = cfg
-        .reverse_seep_hops
-        .max(1)
-        .saturating_add(expand / 32)
-        .min(32);
+    let extra = (expand / 32).min(24) as u8;
+    let hops = cfg.reverse_seep_hops.max(1).saturating_add(extra).min(48);
     let max_work = cfg.max_escapes_per_tick.saturating_mul(3).max(16);
     let mut top = SteamAmtTopK::new(max_work as usize);
     let coords: Vec<ChunkCoord> = world
@@ -2955,7 +2977,7 @@ fn open_pore_steam_seat(
     gx: i32,
     gy: i32,
     max_cells: usize,
-    expand: u8,
+    expand: u16,
 ) -> Option<(i32, i32)> {
     // Prefer the cell above the boiling pore.
     for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2)] {
@@ -2992,15 +3014,16 @@ fn open_pore_steam_seat(
 }
 
 /// Flash expansion cracks the boiling host pore (aperture growth).
-fn phase_crack_host(world: &mut World, gx: i32, gy: i32, boiled: u8, expand: u8) {
+fn phase_crack_host(world: &mut World, gx: i32, gy: i32, boiled: u8, expand: u16) {
     let Some(cell) = world.get_cell(gx, gy) else {
         return;
     };
     if !crate::cell::is_competent_rock(cell.material) {
         return;
     }
-    let throughput = boiled.saturating_mul(expand.min(16)).max(48);
-    let scale = 1.2 + (expand as f32) * 0.06 + (boiled as f32) / 120.0;
+    let expand_n = expand.min(255) as u8;
+    let throughput = boiled.saturating_mul(expand_n.min(16)).max(48);
+    let scale = 1.2 + (expand_n as f32) * 0.06 + (boiled as f32) / 120.0;
     let _ = widen_aperture(world, gx, gy, throughput, scale, 0xB01C_u64, false);
 }
 
@@ -5670,6 +5693,59 @@ mod tests {
     }
 
     #[test]
+    fn leftover_straw_hops_scale_with_steam_expand() {
+        assert!(
+            leftover_straw_hops(8_000, 192) > leftover_straw_hops(8_000, 96),
+            "higher expand must buy a longer reverse river"
+        );
+        assert!(
+            leftover_straw_hops(50_000, PHASE_EXPANSION_DRIVE_MAX) >= 160,
+            "1400× leftover must be able to punch a deep column"
+        );
+        assert_eq!(
+            vapor_volume_units(20, 120.0, 100.0, PHASE_EXPANSION_DRIVE_MAX),
+            20 * PHASE_EXPANSION_DRIVE_MAX as u32,
+            "20 sat at 1400× is 28k volume, not a u8 wrap"
+        );
+    }
+
+    #[test]
+    fn leftover_route_carries_heat_into_cool_rock_above() {
+        let mut w = World::new(253);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..9 {
+            for y in 0..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        let mut src = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(src, &w.hydro).max(1);
+        src.sat = Sat(cap);
+        w.set_cell(5, 1, src);
+        let mut hot = temp_fill(&w, 20.0);
+        let (hx, hy) = hot.tile_of(5, 1);
+        hot.set_tile_c(hx, hy, 160.0);
+        let t_up0 = hot.at_cell(5, 8);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            ..SteamConfig::default()
+        };
+        for t in 1..=10 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let t_up1 = hot.at_cell(5, 8);
+        assert!(
+            t_up1 > t_up0 + 4.0,
+            "leftover reverse river must carry heat up the winning route ({t_up0}→{t_up1})"
+        );
+    }
+
+    #[test]
     fn leftover_raises_a_water_table_bump_not_the_side_lake() {
         let mut w = World::new(225);
         w.ensure_chunk(ChunkCoord::new(0, 0));
@@ -5683,6 +5759,10 @@ mod tests {
         let cap = water_capacity_cell(src, &w.hydro).max(1);
         src.sat = Sat(cap);
         w.set_cell(5, 1, src);
+        // Packed flank so leftover cannot park beside the lake.
+        for y in 1..6 {
+            w.set_cell(4, y, src);
+        }
         // Side lake — the old reverse-seep magnet.
         for y in 1..6 {
             let mut lake = Cell::air();
@@ -5707,7 +5787,9 @@ mod tests {
             reverse_seep_hops: 8,
             ..SteamConfig::default()
         };
-        for i in 1..12 {
+        // A long straw will later treat the packed column + weather lake
+        // as relief. Catch the table rise before that dump.
+        for i in 1..5 {
             w.tick = STEAM_EVERY * i;
             apply_steam(&mut w, &mut hot, &cfg);
         }
