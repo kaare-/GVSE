@@ -1462,11 +1462,15 @@ fn leftover_dim_off_pin_arms(memo: &mut LeftoverMemo) {
         .chain(memo.pin_next.keys().copied())
         .chain(memo.pin_next.values().copied())
         .collect();
+    // Temperature tiles are 4×4, so every wet neighbour of the gravel
+    // vein is "boiling" and used to paint a pink sausage. The pin is
+    // the one-cell front; keep those cells in the map so dest-pick
+    // still treats them as leftover-charged.
     for (cell, pack) in memo.map.iter_mut() {
-        if memo.zone.contains(cell) || on_pin.contains(cell) {
+        if on_pin.contains(cell) {
             continue;
         }
-        *pack = (*pack).min(0.36);
+        *pack = 0.02;
     }
 }
 
@@ -3833,20 +3837,27 @@ fn reverse_push_pore_water_inner(
         let weather_side = best.as_ref().is_some_and(|(_, tx, ty, d, _)| {
             leftover_is_surface_mouth(world, *tx, *ty, *d) && *ty <= gy
         });
-        if weather_up {
-            // Spring / open air above us. Do not overwrite with a
-            // vadose side-stone (playtest 2/19 next to the gravel mouth).
-        } else if let Some(forced) = leftover_forced_route_dest(world, gx, gy, seen) {
-            best = Some(forced);
-        } else if leftover_has_pin(world) {
-            // Stay on the pinned pipe. Off-route vadose / widen is how
-            // the reservoir kept punching the rock slab above.
-            if !best
+        if leftover_has_pin(world) {
+            // The pin already chose the mouth. Do not retarget every
+            // rain cell above the ridge — that was the mouth hunt.
+            if let Some(forced) = leftover_forced_route_dest(world, gx, gy, seen) {
+                best = Some(forced);
+            } else if weather_up
+                && best
+                    .as_ref()
+                    .is_some_and(|(_, tx, ty, _, _)| leftover_on_route(world, *tx, *ty))
+            {
+            } else if !best
                 .as_ref()
                 .is_some_and(|(_, tx, ty, _, _)| leftover_on_route(world, *tx, *ty))
             {
                 best = None;
             }
+        } else if weather_up {
+            // Spring / open air above us. Do not overwrite with a
+            // vadose side-stone (playtest 2/19 next to the gravel mouth).
+        } else if let Some(forced) = leftover_forced_route_dest(world, gx, gy, seen) {
+            best = Some(forced);
         } else {
             let conduit = leftover_conduit_dest(world, gx, gy, seen);
             let vadose = conduit.as_ref().and_then(|r| {
@@ -6607,6 +6618,72 @@ mod tests {
         assert!(
             slab_pore1 <= slab_pore0.saturating_add(6),
             "leftover must not widen a competing slab ({slab_pore0}→{slab_pore1})"
+        );
+    }
+
+    #[test]
+    fn leftover_pin_overlay_is_one_cell_wide() {
+        // Playtest: leftover P was a 4×4 pink sausage because every wet
+        // neighbour in the hot temperature tile joined the zone body.
+        let mut w = World::new(283);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..12 {
+            for y in 0..40 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..8 {
+            for y in 1..5 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 5..32 {
+            w.set_cell(6, y, gravel);
+        }
+        // Same 4×4 temp tile as the gravel vein — used to light up as
+        // a pink blob even though it is off the pin.
+        w.set_cell(7, 20, wet);
+        w.set_cell(5, 20, wet);
+        for y in 32..36 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..8 {
+            for y in 1..5 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let (hx, hy) = hot.tile_of(6, 20);
+        hot.set_tile_c(hx, hy, 122.0);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=6 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        let (p_path, _) = cell_pressure_norm_with_boil(&w, 6, 20, 122.0, 100.0, 192);
+        let (p_r, _) = cell_pressure_norm_with_boil(&w, 7, 20, 122.0, 100.0, 192);
+        let (p_l, _) = cell_pressure_norm_with_boil(&w, 5, 20, 122.0, 100.0, 192);
+        assert!(
+            p_path > 0.08,
+            "pinned gravel front must stay visible ({p_path})"
+        );
+        assert!(
+            p_r < 0.04 && p_l < 0.04,
+            "same-tile wet stone must not paint a 4×4 leftover blob (path {p_path} L {p_l} R {p_r})"
         );
     }
 
