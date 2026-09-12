@@ -319,6 +319,10 @@ const LEFTOVER_COST_FADE: f32 = 32.0;
 /// Magenta pin floor so a cool gravel chimney still reads as a line.
 const LEFTOVER_PIN_PACK: f32 = 0.58;
 
+/// Overlay-only: hide leftover on a block unless bilinear °C is this hot.
+/// `leftover_heat_fade` 0.50 is about boil − 8 °C.
+const LEFTOVER_BLOCK_FADE_MIN: f32 = 0.50;
+
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
@@ -1643,6 +1647,94 @@ fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
     }
 }
 
+fn leftover_is_overlay_rock(cell: Cell) -> bool {
+    cell.material != MaterialId::Air
+        && cell.material != MaterialId::Bedrock
+        && !leftover_is_chimney_skin(cell.material)
+        && cell.sat.0 > 0
+}
+
+/// Carve / grow leftover P at block resolution.
+///
+/// The straw still uses 4×4 heat tiles. A fade inside those tiles still
+/// drew the whole stamp (playtest: same 4×4 stairs). Drop blocks whose
+/// bilinear °C is cool, and paint wet packed blocks in the next tile
+/// that are still hot. Never join `memo.zone`.
+fn leftover_resolve_block_overlay(
+    world: &World,
+    temp: &Temperature,
+    boil: f32,
+    memo: &mut LeftoverMemo,
+) {
+    let pin: FxHashSet<(i32, i32)> = memo.pin_path.iter().copied().collect();
+    let mut drop: Vec<(i32, i32)> = Vec::new();
+    for &cell in &memo.zone {
+        if pin.contains(&cell) {
+            continue;
+        }
+        let fade = leftover_heat_fade(leftover_cell_temp(temp, cell.0, cell.1), boil);
+        if fade < LEFTOVER_BLOCK_FADE_MIN {
+            drop.push(cell);
+        }
+    }
+    for cell in drop {
+        memo.map.remove(&cell);
+    }
+    let mut q: Vec<(i32, i32, i32, f32)> = Vec::new();
+    let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
+    for &cell in &memo.zone {
+        let Some(&pack) = memo.map.get(&cell) else {
+            continue;
+        };
+        if pack < 0.02 {
+            continue;
+        }
+        seen.insert(cell);
+        q.push((cell.0, cell.1, 0, pack));
+    }
+    let mut i = 0;
+    while i < q.len() {
+        let (gx, gy, dist, src) = q[i];
+        i += 1;
+        if dist >= 4 {
+            continue;
+        }
+        for (dx, dy) in [
+            (0, 1),
+            (0, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (1, 1),
+            (-1, -1),
+            (1, -1),
+        ] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            if !seen.insert((nx, ny)) {
+                continue;
+            }
+            if memo.zone.contains(&(nx, ny)) || pin.contains(&(nx, ny)) {
+                continue;
+            }
+            let Some(cell) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if !leftover_is_overlay_rock(cell) {
+                continue;
+            }
+            let fade = leftover_heat_fade(leftover_cell_temp(temp, nx, ny), boil);
+            if fade < LEFTOVER_BLOCK_FADE_MIN {
+                continue;
+            }
+            let pack = (src * fade).clamp(0.20, src);
+            let e = memo.map.entry((nx, ny)).or_insert(0.0);
+            *e = (*e).max(pack);
+            q.push((nx, ny, dist + 1, src));
+        }
+    }
+}
+
 fn leftover_has_pin(world: &World) -> bool {
     let gx_id = world.chunk_cache_id.get();
     LEFTOVER_MEMO.with(|slot| {
@@ -1976,6 +2068,7 @@ fn rebuild_leftover_field(
         leftover_commit_pin(world, memo);
         leftover_dim_off_pin_arms(world, memo);
     }
+    leftover_resolve_block_overlay(world, temp, boil, memo);
 }
 
 /// Standing leftover head: shove groundwater every tick from each seed.
@@ -7124,6 +7217,20 @@ mod tests {
         assert!(
             hi > lo + 0.08,
             "leftover P must vary per block in a heat tile ({lo}→{hi})"
+        );
+        let mut on_edge = 0u32;
+        for x in 8..12 {
+            for y in 4..8 {
+                let t = leftover_cell_temp(&hot, x, y);
+                let (p, _) = cell_pressure_norm_with_boil(&w, x, y, t, 100.0, 192);
+                if p > 0.08 {
+                    on_edge += 1;
+                }
+            }
+        }
+        assert!(
+            on_edge > 0 && on_edge < 16,
+            "a heat tile must not stamp all 16 leftover blocks ({on_edge})"
         );
         assert!(p_pipe > 0.08, "chimney must stay on P ({p_pipe})");
     }
