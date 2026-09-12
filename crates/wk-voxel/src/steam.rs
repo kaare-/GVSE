@@ -7154,10 +7154,26 @@ mod tests {
             w.tick = t;
             apply_steam(&mut w, &mut hot, &cfg);
         }
+        // Pin is live; put the heat tile back so leftover rebuilds a
+        // 4×4 core with a cool wet rim (same tick would skip rebuild).
+        hot.set_tile_c(hx, hy, 122.0);
+        for x in 4..16 {
+            for y in 1..12 {
+                if let Some(mut c) = w.get_cell(x, y) {
+                    if c.material == MaterialId::Stone {
+                        c.sat = Sat(cap);
+                        w.set_cell(x, y, c);
+                    }
+                }
+            }
+        }
+        w.tick = 7;
         prepare_leftover_pressure(&w, &hot, 100.0, 192);
-        let (p_rim, _) = cell_pressure_norm_with_boil(&w, 10, 6, 20.0, 100.0, 192);
+        let (p_core, _) = cell_pressure_norm_with_boil(&w, 6, 6, 122.0, 100.0, 192);
+        let (p_rim, _) = cell_pressure_norm_with_boil(&w, 8, 6, 20.0, 100.0, 192);
         let (p_far, _) = cell_pressure_norm_with_boil(&w, 15, 6, 20.0, 100.0, 192);
         let (p_pipe, _) = cell_pressure_norm_with_boil(&w, 6, 20, 20.0, 100.0, 192);
+        assert!(p_core > 0.20, "hot leftover tile must stay on P ({p_core})");
         assert!(
             p_rim > 0.08,
             "cool wet packed rim must be on P, not leftover 0.02 ({p_rim})"
