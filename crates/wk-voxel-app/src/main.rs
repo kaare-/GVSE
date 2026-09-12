@@ -1400,7 +1400,9 @@ async fn main() {
                             if scene.world.get_cell(x, y).is_none() {
                                 continue;
                             }
-                            let temp_c = scene.temperature.at_cell(x, y);
+                            let temp_c = scene
+                                .temperature
+                                .sample_bilinear(x as f32 + 0.5, y as f32 + 0.5);
                             let (p, kind) = wk_voxel::cell_pressure_norm_with_boil(
                                 &scene.world,
                                 x,

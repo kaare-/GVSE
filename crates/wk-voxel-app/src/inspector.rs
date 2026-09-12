@@ -206,7 +206,7 @@ pub fn draw_block_inspector(
     expand: u16,
 ) {
     let hum = humidity.at_cell(gx, gy);
-    let temp_c = temperature.at_cell(gx, gy);
+    let temp_c = temperature.sample_bilinear(gx as f32 + 0.5, gy as f32 + 0.5);
     let (hx, hy) = humidity.tile_of(gx, gy);
     let mut lines = vec![format!("Block ({gx}, {gy})")];
     match cell {

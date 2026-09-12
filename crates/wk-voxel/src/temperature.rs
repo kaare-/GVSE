@@ -573,6 +573,29 @@ impl Temperature {
         self.at_tile(hx, hy)
     }
 
+    /// Bilinear °C in world-cell space (no 4×4 facets).
+    ///
+    /// Tile centres sit at `(hx + 0.5, hy + 0.5) * tile_cols`, same as
+    /// [`crate::humidity::Humidity::sample_bilinear`]. Heat is still stored
+    /// on tiles; leftover / P can resolve per block.
+    pub fn sample_bilinear(&self, gx: f32, gy: f32) -> f32 {
+        let tc = self.tile_cols.max(1) as f32;
+        let fx = gx / tc - 0.5;
+        let fy = gy / tc - 0.5;
+        let x0 = fx.floor() as i32;
+        let y0 = fy.floor() as i32;
+        let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+        let hx = |x: i32| self.wrap_hx(x).unwrap_or(x);
+        let t00 = self.at_tile_packed(hx(x0), y0);
+        let t10 = self.at_tile_packed(hx(x0 + 1), y0);
+        let t01 = self.at_tile_packed(hx(x0), y0 + 1);
+        let t11 = self.at_tile_packed(hx(x0 + 1), y0 + 1);
+        let a = t00 + (t10 - t00) * tx;
+        let b = t01 + (t11 - t01) * tx;
+        a + (b - a) * ty
+    }
+
     /// Write a tile temperature, keeping the dense slab in sync when present.
     pub fn set_tile_c(&mut self, hx: i32, hy: i32, celsius: f32) {
         let hx = self.wrap_hx(hx).unwrap_or(hx);
@@ -2206,6 +2229,18 @@ mod tests {
     use crate::chunk::ChunkCoord;
     use crate::climate::DEMO_DAY_TICKS;
     use crate::worldgen::WorldgenParams;
+
+    #[test]
+    fn sample_bilinear_smooths_between_tiles() {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 20, false);
+        t.set_tile_c(1, 1, 20.0);
+        t.set_tile_c(2, 1, 122.0);
+        let lo = t.sample_bilinear(6.5, 6.5);
+        let mid = t.sample_bilinear(8.0, 6.5);
+        let hi = t.sample_bilinear(9.5, 6.5);
+        assert!(lo < mid && mid < hi, "bilinear leftover heat {lo} {mid} {hi}");
+        assert!(lo > 20.0 && hi < 122.0);
+    }
 
     fn demo_temp() -> (Temperature, Humidity) {
         let p = WorldgenParams::default();
