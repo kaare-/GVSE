@@ -280,6 +280,9 @@ struct LeftoverMemo {
     boil_bits: u32,
     expand: u16,
     map: FxHashMap<(i32, i32), f32>,
+    /// Overlay-only leftover P (block contour). Straw still reads `map`.
+    view: FxHashMap<(i32, i32), f32>,
+    view_ready: bool,
     /// Zone outlets `(x, y, zone head)`. Adjacent boiling cells share
     /// one head — not a grid of tiny seeds.
     seeds: Vec<(i32, i32, u32)>,
@@ -964,7 +967,11 @@ fn leftover_field_lookup(world: &World, gx: i32, gy: i32, boil_c: f32, expand: u
         if !leftover_memo_bound(&memo, world, boil_c, expand) {
             return 0.0;
         }
-        memo.map.get(&(gx, gy)).copied().unwrap_or(0.0)
+        if memo.view_ready {
+            memo.view.get(&(gx, gy)).copied().unwrap_or(0.0)
+        } else {
+            memo.map.get(&(gx, gy)).copied().unwrap_or(0.0)
+        }
     })
 }
 
@@ -1666,29 +1673,25 @@ fn leftover_resolve_block_overlay(
     boil: f32,
     memo: &mut LeftoverMemo,
 ) {
+    memo.view.clear();
     let pin: FxHashSet<(i32, i32)> = memo.pin_path.iter().copied().collect();
-    let mut drop: Vec<(i32, i32)> = Vec::new();
-    for &cell in &memo.zone {
-        if pin.contains(&cell) {
-            continue;
+    for (&cell, &pack) in &memo.map {
+        if memo.zone.contains(&cell) && !pin.contains(&cell) {
+            let fade = leftover_heat_fade(leftover_cell_temp(temp, cell.0, cell.1), boil);
+            if fade < LEFTOVER_BLOCK_FADE_MIN {
+                continue;
+            }
         }
-        let fade = leftover_heat_fade(leftover_cell_temp(temp, cell.0, cell.1), boil);
-        if fade < LEFTOVER_BLOCK_FADE_MIN {
-            drop.push(cell);
+        if pack > 0.02 {
+            memo.view.insert(cell, pack);
         }
-    }
-    for cell in drop {
-        memo.map.remove(&cell);
     }
     let mut q: Vec<(i32, i32, i32, f32)> = Vec::new();
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
     for &cell in &memo.zone {
-        let Some(&pack) = memo.map.get(&cell) else {
+        let Some(&pack) = memo.view.get(&cell) else {
             continue;
         };
-        if pack < 0.02 {
-            continue;
-        }
         seen.insert(cell);
         q.push((cell.0, cell.1, 0, pack));
     }
@@ -1728,11 +1731,12 @@ fn leftover_resolve_block_overlay(
                 continue;
             }
             let pack = (src * fade).clamp(0.20, src);
-            let e = memo.map.entry((nx, ny)).or_insert(0.0);
+            let e = memo.view.entry((nx, ny)).or_insert(0.0);
             *e = (*e).max(pack);
             q.push((nx, ny, dist + 1, src));
         }
     }
+    memo.view_ready = true;
 }
 
 fn leftover_has_pin(world: &World) -> bool {
@@ -1783,6 +1787,8 @@ fn rebuild_leftover_field(
     let old_heads = std::mem::take(&mut memo.heads);
     let old_released = std::mem::take(&mut memo.released);
     memo.map.clear();
+    memo.view.clear();
+    memo.view_ready = false;
     memo.seeds.clear();
     memo.seed_zone.clear();
     memo.zone.clear();
