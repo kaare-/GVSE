@@ -1706,7 +1706,7 @@ fn rebuild_leftover_field(
         .collect();
     let mut cands: FxHashMap<(i32, i32), (u32, u32)> = FxHashMap::default();
     for coord in coords {
-        for_each_leftover_seat_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
+        for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
             if cell.material == MaterialId::Air || cell.sat.0 == 0 {
                 return;
             }
@@ -1827,6 +1827,9 @@ fn rebuild_leftover_field(
             } else {
                 leftover_hue_pack(0.5, body)
             };
+            // Heat is 4×4; fade P by bilinear °C so neighbouring
+            // blocks can differ at a tile edge.
+            let pack = pack * leftover_heat_fade(leftover_cell_temp(temp, gx, gy), boil);
             if pack > 0.02 {
                 memo.map.insert((gx, gy), pack);
             }
@@ -3293,62 +3296,13 @@ fn leftover_cell_temp(temp: &Temperature, gx: i32, gy: i32) -> f32 {
     temp.sample_bilinear(gx as f32 + 0.5, gy as f32 + 0.5)
 }
 
-fn tile_touches_hot(temp: &Temperature, hx: i32, hy: i32, boil: f32) -> bool {
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            let nx = temp.wrap_tile_x(hx + dx).unwrap_or(hx + dx);
-            if temp.at_tile(nx, hy + dy) >= boil {
-                return true;
-            }
-        }
+/// How hard leftover P reads on this block. Full in a hot core;
+/// fades across a tile edge toward cool neighbours.
+fn leftover_heat_fade(temp_c: f32, boil: f32) -> f32 {
+    if !temp_c.is_finite() || !boil.is_finite() {
+        return 0.0;
     }
-    false
-}
-
-/// Leftover seats at **block** resolution: bilinear °C, not the 4×4 tile.
-///
-/// Heat is still stored on tiles. A cell is leftover only when the
-/// interpolated T ≥ boil, so the vessel follows the boil contour.
-fn for_each_leftover_seat_cell(
-    world: &World,
-    temp: &Temperature,
-    coord: ChunkCoord,
-    boil: f32,
-    mut visit: impl FnMut(i32, i32, f32, crate::cell::Cell),
-) {
-    let Some(chunk) = world.chunks.get(&coord) else {
-        return;
-    };
-    let cw = CHUNK_CELLS_W as i32;
-    let ch = CHUNK_CELLS_H as i32;
-    let tc = temp.tile_cols.max(1);
-    let x0 = coord.cx * cw;
-    let y0 = coord.cy * ch;
-    let hx0 = x0.div_euclid(tc);
-    let hy0 = y0.div_euclid(tc);
-    let hx1 = (x0 + cw - 1).div_euclid(tc);
-    let hy1 = (y0 + ch - 1).div_euclid(tc);
-    for hy in hy0..=hy1 {
-        for hx in hx0..=hx1 {
-            if !tile_touches_hot(temp, hx, hy, boil) {
-                continue;
-            }
-            let tx0 = hx * tc;
-            let ty0 = hy * tc;
-            let lx0 = (tx0 - x0).max(0) as u32;
-            let ly0 = (ty0 - y0).max(0) as u32;
-            let lx1 = (tx0 + tc - x0).min(cw) as u32;
-            let ly1 = (ty0 + tc - y0).min(ch) as u32;
-            for ly in ly0..ly1 {
-                for lx in lx0..lx1 {
-                    let cell = chunk.get(lx as usize, ly as usize);
-                    let gx = world.wrap_x(x0 + lx as i32);
-                    let gy = y0 + ly as i32;
-                    visit(gx, gy, leftover_cell_temp(temp, gx, gy), cell);
-                }
-            }
-        }
-    }
+    ((temp_c - (boil - 24.0)) / 32.0).clamp(0.0, 1.0)
 }
 
 fn boil_hot_air(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, max_cells: usize) {
@@ -6577,7 +6531,7 @@ mod tests {
         prepare_leftover_pressure(&w, &temp, 100.0, 192);
         let (p_src, kind) = cell_pressure_norm_with_boil(&w, 5, 1, 122.0, 100.0, 192);
         assert!(
-            p_src > 0.5 && kind == CellPressureKind::PoreFlash,
+            p_src > 0.35 && kind == CellPressureKind::PoreFlash,
             "boiler cell must still pack ({p_src}, {kind:?})"
         );
         let (p_up, up_kind) = cell_pressure_norm_with_boil(&w, 5, 8, 20.0, 100.0, 192);
@@ -7156,20 +7110,20 @@ mod tests {
         let t_core = leftover_cell_temp(&hot, 6, 6);
         let (p_core, _) = cell_pressure_norm_with_boil(&w, 6, 6, t_core, 100.0, 192);
         let (p_pipe, _) = cell_pressure_norm_with_boil(&w, 6, 20, 20.0, 100.0, 192);
-        let mut on_edge_tile = 0u32;
+        let mut lo = 1.0f32;
+        let mut hi = 0.0f32;
         for x in 8..12 {
             for y in 4..8 {
                 let t = leftover_cell_temp(&hot, x, y);
                 let (p, _) = cell_pressure_norm_with_boil(&w, x, y, t, 100.0, 192);
-                if p > 0.08 {
-                    on_edge_tile += 1;
-                }
+                lo = lo.min(p);
+                hi = hi.max(p);
             }
         }
         assert!(p_core > 0.20, "hot leftover core must stay on P ({p_core})");
         assert!(
-            on_edge_tile > 0 && on_edge_tile < 16,
-            "leftover must follow blocks, not stamp the whole 4×4 ({on_edge_tile})"
+            hi > lo + 0.08,
+            "leftover P must vary per block in a heat tile ({lo}→{hi})"
         );
         assert!(p_pipe > 0.08, "chimney must stay on P ({p_pipe})");
     }
