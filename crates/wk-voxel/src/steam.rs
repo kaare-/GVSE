@@ -319,6 +319,10 @@ const LEFTOVER_COST_FADE: f32 = 32.0;
 /// Magenta pin floor so a cool gravel chimney still reads as a line.
 const LEFTOVER_PIN_PACK: f32 = 0.58;
 
+/// Cool wet packed cells around a 4×4 hot leftover tile. Overlay only.
+/// One temperature tile of rim so the hill edge is cells, not stairs.
+const LEFTOVER_SKIRT_HOPS: i32 = 4;
+
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
@@ -1613,12 +1617,89 @@ fn leftover_dim_paintable_pin(world: &World, memo: &LeftoverMemo, cell: (i32, i3
         .is_some_and(|c| leftover_is_chimney_skin(c.material) || c.material == MaterialId::Air)
 }
 
+fn leftover_is_skirt_cell(cell: Cell) -> bool {
+    cell.material != MaterialId::Air
+        && cell.material != MaterialId::Bedrock
+        && !leftover_is_chimney_skin(cell.material)
+        && cell.sat.0 > 0
+}
+
+/// Wet packed cells within one heat tile of the leftover zone.
+/// Overlay-only — never join `memo.zone` (that retargets the straw).
+fn leftover_skirt_reach(
+    world: &World,
+    memo: &LeftoverMemo,
+) -> FxHashMap<(i32, i32), (i32, f32)> {
+    let mut best: FxHashMap<(i32, i32), (i32, f32)> = FxHashMap::default();
+    let mut q: Vec<(i32, i32, i32, f32)> = Vec::new();
+    for &cell in &memo.zone {
+        let pack = memo.map.get(&cell).copied().unwrap_or(0.0);
+        if pack < 0.02 {
+            continue;
+        }
+        best.insert(cell, (0, pack));
+        q.push((cell.0, cell.1, 0, pack));
+    }
+    let mut i = 0;
+    while i < q.len() {
+        let (gx, gy, dist, src) = q[i];
+        i += 1;
+        if dist >= LEFTOVER_SKIRT_HOPS {
+            continue;
+        }
+        for (dx, dy) in [
+            (0, 1),
+            (0, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (1, 1),
+            (-1, -1),
+            (1, -1),
+        ] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            let nd = dist + 1;
+            if best.get(&(nx, ny)).is_some_and(|&(d0, _)| d0 <= nd) {
+                continue;
+            }
+            if memo.zone.contains(&(nx, ny)) {
+                continue;
+            }
+            let Some(cell) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if !leftover_is_skirt_cell(cell) {
+                continue;
+            }
+            best.insert((nx, ny), (nd, src));
+            q.push((nx, ny, nd, src));
+        }
+    }
+    best
+}
+
+fn leftover_paint_zone_skirt(world: &World, memo: &mut LeftoverMemo) {
+    let skirt = leftover_skirt_reach(world, memo);
+    for (cell, (dist, src)) in skirt {
+        if dist == 0 {
+            continue;
+        }
+        let fade =
+            (LEFTOVER_SKIRT_HOPS + 1 - dist) as f32 / (LEFTOVER_SKIRT_HOPS + 1) as f32;
+        let pack = (src * fade).clamp(0.20, src);
+        let e = memo.map.entry(cell).or_insert(0.0);
+        *e = (*e).max(pack);
+    }
+}
+
 fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
     if memo.pin_path.len() < 2 {
         return;
     }
     // Whole leftover vessel stays on P at its leftover hue. The pin is
-    // a 1-cell front. Ridge sand / 4×4 smear stay off (pack 0.02).
+    // a 1-cell front. Ridge sand / 4×4 smear stay off (pack 0). Cool
+    // wet packed cells on the zone rim stay — leftover 0.02 was a hide.
     let mut line: Vec<(i32, i32)> = Vec::new();
     for w in memo.pin_path.windows(2) {
         line.extend(leftover_pin_segment(world, w[0], w[1]));
@@ -1635,11 +1716,12 @@ fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
         let e = memo.map.entry(cell).or_insert(0.0);
         *e = (*e).max(ramp);
     }
+    let skirt = leftover_skirt_reach(world, memo);
     for (cell, pack) in memo.map.iter_mut() {
-        if on_line.contains(cell) || memo.zone.contains(cell) {
+        if on_line.contains(cell) || memo.zone.contains(cell) || skirt.contains_key(cell) {
             continue;
         }
-        *pack = 0.02;
+        *pack = 0.0;
     }
 }
 
@@ -1973,6 +2055,7 @@ fn rebuild_leftover_field(
         leftover_commit_pin(world, memo);
         leftover_dim_off_pin_arms(world, memo);
     }
+    leftover_paint_zone_skirt(world, memo);
 }
 
 /// Standing leftover head: shove groundwater every tick from each seed.
@@ -7026,6 +7109,64 @@ mod tests {
             hi - lo > 0.40,
             "leftover hues must span the P ramp, not one burnt magenta ({lo}→{hi})"
         );
+    }
+
+    #[test]
+    fn leftover_cool_wet_rim_is_on_p() {
+        // Playtest: leftover body followed 4×4 heat tiles, so the hill
+        // edge was a staircase. Cool wet packed cells just outside the
+        // hot tile showed leftover 0.02 in the inspector and stayed dark.
+        let mut w = World::new(313);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..20 {
+            for y in 0..40 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..16 {
+            for y in 1..12 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 12..28 {
+            w.set_cell(6, y, gravel);
+        }
+        for y in 28..32 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        let (hx, hy) = hot.tile_of(6, 6);
+        hot.set_tile_c(hx, hy, 122.0);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=6 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        let (p_rim, _) = cell_pressure_norm_with_boil(&w, 10, 6, 20.0, 100.0, 192);
+        let (p_far, _) = cell_pressure_norm_with_boil(&w, 15, 6, 20.0, 100.0, 192);
+        let (p_pipe, _) = cell_pressure_norm_with_boil(&w, 6, 20, 20.0, 100.0, 192);
+        assert!(
+            p_rim > 0.08,
+            "cool wet packed rim must be on P, not leftover 0.02 ({p_rim})"
+        );
+        assert!(
+            p_far < 0.04,
+            "far cool wet hill must not become a leftover sticker ({p_far})"
+        );
+        assert!(p_pipe > 0.08, "chimney must stay on P ({p_pipe})");
     }
 
     #[test]

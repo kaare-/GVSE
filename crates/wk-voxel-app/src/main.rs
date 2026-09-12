@@ -1367,6 +1367,7 @@ async fn main() {
 
         // Leftover volume field (P): boiling seats shove ~expand neighbour
         // seats along least resistance — a mound or a finger, not a thermal blob.
+        // Draw leftover 0.02+ (the old 0.03 skip hid the cell-accurate rim).
         if pressure_overlay && overlay_k > 0.01 {
             wk_voxel::prepare_leftover_pressure(
                 &scene.world,
@@ -1408,7 +1409,7 @@ async fn main() {
                                 settings.steam.boil_point_c,
                                 settings.steam.phase_expansion_drive,
                             );
-                            if kind == wk_voxel::CellPressureKind::None || p < 0.03 {
+                            if kind == wk_voxel::CellPressureKind::None || p < 0.02 {
                                 continue;
                             }
                             draw_rectangle(
