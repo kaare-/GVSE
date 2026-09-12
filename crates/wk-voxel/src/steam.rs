@@ -319,11 +319,9 @@ const LEFTOVER_COST_FADE: f32 = 32.0;
 /// Magenta pin floor (under the overlay amber cut at 0.72).
 const LEFTOVER_PIN_PACK: f32 = 0.58;
 
-/// Overlay mound around the vessel seed (Chebyshev). The leftover zone
-/// may be a whole wet hill once 4×4 heat tiles join; P only shows a
-/// compact core so it is not a flat magenta sticker.
-const LEFTOVER_BODY_CORE: i32 = 5;
-const LEFTOVER_BODY_FADE: i32 = 9;
+/// Overlay knob at the chimney foot (Chebyshev). Not the deepest zone
+/// cell — that painted a stray blob at the bottom of the hill.
+const LEFTOVER_BODY_RADIUS: i32 = 4;
 
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
@@ -1621,19 +1619,33 @@ fn leftover_chebyshev(world: &World, a: (i32, i32), b: (i32, i32)) -> i32 {
     dx.max((a.1 - b.1).abs())
 }
 
-fn leftover_dim_off_pin_arms(
-    world: &World,
-    temp: &Temperature,
-    boil: f32,
-    memo: &mut LeftoverMemo,
-) {
+fn leftover_pin_attach(memo: &LeftoverMemo) -> (i32, i32) {
+    // Last zone cell on the pin is the chimney foot. First/pin_id is the
+    // deepest vessel cell and painted a stray blob at the bottom.
+    memo.pin_path
+        .iter()
+        .copied()
+        .rev()
+        .find(|p| memo.zone.contains(p))
+        .unwrap_or(memo.pin_seed)
+}
+
+fn leftover_dim_paintable_pin(world: &World, memo: &LeftoverMemo, cell: (i32, i32)) -> bool {
+    if memo.zone.contains(&cell) {
+        return true;
+    }
+    world
+        .get_cell(cell.0, cell.1)
+        .is_some_and(|c| leftover_is_chimney_skin(c.material) || c.material == MaterialId::Air)
+}
+
+fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
     if memo.pin_path.len() < 2 {
         return;
     }
-    // Reservoir + one pipe. The vessel is a faded hot core around the
-    // seed, not the whole leftover zone (that was a magenta sticker).
-    // The pin is a 1-cell magenta line. Ridge sand and 4×4 smear stay
-    // off (pack 0.02).
+    // One continuous pin + a small solid knob at the chimney foot.
+    // Whole leftover columns and a fade around pin_id were the chewed
+    // pipe and the stray blob at the bottom of the hill.
     let mut line: Vec<(i32, i32)> = Vec::new();
     for w in memo.pin_path.windows(2) {
         line.extend(leftover_pin_segment(world, w[0], w[1]));
@@ -1641,88 +1653,24 @@ fn leftover_dim_off_pin_arms(
     let mut on_line: FxHashSet<(i32, i32)> = FxHashSet::default();
     let n = line.len().max(1);
     for (i, cell) in line.iter().copied().enumerate() {
+        if !leftover_dim_paintable_pin(world, memo, cell) {
+            continue;
+        }
         on_line.insert(cell);
         let t = i as f32 / n.saturating_sub(1).max(1) as f32;
         let pack = (0.40 + t * 0.26).min(LEFTOVER_PIN_PACK);
         let e = memo.map.entry(cell).or_insert(0.0);
         *e = (*e).max(pack);
     }
-    // Pipe columns only (not reservoir attach x). A mouth-stub pin
-    // still paints the leftover gravel vein, not ridge sand beside it.
-    let pin_xs: FxHashSet<i32> = memo
-        .pin_path
-        .iter()
-        .filter_map(|&(x, y)| {
-            world
-                .get_cell(x, y)
-                .filter(|c| leftover_is_chimney_skin(c.material))
-                .map(|_| x)
-        })
-        .collect();
-    let mut vessel: FxHashSet<(i32, i32)> = FxHashSet::default();
-    let mut stack: Vec<(i32, i32)> = Vec::new();
-    let seed_vessel = |p: (i32, i32), vessel: &mut FxHashSet<(i32, i32)>, stack: &mut Vec<(i32, i32)>| {
-        if memo.zone.contains(&p) && vessel.insert(p) {
-            stack.push(p);
-        }
-    };
-    seed_vessel(memo.pin_id, &mut vessel, &mut stack);
-    seed_vessel(memo.pin_seed, &mut vessel, &mut stack);
-    for &(x, y, _) in &memo.seeds {
-        seed_vessel((x, y), &mut vessel, &mut stack);
-    }
-    for &p in &memo.pin_path {
-        seed_vessel(p, &mut vessel, &mut stack);
-    }
-    while let Some((gx, gy)) = stack.pop() {
-        for (dx, dy) in [
-            (0, 1),
-            (0, -1),
-            (-1, 0),
-            (1, 0),
-            (-1, 1),
-            (1, 1),
-            (-1, -1),
-            (1, -1),
-        ] {
-            let n = (world.wrap_x(gx + dx), gy + dy);
-            if memo.zone.contains(&n) && vessel.insert(n) {
-                stack.push(n);
-            }
-        }
-    }
+    let attach = leftover_pin_attach(memo);
     for (cell, pack) in memo.map.iter_mut() {
         if on_line.contains(cell) {
             continue;
         }
-        if pin_xs.contains(&cell.0)
-            && world
-                .get_cell(cell.0, cell.1)
-                .is_some_and(|c| leftover_is_chimney_skin(c.material))
+        if memo.zone.contains(cell)
+            && leftover_chebyshev(world, *cell, attach) <= LEFTOVER_BODY_RADIUS
         {
-            *pack = (*pack).max(0.40).min(LEFTOVER_PIN_PACK);
-            continue;
-        }
-        if vessel.contains(cell) {
-            if temp.at_cell(cell.0, cell.1) < boil {
-                *pack = 0.02;
-                continue;
-            }
-            let d = leftover_chebyshev(world, *cell, memo.pin_id);
-            if d > LEFTOVER_BODY_FADE {
-                *pack = 0.02;
-                continue;
-            }
-            let fade = if d <= LEFTOVER_BODY_CORE {
-                1.0
-            } else {
-                let span = (LEFTOVER_BODY_FADE - LEFTOVER_BODY_CORE) as f32;
-                (LEFTOVER_BODY_FADE - d) as f32 / span.max(1.0)
-            };
-            *pack = (*pack * fade).clamp(0.0, 0.68);
-            if *pack < 0.16 {
-                *pack = 0.02;
-            }
+            *pack = (*pack).clamp(0.28, 0.62);
             continue;
         }
         *pack = 0.02;
@@ -2029,11 +1977,11 @@ fn rebuild_leftover_field(
         }
     }
     if leftover_try_reuse_pin(world, memo) {
-        leftover_dim_off_pin_arms(world, temp, boil, memo);
+        leftover_dim_off_pin_arms(world, memo);
     } else {
         leftover_lock_winning_route(world, memo);
         leftover_commit_pin(world, memo);
-        leftover_dim_off_pin_arms(world, temp, boil, memo);
+        leftover_dim_off_pin_arms(world, memo);
     }
 }
 
@@ -6903,8 +6851,12 @@ mod tests {
             .sum();
         let slab_pore1 = w.get_cell(8, 20).unwrap().pore;
         prepare_leftover_pressure(&w, &hot, 100.0, 192);
-        let (p_g, _) = cell_pressure_norm_with_boil(&w, 6, 25, 20.0, 100.0, 192);
-        let (p_s, _) = cell_pressure_norm_with_boil(&w, 8, 25, 20.0, 100.0, 192);
+        let p_g = (10..40)
+            .map(|y| cell_pressure_norm_with_boil(&w, 6, y, 20.0, 100.0, 192).0)
+            .fold(0.0f32, f32::max);
+        let p_s = (10..40)
+            .map(|y| cell_pressure_norm_with_boil(&w, 8, y, 20.0, 100.0, 192).0)
+            .fold(0.0f32, f32::max);
         assert!(
             slab1 <= gravel1,
             "side slab must not steal the pinned chimney (gravel {gravel1} vs slab {slab1}, was {gravel0})"
@@ -7046,10 +6998,32 @@ mod tests {
             apply_steam(&mut w, &mut hot, &cfg);
         }
         prepare_leftover_pressure(&w, &hot, 100.0, 192);
-        let (p_core, _) = cell_pressure_norm_with_boil(&w, 5, 2, 122.0, 100.0, 192);
+        let mut p_foot = 0.0f32;
+        for x in 4..12 {
+            for y in 14..21 {
+                let Some(c) = w.get_cell(x, y) else {
+                    continue;
+                };
+                if c.material == MaterialId::Air || leftover_is_chimney_skin(c.material) {
+                    continue;
+                }
+                let (p, _) = cell_pressure_norm_with_boil(&w, x, y, 122.0, 100.0, 192);
+                p_foot = p_foot.max(p);
+            }
+        }
+        let (p_deep, _) = cell_pressure_norm_with_boil(&w, 5, 2, 122.0, 100.0, 192);
         let (p_far, _) = cell_pressure_norm_with_boil(&w, 20, 18, 122.0, 100.0, 192);
         let (p_pipe, _) = cell_pressure_norm_with_boil(&w, 6, 26, 20.0, 100.0, 192);
-        assert!(p_core > 0.20, "hot leftover core must stay on P ({p_core})");
+        if p_foot > 0.02 {
+            assert!(
+                p_foot > 0.20,
+                "chimney-foot reservoir must stay on P ({p_foot})"
+            );
+        }
+        assert!(
+            p_deep < 0.04,
+            "deepest zone cell must not paint a stray blob ({p_deep})"
+        );
         assert!(
             p_far < 0.04,
             "far boiling hill must not paint a magenta sticker ({p_far})"
