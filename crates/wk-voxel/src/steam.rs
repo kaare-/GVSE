@@ -319,6 +319,12 @@ const LEFTOVER_COST_FADE: f32 = 32.0;
 /// Magenta pin floor (under the overlay amber cut at 0.72).
 const LEFTOVER_PIN_PACK: f32 = 0.58;
 
+/// Overlay mound around the vessel seed (Chebyshev). The leftover zone
+/// may be a whole wet hill once 4×4 heat tiles join; P only shows a
+/// compact core so it is not a flat magenta sticker.
+const LEFTOVER_BODY_CORE: i32 = 5;
+const LEFTOVER_BODY_FADE: i32 = 9;
+
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
@@ -1604,13 +1610,30 @@ fn leftover_pin_segment(world: &World, a: (i32, i32), b: (i32, i32)) -> Vec<(i32
     out
 }
 
-fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
+fn leftover_chebyshev(world: &World, a: (i32, i32), b: (i32, i32)) -> i32 {
+    let dx = {
+        let raw = (a.0 - b.0).abs();
+        match world.wrap_width {
+            Some(w) if w > 0 => raw.min(w - raw),
+            _ => raw,
+        }
+    };
+    dx.max((a.1 - b.1).abs())
+}
+
+fn leftover_dim_off_pin_arms(
+    world: &World,
+    temp: &Temperature,
+    boil: f32,
+    memo: &mut LeftoverMemo,
+) {
     if memo.pin_path.len() < 2 {
         return;
     }
-    // Reservoir + one pipe. The vessel is the packed zone that touches
-    // the pin. The pin is a 1-cell magenta line. Ridge sand past the
-    // first dump and 4×4 wet-stone smear stay off (pack 0.02).
+    // Reservoir + one pipe. The vessel is a faded hot core around the
+    // seed, not the whole leftover zone (that was a magenta sticker).
+    // The pin is a 1-cell magenta line. Ridge sand and 4×4 smear stay
+    // off (pack 0.02).
     let mut line: Vec<(i32, i32)> = Vec::new();
     for w in memo.pin_path.windows(2) {
         line.extend(leftover_pin_segment(world, w[0], w[1]));
@@ -1681,6 +1704,25 @@ fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
             continue;
         }
         if vessel.contains(cell) {
+            if temp.at_cell(cell.0, cell.1) < boil {
+                *pack = 0.02;
+                continue;
+            }
+            let d = leftover_chebyshev(world, *cell, memo.pin_id);
+            if d > LEFTOVER_BODY_FADE {
+                *pack = 0.02;
+                continue;
+            }
+            let fade = if d <= LEFTOVER_BODY_CORE {
+                1.0
+            } else {
+                let span = (LEFTOVER_BODY_FADE - LEFTOVER_BODY_CORE) as f32;
+                (LEFTOVER_BODY_FADE - d) as f32 / span.max(1.0)
+            };
+            *pack = (*pack * fade).clamp(0.0, 0.68);
+            if *pack < 0.16 {
+                *pack = 0.02;
+            }
             continue;
         }
         *pack = 0.02;
@@ -1987,11 +2029,11 @@ fn rebuild_leftover_field(
         }
     }
     if leftover_try_reuse_pin(world, memo) {
-        leftover_dim_off_pin_arms(world, memo);
+        leftover_dim_off_pin_arms(world, temp, boil, memo);
     } else {
         leftover_lock_winning_route(world, memo);
         leftover_commit_pin(world, memo);
-        leftover_dim_off_pin_arms(world, memo);
+        leftover_dim_off_pin_arms(world, temp, boil, memo);
     }
 }
 
@@ -6955,6 +6997,64 @@ mod tests {
             p_body > 0.20,
             "leftover reservoir must stay on P (got {p_body})"
         );
+    }
+
+    #[test]
+    fn leftover_boiling_hill_is_not_a_magenta_sticker() {
+        // Playtest: leftover P filled the whole connected wet hill as a
+        // flat magenta flood (17 °C stone in a hot 4×4 tile lit up).
+        let mut w = World::new(311);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..24 {
+            for y in 0..40 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..22 {
+            for y in 1..20 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 20..32 {
+            w.set_cell(6, y, gravel);
+        }
+        for y in 32..36 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..22 {
+            for y in 1..20 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=6 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        let (p_core, _) = cell_pressure_norm_with_boil(&w, 5, 2, 122.0, 100.0, 192);
+        let (p_far, _) = cell_pressure_norm_with_boil(&w, 20, 18, 122.0, 100.0, 192);
+        let (p_pipe, _) = cell_pressure_norm_with_boil(&w, 6, 26, 20.0, 100.0, 192);
+        assert!(p_core > 0.20, "hot leftover core must stay on P ({p_core})");
+        assert!(
+            p_far < 0.04,
+            "far boiling hill must not paint a magenta sticker ({p_far})"
+        );
+        assert!(p_pipe > 0.08, "chimney must stay on P ({p_pipe})");
     }
 
     #[test]
