@@ -316,12 +316,8 @@ const LEFTOVER_FIELD_CELLS: usize = 4096;
 /// Fade leftover *display* by path cost along relief arms.
 const LEFTOVER_COST_FADE: f32 = 32.0;
 
-/// Magenta pin floor (under the overlay amber cut at 0.72).
+/// Magenta pin floor so a cool gravel chimney still reads as a line.
 const LEFTOVER_PIN_PACK: f32 = 0.58;
-
-/// Overlay knob at the chimney foot (Chebyshev). Not the deepest zone
-/// cell — that painted a stray blob at the bottom of the hill.
-const LEFTOVER_BODY_RADIUS: i32 = 4;
 
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
@@ -1608,28 +1604,6 @@ fn leftover_pin_segment(world: &World, a: (i32, i32), b: (i32, i32)) -> Vec<(i32
     out
 }
 
-fn leftover_chebyshev(world: &World, a: (i32, i32), b: (i32, i32)) -> i32 {
-    let dx = {
-        let raw = (a.0 - b.0).abs();
-        match world.wrap_width {
-            Some(w) if w > 0 => raw.min(w - raw),
-            _ => raw,
-        }
-    };
-    dx.max((a.1 - b.1).abs())
-}
-
-fn leftover_pin_attach(memo: &LeftoverMemo) -> (i32, i32) {
-    // Last zone cell on the pin is the chimney foot. First/pin_id is the
-    // deepest vessel cell and painted a stray blob at the bottom.
-    memo.pin_path
-        .iter()
-        .copied()
-        .rev()
-        .find(|p| memo.zone.contains(p))
-        .unwrap_or(memo.pin_seed)
-}
-
 fn leftover_dim_paintable_pin(world: &World, memo: &LeftoverMemo, cell: (i32, i32)) -> bool {
     if memo.zone.contains(&cell) {
         return true;
@@ -1643,9 +1617,8 @@ fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
     if memo.pin_path.len() < 2 {
         return;
     }
-    // One continuous pin + a small solid knob at the chimney foot.
-    // Whole leftover columns and a fade around pin_id were the chewed
-    // pipe and the stray blob at the bottom of the hill.
+    // Whole leftover vessel stays on P at its leftover hue. The pin is
+    // a 1-cell front. Ridge sand / 4×4 smear stay off (pack 0.02).
     let mut line: Vec<(i32, i32)> = Vec::new();
     for w in memo.pin_path.windows(2) {
         line.extend(leftover_pin_segment(world, w[0], w[1]));
@@ -1658,19 +1631,12 @@ fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
         }
         on_line.insert(cell);
         let t = i as f32 / n.saturating_sub(1).max(1) as f32;
-        let pack = (0.40 + t * 0.26).min(LEFTOVER_PIN_PACK);
+        let ramp = (0.40 + t * 0.26).min(LEFTOVER_PIN_PACK);
         let e = memo.map.entry(cell).or_insert(0.0);
-        *e = (*e).max(pack);
+        *e = (*e).max(ramp);
     }
-    let attach = leftover_pin_attach(memo);
     for (cell, pack) in memo.map.iter_mut() {
-        if on_line.contains(cell) {
-            continue;
-        }
-        if memo.zone.contains(cell)
-            && leftover_chebyshev(world, *cell, attach) <= LEFTOVER_BODY_RADIUS
-        {
-            *pack = (*pack).clamp(0.28, 0.62);
+        if on_line.contains(cell) || memo.zone.contains(cell) {
             continue;
         }
         *pack = 0.02;
@@ -1698,10 +1664,21 @@ fn leftover_is_boiler_path(world: &World, gx: i32, gy: i32, cell: Cell) -> bool 
 fn leftover_zone_body_pack(head: u32, seats: u32, expand: u16) -> f32 {
     let denom = seats.saturating_mul(expand.max(1) as u32).saturating_mul(2);
     let t = (head as f32 / denom.max(1) as f32).clamp(0.0, 1.0);
-    // One vessel: magenta body that brightens as undischarged head grows.
-    // Stay under the overlay amber cut (0.72) so the hotspot is not a
-    // yellow disk. Escape arms may go brighter.
     (0.38 + t * 0.30).clamp(0.0, 0.68)
+}
+
+/// Map leftover 0..=1 onto the P overlay hue ramp (magenta → yellow).
+///
+/// Burnt-flat magenta was `leftover_zone_body_pack` written to every
+/// vessel cell. The pipe already uses this ramp; the reservoir must too.
+fn leftover_hue_pack(local: f32, body: f32) -> f32 {
+    let h = ((body - 0.38) / 0.30).clamp(0.0, 1.0);
+    let drive = (local.clamp(0.0, 1.0) * (0.40 + 0.60 * h)).clamp(0.0, 1.0);
+    if drive < 0.02 {
+        0.0
+    } else {
+        (0.20 + drive * 0.72).clamp(0.20, 0.92)
+    }
 }
 
 fn rebuild_leftover_field(
@@ -1833,12 +1810,25 @@ fn rebuild_leftover_field(
         head = head.min(cap_head);
         memo.heads.insert(id, head);
         let body = leftover_zone_body_pack(head, seats.max(1), expand);
+        let max_s = cells
+            .iter()
+            .filter_map(|c| cands.get(c).map(|&(s, _)| s))
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let mut in_zone: FxHashSet<(i32, i32)> = FxHashSet::default();
         for &(gx, gy) in &cells {
             in_zone.insert((gx, gy));
             memo.zone.insert((gx, gy));
-            if body > 0.02 {
-                memo.map.insert((gx, gy), body);
+            let pack = if let Some(&(s, cap)) = cands.get(&(gx, gy)) {
+                let local = leftover_pack_norm(cap.saturating_add(s), cap.max(1));
+                let rel = s as f32 / max_s as f32;
+                leftover_hue_pack(local * (0.5 + 0.5 * rel), body)
+            } else {
+                leftover_hue_pack(0.5, body)
+            };
+            if pack > 0.02 {
+                memo.map.insert((gx, gy), pack);
             }
         }
         let mut outlets: Vec<(i32, i32, i32)> = Vec::new();
@@ -6998,37 +6988,44 @@ mod tests {
             apply_steam(&mut w, &mut hot, &cfg);
         }
         prepare_leftover_pressure(&w, &hot, 100.0, 192);
-        let mut p_foot = 0.0f32;
-        for x in 4..12 {
-            for y in 14..21 {
+        let mut on = 0u32;
+        for x in 4..22 {
+            for y in 1..20 {
                 let Some(c) = w.get_cell(x, y) else {
                     continue;
                 };
-                if c.material == MaterialId::Air || leftover_is_chimney_skin(c.material) {
+                if c.material == MaterialId::Air
+                    || leftover_is_chimney_skin(c.material)
+                    || c.sat.0 == 0
+                {
                     continue;
                 }
                 let (p, _) = cell_pressure_norm_with_boil(&w, x, y, 122.0, 100.0, 192);
-                p_foot = p_foot.max(p);
+                if p > 0.08 {
+                    on += 1;
+                }
             }
         }
-        let (p_deep, _) = cell_pressure_norm_with_boil(&w, 5, 2, 122.0, 100.0, 192);
-        let (p_far, _) = cell_pressure_norm_with_boil(&w, 20, 18, 122.0, 100.0, 192);
         let (p_pipe, _) = cell_pressure_norm_with_boil(&w, 6, 26, 20.0, 100.0, 192);
-        if p_foot > 0.02 {
-            assert!(
-                p_foot > 0.20,
-                "chimney-foot reservoir must stay on P ({p_foot})"
-            );
-        }
         assert!(
-            p_deep < 0.04,
-            "deepest zone cell must not paint a stray blob ({p_deep})"
-        );
-        assert!(
-            p_far < 0.04,
-            "far boiling hill must not paint a magenta sticker ({p_far})"
+            on > 8,
+            "leftover reservoir must light up ({on} wet packed cells)"
         );
         assert!(p_pipe > 0.08, "chimney must stay on P ({p_pipe})");
+        let lo = leftover_hue_pack(0.08, 0.38);
+        let hi = leftover_hue_pack(1.0, 0.68);
+        assert!(
+            lo >= 0.20 && lo < 0.40,
+            "low leftover must stay magenta ({lo})"
+        );
+        assert!(
+            hi > 0.80,
+            "high leftover must reach orange/yellow ({hi})"
+        );
+        assert!(
+            hi - lo > 0.40,
+            "leftover hues must span the P ramp, not one burnt magenta ({lo}→{hi})"
+        );
     }
 
     #[test]
@@ -7484,7 +7481,7 @@ mod tests {
         );
         assert_eq!(
             yellow, 0,
-            "zone body stays out of maxed yellow ({yellow} cells >0.88)"
+            "fresh equal vessel is one hue, not a grid of maxed yellow dots ({yellow} cells >0.88)"
         );
     }
 
@@ -7533,8 +7530,12 @@ mod tests {
             "sealed leftover head must grow until relief ({p0}→{p1})"
         );
         assert!(
-            p1 < 0.72,
-            "growing head must stay a magenta vessel, not a yellow disk ({p1})"
+            p1 > 0.72,
+            "packed leftover must leave burnt magenta for orange/yellow ({p1})"
+        );
+        assert!(
+            p1 <= 0.92,
+            "growing head must stay on the leftover hue ramp ({p1})"
         );
     }
 
