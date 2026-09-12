@@ -573,6 +573,29 @@ impl Temperature {
         self.at_tile(hx, hy)
     }
 
+    /// Bilinear °C in world-cell space (no 4×4 facets).
+    ///
+    /// Tile centres sit at `(hx + 0.5, hy + 0.5) * tile_cols`, same as
+    /// [`crate::humidity::Humidity::sample_bilinear`]. Heat is still stored
+    /// on tiles; leftover / P can resolve per block.
+    pub fn sample_bilinear(&self, gx: f32, gy: f32) -> f32 {
+        let tc = self.tile_cols.max(1) as f32;
+        let fx = gx / tc - 0.5;
+        let fy = gy / tc - 0.5;
+        let x0 = fx.floor() as i32;
+        let y0 = fy.floor() as i32;
+        let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+        let hx = |x: i32| self.wrap_hx(x).unwrap_or(x);
+        let t00 = self.at_tile_packed(hx(x0), y0);
+        let t10 = self.at_tile_packed(hx(x0 + 1), y0);
+        let t01 = self.at_tile_packed(hx(x0), y0 + 1);
+        let t11 = self.at_tile_packed(hx(x0 + 1), y0 + 1);
+        let a = t00 + (t10 - t00) * tx;
+        let b = t01 + (t11 - t01) * tx;
+        a + (b - a) * ty
+    }
+
     /// Write a tile temperature, keeping the dense slab in sync when present.
     pub fn set_tile_c(&mut self, hx: i32, hy: i32, celsius: f32) {
         let hx = self.wrap_hx(hx).unwrap_or(hx);
@@ -640,6 +663,65 @@ impl Temperature {
         }
         self.set_tile_c(thx, thy, dest + (src - dest) * mix);
         self.set_tile_c(fhx, fhy, src + (dest - src) * (mix * 0.35));
+    }
+
+    /// Leftover reverse-river: leftover heat energy equalizes along the
+    /// winning route. Stronger mix than a single marble so the vein stays
+    /// hot instead of cooling off after a few hops.
+    pub fn advect_leftover_route(
+        &mut self,
+        from_gx: i32,
+        from_gy: i32,
+        to_gx: i32,
+        to_gy: i32,
+        moved: u8,
+    ) {
+        if moved == 0 {
+            return;
+        }
+        let (fhx, fhy) = self.tile_of(from_gx, from_gy);
+        let (thx, thy) = self.tile_of(to_gx, to_gy);
+        if fhx == thx && fhy == thy {
+            return;
+        }
+        let src = self.at_tile_packed(fhx, fhy);
+        let dest = self.at_tile_packed(thx, thy);
+        if src <= dest + 0.2 {
+            return;
+        }
+        let mix = ((moved as f32) / 20.0).clamp(0.28, 0.88);
+        self.set_tile_c(thx, thy, dest + (src - dest) * mix);
+        self.set_tile_c(fhx, fhy, src + (dest - src) * (mix * 0.18));
+    }
+
+    /// Mouth dump: leftover heat enters flowing / standing water and
+    /// should leave the rock, not keep punching through the stream.
+    pub fn advect_leftover_into_water(
+        &mut self,
+        from_gx: i32,
+        from_gy: i32,
+        to_gx: i32,
+        to_gy: i32,
+        moved: u8,
+    ) {
+        if moved == 0 {
+            return;
+        }
+        let (fhx, fhy) = self.tile_of(from_gx, from_gy);
+        let (thx, thy) = self.tile_of(to_gx, to_gy);
+        if fhx == thx && fhy == thy {
+            return;
+        }
+        let src = self.at_tile_packed(fhx, fhy);
+        let dest = self.at_tile_packed(thx, thy);
+        if src <= dest + 0.2 {
+            return;
+        }
+        let mix = ((moved as f32) / 12.0).clamp(0.55, 0.95);
+        self.set_tile_c(thx, thy, dest + (src - dest) * mix);
+        // Cool the last rock tile, but keep the boiler hot enough to
+        // stay at boil. The stream carries the heat from here.
+        self.set_tile_c(fhx, fhy, src + (dest - src) * (mix * 0.22));
     }
 
     pub fn mean(&self) -> f32 {
@@ -740,8 +822,8 @@ impl Temperature {
                         if fw >= 0.5 {
                             let water = MaterialRegistry::props(MaterialId::Water);
                             p.free_water = fw;
-                            p.capacity = water.heat_capacity
-                                * (1.0 + self.config.water_stack_cap * fw);
+                            p.capacity =
+                                water.heat_capacity * (1.0 + self.config.water_stack_cap * fw);
                             p.diffusivity = water.thermal_diffusivity;
                             p.albedo = water.albedo;
                         }
@@ -1042,8 +1124,7 @@ impl Temperature {
                             hx,
                             self.tile_mid_y(hy),
                         ));
-                        let k_lag = (0.7
-                            + 0.3 * (props.diffusivity / REF_THERMAL_DIFFUSIVITY))
+                        let k_lag = (0.7 + 0.3 * (props.diffusivity / REF_THERMAL_DIFFUSIVITY))
                             .clamp(0.55, 1.4);
                         let relax = (cfg.geothermal_relax * k_lag
                             / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale * 0.35))
@@ -1274,9 +1355,8 @@ impl Temperature {
             };
             let cw = water_props.capacity.max(0.05);
             let cr = rock_props.capacity.max(0.05);
-            let a = (rate
-                * pair_diff_scale(water_props.diffusivity, rock_props.diffusivity))
-            .clamp(0.0, 1.0);
+            let a = (rate * pair_diff_scale(water_props.diffusivity, rock_props.diffusivity))
+                .clamp(0.0, 1.0);
             if a < 1e-5 {
                 continue;
             }
@@ -1359,10 +1439,9 @@ impl Temperature {
             } else {
                 1.0
             };
-            let a = (rate
-                * quench
-                * pair_diff_scale(water_props.diffusivity, air_props.diffusivity))
-            .clamp(0.0, 1.0);
+            let a =
+                (rate * quench * pair_diff_scale(water_props.diffusivity, air_props.diffusivity))
+                    .clamp(0.0, 1.0);
             if a < 1e-5 {
                 continue;
             }
@@ -1680,8 +1759,7 @@ impl Temperature {
                             .unwrap_or(REF_THERMAL_DIFFUSIVITY);
                         let fw_n = props_n.map(|p| p.free_water).unwrap_or(0.0);
                         let gate = diffuse_free_water_gate(fw_here, fw_n, false);
-                        let flow =
-                            (val - n_val) * alpha * pair_diff_scale(k_here, k_n) * gate;
+                        let flow = (val - n_val) * alpha * pair_diff_scale(k_here, k_n) * gate;
                         if flow.abs() >= 1e-9 {
                             *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
                             *deltas.entry((nx, hy)).or_insert(0.0) += flow;
@@ -1708,8 +1786,7 @@ impl Temperature {
                 } else {
                     0.35
                 };
-                let flow =
-                    (val - n_val) * alpha * vert * pair_diff_scale(k_here, k_n) * gate;
+                let flow = (val - n_val) * alpha * vert * pair_diff_scale(k_here, k_n) * gate;
                 if flow.abs() >= 1e-9 {
                     *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
                     *deltas.entry(n_key).or_insert(0.0) += flow;
@@ -1790,8 +1867,7 @@ impl Temperature {
                                 .unwrap_or(REF_THERMAL_DIFFUSIVITY);
                             let fw_n = props_n.map(|p| p.free_water).unwrap_or(0.0);
                             let gate = diffuse_free_water_gate(fw_here, fw_n, false);
-                            let flow =
-                                (val - n_val) * alpha * pair_diff_scale(k_here, k_n) * gate;
+                            let flow = (val - n_val) * alpha * pair_diff_scale(k_here, k_n) * gate;
                             if flow.abs() >= 1e-9 {
                                 self.slab_deltas[i] -= flow;
                                 self.slab_deltas[ni] += flow;
@@ -1818,8 +1894,7 @@ impl Temperature {
                     } else {
                         0.35
                     };
-                    let flow =
-                        (val - n_val) * alpha * vert * pair_diff_scale(k_here, k_n) * gate;
+                    let flow = (val - n_val) * alpha * vert * pair_diff_scale(k_here, k_n) * gate;
                     if flow.abs() >= 1e-9 {
                         self.slab_deltas[i] -= flow;
                         self.slab_deltas[ni] += flow;
@@ -2065,8 +2140,7 @@ fn tile_thermal_props(temp: &Temperature, world: Option<&World>, hx: i32, hy: i3
         if free_water >= 0.5 {
             // Deep lake / flooded shaft — water thermal mass, not rock geo.
             let water = MaterialRegistry::props(MaterialId::Water);
-            props.capacity = water.heat_capacity
-                * (1.0 + temp.config.water_stack_cap * free_water);
+            props.capacity = water.heat_capacity * (1.0 + temp.config.water_stack_cap * free_water);
             props.diffusivity = water.thermal_diffusivity;
             props.albedo = water.albedo;
         } else {
@@ -2155,6 +2229,18 @@ mod tests {
     use crate::chunk::ChunkCoord;
     use crate::climate::DEMO_DAY_TICKS;
     use crate::worldgen::WorldgenParams;
+
+    #[test]
+    fn sample_bilinear_smooths_between_tiles() {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 20, false);
+        t.set_tile_c(1, 1, 20.0);
+        t.set_tile_c(2, 1, 122.0);
+        let lo = t.sample_bilinear(6.5, 6.5);
+        let mid = t.sample_bilinear(8.0, 6.5);
+        let hi = t.sample_bilinear(9.5, 6.5);
+        assert!(lo < mid && mid < hi, "bilinear leftover heat {lo} {mid} {hi}");
+        assert!(lo > 20.0 && hi < 122.0);
+    }
 
     fn demo_temp() -> (Temperature, Humidity) {
         let p = WorldgenParams::default();
@@ -3599,7 +3685,7 @@ mod tests {
             "warm donor should boost rise ({rise_warm_below:.2}), cold donor throttle ({rise_cold_below:.2})"
         );
         let fall_stable = water_convect_fall_scale(&t, 1, 17, 1, 1); // cold above? wait 17 is hy=4 cold, 1 is hy=0 warm — cold above warm is unstable
-        // Warm above cold: put warm at high cell
+                                                                     // Warm above cold: put warm at high cell
         t.cells.insert((0, 4), 40.0);
         t.cells.insert((0, 0), 0.0);
         let fall_warm_over_cold = water_convect_fall_scale(&t, 1, 17, 1, 1);

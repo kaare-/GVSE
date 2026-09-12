@@ -54,7 +54,7 @@ use crate::parallel::set_parallel_enabled;
 use crate::phase::{apply_phase, PhaseConfig};
 use crate::pore_ice::apply_pore_ice;
 use crate::cave_humidity::apply_cave_humidity;
-use crate::steam::{apply_steam, SteamConfig};
+use crate::steam::{apply_steam_with_weather, SteamConfig};
 use crate::plant::{collect_live_root_world_cells, sail_plants_on_wind_rafts_cfg};
 use crate::rules::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity_climate,
@@ -475,7 +475,7 @@ pub fn step_world(
         let t0 = profile.then(Instant::now);
         // Steam first so thaw sees cavity heat on the same tick (130 °C
         // ice at a vent was phase-then-steam leftover).
-        apply_steam(world, temperature, cfg.steam);
+        apply_steam_with_weather(world, temperature, cfg.steam, Some(humidity));
         apply_phase(world, temperature, cfg.phase);
         apply_pore_ice(world, temperature, cfg.phase.freeze_point_c);
         apply_cave_humidity(world, temperature, humidity);
