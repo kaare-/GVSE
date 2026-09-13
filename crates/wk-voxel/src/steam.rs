@@ -2380,7 +2380,14 @@ fn leftover_pulse_loose_channel(world: &mut World, gx: i32, gy: i32) {
         next.sat = Sat(next.sat.0.min(cap));
         world.set_cell(gx, gy, next);
         if spill > 0 {
-            let _ = crate::displace::park_orphan_water(world, gx, gy + 1, spill as u32);
+            let _ = crate::displace::park_orphan_or_keep(
+                world,
+                gx,
+                gy + 1,
+                gx,
+                gy,
+                spill as u32,
+            );
         }
         return;
     }
@@ -2809,6 +2816,45 @@ fn bleed_steam_into_open_vent(world: &mut World, seats: &[(i32, i32)]) {
     }
 }
 
+/// Park leftover thermal mass. Anything that cannot seat as liquid is
+/// restored as steam (same `cell_total`) so flood / recondense never
+/// delete water.
+fn park_or_restore_vapour(world: &mut World, gx: i32, gy: i32, units: u32) {
+    if units == 0 {
+        return;
+    }
+    let mut left = crate::displace::park_orphan_water(world, gx, gy, units);
+    if left == 0 {
+        return;
+    }
+    for (dx, dy) in [(0, 0), (0, 1), (-1, 0), (1, 0), (0, -1)] {
+        if left == 0 {
+            break;
+        }
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        while left > 0 {
+            let chunk = left.min(255) as u8;
+            let placed = add_steam(world, nx, ny, chunk);
+            if placed == 0 {
+                break;
+            }
+            left -= placed as u32;
+        }
+    }
+    if left == 0 {
+        return;
+    }
+    if let Some(mut c) = world.get_cell(gx, gy) {
+        let room = u8::MAX.saturating_sub(c.sat.0) as u32;
+        let put = room.min(left);
+        if put > 0 {
+            c.sat = Sat(c.sat.0 + put as u8);
+            world.set_cell(gx, gy, c);
+        }
+    }
+}
+
 /// Prefer injecting boiled steam into void Air above / beside the source.
 fn inject_steam_near(world: &mut World, gx: i32, gy: i32, amt: u8, max_cells: usize) -> u8 {
     if amt == 0 {
@@ -2937,7 +2983,7 @@ fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32)
                             let moved = take_steam(world, gx, gy, put_up);
                             let placed = add_steam(world, gx, gy + 1, moved);
                             if placed < moved {
-                                let _ = crate::displace::park_orphan_water(
+                                park_or_restore_vapour(
                                     world,
                                     gx,
                                     gy + 1,
@@ -3085,7 +3131,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             if left > 0 {
                 // Cap / full seats: convert leftover vapour to liquid store.
                 let seed = seats_all.first().copied().unwrap_or((sx, sy));
-                let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, left);
+                park_or_restore_vapour(world, seed.0, seed.1, left);
             }
             continue;
         }
@@ -3107,7 +3153,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                 .collect();
             if seats.is_empty() {
                 let seed = seats_all.first().copied().unwrap_or((sx, sy));
-                let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, total);
+                park_or_restore_vapour(world, seed.0, seed.1, total);
                 continue;
             }
             seats.sort_by(|a, b| {
@@ -3144,7 +3190,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
                 let left = spill_steam_across(world, &seats, left, max_cells);
                 if left > 0 {
                     let seed = seats.first().copied().unwrap_or((sx, sy));
-                    let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, left);
+                    park_or_restore_vapour(world, seed.0, seed.1, left);
                 }
             }
             // Surface-connected flooded vents: recondense a slice of pocket
@@ -3167,7 +3213,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             // sky. That was the leftover puffy clouds sitting on the
             // humidity field. Park as liquid at the seed (mass-flat).
             let seed = seats_all.first().copied().unwrap_or((sx, sy));
-            let _ = crate::displace::park_orphan_water(world, seed.0, seed.1, total);
+            park_or_restore_vapour(world, seed.0, seed.1, total);
         }
     }
 }
@@ -4049,7 +4095,7 @@ fn leak_choked_boiler_mouth(
             let back = add_steam(world, gx, gy, left.min(255) as u8);
             left = left.saturating_sub(back as u32);
             if left > 0 {
-                let _ = crate::displace::park_orphan_water(world, gx, gy, left);
+                park_or_restore_vapour(world, gx, gy, left);
             }
         }
         leaked = leaked.saturating_add(1);
@@ -4548,16 +4594,16 @@ fn reverse_push_pore_water_inner(
         world.set_cell(tx, ty, d);
     }
     if overflow > 0 {
-        let left = crate::displace::park_orphan_water(world, tx, ty + 1, overflow as u32);
+        let left = crate::displace::park_orphan_or_keep(
+            world,
+            tx,
+            ty + 1,
+            gx,
+            gy,
+            overflow as u32,
+        );
         if left > 0 {
-            // Put unplaced overflow back on the source — mass-flat.
-            if let Some(mut back) = world.get_cell(gx, gy) {
-                let put = left.min(255) as u8;
-                let room_back = u8::MAX.saturating_sub(back.sat.0);
-                let add = put.min(room_back);
-                back.sat = Sat(back.sat.0.saturating_add(add));
-                world.set_cell(gx, gy, back);
-            }
+            park_or_restore_vapour(world, gx, gy, left);
         }
     }
     let actually_moved = {
@@ -5140,7 +5186,7 @@ fn try_place_burst_debris(
             }
         }
         if left > 0 {
-            let _ = crate::displace::park_orphan_water(world, tube_x, tube_y, left as u32);
+            park_or_restore_vapour(world, tube_x, tube_y, left as u32);
         }
     }
     true
@@ -6098,6 +6144,42 @@ mod tests {
             sat_totals(&w).cell_total,
             before,
             "steam-cap leftover must stay in the cell water budget"
+        );
+    }
+
+    #[test]
+    fn flood_equalize_restores_vapour_when_park_is_jammed() {
+        // Seats already hold 255 sat and 255 cave humidity. max_cells=1
+        // so flood cannot re-place the three steam markers. Park has no
+        // room — leftover must return as steam, not vanish.
+        let mut w = World::new(19);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 3..6 {
+            let mut air = Cell::air();
+            air.sat = Sat(255);
+            w.set_cell(x, 2, air);
+            w.cave_humidity.insert((x, 2), 255);
+        }
+        add_steam(&mut w, 3, 2, 200);
+        add_steam(&mut w, 4, 2, 200);
+        add_steam(&mut w, 5, 2, 200);
+        let before = sat_totals(&w).cell_total;
+        let cfg = SteamConfig {
+            enable_escape: false,
+            enable_pore_boil: false,
+            max_steam_cells: 1,
+            ..SteamConfig::default()
+        };
+        flood_equalize_steam(&mut w, &cfg, 1);
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "jammed flood must restore vapour, not delete it"
         );
     }
 
@@ -7073,6 +7155,89 @@ mod tests {
         assert!(
             leftover_has_pin(&w) && leftover_on_route(&w, 6, 20),
             "weld to stone along the pin must not retarget the spring"
+        );
+    }
+
+    #[test]
+    fn leftover_pulse_sinter_does_not_destroy_packed_water() {
+        // Loaded full-sat sand boxed in bedrock. Leftover pulse cements
+        // to sandstone and capacity drops; park has no seat.
+        let mut w = World::new(331);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            for y in 0..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.pore = 220;
+        sand.sat = Sat(water_capacity_cell(sand, &w.hydro).max(1));
+        w.set_cell(5, 5, sand);
+        add_dissolved(&mut w, 5, 5, CEMENT_MIN_LOAD + 4);
+        let before = sat_totals(&w).cell_total;
+        leftover_pulse_loose_channel(&mut w, 5, 5);
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "leftover pulse sinter must not delete water"
+        );
+    }
+
+    #[test]
+    fn leftover_thermal_sinter_soak_is_mass_flat() {
+        // Wet sand chimney + carbonate load. Leftover pulses cement /
+        // wear while boil shoves the straw. Cell water (sat+steam+cave_h)
+        // must stay flat — no thermal delete.
+        let mut w = World::new(333);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..12 {
+            for y in 0..20 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..8 {
+            for y in 1..6 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.pore = 200;
+        let sand_cap = water_capacity_cell(sand, &w.hydro).max(1);
+        sand.sat = Sat(sand_cap);
+        for y in 6..14 {
+            w.set_cell(6, y, sand);
+            add_dissolved(&mut w, 6, y, CEMENT_MIN_LOAD);
+        }
+        for y in 14..20 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let water0 = sat_totals(&w).cell_total;
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..8 {
+            for y in 1..6 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=24 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "leftover + sinter soak must stay mass-flat"
         );
     }
 

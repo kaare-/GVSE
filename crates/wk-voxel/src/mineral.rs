@@ -428,7 +428,7 @@ fn cement_cell(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
         next.sat = Sat(next.sat.0.min(cap));
         world.set_cell(gx, gy, next);
         if spill > 0 {
-            push_water_up(world, gx, gy + 1, spill);
+            push_water_up(world, gx, gy, spill);
         }
         return used;
     }
@@ -455,7 +455,7 @@ fn cement_cell(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
     next.sat = Sat(next.sat.0.min(cap));
     world.set_cell(gx, gy, next);
     if spill > 0 {
-        push_water_up(world, gx, gy + 1, spill);
+        push_water_up(world, gx, gy, spill);
     }
     used
 }
@@ -488,7 +488,7 @@ pub fn pressure_sinter_cell(world: &mut World, gx: i32, gy: i32) -> bool {
     next.sat = Sat(next.sat.0.min(cap));
     world.set_cell(gx, gy, next);
     if spill > 0 {
-        push_water_up(world, gx, gy + 1, spill);
+        push_water_up(world, gx, gy, spill);
     }
     true
 }
@@ -583,7 +583,7 @@ pub fn precipitate_vent_mouth(world: &mut World, gx: i32, gy: i32, warmth: f32) 
             deposit.sat = Sat(keep);
             world.set_cell(gx, gy, deposit);
             if spill > 0 {
-                push_water_up(world, gx, gy + 1, spill);
+                push_water_up(world, gx, gy, spill);
             }
             return used;
         }
@@ -818,7 +818,7 @@ fn precipitate_over(world: &mut World, gx: i32, gy: i32, ceiling: u16) -> u16 {
             deposit.sat = Sat(keep);
             world.set_cell(gx, gy, deposit);
             if spill > 0 {
-                push_water_up(world, gx, gy + 1, spill);
+                push_water_up(world, gx, gy, spill);
             }
             return used;
         }
@@ -894,7 +894,7 @@ fn mint_seated_sinter(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
     deposit.sat = Sat(keep);
     world.set_cell(gx, gy, deposit);
     if spill > 0 {
-        push_water_up(world, gx, gy + 1, spill);
+        push_water_up(world, gx, gy, spill);
     }
     used
 }
@@ -992,14 +992,15 @@ fn occlude_pore(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
     next.sat = Sat(next.sat.0.min(cap));
     world.set_cell(gx, gy, next);
     if spill > 0 {
-        push_water_up(world, gx, gy + 1, spill);
+        push_water_up(world, gx, gy, spill);
     }
     used
 }
 
-/// Park shed water near `gy` so sinter/cement under a lid never deletes sat.
+/// Park shed water above `gy`. Leftover that cannot seat is written
+/// back onto the host so sinter/cement never deletes sat.
 fn push_water_up(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
-    crate::displace::park_orphan_water(world, gx, gy, amount as u32).min(255) as u8
+    crate::displace::park_orphan_or_keep(world, gx, gy + 1, gx, gy, amount as u32).min(255) as u8
 }
 
 /// Drop the entire load of a cell whose water has left (evaporation, drainage).
@@ -1042,6 +1043,7 @@ pub fn precipitate_dry_cell(world: &mut World, gx: i32, gy: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::sat_totals;
     use crate::chunk::ChunkCoord;
 
     fn bed(seed: u64) -> World {
@@ -1521,6 +1523,39 @@ mod tests {
         assert_eq!(after.material, MaterialId::Stone);
         assert!(crate::cell::is_competent_rock(after.material));
         assert!(!crate::cell::is_grain(after.material));
+    }
+
+    #[test]
+    fn pressure_sinter_does_not_destroy_packed_water() {
+        // Full-sat sand boxed in impermeable bedrock: park has nowhere to
+        // go. Weld to Stone drops capacity; leftover must stay on the host.
+        let mut w = World::new(15);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            for y in 0..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.pore = 220;
+        sand.sat = Sat(water_capacity_cell(sand, &w.hydro).max(1));
+        w.set_cell(5, 5, sand);
+        let before = sat_totals(&w).cell_total;
+        assert!(
+            before > 0,
+            "packed sand must start wet ({before})"
+        );
+        assert!(pressure_sinter_cell(&mut w, 5, 5));
+        assert_eq!(
+            w.get_cell(5, 5).unwrap().material,
+            MaterialId::Stone,
+            "silicate weld"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "sinter must not delete water when park has no seat"
+        );
     }
 
     #[test]
