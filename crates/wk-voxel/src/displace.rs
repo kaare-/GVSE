@@ -171,6 +171,39 @@ pub fn park_orphan_water(world: &mut World, gx: i32, gy: i32, mut units: u32) ->
   units
 }
 
+/// Park orphan water, then put any leftover back on `keep` so a capacity
+/// shrink (sinter, gravel wear) never deletes sat.
+///
+/// Returns units still unplaced after both steps — only possible when
+/// `keep` is already at 255 and the neighbourhood is also full.
+pub fn park_orphan_or_keep(
+  world: &mut World,
+  park_gx: i32,
+  park_gy: i32,
+  keep_gx: i32,
+  keep_gy: i32,
+  units: u32,
+) -> u32 {
+  if units == 0 {
+    return 0;
+  }
+  let left = park_orphan_water(world, park_gx, park_gy, units);
+  if left == 0 {
+    return 0;
+  }
+  let Some(mut c) = world.get_cell(keep_gx, keep_gy) else {
+    return left;
+  };
+  let room = (u8::MAX - c.sat.0) as u32;
+  let put = room.min(left);
+  if put == 0 {
+    return left;
+  }
+  c.sat = Sat(c.sat.0 + put as u8);
+  world.set_cell(keep_gx, keep_gy, c);
+  left - put
+}
+
 /// Pour displaced water back into the world.
 ///
 /// `prefer` is tried in order first (normally the cells the body vacated, which

@@ -185,6 +185,9 @@ pub fn entrain_cell(world: &mut World, gx: i32, gy: i32, carrier: (i32, i32)) ->
 /// would only fall as debris next tick.
 pub fn settle_at(world: &mut World, gx: i32, gy: i32, moving: bool) -> u16 {
     let gx = world.wrap_x(gx);
+    if crate::mineral::leftover_lake_vent_skip(world, gx, gy) {
+        return 0;
+    }
     let load = suspended_at(world, gx, gy);
     if load == 0 {
         return 0;
@@ -379,7 +382,10 @@ mod tests {
         w.set_cell(4, 1, Cell::solid(MaterialId::Clay));
         w.set_cell(4, 2, Cell::water());
         let before = total(&w);
-        assert!(entrain_cell(&mut w, 4, 1, (4, 2)), "flowing water should lift clay");
+        assert!(
+            entrain_cell(&mut w, 4, 1, (4, 2)),
+            "flowing water should lift clay"
+        );
         assert_eq!(total(&w), before, "entrainment must conserve sediment");
         assert_eq!(w.get_cell(4, 1).unwrap().material, MaterialId::Air);
         assert_eq!(suspended_at(&w, 4, 2), SEDIMENT_PER_CELL);
@@ -440,8 +446,15 @@ mod tests {
         add_suspended(&mut w, 4, 2, 200);
         carry_with_water(&mut w, (4, 2), (5, 2), 128, 255);
         let moved = suspended_at(&w, 5, 2);
-        assert!((99..=101).contains(&moved), "about half should travel, got {moved}");
-        assert_eq!(moved + suspended_at(&w, 4, 2), 200, "transport must conserve");
+        assert!(
+            (99..=101).contains(&moved),
+            "about half should travel, got {moved}"
+        );
+        assert_eq!(
+            moved + suspended_at(&w, 4, 2),
+            200,
+            "transport must conserve"
+        );
     }
 
     #[test]

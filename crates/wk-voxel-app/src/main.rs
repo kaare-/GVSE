@@ -163,22 +163,24 @@ fn sat_overlay_color(wet: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
-/// Pore / cavity pressure 0..=1 → indigo → magenta → amber.
+/// Pore / cavity pressure 0..=1 → indigo → magenta, amber only at peaks.
+/// Arms live in the magenta band; a wide 0.5+ amber ramp turned every
+/// leftover core into a maxed-out yellow blob.
 fn pressure_overlay_color(p: f32) -> Color {
     let t = p.clamp(0.0, 1.0);
-    let (r, g, b) = if t < 0.5 {
-        let u = t / 0.5;
+    let (r, g, b) = if t < 0.72 {
+        let u = t / 0.72;
         (
-            (40.0 + u * 160.0) as u8,
-            (30.0 + u * 20.0) as u8,
-            (120.0 + u * 80.0) as u8,
+            (40.0 + u * 180.0) as u8,
+            (30.0 + u * 30.0) as u8,
+            (120.0 + u * 90.0) as u8,
         )
     } else {
-        let u = (t - 0.5) / 0.5;
+        let u = (t - 0.72) / 0.28;
         (
-            (200.0 + u * 55.0) as u8,
-            (50.0 + u * 140.0) as u8,
-            (200.0 - u * 160.0) as u8,
+            (220.0 + u * 35.0) as u8,
+            (60.0 + u * 130.0) as u8,
+            (210.0 - u * 170.0) as u8,
         )
     };
     let a = (70.0 + t * 150.0) as u8;
@@ -1363,8 +1365,16 @@ async fn main() {
         }
 
 
-        // Pore / cavity pressure gradient (P): flash drive + pressurized vapour.
+        // Leftover volume field (P): boiling seats shove ~expand neighbour
+        // seats along least resistance — a mound or a finger, not a thermal blob.
+        // Leftover vessel + pin. Skip only leftover 0 (no hide-band).
         if pressure_overlay && overlay_k > 0.01 {
+            wk_voxel::prepare_leftover_pressure(
+                &scene.world,
+                &scene.temperature,
+                settings.steam.boil_point_c,
+                settings.steam.phase_expansion_drive,
+            );
             let (xr, xn) = view_cell_x_ranges(
                 origin_x,
                 cell_px,
@@ -1397,8 +1407,9 @@ async fn main() {
                                 y,
                                 temp_c,
                                 settings.steam.boil_point_c,
+                                settings.steam.phase_expansion_drive,
                             );
-                            if kind == wk_voxel::CellPressureKind::None || p < 0.03 {
+                            if kind == wk_voxel::CellPressureKind::None || p <= 0.0 {
                                 continue;
                             }
                             draw_rectangle(
@@ -1706,6 +1717,7 @@ async fn main() {
                     corpse,
                     sw,
                     settings.steam.boil_point_c,
+                    settings.steam.phase_expansion_drive,
                 );
             }
         }

@@ -35,8 +35,10 @@ karst opens conduits that feed confined rise
 | Topic | Decision |
 |-------|----------|
 | Pore ice | Freeze pore `sat` **in place**. Host stays Sand/Stone/etc. **No frost heave** in v1. Blocks seepage / throughflow / confined walk while frozen; thaw restores liquid sat; mass-flat. Sparse map (`World.pore_ice`), not `MaterialId::Ice`. |
-| Cavity humidity / pressure | **Two sealed modes + sky:** (1) sky [`Humidity`] for weather + open caves; (2) sparse `World.cave_humidity` for cool sealed ambient; (3) sparse `World.steam` (wire name) for **pressurized cavity humidity** in closed / semi-closed voids. Not a separate steam-gas species. Never dumps into H/rain. Hot water **carries heat** along reverse seep so channels warm through colder rock; vapour density keeps pushing past the boil isotherm. |
-| Pore pressure transport | Phase expansion reverse-seeps ~10 hops by default, widens rock along the path, and vents dissolved load as artesian sinter. Drive is force (not minted mass); conduits stay rock (`mint_void = false`). Sealed hot **grain** hosts sinter to competent rock (cement if dissolved load exists, else silicate weld to Stone) and get a capped hydrothermal solute pulse so conduits and sinter can start without Air seats. Full-sat reverse-push widens competent neighbours before retrying. |
+| Cavity humidity / pressure | **Two sealed modes + sky:** (1) sky [`Humidity`] for weather + open caves; (2) sparse `World.cave_humidity` for cool sealed ambient; (3) sparse `World.steam` (wire name) for **pressurized cavity humidity** in closed / semi-closed voids. Not a separate steam-gas species. Never dumps into H/rain **from a sealed pocket**. Hot water **carries heat** along reverse seep so channels warm through colder rock; leftover **volume** (`mass × expand` while T ≥ boil) is overpressure. |
+| Weather vs boiler | Not “can I see the sky.” **Weather** = vapour leaves as fast as it is made (open hot rock, wide U). **Boiler** = leftover volume packs the vessel (sealed, or fat pocket + pinprick throat — including a 100-wide cave and a 1-wide chimney). Ambiguous cuts bias weather. |
+| Pore pressure transport | **Marble tube:** surplus at the hot end displaces groundwater (one in, one out). Often a cold spring; heat is a dye on that column; gas at the mouth only when the throat cannot refill. Winner-take-most. Dry open pores may take **distilled** gas (no solute). Drive is leftover volume, not minted mass; conduits stay rock (`mint_void = false`). |
+| Mouth leak | Choke rate emits **mass** (never volume). Mouth T ≥ live boil → sky H like evap. Cooler → distilled liquid at the lip. **No mineral rain.** Rejected H parks as water. |
 | Pressure HUD | Inspector shows `pressure=` on hot saturated rock (pore flash) and on cavity vapour seats. Overlay **P** paints the pore/cavity pressure gradient (indigo → magenta → amber). Cavity fill is the connected-pocket mean (follows the cave / wet walls); not a 3×16 candle and not a continuum PDE. |
 | Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~96×, Tab up to 192×), not minted mass. Heat above 100 °C further scales the pulse (~×3 by +80 °C). Expand is the primary knob (not `boiled×expand`, which saturated a u8 at tiny factors); still deliberately far below Clausius 1700×. Reverse seep **advects tile heat** with the water and follows **highest permeability** (path of least resistance); vents drop Flowstone. Existing cavity humidity keeps driving pore push + heat deposit beyond the hot zone. |
 | Pressure | **No continuum PDE.** Sparse underground vapour density + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
@@ -50,8 +52,9 @@ karst opens conduits that feed confined rise
 - No world-wide vapour or pressure grids.
 - No second full-world confined/pressure BFS.
 - **No writing sealed-cave boil / pressure steam into the sky Humidity store.**
-  Open-sky hot water may evaporate into sky H (weather). Sealed ambient air
-  uses `cave_humidity`.
+  Open-sky hot water may evaporate into sky H (weather). A choked boiler may
+  leak **mass** at the mouth into H only after a sky path exists. Sealed ambient
+  air uses `cave_humidity`. Volume (`mass × expand`) never enters H.
 - No frost heave (P5) until P1–P4 are proven and someone asks.
 - Do not skip the condensation lottery to “make steam.”
 - Do not apply the contact dry-pore skip on the deep seepage pass.
@@ -161,10 +164,11 @@ cave air uses sparse `World.cave_humidity` (not pressure). Hard cap
 | Setting | Behaviour |
 |---------|-----------|
 | Open surface (no roof) | Accelerated film evaporization into **Humidity** — steam module skips (hotter lake, not a special path) |
-| Open cave / overhang / side vent | Same sky Humidity store (T5 `air_void_open_to_sky`); films deposit to H |
-| Sealed cave under rock (any RH) | Ambient film → sparse **`cave_humidity`**; cool surplus drips to Air sat; open vent → sky H; wash stops at pool waterline |
-| Cave under solid roof, ≥100 °C | Steam **flood-fills** the void; pressure assaults wet pores + soft lids |
-| Hot wet rock | Pore boil seats vapour; phase expansion reverse-seeps / cracks host |
+| Open cave / overhang / wide U | Weather if the mouth can dump volume as fast as it is made |
+| Fat pocket + pinprick chimney | **Boiler** even if a bird can fly out — leftover volume is overpressure |
+| Sealed cave under rock (any RH) | Ambient film → sparse **`cave_humidity`**; cool surplus drips to Air sat |
+| Cave under solid roof, ≥ boil | Flash mass 1:1; volume = mass × expand; choke leak at the mouth |
+| Hot wet rock | Surplus shoves groundwater (marble tube); dry competent pores may take distilled gas |
 
 Save schema **v18** (`cave_humidity`). Cadence `STEAM_EVERY` (= 5).
 
