@@ -42,7 +42,7 @@ use crate::mineral::{
     add_dissolved, carry_with_water, clear_leftover_lake_vents, dissolved_at, dump_dry_air_load,
     emit_from_dissolved_rock, is_soluble_rock, note_leftover_lake_vent, precipitate_artesian_warm,
     precipitate_at, precipitate_dry_cell, precipitate_vent_mouth, pressure_sinter_cell,
-    take_dissolved, widen_aperture, VENT_PIPE_LUMEN,
+    take_dissolved, widen_aperture, CEMENT_MIN_LOAD, VENT_PIPE_LUMEN,
 };
 use crate::sediment::{add_suspended, is_suspendable, SEDIMENT_PER_CELL};
 use crate::temperature::Temperature;
@@ -302,14 +302,14 @@ struct LeftoverMemo {
     /// Winner-takes-all next hop (from → to) along the locked chimney.
     route_next: FxHashMap<(i32, i32), (i32, i32)>,
     /// Persisted chimney. Survives leftover rebuilds so a grain of sand
-    /// cannot retarget the spring. Cleared only when the pipe breaks or
-    /// the vessel is gone.
+    /// cannot retarget the spring. Cleared only when the pipe is sealed
+    /// or the vessel is gone. Sinter / wear along the route does not
+    /// retarget — pulse erosion is how the planned path opens.
     pin_path: Vec<(i32, i32)>,
     pin_next: FxHashMap<(i32, i32), (i32, i32)>,
     pin_seed: (i32, i32),
     pin_id: (i32, i32),
-    /// Path cells that were loose when pinned. Sinter (gravel → stone)
-    /// breaks the pipe; sat / pore flicker does not.
+    /// Path cells that were loose when pinned (debug / overlay).
     pin_loose: Vec<bool>,
 }
 
@@ -1058,6 +1058,102 @@ fn leftover_is_dump_cell(world: &World, gx: i32, gy: i32) -> bool {
     leftover_is_chimney_skin(cell.material) && leftover_has_upward_mouth(world, gx, gy)
 }
 
+/// Loose / sinter that already sees weather — the pipe, not the vessel.
+///
+/// Buried gravel / sand / loose rock surrounded by stone stays in the
+/// chamber. A ridge chimney that reaches sky must not join the zone
+/// (that was dest-pick walking sand back into the mountain).
+fn leftover_is_open_pipe(world: &World, gx: i32, gy: i32) -> bool {
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return false;
+    };
+    if leftover_is_dump_cell(world, gx, gy) {
+        return true;
+    }
+    if !leftover_is_chimney_skin(cell.material) {
+        return false;
+    }
+    if leftover_has_upward_mouth(world, gx, gy) {
+        return true;
+    }
+    let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
+    let mut q = vec![(gx, gy)];
+    seen.insert((gx, gy));
+    let mut i = 0;
+    while i < q.len() && i < 128 {
+        let (x, y) = q[i];
+        i += 1;
+        if leftover_is_dump_cell(world, x, y) || leftover_has_upward_mouth(world, x, y) {
+            return true;
+        }
+        for (dx, dy) in [
+            (0, 1),
+            (0, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (1, 1),
+            (-1, -1),
+            (1, -1),
+        ] {
+            let nx = world.wrap_x(x + dx);
+            let ny = y + dy;
+            if !seen.insert((nx, ny)) {
+                continue;
+            }
+            let Some(n) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if n.material == MaterialId::Air {
+                return true;
+            }
+            if leftover_is_chimney_skin(n.material) {
+                q.push((nx, ny));
+            }
+        }
+    }
+    false
+}
+
+fn leftover_touches_weather_lake(world: &World, gx: i32, gy: i32) -> bool {
+    for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0), (-1, 1), (1, 1)] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        let Some(n) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if leftover_is_weather_lake(world, nx, ny, n) {
+            return true;
+        }
+    }
+    false
+}
+
+fn leftover_pipe_touches_air(world: &World, gx: i32, gy: i32) -> bool {
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if world
+            .get_cell(nx, ny)
+            .is_some_and(|n| n.material == MaterialId::Air)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Enclosed loose / sinter / roofed void — chamber fill, not a sky pipe.
+fn leftover_is_chamber_fill(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    if leftover_is_open_pipe(world, gx, gy) {
+        return false;
+    }
+    if cell.material == MaterialId::Air {
+        return leftover_is_boiler_path(world, gx, gy, cell);
+    }
+    leftover_is_chimney_skin(cell.material)
+}
+
 fn leftover_step_cost_ex(perm: u8, dx: i32, dy: i32, loose: bool) -> u32 {
     let resist = 1u32 + (256 / (perm.max(1) as u32));
     let vert = if dy > 0 {
@@ -1129,12 +1225,233 @@ fn leftover_push_exterior_neighbors(
     }
 }
 
-/// Pick one chimney: cheapest leftover arm that touches weather, else
-/// the highest loose cell. Lock `route_next` and replace seeds with
-/// that path's zone attachment so leftover cannot wander.
+/// Cheapest walk to weather / a dump, ignoring this tick's leftover head.
+///
+/// Overlay BFS still fades with remaining volume. The pin must exist
+/// before the straw can travel the whole chimney — pressure builds and
+/// pulse-erodes this path until it can.
+fn leftover_plan_cheapest_mouth(world: &World, memo: &LeftoverMemo) -> Option<Vec<(i32, i32)>> {
+    if memo.zone.is_empty() {
+        return None;
+    }
+    let mut heap: BinaryHeap<(Reverse<u32>, i32, i32)> = BinaryHeap::new();
+    let mut best_cost: FxHashMap<(i32, i32), u32> = FxHashMap::default();
+    let mut parents: FxHashMap<(i32, i32), (i32, i32)> = FxHashMap::default();
+    let mut goals: FxHashMap<(i32, i32), u32> = FxHashMap::default();
+    for &(gx, gy) in &memo.zone {
+        heap.push((Reverse(0), gx, gy));
+        best_cost.insert((gx, gy), 0);
+    }
+    let mut expanded = 0usize;
+    while let Some((Reverse(cost), gx, gy)) = heap.pop() {
+        if best_cost.get(&(gx, gy)).copied().unwrap_or(u32::MAX) < cost {
+            continue;
+        }
+        if expanded >= LEFTOVER_FIELD_CELLS {
+            break;
+        }
+        expanded += 1;
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            let Some(n) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if n.material == MaterialId::Bedrock {
+                continue;
+            }
+            let in_zone = memo.zone.contains(&(nx, ny));
+            let pipe_vent = leftover_is_dump_cell(world, nx, ny)
+                || (leftover_is_chimney_skin(n.material)
+                    && leftover_pipe_touches_air(world, nx, ny));
+            if leftover_is_surface_mouth(world, nx, ny, n) || pipe_vent {
+                let mut rank = cost.saturating_add(if in_zone { 0 } else { 1 });
+                rank = rank
+                    .saturating_add(8_000)
+                    .saturating_sub((ny.max(0) as u32).saturating_mul(120));
+                if leftover_is_weather_lake(world, nx, ny, n)
+                    || leftover_touches_weather_lake(world, nx, ny)
+                {
+                    rank = rank.saturating_add(6_000);
+                }
+                if rank < goals.get(&(nx, ny)).copied().unwrap_or(u32::MAX) {
+                    goals.insert((nx, ny), rank);
+                    parents.insert((nx, ny), (gx, gy));
+                }
+                continue;
+            }
+            let step = if in_zone {
+                0
+            } else if n.material == MaterialId::Air {
+                if leftover_is_boiler_path(world, nx, ny, n) {
+                    1
+                } else {
+                    continue;
+                }
+            } else if leftover_pin_cell_walkable(world, nx, ny) {
+                leftover_step_cost_ex(
+                    permeability_cell(n, &world.hydro).max(1),
+                    dx,
+                    dy,
+                    leftover_is_loose(n.material),
+                )
+            } else {
+                continue;
+            };
+            let nc = cost.saturating_add(step);
+            if nc < best_cost.get(&(nx, ny)).copied().unwrap_or(u32::MAX) {
+                best_cost.insert((nx, ny), nc);
+                parents.insert((nx, ny), (gx, gy));
+                heap.push((Reverse(nc), nx, ny));
+            }
+        }
+    }
+    let sky_only: Vec<((i32, i32), u32)> = goals
+        .iter()
+        .filter_map(|(&(x, y), &c)| {
+            let n = world.get_cell(x, y)?;
+            if leftover_is_weather_lake(world, x, y, n)
+                || leftover_touches_weather_lake(world, x, y)
+            {
+                None
+            } else {
+                Some(((x, y), c))
+            }
+        })
+        .collect();
+    let pool = if sky_only.is_empty() {
+        goals.iter().map(|(&p, &c)| (p, c)).collect::<Vec<_>>()
+    } else {
+        sky_only
+    };
+    let ((mx, my), _) = *pool.iter().min_by_key(|((x, y), c)| (*c, Reverse(*y), *x))?;
+    let mut path = vec![(mx, my)];
+    let mut cur = (mx, my);
+    for _ in 0..512 {
+        let Some(&parent) = parents.get(&cur) else {
+            break;
+        };
+        path.push(parent);
+        cur = parent;
+        if memo.zone.contains(&parent) {
+            break;
+        }
+    }
+    path.reverse();
+    if let Some(cut) = path
+        .iter()
+        .position(|&(x, y)| leftover_is_dump_cell(world, x, y))
+    {
+        path.truncate(cut + 1);
+    }
+    if path.len() < 2 || !memo.zone.contains(&path[0]) {
+        return None;
+    }
+    Some(path)
+}
+
+fn leftover_apply_locked_path(world: &World, memo: &mut LeftoverMemo, path: Vec<(i32, i32)>) {
+    if path.len() < 2 || !memo.zone.contains(&path[0]) {
+        return;
+    }
+    memo.route_next.clear();
+    for w in path.windows(2) {
+        memo.route_next.insert(w[0], w[1]);
+    }
+    let (ex, ey) = path[path.len() - 1];
+    let mut mouth: Option<(i32, i32)> = None;
+    let mut mouth_score = i32::MIN;
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)] {
+        let nx = world.wrap_x(ex + dx);
+        let ny = ey + dy;
+        let Some(n) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if leftover_is_surface_mouth(world, nx, ny, n) {
+            let s = 1_000 + dy.max(0) * 200 + n.sat.0 as i32;
+            if s > mouth_score {
+                mouth_score = s;
+                mouth = Some((nx, ny));
+            }
+        }
+    }
+    if let Some(m) = mouth {
+        memo.route_next.insert((ex, ey), m);
+    }
+    let first_ext = path.iter().copied().find(|p| !memo.zone.contains(p));
+    let (sx, sy) = path
+        .iter()
+        .rev()
+        .copied()
+        .find(|&(x, y)| {
+            memo.zone.contains(&(x, y)) && first_ext.is_some_and(|(ex, ey)| x == ex || y == ey)
+        })
+        .unwrap_or(path[0]);
+    if let Some(ext) = first_ext {
+        memo.route_next.insert((sx, sy), ext);
+    }
+    let head = memo.heads.values().copied().max().unwrap_or(1).max(1);
+    let id = memo
+        .heads
+        .keys()
+        .copied()
+        .find(|k| memo.zone.contains(k))
+        .unwrap_or((sx, sy));
+    leftover_stitch_zone_route(world, memo, id, (sx, sy));
+    memo.seeds.clear();
+    memo.seed_zone.clear();
+    memo.seeds.push((id.0, id.1, head));
+    memo.seed_zone.push(id);
+}
+
+/// Walk leftover through the vessel to the planned exit so the straw
+/// starts at the boiler, not the highest rim (that emptied the box).
+fn leftover_stitch_zone_route(
+    world: &World,
+    memo: &mut LeftoverMemo,
+    from: (i32, i32),
+    to: (i32, i32),
+) {
+    if from == to || !memo.zone.contains(&from) || !memo.zone.contains(&to) {
+        return;
+    }
+    let mut cur = from;
+    for _ in 0..64 {
+        if cur == to {
+            return;
+        }
+        let mut best: Option<(i32, i32, i32)> = None;
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
+            let nx = world.wrap_x(cur.0 + dx);
+            let ny = cur.1 + dy;
+            if !memo.zone.contains(&(nx, ny)) {
+                continue;
+            }
+            let dist = (nx - to.0).abs() + (ny - to.1).abs();
+            if best.is_none_or(|(d, _, _)| dist < d) {
+                best = Some((dist, nx, ny));
+            }
+        }
+        let Some((_, nx, ny)) = best else {
+            return;
+        };
+        memo.route_next.entry(cur).or_insert((nx, ny));
+        cur = (nx, ny);
+    }
+}
+
+/// Pick one chimney: cheapest walk to weather (head does not have to
+/// finish it this tick). Fall back to the highest reached loose cell.
 fn leftover_lock_winning_route(world: &World, memo: &mut LeftoverMemo) {
     memo.route_next.clear();
-    if memo.parents.is_empty() || memo.zone.is_empty() {
+    if memo.zone.is_empty() {
+        return;
+    }
+    if let Some(path) = leftover_plan_cheapest_mouth(world, memo) {
+        leftover_apply_locked_path(world, memo, path);
+        return;
+    }
+    if memo.parents.is_empty() {
         return;
     }
     let mut best: Option<(i32, i32, i32)> = None; // score, x, y
@@ -1207,92 +1524,18 @@ fn leftover_lock_winning_route(world: &World, memo: &mut LeftoverMemo) {
     let mouth_loose = world
         .get_cell(mx, my)
         .is_some_and(|c| leftover_is_chimney_skin(c.material));
-    // Only lock a real chimney. A packed-stone halo path is table swell
-    // and must keep dest-pick (vadose column vs side lake).
-    let touches_weather = {
-        let (ex, ey) = path[path.len() - 1];
-        let mut hit = mouth_loose;
-        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)] {
-            let nx = world.wrap_x(ex + dx);
-            let ny = ey + dy;
-            if world
-                .get_cell(nx, ny)
-                .is_some_and(|n| leftover_is_surface_mouth(world, nx, ny, n))
-            {
-                hit = true;
-            }
-        }
-        hit
-    };
     let path_has_loose = path.iter().any(|&(x, y)| {
         world
             .get_cell(x, y)
             .is_some_and(|c| leftover_is_chimney_skin(c.material))
     });
-    // Packed halo that happens to reach open air (or a side lake) is
-    // table swell — dest-pick must keep the vadose column. Pin only a
-    // loose chimney. Homogeneous stone to sky emptied the playtest
-    // reservoir out the top of the box.
+    // Fallback only pins a loose chimney the pressure-limited halo
+    // already reached. The planner above pins packed stone when it
+    // can see weather; this path is "we never found the surface".
     if !path_has_loose && !mouth_loose {
         return;
     }
-    if !touches_weather && !mouth_loose {
-        return;
-    }
-    for w in path.windows(2) {
-        memo.route_next.insert(w[0], w[1]);
-    }
-    // Last hop: dump into the weather neighbour if the mouth has one.
-    let (ex, ey) = path[path.len() - 1];
-    let mut mouth: Option<(i32, i32)> = None;
-    let mut mouth_score = i32::MIN;
-    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0)] {
-        let nx = world.wrap_x(ex + dx);
-        let ny = ey + dy;
-        let Some(n) = world.get_cell(nx, ny) else {
-            continue;
-        };
-        if leftover_is_surface_mouth(world, nx, ny, n) {
-            let s = 1_000 + dy.max(0) * 200 + n.sat.0 as i32;
-            if s > mouth_score {
-                mouth_score = s;
-                mouth = Some((nx, ny));
-            }
-        }
-    }
-    if let Some(m) = mouth {
-        memo.route_next.insert((ex, ey), m);
-    }
-    let first_ext = path.iter().copied().find(|p| !memo.zone.contains(p));
-    let (sx, sy) = path
-        .iter()
-        .rev()
-        .copied()
-        .find(|&(x, y)| {
-            memo.zone.contains(&(x, y))
-                && first_ext.is_some_and(|(ex, ey)| x == ex || y == ey)
-        })
-        .unwrap_or(path[0]);
-    if let Some(ext) = first_ext {
-        memo.route_next.insert((sx, sy), ext);
-    }
-    let head = memo
-        .heads
-        .values()
-        .copied()
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let id = memo
-        .heads
-        .keys()
-        .copied()
-        .find(|k| memo.zone.contains(k))
-        .unwrap_or((sx, sy));
-    memo.seeds.clear();
-    memo.seed_zone.clear();
-    memo.seeds.push((sx, sy, head));
-    memo.seed_zone.push(id);
+    leftover_apply_locked_path(world, memo, path);
 }
 
 fn leftover_forced_route_dest(
@@ -1438,19 +1681,8 @@ fn leftover_try_reuse_pin(world: &World, memo: &mut LeftoverMemo) -> bool {
         leftover_clear_pin(memo);
         return false;
     }
-    for (i, &(x, y)) in memo.pin_path.iter().enumerate() {
+    for &(x, y) in &memo.pin_path {
         if !leftover_pin_cell_walkable(world, x, y) {
-            leftover_clear_pin(memo);
-            return false;
-        }
-        let Some(cell) = world.get_cell(x, y) else {
-            leftover_clear_pin(memo);
-            return false;
-        };
-        if memo.pin_loose.get(i).copied().unwrap_or(false)
-            && cell.material != MaterialId::Air
-            && !leftover_is_chimney_skin(cell.material)
-        {
             leftover_clear_pin(memo);
             return false;
         }
@@ -1615,9 +1847,7 @@ fn leftover_dim_paintable_pin(world: &World, memo: &LeftoverMemo, cell: (i32, i3
     if memo.zone.contains(&cell) {
         return true;
     }
-    world
-        .get_cell(cell.0, cell.1)
-        .is_some_and(|c| leftover_is_chimney_skin(c.material) || c.material == MaterialId::Air)
+    leftover_pin_cell_walkable(world, cell.0, cell.1)
 }
 
 fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
@@ -1712,6 +1942,19 @@ fn leftover_paint_hill_view(world: &World, memo: &mut LeftoverMemo) {
     memo.view_ready = true;
 }
 
+/// Planned packed stone is a swell until pulse erosion opens a conduit.
+/// Loose / sinter / roofed voids / high-pore rock can already carry.
+fn leftover_route_is_open(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    if leftover_is_loose(cell.material) || leftover_is_chimney_skin(cell.material) {
+        return true;
+    }
+    if cell.material == MaterialId::Air {
+        return leftover_is_boiler_path(world, gx, gy, cell)
+            || leftover_is_surface_mouth(world, gx, gy, cell);
+    }
+    crate::cell::is_competent_rock(cell.material) && cell.pore >= VENT_PIPE_LUMEN
+}
+
 fn leftover_has_pin(world: &World) -> bool {
     let gx_id = world.chunk_cache_id.get();
     LEFTOVER_MEMO.with(|slot| {
@@ -1801,22 +2044,23 @@ fn rebuild_leftover_field(
     let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
     let mut components: Vec<(Vec<(i32, i32)>, u32, u32)> = Vec::new();
     while let Some(&start) = unvisited.iter().next() {
-        // Loose / mouth sinter is the pipe, not a second vessel. Once
-        // leftover heat reaches the chimney, joining it into the zone
-        // made dest-pick skip the real mouth and walk ridge sand.
-        if world
-            .get_cell(start.0, start.1)
-            .is_some_and(|c| leftover_is_chimney_skin(c.material))
-        {
+        // Open sky chimneys stay the pipe. Buried loose / sinter /
+        // roofed voids join the vessel — they are the chamber or the
+        // planned route, not ridge sand.
+        if leftover_is_open_pipe(world, start.0, start.1) {
             unvisited.remove(&start);
             continue;
         }
         let mut stack = vec![start];
         unvisited.remove(&start);
         let mut cells: Vec<(i32, i32)> = Vec::new();
+        let mut in_comp: FxHashSet<(i32, i32)> = FxHashSet::default();
         let mut surplus = 0u32;
         let mut seats = 0u32;
         while let Some((gx, gy)) = stack.pop() {
+            if !in_comp.insert((gx, gy)) {
+                continue;
+            }
             if let Some(&(s, cap)) = cands.get(&(gx, gy)) {
                 surplus = surplus.saturating_add(s);
                 seats = seats.saturating_add(cap);
@@ -1834,13 +2078,17 @@ fn rebuild_leftover_field(
             ] {
                 let nx = world.wrap_x(gx + dx);
                 let ny = gy + dy;
-                if world
-                    .get_cell(nx, ny)
-                    .is_some_and(|c| leftover_is_chimney_skin(c.material))
-                {
+                if leftover_is_open_pipe(world, nx, ny) {
                     continue;
                 }
                 if unvisited.remove(&(nx, ny)) {
+                    stack.push((nx, ny));
+                    continue;
+                }
+                let Some(n) = world.get_cell(nx, ny) else {
+                    continue;
+                };
+                if leftover_is_chamber_fill(world, nx, ny, n) && !in_comp.contains(&(nx, ny)) {
                     stack.push((nx, ny));
                 }
             }
@@ -2079,6 +2327,68 @@ fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
     LEFTOVER_MEMO.with(|slot| {
         slot.borrow_mut().released = released;
     });
+    leftover_erode_planned_route(world);
+}
+
+/// Pulse-erode the pinned chimney. Head may not finish the walk this
+/// tick; widening / gravel wear is what makes the planned route open.
+fn leftover_erode_planned_route(world: &mut World) {
+    let path = LEFTOVER_MEMO.with(|slot| slot.borrow().pin_path.clone());
+    if path.len() < 2 {
+        return;
+    }
+    for &(gx, gy) in &path {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if leftover_is_surface_mouth(world, gx, gy, cell) {
+            break;
+        }
+        if crate::cell::is_competent_rock(cell.material) {
+            let _ = widen_aperture(world, gx, gy, 48, 1.6, 0x51A7_u64, false);
+            continue;
+        }
+        leftover_pulse_loose_channel(world, gx, gy);
+    }
+}
+
+/// Gravel / loose rock on the pin: cement to conglomerate when the
+/// water carries carbonate, wear toward sand when already open, else
+/// scour the pore. Silicate weld to stone stays on the hot-pore pulse.
+fn leftover_pulse_loose_channel(world: &mut World, gx: i32, gy: i32) {
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return;
+    };
+    if !matches!(
+        cell.material,
+        MaterialId::Gravel | MaterialId::LooseRock | MaterialId::Sand
+    ) {
+        return;
+    }
+    let load = dissolved_at(world, gx, gy);
+    if load >= CEMENT_MIN_LOAD {
+        let _ = pressure_sinter_cell(world, gx, gy);
+        return;
+    }
+    if matches!(cell.material, MaterialId::Gravel | MaterialId::LooseRock)
+        && cell.pore >= 220
+    {
+        let mut next = cell;
+        next.material = MaterialId::Sand;
+        let cap = water_capacity_cell(next, &world.hydro);
+        let spill = next.sat.0.saturating_sub(cap);
+        next.sat = Sat(next.sat.0.min(cap));
+        world.set_cell(gx, gy, next);
+        if spill > 0 {
+            let _ = crate::displace::park_orphan_water(world, gx, gy + 1, spill as u32);
+        }
+        return;
+    }
+    if cell.material != MaterialId::Air && cell.pore < 240 {
+        let mut g = cell;
+        g.pore = g.pore.saturating_add(1);
+        world.set_cell(gx, gy, g);
+    }
 }
 
 struct LeftoverStrawGuard;
@@ -4191,7 +4501,15 @@ fn reverse_push_pore_water_inner(
     // Full wet seat: shove its marble onward first, then occupy the hole.
     // Leftover straw also walks a flooded confined cave as a pipe.
     let packed_pipe = dst.material != MaterialId::Air || LEFTOVER_STRAW.with(|f| f.get());
-    if room == 0 && !overflow_vent && packed_pipe && depth > 0 {
+    let open_route = leftover_route_is_open(world, tx, ty, dst);
+    if room == 0
+        && !overflow_vent
+        && packed_pipe
+        && depth > 0
+        && (open_route
+            || leftover_in_zone(world, tx, ty)
+            || !leftover_has_pin(world))
+    {
         let _ = reverse_push_pore_water_inner(world, temp, tx, ty, drive, depth - 1, seen);
         let Some(now) = world.get_cell(tx, ty) else {
             return (0, None, false);
@@ -6597,8 +6915,13 @@ mod tests {
         );
         let (p_far, far_kind) = cell_pressure_norm_with_boil(&w, 5, 13, 20.0, 100.0, 192);
         assert!(
-            p_far < p_up || far_kind == CellPressureKind::None,
-            "pressure must decay with resistance, not paint the whole hill ({p_far} vs {p_up})"
+            p_far > 0.02 && far_kind == CellPressureKind::PoreFlash,
+            "the planned route must stay on P all the way to the surface ({p_far}, {far_kind:?})"
+        );
+        let (p_side, side_kind) = cell_pressure_norm_with_boil(&w, 8, 8, 20.0, 100.0, 192);
+        assert!(
+            p_side + 0.04 < p_up || side_kind == CellPressureKind::None,
+            "off-route flank must stay dimmer than the planned chimney ({p_side} vs {p_up})"
         );
     }
 
@@ -6616,6 +6939,140 @@ mod tests {
             vapor_volume_units(20, 120.0, 100.0, PHASE_EXPANSION_DRIVE_MAX),
             20 * PHASE_EXPANSION_DRIVE_MAX as u32,
             "20 sat at 1400× is 28k volume, not a u8 wrap"
+        );
+    }
+
+    #[test]
+    fn leftover_plans_a_surface_route_before_head_can_reach() {
+        // Deep chimney: this tick's leftover cannot walk 40 seats, but
+        // the pin must still map the cheapest path to sky.
+        let mut w = World::new(317);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..12 {
+            for y in 0..56 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..8 {
+            for y in 1..4 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 4..50 {
+            w.set_cell(6, y, gravel);
+        }
+        for y in 50..56 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..8 {
+            for y in 1..4 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &hot, 100.0, 32);
+        assert!(
+            leftover_has_pin(&w),
+            "leftover must pin a surface route even when expand is 32"
+        );
+        assert!(
+            leftover_on_route(&w, 6, 46),
+            "the pin must reach the high chimney, not die where this tick's head ran out"
+        );
+    }
+
+    #[test]
+    fn leftover_enclosed_gravel_joins_the_chamber() {
+        let mut w = World::new(319);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..14 {
+            for y in 0..16 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..10 {
+            for y in 1..8 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 180;
+        gravel.sat = Sat(water_capacity_cell(gravel, &w.hydro).max(1));
+        w.set_cell(6, 4, gravel);
+        w.set_cell(7, 4, gravel);
+        w.set_cell(6, 5, gravel);
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..10 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        assert!(
+            leftover_in_zone(&w, 6, 4) && leftover_in_zone(&w, 7, 4),
+            "gravel surrounded by packed stone is chamber, not chimney skin"
+        );
+        assert!(
+            !leftover_is_open_pipe(&w, 6, 4),
+            "a buried lens must not read as a sky pipe"
+        );
+    }
+
+    #[test]
+    fn leftover_pin_survives_gravel_weld_to_stone() {
+        let mut w = World::new(321);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..12 {
+            for y in 0..40 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..8 {
+            for y in 1..5 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 5..32 {
+            w.set_cell(6, y, gravel);
+        }
+        for y in 32..40 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..8 {
+            for y in 1..5 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        w.tick = 1;
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        assert!(leftover_has_pin(&w), "gravel chimney must pin");
+        let mut stone = Cell::solid(MaterialId::Stone);
+        stone.pore = 80;
+        w.set_cell(6, 20, stone);
+        w.tick = 2;
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        assert!(
+            leftover_has_pin(&w) && leftover_on_route(&w, 6, 20),
+            "weld to stone along the pin must not retarget the spring"
         );
     }
 
@@ -7423,9 +7880,11 @@ mod tests {
             w.set_cell(3, y, Cell::air());
         }
         let water0 = sat_totals(&w).cell_total;
-        let up0: u16 = (2..=6)
-            .map(|y| w.get_cell(5, y).unwrap().sat.0 as u16)
-            .sum();
+        let lake0: u32 = (1..6).map(|y| w.get_cell(3, y).unwrap().sat.0 as u32).sum();
+        let up0 = w.get_cell(4, 6).unwrap().sat.0 as u16
+            + (2..=6)
+                .map(|y| w.get_cell(5, y).unwrap().sat.0 as u16)
+                .sum::<u16>();
         let mut hot = temp_fill(&w, 20.0);
         let (hx, hy) = hot.tile_of(5, 1);
         hot.set_tile_c(hx, hy, 122.0);
@@ -7443,9 +7902,11 @@ mod tests {
             w.tick = STEAM_EVERY * i;
             apply_steam(&mut w, &mut hot, &cfg);
         }
-        let up1: u16 = (2..=6)
-            .map(|y| w.get_cell(5, y).unwrap().sat.0 as u16)
-            .sum();
+        let up1 = w.get_cell(4, 6).unwrap().sat.0 as u16
+            + (2..=6)
+                .map(|y| w.get_cell(5, y).unwrap().sat.0 as u16)
+                .sum::<u16>();
+        let lake1: u32 = (1..6).map(|y| w.get_cell(3, y).unwrap().sat.0 as u32).sum();
         assert_eq!(
             sat_totals(&w).cell_total,
             water0,
@@ -7453,7 +7914,11 @@ mod tests {
         );
         assert!(
             up1 > up0,
-            "leftover must raise the column above the hotspot, not only dump into the lake (up {up0}→{up1})"
+            "leftover must raise the packed column, not only dump into the lake (up {up0}→{up1})"
+        );
+        assert!(
+            lake1 <= lake0 + 8,
+            "side lake must not swallow the first leftover pulses (lake {lake0}→{lake1})"
         );
     }
 
