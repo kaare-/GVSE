@@ -1787,6 +1787,62 @@ fn leftover_forced_route_dest(
     Some((i32::MAX, next.0, next.1, dst, overflow))
 }
 
+/// Packed leftover seats with room, before leftover mass dumps at a mouth.
+///
+/// A pin that already sees weather would otherwise skip the water table
+/// and empty the hill into the lake. Leftover pressure *is* that leftover
+/// water — park it in packed vadose first.
+fn leftover_table_before_mouth(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    seen: &FxHashSet<(i32, i32)>,
+) -> Option<(i32, i32, i32, Cell, bool)> {
+    // A loose chimney mouth with a side-stone hole must still dump
+    // (playtest 2/19 next to the gravel spring). Packed leftover hills
+    // park in vadose first even when weather is one cell away.
+    if world
+        .get_cell(gx, gy)
+        .is_some_and(|c| leftover_is_loose(c.material))
+        && leftover_has_upward_mouth(world, gx, gy)
+    {
+        return None;
+    }
+    let mouth_dump = leftover_forced_route_dest(world, gx, gy, seen)
+        .is_some_and(|f| leftover_is_surface_mouth(world, f.1, f.2, f.3));
+    let mut best: Option<(i32, i32, i32, Cell, bool)> = None;
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
+        let tx = world.wrap_x(gx + dx);
+        let ty = gy + dy;
+        if seen.contains(&(tx, ty)) {
+            continue;
+        }
+        let Some(dst) = world.get_cell(tx, ty) else {
+            continue;
+        };
+        if dst.material == MaterialId::Air || leftover_is_loose(dst.material) {
+            continue;
+        }
+        let cap = water_capacity_cell(dst, &world.hydro);
+        if cap == 0 || dst.sat.0 >= cap {
+            continue;
+        }
+        if permeability_cell(dst, &world.hydro) == 0 {
+            continue;
+        }
+        let on_pin = leftover_on_route(world, tx, ty);
+        if !on_pin && !mouth_dump {
+            continue;
+        }
+        let score = if on_pin { 2_000 } else { 0 } + dy * 40 - dx.abs();
+        let row = (score, tx, ty, dst, false);
+        if best.as_ref().is_none_or(|b| row.0 > b.0) {
+            best = Some(row);
+        }
+    }
+    best
+}
+
 /// Weather mouth: open sky or a true lake (U-bowl / `!boiler`).
 ///
 /// Water-filled **boilers** are a path hop — air above that pool still
@@ -2549,15 +2605,14 @@ fn rebuild_leftover_field(
     leftover_paint_hill_view(world, memo);
 }
 
-/// Standing leftover head: shove groundwater every tick from each seed.
+/// Standing leftover head: shove leftover mass every tick from each seed.
 ///
-/// Surplus volume (`mass × expand − seat`) is the hop budget — one
-/// boiling seat at expand 192 presses about 192 seats along cheapest
-/// perm / upward rock. Packed wet rock is a marble straw. Already-wet
-/// seats are not a "bump"; the straw climbs until it fills vadose /
-/// dry rock (a table mound or a vein). Lakes only if no rock dest.
+/// Leftover volume (`mass × expand − seat`) *is* the pressure — hot
+/// pore water / steam, not a dry heat walk. The hop budget is how far
+/// one marble may travel. Packed wet rock is a marble straw. Already-wet
+/// seats keep their table; surplus leftover climbs until it fills vadose
+/// / dry rock. Lakes only if no rock dest.
 fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
-    leftover_conduct_route_heat(world, temp);
     let (seeds, ids): (Vec<(i32, i32, u32)>, Vec<(i32, i32)>) = LEFTOVER_MEMO.with(|slot| {
         let memo = slot.borrow();
         (memo.seeds.clone(), memo.seed_zone.clone())
@@ -2582,6 +2637,7 @@ fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
         slot.borrow_mut().released = released;
     });
     leftover_erode_planned_route(world);
+    leftover_conduct_wet_route(world, temp);
 }
 
 /// Pulse-erode the pinned chimney. Head may not finish the walk this
@@ -2678,7 +2734,8 @@ fn leftover_straw_chain(
         if leftover_is_surface_mouth(world, gx, gy, here) {
             return released;
         }
-        if here.material != MaterialId::Air && here.sat.0 <= retained_sat_cell(here, &world.hydro) {
+        if here.material != MaterialId::Air && here.sat.0 <= leftover_straw_floor(world, gx, gy, here)
+        {
             let mut stepped = false;
             for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1), (0, 2)] {
                 let nx = world.wrap_x(gx + dx);
@@ -2692,7 +2749,12 @@ fn leftover_straw_chain(
                 if permeability_cell(n, &world.hydro) == 0 {
                     continue;
                 }
-                if n.sat.0 <= retained_sat_cell(n, &world.hydro) {
+                // Only raid leftover zone water. Climbing onto the pin
+                // and draining its table is the dry steam vent.
+                if !leftover_in_zone(world, nx, ny) {
+                    continue;
+                }
+                if n.sat.0 <= leftover_straw_floor(world, nx, ny, n) {
                     continue;
                 }
                 gx = nx;
@@ -2703,11 +2765,13 @@ fn leftover_straw_chain(
             if !stepped {
                 return released;
             }
+            continue;
         }
         let mut seen = FxHashSet::default();
         // Loose chimneys (playtest gravel cheat path) are routinely
         // longer than 24. Packed rock keeps the short hop so a sealed
-        // vessel does not recirculate itself into fake relief.
+        // vessel does not recirculate itself into fake relief. On the
+        // leftover straw the hop budget *is* the marble walk.
         let depth = leftover_packed_depth(world, gx, gy, hops);
         let (moved, dest, parked_vadose) =
             reverse_push_pore_water_inner(world, temp, gx, gy, drive, depth, &mut seen);
@@ -2717,8 +2781,8 @@ fn leftover_straw_chain(
         let Some((nx, ny)) = dest else {
             return released;
         };
-        // Leftover is leftover heat: the reverse river must stay a hot vein.
-        leftover_boost_route_heat(world, temp, gx, gy, nx, ny, moved);
+        // Heat rides leftover mass (pore water / steam). Do not walk a
+        // dry heat finger along the pin — that leftover *is* the pressure.
         if world
             .get_cell(nx, ny)
             .is_some_and(|c| leftover_is_surface_mouth(world, nx, ny, c))
@@ -2731,18 +2795,33 @@ fn leftover_straw_chain(
         }
         // Fill holes on a loose chimney, then keep walking. Parking at
         // the first vadose gravel cell was why a cheat path lit up on P
-        // but never became a spring. Packed-rock vadose is still a
-        // water-table swell.
+        // but never became a spring. Off-pin packed vadose is still a
+        // local table swell. On the pin, stay at the leftover source so
+        // the next marble still comes from surplus — walking onto the
+        // seat drained the climb out the dry steam vent.
         let dest_loose = world
             .get_cell(nx, ny)
             .is_some_and(|c| leftover_is_loose(c.material));
         if parked_vadose && !leftover_in_zone(world, nx, ny) && !dest_loose {
-            return released.saturating_add(moved as u32);
+            if leftover_on_route(world, nx, ny) {
+                continue;
+            } else {
+                return released.saturating_add(moved as u32);
+            }
         }
         // Do not recirculate the boiler — unless this hop is the locked
         // chimney walking through the vessel toward the mouth.
         if leftover_in_zone(world, nx, ny) && !dest_loose && !leftover_on_route(world, nx, ny) {
             return released;
+        }
+        // Stay at the leftover source. Walking onto a dest seat either
+        // drained the table out the mouth or stalled in high-cap gravel.
+        // Loose chimneys transmit as a leftover pipe (film + onward).
+        if world
+            .get_cell(nx, ny)
+            .is_some_and(|c| !leftover_is_surface_mouth(world, nx, ny, c))
+        {
+            continue;
         }
         gx = nx;
         gy = ny;
@@ -2762,6 +2841,9 @@ pub fn leftover_straw_hops(surplus: u32, expand: u16) -> u16 {
 }
 
 fn leftover_packed_depth(world: &World, gx: i32, gy: i32, hops: u16) -> u8 {
+    if LEFTOVER_STRAW.with(|f| f.get()) || leftover_on_route(world, gx, gy) {
+        return hops.max(1).min(255) as u8;
+    }
     for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
         let nx = world.wrap_x(gx + dx);
         let ny = gy + dy;
@@ -2778,6 +2860,34 @@ fn leftover_packed_depth(world: &World, gx: i32, gy: i32, hops: u16) -> u8 {
     24
 }
 
+/// Heat rides leftover mass already on the pin. Dry planned cells stay
+/// cold — leftover volume *is* that pore water / steam, not a heat walk.
+fn leftover_conduct_wet_route(world: &World, temp: &mut Temperature) {
+    let path = LEFTOVER_MEMO.with(|slot| slot.borrow().pin_path.clone());
+    if path.len() < 2 {
+        return;
+    }
+    for w in path.windows(2) {
+        let (ax, ay) = w[0];
+        let (bx, by) = w[1];
+        let Some(a) = world.get_cell(ax, ay) else {
+            break;
+        };
+        let Some(b) = world.get_cell(bx, by) else {
+            break;
+        };
+        let src_mass = a.sat.0.max(steam_at(world, ax, ay));
+        let dest_mass = b.sat.0.max(steam_at(world, bx, by));
+        if src_mass == 0 || dest_mass == 0 {
+            continue;
+        }
+        leftover_boost_route_heat(world, temp, ax, ay, bx, by, dest_mass.min(16).max(1));
+        if leftover_is_heat_sink(world, bx, by, b) {
+            break;
+        }
+    }
+}
+
 fn leftover_boost_route_heat(
     world: &World,
     temp: &mut Temperature,
@@ -2787,59 +2897,55 @@ fn leftover_boost_route_heat(
     to_gy: i32,
     moved: u8,
 ) {
+    if moved == 0 {
+        return;
+    }
     if world
         .get_cell(to_gx, to_gy)
         .is_some_and(|c| leftover_is_heat_sink(world, to_gx, to_gy, c))
     {
         temp.advect_leftover_into_water(from_gx, from_gy, to_gx, to_gy, moved);
     } else {
+        // Only with leftover mass that actually moved — leftover volume
+        // *is* that hot pore water / steam, not a dry overlay walk.
         temp.advect_leftover_route(from_gx, from_gy, to_gx, to_gy, moved);
     }
 }
 
-/// Pull zone heat along the pinned chimney only, and stop at open water.
-///
-/// Walking every leftover parent painted a heat finger through the rain
-/// sheet and any competing slab the overlay had explored.
-fn leftover_conduct_route_heat(world: &World, temp: &mut Temperature) {
-    let path = LEFTOVER_MEMO.with(|slot| {
-        let memo = slot.borrow();
-        if memo.pin_path.len() >= 2 {
-            memo.pin_path.clone()
-        } else if memo.route_next.is_empty() || memo.seeds.is_empty() {
-            Vec::new()
-        } else {
-            let mut p = vec![(memo.seeds[0].0, memo.seeds[0].1)];
-            let mut cur = p[0];
-            let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
-            seen.insert(cur);
-            for _ in 0..2048 {
-                let Some(&next) = memo.route_next.get(&cur) else {
-                    break;
-                };
-                if !seen.insert(next) {
-                    break;
-                }
-                p.push(next);
-                cur = next;
-            }
-            p
-        }
-    });
-    if path.len() < 2 {
-        return;
+/// Room leftover mass may occupy in a dest. Loose pin seats keep a
+/// wet film and transmit the rest — they are not leftover tanks.
+fn leftover_straw_dest_room(_world: &World, _tx: i32, _ty: i32, dst: Cell, cap: u8) -> u8 {
+    let room = cap.saturating_sub(dst.sat.0);
+    if !LEFTOVER_STRAW.with(|f| f.get()) {
+        return room;
     }
-    for w in path.windows(2) {
-        let (ax, ay) = w[0];
-        let (bx, by) = w[1];
-        let Some(cell) = world.get_cell(bx, by) else {
-            break;
-        };
-        leftover_boost_route_heat(world, temp, ax, ay, bx, by, 16);
-        if leftover_is_heat_sink(world, bx, by, cell) {
-            break;
-        }
+    if leftover_is_loose(dst.material) {
+        const LOOSE_FILM: u8 = 8;
+        return LOOSE_FILM.saturating_sub(dst.sat.0);
     }
+    room
+}
+
+/// Leftover volume is `mass × expand`. One marble (or a few) — never the
+/// whole seat, or the reverse river empties out a dry steam vent.
+fn leftover_marble_want(drive: u8, mobile: u8) -> u8 {
+    if mobile == 0 {
+        return 0;
+    }
+    (1 + drive / 80).min(4).min(mobile)
+}
+
+/// Packed leftover seats keep a wet table. Zone cells may donate down
+/// to a wet floor — leftover pressure is that leftover mass.
+fn leftover_straw_floor(world: &World, gx: i32, gy: i32, cell: Cell) -> u8 {
+    if cell.material == MaterialId::Air || leftover_is_loose(cell.material) {
+        return 0;
+    }
+    let retained = retained_sat_cell(cell, &world.hydro);
+    if leftover_in_zone(world, gx, gy) && !leftover_on_route(world, gx, gy) {
+        return retained.saturating_div(2).max(1);
+    }
+    retained
 }
 
 /// How much expanded volume does not fit the equilibrium seat (0..=1).
@@ -3174,6 +3280,9 @@ pub fn apply_steam_with_weather(
     // boil cadence is idle. Flood / boil stay periodic (FPS).
     prepare_leftover_pressure(world, temp, boil, cfg.phase_expansion_drive);
     clear_leftover_lake_vents(world.chunk_cache_id.get());
+    // Leftover mass *is* the pressure. Shove pore water / steam first so
+    // a cadence boil cannot steal the reverse river into a dry vent.
+    shove_phreatic_bump(world, temp);
     if due {
         scrub_invalid_steam_seats(world, max_cells);
         recondense_cool(world, temp, recondense_below);
@@ -3182,7 +3291,6 @@ pub fn apply_steam_with_weather(
             boil_hot_pores(world, temp, cfg, max_cells);
         }
     }
-    shove_phreatic_bump(world, temp);
     if !due {
         return;
     }
@@ -4685,7 +4793,19 @@ fn reverse_push_pore_water_inner(
     } else if src.sat.0 == 0 {
         return (0, None, false);
     }
-    let want = drive.min(src.sat.0).max(1);
+    let want = if LEFTOVER_STRAW.with(|f| f.get()) {
+        let floor = leftover_straw_floor(world, gx, gy, src);
+        let mobile = src.sat.0.saturating_sub(floor);
+        if mobile == 0 {
+            return (0, None, false);
+        }
+        leftover_marble_want(drive, mobile)
+    } else {
+        drive.min(src.sat.0).max(1)
+    };
+    if want == 0 {
+        return (0, None, false);
+    }
     let mut best: Option<(i32, i32, i32, Cell, bool)> = None; // score, tx, ty, dst, overflow_vent
     for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0), (0, -1)] {
         let tx = world.wrap_x(gx + dx);
@@ -4755,7 +4875,11 @@ fn reverse_push_pore_water_inner(
         if leftover_has_pin(world) {
             // The pin already chose the mouth. Do not retarget every
             // rain cell above the ridge — that was the mouth hunt.
-            if let Some(forced) = leftover_forced_route_dest(world, gx, gy, seen) {
+            // Leftover mass parks in packed vadose before a mouth dump
+            // (water-table first — leftover *is* that leftover water).
+            if let Some(table) = leftover_table_before_mouth(world, gx, gy, seen) {
+                best = Some(table);
+            } else if let Some(forced) = leftover_forced_route_dest(world, gx, gy, seen) {
                 best = Some(forced);
             } else if weather_up
                 && best
@@ -4799,7 +4923,7 @@ fn reverse_push_pore_water_inner(
         && dst.material != MaterialId::Air
         && dst.sat.0 <= retained_sat_cell(dst, &world.hydro);
     let mut cap = water_capacity_cell(dst, &world.hydro);
-    let mut room = cap.saturating_sub(dst.sat.0);
+    let mut room = leftover_straw_dest_room(world, tx, ty, dst, cap);
     // Full wet seat: shove its marble onward first, then occupy the hole.
     // Leftover straw also walks a flooded confined cave as a pipe.
     let packed_pipe = dst.material != MaterialId::Air || LEFTOVER_STRAW.with(|f| f.get());
@@ -4810,6 +4934,7 @@ fn reverse_push_pore_water_inner(
         && depth > 0
         && (open_route
             || leftover_in_zone(world, tx, ty)
+            || leftover_on_route(world, tx, ty)
             || !leftover_has_pin(world))
     {
         let _ = reverse_push_pore_water_inner(world, temp, tx, ty, drive, depth - 1, seen);
@@ -4818,7 +4943,7 @@ fn reverse_push_pore_water_inner(
         };
         dst = now;
         cap = water_capacity_cell(dst, &world.hydro);
-        room = cap.saturating_sub(dst.sat.0);
+        room = leftover_straw_dest_room(world, tx, ty, dst, cap);
         overflow_vent = if leftover_cell_charged(world, gx, gy) {
             leftover_is_surface_mouth(world, tx, ty, dst) && room == 0
         } else {
@@ -4870,7 +4995,11 @@ fn reverse_push_pore_water_inner(
         return (0, None, false);
     }
     carry_with_water(world, (gx, gy), (tx, ty), actually_moved, before);
-    temp.advect_with_mass(gx, gy, tx, ty, actually_moved);
+    if LEFTOVER_STRAW.with(|f| f.get()) {
+        leftover_boost_route_heat(world, temp, gx, gy, tx, ty, actually_moved);
+    } else {
+        temp.advect_with_mass(gx, gy, tx, ty, actually_moved);
+    }
     // Self-amplifying conduit: throughput opens the cell it just used
     // (mint_void=false — high-aperture rock, not Air pipes). A slightly
     // higher scale makes a steady route win the next score by more.
@@ -7281,6 +7410,81 @@ mod tests {
     }
 
     #[test]
+    fn leftover_straw_climbs_the_pin_past_the_first_vadose_hump() {
+        // Playtest: leftover found the crest (dry steam vent) because
+        // heat walked the pin without leftover mass. Pressure *is* that
+        // hot pore water — the straw must wet the climb and keep a table.
+        let mut w = World::new(355);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..12 {
+            for y in 0..48 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..9 {
+            for y in 1..5 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut dry = Cell::solid(MaterialId::Stone);
+        dry.pore = 40;
+        dry.sat = Sat(0);
+        for y in 5..40 {
+            w.set_cell(6, y, dry);
+        }
+        for y in 40..48 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let water0 = sat_totals(&w).cell_total;
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..9 {
+            for y in 1..5 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 150.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: PHASE_EXPANSION_DRIVE_MAX,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=24 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let near = w.get_cell(6, 6).unwrap().sat.0 as u32;
+        let mid = w.get_cell(6, 22).unwrap().sat.0 as u32;
+        let high = w.get_cell(6, 34).unwrap().sat.0 as u32;
+        let hill: u32 = (4..9)
+            .flat_map(|x| (1..5).map(move |y| (x, y)))
+            .map(|(x, y)| w.get_cell(x, y).unwrap().sat.0 as u32)
+            .sum();
+        assert_eq!(sat_totals(&w).cell_total, water0, "reverse river is mass-flat");
+        assert!(
+            leftover_has_pin(&w) && leftover_on_route(&w, 6, 22),
+            "the packed climb must stay the leftover pin"
+        );
+        assert!(
+            hill > 0,
+            "leftover must not empty the wet hill out the mouth (hill {hill})"
+        );
+        assert!(
+            mid > 0 || high > 0,
+            "leftover must carry groundwater past the first vadose hump (near {near} mid {mid} high {high})"
+        );
+        assert!(
+            mid + high >= near,
+            "the reverse river must wet the climb, not only the seat above the boiler (near {near} mid {mid} high {high})"
+        );
+    }
+
+    #[test]
     fn leftover_plans_a_surface_route_before_head_can_reach() {
         // Deep chimney: this tick's leftover cannot walk 40 seats, but
         // the pin must still map the cheapest path to sky.
@@ -7466,8 +7670,8 @@ mod tests {
     #[test]
     fn leftover_plans_through_cold_strata_below_boil() {
         // Playtest: leftover overlay dies at the 100 °C isotherm. The
-        // pin must still climb packed rock colder than boil — heat and
-        // leftover follow that faint magenta, not the heat mask.
+        // pin must still climb packed rock colder than boil. Leftover
+        // mass (pore water) is the pressure; heat rides that mass.
         let mut w = World::new(353);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         let mut wet = Cell::solid(MaterialId::Stone);
@@ -7532,6 +7736,7 @@ mod tests {
             "P must show a faint planned trace on cold packed rock ({p_trace}, {kind:?})"
         );
         let t_before = hot.at_cell(30, 36);
+        let sat0 = w.get_cell(30, 36).unwrap().sat.0;
         let cfg = SteamConfig {
             enable_pore_boil: true,
             enable_escape: false,
@@ -7540,14 +7745,19 @@ mod tests {
             reverse_seep_hops: 8,
             ..SteamConfig::default()
         };
-        for t in STEAM_EVERY..=STEAM_EVERY + 4 {
+        for t in STEAM_EVERY..=STEAM_EVERY + 8 {
             w.tick = t;
             apply_steam(&mut w, &mut hot, &cfg);
         }
         let t_after = hot.at_cell(30, 36);
+        let sat1 = w.get_cell(30, 36).unwrap().sat.0;
         assert!(
-            t_after > t_before + 8.0,
-            "leftover must carry heat through rock colder than boil ({t_before} → {t_after})"
+            sat1 > 0,
+            "leftover pressure is leftover mass — the cold climb must stay wet ({sat0}→{sat1})"
+        );
+        assert!(
+            t_after > t_before + 2.0,
+            "leftover mass must carry heat through rock colder than boil ({t_before} → {t_after})"
         );
     }
 
@@ -7803,12 +8013,12 @@ mod tests {
             reverse_seep_hops: 8,
             ..SteamConfig::default()
         };
-        for t in 1..=8 {
+        for t in 1..=24 {
             w.tick = t;
             apply_steam(&mut w, &mut hot, &cfg);
         }
         let mouth1 = w.get_cell(6, 40).unwrap().sat.0;
-        let column: u32 = (30..40)
+        let column: u32 = (8..40)
             .map(|y| w.get_cell(6, y).unwrap().sat.0 as u32)
             .sum();
         assert_eq!(
@@ -7868,14 +8078,14 @@ mod tests {
             reverse_seep_hops: 8,
             ..SteamConfig::default()
         };
-        for t in 1..=8 {
+        for t in 1..=24 {
             w.tick = t;
             apply_steam(&mut w, &mut hot, &cfg);
         }
         let mouth1 = w.get_cell(6, 40).unwrap().sat.0;
         let side1 = w.get_cell(7, 39).unwrap().sat.0;
         let top = w.get_cell(6, 39).unwrap().sat.0;
-        let column: u32 = (30..40)
+        let column: u32 = (8..40)
             .map(|y| w.get_cell(6, y).unwrap().sat.0 as u32)
             .sum();
         assert_eq!(sat_totals(&w).cell_total, water0, "locked spring is mass-flat");
@@ -7934,13 +8144,18 @@ mod tests {
             boil_point_c: 100.0,
             ..SteamConfig::default()
         };
-        w.tick = 1;
-        apply_steam(&mut w, &mut hot, &cfg);
-        let t_path = hot.at_cell(6, 28);
+        for t in 1..=24 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let t_path = hot.at_cell(6, 12);
         let t_side = hot.at_cell(12, 28);
+        let sat_path: u32 = (8..=16)
+            .map(|y| w.get_cell(6, y).unwrap().sat.0 as u32)
+            .sum();
         assert!(
-            t_path > t_side + 8.0,
-            "leftover heat must follow the gravel channel, not a heat pyramid ({t_path} vs side {t_side}, side0 {t_side0})"
+            sat_path > 0 && t_path > t_side + 8.0,
+            "leftover heat must follow leftover mass in the gravel, not a heat pyramid (sat {sat_path}, {t_path} vs side {t_side}, side0 {t_side0})"
         );
     }
 
@@ -8543,9 +8758,10 @@ mod tests {
             ..SteamConfig::default()
         };
         // A long straw will later treat the packed column + weather lake
-        // as relief. Catch the table rise before that dump.
-        for i in 1..5 {
-            w.tick = STEAM_EVERY * i;
+        // as relief. Catch the table rise before that dump — including
+        // off-cadence leftover ticks so boil cannot steal the river.
+        for t in 1..=8 {
+            w.tick = t;
             apply_steam(&mut w, &mut hot, &cfg);
         }
         let up1 = w.get_cell(4, 6).unwrap().sat.0 as u16
