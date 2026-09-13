@@ -316,9 +316,10 @@ struct LeftoverMemo {
 /// Exterior leftover arms from a zone boundary.
 const LEFTOVER_FIELD_CELLS: usize = 4096;
 
-/// Exterior Dijkstra budget for the planned sky walk. Zone cells are
-/// free — a huge 150 °C hill must not burn this walking itself.
-const LEFTOVER_PLAN_CELLS: usize = 8192;
+/// Exterior Dijkstra budget for the planned sky walk. Only the high
+/// upward rim is seeded — a huge perimeter next to the ocean must not
+/// spend this on a 20-cell halo.
+const LEFTOVER_PLAN_CELLS: usize = 16384;
 
 /// Faint P-overlay floor for the planned pin. Visible magenta, not the
 /// banned hidden 0.02 pack. Used when leftover head has not charged the
@@ -1234,41 +1235,177 @@ fn leftover_push_exterior_neighbors(
     }
 }
 
+/// Rim cells of the leftover vessel. `up` faces a non-bedrock neighbor
+/// above; `all` is every zone cell that touches the exterior.
+fn leftover_plan_rim_cells(world: &World, memo: &LeftoverMemo) -> (Vec<(i32, i32)>, Vec<(i32, i32)>) {
+    let mut up: Vec<(i32, i32)> = Vec::new();
+    let mut all: Vec<(i32, i32)> = Vec::new();
+    for &(gx, gy) in &memo.zone {
+        let mut is_rim = false;
+        let mut faces_up = false;
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            if memo.zone.contains(&(nx, ny)) {
+                continue;
+            }
+            is_rim = true;
+            if dy > 0
+                && world
+                    .get_cell(nx, ny)
+                    .is_some_and(|n| n.material != MaterialId::Bedrock)
+            {
+                faces_up = true;
+            }
+        }
+        if !is_rim {
+            continue;
+        }
+        all.push((gx, gy));
+        if faces_up {
+            up.push((gx, gy));
+        }
+    }
+    (up, all)
+}
+
+/// High upward-facing rim cells. A mountain-scale vessel next to the
+/// ocean has a huge perimeter; seeding all of it spends the planner
+/// on a lake halo and never climbs 200 packed seats to the crest.
+fn leftover_plan_high_upward_rim(world: &World, memo: &LeftoverMemo) -> Vec<(i32, i32)> {
+    let (mut up, rim) = leftover_plan_rim_cells(world, memo);
+    if up.is_empty() {
+        return rim;
+    }
+    let max_y = up.iter().map(|&(_, y)| y).max().unwrap_or(0);
+    up.retain(|&(_, y)| y + 8 >= max_y);
+    if up.len() > 64 {
+        up.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        up.truncate(64);
+    }
+    up
+}
+
+fn leftover_cells_reach_open_sky(world: &World, cells: &[(i32, i32)]) -> bool {
+    for &(x, y) in cells.iter().rev().take(6) {
+        let Some(cell) = world.get_cell(x, y) else {
+            continue;
+        };
+        if leftover_is_open_sky_mouth(world, x, y, cell) {
+            return true;
+        }
+        if leftover_has_upward_mouth(world, x, y) {
+            for (dx, dy) in [(0, 1), (-1, 1), (1, 1)] {
+                let nx = world.wrap_x(x + dx);
+                let ny = y + dy;
+                let Some(n) = world.get_cell(nx, ny) else {
+                    continue;
+                };
+                if leftover_is_open_sky_mouth(world, nx, ny, n) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn leftover_pin_ends_in_weather_lake(world: &World, memo: &LeftoverMemo) -> bool {
+    for &(x, y) in memo.pin_path.iter().rev().take(6) {
+        let Some(cell) = world.get_cell(x, y) else {
+            continue;
+        };
+        if leftover_is_weather_lake(world, x, y, cell)
+            || leftover_touches_weather_lake(world, x, y)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn leftover_pin_has_chimney_skin(world: &World, memo: &LeftoverMemo) -> bool {
+    memo.pin_path.iter().any(|&(x, y)| {
+        world
+            .get_cell(x, y)
+            .is_some_and(|c| leftover_is_chimney_skin(c.material))
+    })
+}
+
+/// Foot-ocean dump: a couple of hops into a weather U. A gravel
+/// chimney that *fills* its own mouth is not this — leftover emit
+/// makes that air wet, and it must stay the pin.
+fn leftover_pin_is_short_lake_dump(world: &World, memo: &LeftoverMemo) -> bool {
+    memo.pin_path.len() < 8
+        && leftover_pin_ends_in_weather_lake(world, memo)
+        && !leftover_pin_has_chimney_skin(world, memo)
+}
+
+/// Punch-through can empty a tiny boiler. Keep a live sky / gravel
+/// chimney on P; drop a foot-ocean pin.
+fn leftover_pin_keep_when_cold(world: &World, memo: &LeftoverMemo) -> bool {
+    memo.pin_path.len() >= 2 && !leftover_pin_is_short_lake_dump(world, memo)
+}
+
 /// Cheapest walk to weather / a dump, ignoring this tick's leftover head.
 ///
 /// Overlay BFS still fades with remaining volume. The pin must exist
 /// before the straw can travel the whole chimney — pressure builds and
 /// pulse-erodes this path until it can.
+///
+/// Do **not** walk the vessel at cost 0. That re-seeds the whole rim,
+/// spends [`LEFTOVER_PLAN_CELLS`] on a foot-ocean halo, and never
+/// climbs 200 packed seats to the crest.
 fn leftover_plan_cheapest_mouth(world: &World, memo: &LeftoverMemo) -> Option<Vec<(i32, i32)>> {
     if memo.zone.is_empty() {
+        return None;
+    }
+    let high = leftover_plan_high_upward_rim(world, memo);
+    let high = if high.is_empty() {
+        memo.zone.iter().copied().collect::<Vec<_>>()
+    } else {
+        high
+    };
+    let mut lake: Option<Vec<(i32, i32)>> = None;
+    if let Some(path) = leftover_plan_mouths_from_seeds(world, memo, &high, false) {
+        if leftover_cells_reach_open_sky(world, &path) {
+            return Some(path);
+        }
+        lake = Some(path);
+    }
+    let (_, rim) = leftover_plan_rim_cells(world, memo);
+    if !rim.is_empty() && rim != high {
+        if let Some(path) = leftover_plan_mouths_from_seeds(world, memo, &rim, false) {
+            if leftover_cells_reach_open_sky(world, &path) {
+                return Some(path);
+            }
+            if lake.is_none() {
+                lake = Some(path);
+            }
+        }
+    }
+    if let Some(path) = lake {
+        return Some(path);
+    }
+    leftover_plan_mouths_from_seeds(world, memo, &high, true)
+}
+
+fn leftover_plan_mouths_from_seeds(
+    world: &World,
+    memo: &LeftoverMemo,
+    seeds: &[(i32, i32)],
+    flood_zone: bool,
+) -> Option<Vec<(i32, i32)>> {
+    if seeds.is_empty() {
         return None;
     }
     let mut heap: BinaryHeap<(Reverse<u32>, i32, i32)> = BinaryHeap::new();
     let mut best_cost: FxHashMap<(i32, i32), u32> = FxHashMap::default();
     let mut parents: FxHashMap<(i32, i32), (i32, i32)> = FxHashMap::default();
     let mut goals: FxHashMap<(i32, i32), u32> = FxHashMap::default();
-    // Seed the rim only. Cost-0 expansion of a 4000-cell vessel used to
-    // exhaust the planner before it ever looked at the hill above.
-    for &(gx, gy) in &memo.zone {
-        let mut rim = false;
-        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
-            let nx = world.wrap_x(gx + dx);
-            let ny = gy + dy;
-            if !memo.zone.contains(&(nx, ny)) {
-                rim = true;
-                break;
-            }
-        }
-        if rim {
-            heap.push((Reverse(0), gx, gy));
-            best_cost.insert((gx, gy), 0);
-        }
-    }
-    if heap.is_empty() {
-        for &(gx, gy) in &memo.zone {
-            heap.push((Reverse(0), gx, gy));
-            best_cost.insert((gx, gy), 0);
-        }
+    for &(gx, gy) in seeds {
+        heap.push((Reverse(0), gx, gy));
+        best_cost.insert((gx, gy), 0);
     }
     let mut expanded = 0usize;
     while let Some((Reverse(cost), gx, gy)) = heap.pop() {
@@ -1291,6 +1428,9 @@ fn leftover_plan_cheapest_mouth(world: &World, memo: &LeftoverMemo) -> Option<Ve
                 continue;
             }
             let in_zone = memo.zone.contains(&(nx, ny));
+            if in_zone && !flood_zone {
+                continue;
+            }
             let pipe_vent = leftover_is_dump_cell(world, nx, ny)
                 || (leftover_is_chimney_skin(n.material)
                     && leftover_pipe_touches_air(world, nx, ny));
@@ -1674,6 +1814,13 @@ fn leftover_is_surface_mouth(world: &World, gx: i32, gy: i32, cell: Cell) -> boo
     air_void_open_to_sky(world, gx, gy) || wet
 }
 
+/// Open sky / unroofed air — not a weather lake at the hill foot.
+fn leftover_is_open_sky_mouth(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    leftover_is_surface_mouth(world, gx, gy, cell)
+        && !leftover_is_weather_lake(world, gx, gy, cell)
+        && !leftover_touches_weather_lake(world, gx, gy)
+}
+
 /// Heat dump at the first open / flowing water the chimney hits.
 fn leftover_is_heat_sink(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
     leftover_is_surface_mouth(world, gx, gy, cell)
@@ -1748,6 +1895,11 @@ fn leftover_try_reuse_pin(world: &World, memo: &mut LeftoverMemo) -> bool {
     leftover_trim_pin_at_upward_mouth(world, memo);
     if memo.pin_path.len() < 2 {
         leftover_clear_pin(memo);
+        return false;
+    }
+    // A foot-of-hill ocean pin must not lock out the crest. Sinter
+    // and a gravel chimney that flooded its own mouth still keep.
+    if leftover_pin_is_short_lake_dump(world, memo) {
         return false;
     }
     memo.route_next = memo.pin_next.clone();
@@ -2015,6 +2167,8 @@ fn leftover_stamp_planned_route(world: &World, memo: &mut LeftoverMemo) {
         if !leftover_dim_paintable_pin(world, memo, cell) {
             continue;
         }
+        let e = memo.map.entry(cell).or_insert(0.0);
+        *e = (*e).max(LEFTOVER_PLAN_TRACE);
         let e = memo.view.entry(cell).or_insert(0.0);
         *e = (*e).max(LEFTOVER_PLAN_TRACE);
     }
@@ -2115,6 +2269,14 @@ fn rebuild_leftover_field(
         });
     }
     if cands.is_empty() {
+        // Punch-through can empty a tiny boiler. A live *sky* pin stays
+        // on P so the planned climb does not vanish the tick leftover
+        // hits zero. Lake-only pins still drop.
+        if leftover_pin_keep_when_cold(world, memo) {
+            leftover_stamp_planned_route(world, memo);
+            leftover_paint_hill_view(world, memo);
+            return;
+        }
         leftover_clear_pin(memo);
         return;
     }
@@ -7208,6 +7370,82 @@ mod tests {
         assert!(
             p_smear < 0.04 || smear_kind == CellPressureKind::None,
             "planned trace must stay one cell wide ({p_smear}, {smear_kind:?})"
+        );
+    }
+
+    #[test]
+    fn leftover_plans_hilltop_sky_not_the_foot_ocean() {
+        // Playtest: leftover=0.56 at the buried foot, ocean a few cells
+        // away, crest <200 packed seats up. Seeding the whole rim pinned
+        // the lake and never painted a trace up the hill.
+        let mut w = World::new(351);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 0..62 {
+            for y in 0..62 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 12..50 {
+            for y in 1..12 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        // Ocean touches the buried foot. The old planner flooded the
+        // vessel at cost 0, then spent its budget on this lake halo.
+        for x in 1..12 {
+            for y in 1..10 {
+                let mut lake = Cell::air();
+                lake.sat = Sat(255);
+                w.set_cell(x, y, lake);
+            }
+            for y in 10..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut lid = Cell::solid(MaterialId::Stone);
+        lid.pore = 40;
+        lid.sat = Sat(0);
+        for y in 12..52 {
+            w.set_cell(30, y, lid);
+        }
+        for y in 52..62 {
+            w.set_cell(30, y, Cell::air());
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 12..50 {
+            for y in 1..12 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 150.0);
+            }
+        }
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &hot, 100.0, PHASE_EXPANSION_DRIVE_MAX);
+        assert!(
+            leftover_has_pin(&w),
+            "1400× leftover must pin a route off the buried reservoir"
+        );
+        assert!(
+            leftover_on_route(&w, 30, 40),
+            "the pin must climb the packed hill, not dump into the foot ocean"
+        );
+        assert!(
+            !leftover_on_route(&w, 4, 6) && !leftover_on_route(&w, 11, 6),
+            "the weather U at the foot is not the leftover chimney"
+        );
+        let (p_trace, kind) =
+            cell_pressure_norm_with_boil(&w, 30, 40, 14.0, 100.0, PHASE_EXPANSION_DRIVE_MAX);
+        assert!(
+            p_trace >= 0.20 && kind == CellPressureKind::PoreFlash,
+            "P must show a faint planned trace on the climb ({p_trace}, {kind:?})"
+        );
+        w.tick = STEAM_EVERY + 1;
+        prepare_leftover_pressure(&w, &hot, 100.0, PHASE_EXPANSION_DRIVE_MAX);
+        assert!(
+            leftover_on_route(&w, 30, 40),
+            "a lake pin must not lock out the crest on the next tick"
         );
     }
 
