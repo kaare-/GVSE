@@ -206,7 +206,7 @@ pub fn draw_block_inspector(
     expand: u16,
 ) {
     let hum = humidity.at_cell(gx, gy);
-    let temp_c = temperature.sample_bilinear(gx as f32 + 0.5, gy as f32 + 0.5);
+    let temp_c = temperature.at_cell(gx, gy);
     let (hx, hy) = humidity.tile_of(gx, gy);
     let mut lines = vec![format!("Block ({gx}, {gy})")];
     match cell {
@@ -264,7 +264,7 @@ pub fn draw_block_inspector(
                 cell_pressure_norm_with_boil(world, gx, gy, temp_c, boil_c, expand);
             // Hot saturated rock used to hide pressure entirely — cavity_h only
             // fired for steam seats / hot wet Air. Pore flash + cavity share one line.
-            if steam > 0 || press_kind != CellPressureKind::None || press > 0.02 {
+            if steam > 0 || press > 0.0 {
                 let confined = if c.material == MaterialId::Air {
                     void_is_confined(world, gx, gy)
                 } else {
@@ -274,18 +274,18 @@ pub fn draw_block_inspector(
                 let cavity = steam_pressure_norm(world, gx, gy);
                 let kind = match press_kind {
                     CellPressureKind::Cavity => "vessel leftover",
-                    CellPressureKind::PoreFlash => "pore leftover",
-                    CellPressureKind::None => "trace",
+                    CellPressureKind::PoreFlash => "leftover",
+                    CellPressureKind::None => "leftover",
                 };
                 if steam > 0 || c.material == MaterialId::Air {
                     lines.push(format!(
-                        "cavity_h={steam}/255  roofed={}  boiler={}  pressure={press:.2} ({kind}; mass×expand, not sky H)",
+                        "cavity_h={steam}/255  roofed={}  boiler={}  leftover={press:.2} ({kind}; tile T={temp_c:.0}C expand={expand})",
                         if confined { "yes" } else { "no" },
                         if boiler { "yes" } else { "no" },
                     ));
                 } else {
                     lines.push(format!(
-                        "pressure={press:.2} ({kind}; wet={pct:.0}% T={temp_c:.0}C expand={expand} cavity_P={cavity:.2})"
+                        "leftover={press:.2} ({kind}; wet={pct:.0}% tile T={temp_c:.0}C expand={expand} cavity_P={cavity:.2})"
                     ));
                 }
             }

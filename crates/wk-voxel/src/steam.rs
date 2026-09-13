@@ -322,10 +322,6 @@ const LEFTOVER_COST_FADE: f32 = 32.0;
 /// Magenta pin floor so a cool gravel chimney still reads as a line.
 const LEFTOVER_PIN_PACK: f32 = 0.58;
 
-/// Overlay-only: hide leftover on a block unless bilinear °C is this hot.
-/// `leftover_heat_fade` 0.50 is about boil − 8 °C.
-const LEFTOVER_BLOCK_FADE_MIN: f32 = 0.50;
-
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
@@ -929,8 +925,8 @@ pub enum CellPressureKind {
 /// Adjacent boiling wet cells are **one vessel**. The zone head is the
 /// sum of every cell's leftover (`mass × expand − seat`) and keeps
 /// growing until a straw finds vadose or a sky-open vent. Exterior
-/// arms follow cheap perm / loose / confined cavities. Display keeps
-/// the vessel magenta; only the escape path may go amber.
+/// arms follow cheap perm / loose / confined cavities. P paints the
+/// wet packed hill plus the 1-cell pin; hue follows leftover head.
 pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32, expand: u16) {
     let boil = if boil_c.is_finite() {
         boil_c
@@ -1628,8 +1624,8 @@ fn leftover_dim_off_pin_arms(world: &World, memo: &mut LeftoverMemo) {
     if memo.pin_path.len() < 2 {
         return;
     }
-    // Whole leftover vessel stays on P at its leftover hue. The pin is
-    // a 1-cell front. Ridge sand / 4×4 smear stay off (pack 0).
+    // Straw map: leftover zone + 1-cell pin. Ridge sand / 4×4 smear
+    // stay off. The wet-stone hill is painted on `view` only.
     let mut line: Vec<(i32, i32)> = Vec::new();
     for w in memo.pin_path.windows(2) {
         line.extend(leftover_pin_segment(world, w[0], w[1]));
@@ -1661,47 +1657,32 @@ fn leftover_is_overlay_rock(cell: Cell) -> bool {
         && cell.sat.0 > 0
 }
 
-/// Carve / grow leftover P at block resolution.
-///
-/// The straw still uses 4×4 heat tiles. A fade inside those tiles still
-/// drew the whole stamp (playtest: same 4×4 stairs). Drop blocks whose
-/// bilinear °C is cool, and paint wet packed blocks in the next tile
-/// that are still hot. Never join `memo.zone`.
-fn leftover_resolve_block_overlay(
-    world: &World,
-    temp: &Temperature,
-    boil: f32,
-    memo: &mut LeftoverMemo,
-) {
+/// Overlay silhouette: leftover zone + leftover-connected wet packed
+/// hill + 1-cell pin. Not the 4×4 heat mask. Never joins `memo.zone`.
+fn leftover_paint_hill_view(world: &World, memo: &mut LeftoverMemo) {
     memo.view.clear();
-    let pin: FxHashSet<(i32, i32)> = memo.pin_path.iter().copied().collect();
     for (&cell, &pack) in &memo.map {
-        if memo.zone.contains(&cell) && !pin.contains(&cell) {
-            let fade = leftover_heat_fade(leftover_cell_temp(temp, cell.0, cell.1), boil);
-            if fade < LEFTOVER_BLOCK_FADE_MIN {
-                continue;
-            }
-        }
-        if pack > 0.02 {
+        if pack > 0.0 {
             memo.view.insert(cell, pack);
         }
     }
-    let mut q: Vec<(i32, i32, i32, f32)> = Vec::new();
+    let mut q: Vec<(i32, i32, f32)> = Vec::new();
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
     for &cell in &memo.zone {
-        let Some(&pack) = memo.view.get(&cell) else {
+        let pack = memo.view.get(&cell).copied().unwrap_or(0.0);
+        if pack <= 0.0 {
             continue;
-        };
+        }
         seen.insert(cell);
-        q.push((cell.0, cell.1, 0, pack));
+        q.push((cell.0, cell.1, pack));
     }
     let mut i = 0;
     while i < q.len() {
-        let (gx, gy, dist, src) = q[i];
-        i += 1;
-        if dist >= 4 {
-            continue;
+        if memo.view.len() >= LEFTOVER_FIELD_CELLS {
+            break;
         }
+        let (gx, gy, src) = q[i];
+        i += 1;
         for (dx, dy) in [
             (0, 1),
             (0, -1),
@@ -1717,23 +1698,15 @@ fn leftover_resolve_block_overlay(
             if !seen.insert((nx, ny)) {
                 continue;
             }
-            if memo.zone.contains(&(nx, ny)) || pin.contains(&(nx, ny)) {
-                continue;
-            }
             let Some(cell) = world.get_cell(nx, ny) else {
                 continue;
             };
             if !leftover_is_overlay_rock(cell) {
                 continue;
             }
-            let fade = leftover_heat_fade(leftover_cell_temp(temp, nx, ny), boil);
-            if fade < LEFTOVER_BLOCK_FADE_MIN {
-                continue;
-            }
-            let pack = (src * fade).clamp(0.20, src);
             let e = memo.view.entry((nx, ny)).or_insert(0.0);
-            *e = (*e).max(pack);
-            q.push((nx, ny, dist + 1, src));
+            *e = (*e).max(src);
+            q.push((nx, ny, src));
         }
     }
     memo.view_ready = true;
@@ -1770,7 +1743,7 @@ fn leftover_zone_body_pack(head: u32, seats: u32, expand: u16) -> f32 {
 fn leftover_hue_pack(local: f32, body: f32) -> f32 {
     let h = ((body - 0.38) / 0.30).clamp(0.0, 1.0);
     let drive = (local.clamp(0.0, 1.0) * (0.40 + 0.60 * h)).clamp(0.0, 1.0);
-    if drive < 0.02 {
+    if drive <= 0.0 {
         0.0
     } else {
         (0.20 + drive * 0.72).clamp(0.20, 0.92)
@@ -1925,10 +1898,7 @@ fn rebuild_leftover_field(
             } else {
                 leftover_hue_pack(0.5, body)
             };
-            // Heat is 4×4; fade P by bilinear °C so neighbouring
-            // blocks can differ at a tile edge.
-            let pack = pack * leftover_heat_fade(leftover_cell_temp(temp, gx, gy), boil);
-            if pack > 0.02 {
+            if pack > 0.0 {
                 memo.map.insert((gx, gy), pack);
             }
         }
@@ -2074,7 +2044,7 @@ fn rebuild_leftover_field(
         leftover_commit_pin(world, memo);
         leftover_dim_off_pin_arms(world, memo);
     }
-    leftover_resolve_block_overlay(world, temp, boil, memo);
+    leftover_paint_hill_view(world, memo);
 }
 
 /// Standing leftover head: shove groundwater every tick from each seed.
@@ -2378,7 +2348,7 @@ pub fn cell_pressure_norm_with_boil(
     } else {
         pack = pack.max(field);
     }
-    if pack < 0.02 {
+    if pack <= 0.0 {
         return (0.0, CellPressureKind::None);
     }
     (pack, CellPressureKind::PoreFlash)
@@ -3389,19 +3359,6 @@ fn for_each_hot_tile_cell(
     visit: impl FnMut(i32, i32, f32, crate::cell::Cell),
 ) {
     for_each_tile_cell_where(world, temp, coord, |t| t >= min_c, visit);
-}
-
-fn leftover_cell_temp(temp: &Temperature, gx: i32, gy: i32) -> f32 {
-    temp.sample_bilinear(gx as f32 + 0.5, gy as f32 + 0.5)
-}
-
-/// How hard leftover P reads on this block. Full in a hot core;
-/// fades across a tile edge toward cool neighbours.
-fn leftover_heat_fade(temp_c: f32, boil: f32) -> f32 {
-    if !temp_c.is_finite() || !boil.is_finite() {
-        return 0.0;
-    }
-    ((temp_c - (boil - 24.0)) / 32.0).clamp(0.0, 1.0)
 }
 
 fn boil_hot_air(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, max_cells: usize) {
@@ -7144,15 +7101,16 @@ mod tests {
     }
 
     #[test]
-    fn leftover_is_per_block_at_a_heat_tile_edge() {
-        // Heat is 4×4. Leftover / P is per block: bilinear °C so a
-        // 122 °C tile next to 20 °C does not light all 16 cells.
+    fn leftover_p_follows_wet_hill_not_heat_tiles() {
+        // Heat is 4×4. P is the leftover vessel: wet packed stone on
+        // the same hill, plus the 1-cell pin. Cool wet rock stays on;
+        // a wet pocket behind bedrock stays off.
         let mut w = World::new(313);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         let mut wet = Cell::solid(MaterialId::Stone);
         let cap = water_capacity_cell(wet, &w.hydro).max(1);
         wet.sat = Sat(cap);
-        for x in 2..20 {
+        for x in 2..24 {
             for y in 0..40 {
                 w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
             }
@@ -7161,6 +7119,9 @@ mod tests {
             for y in 1..12 {
                 w.set_cell(x, y, wet);
             }
+        }
+        for y in 4..8 {
+            w.set_cell(20, y, wet);
         }
         let mut gravel = Cell::solid(MaterialId::Gravel);
         gravel.pore = 200;
@@ -7204,41 +7165,34 @@ mod tests {
                 }
             }
         }
-        w.tick = 7;
-        prepare_leftover_pressure(&w, &hot, 100.0, 192);
-        let t_core = leftover_cell_temp(&hot, 6, 6);
-        let (p_core, _) = cell_pressure_norm_with_boil(&w, 6, 6, t_core, 100.0, 192);
-        let (p_pipe, _) = cell_pressure_norm_with_boil(&w, 6, 20, 20.0, 100.0, 192);
-        let mut lo = 1.0f32;
-        let mut hi = 0.0f32;
-        for x in 8..12 {
-            for y in 4..8 {
-                let t = leftover_cell_temp(&hot, x, y);
-                let (p, _) = cell_pressure_norm_with_boil(&w, x, y, t, 100.0, 192);
-                lo = lo.min(p);
-                hi = hi.max(p);
-            }
-        }
-        assert!(p_core > 0.20, "hot leftover core must stay on P ({p_core})");
-        assert!(
-            hi > lo + 0.08,
-            "leftover P must vary per block in a heat tile ({lo}→{hi})"
-        );
-        let mut on_edge = 0u32;
-        for x in 8..12 {
-            for y in 4..8 {
-                let t = leftover_cell_temp(&hot, x, y);
-                let (p, _) = cell_pressure_norm_with_boil(&w, x, y, t, 100.0, 192);
-                if p > 0.08 {
-                    on_edge += 1;
+        for y in 4..8 {
+            if let Some(mut c) = w.get_cell(20, y) {
+                if c.material == MaterialId::Stone {
+                    c.sat = Sat(cap);
+                    w.set_cell(20, y, c);
                 }
             }
         }
+        w.tick = 7;
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        let (p_core, _) = cell_pressure_norm_with_boil(&w, 6, 6, 122.0, 100.0, 192);
+        let (p_hill, _) = cell_pressure_norm_with_boil(&w, 14, 6, 20.0, 100.0, 192);
+        let (p_iso, _) = cell_pressure_norm_with_boil(&w, 20, 6, 20.0, 100.0, 192);
+        let (p_pipe, _) = cell_pressure_norm_with_boil(&w, 6, 20, 20.0, 100.0, 192);
+        assert!(p_core > 0.20, "hot leftover core must stay on P ({p_core})");
         assert!(
-            on_edge > 0 && on_edge < 16,
-            "a heat tile must not stamp all 16 leftover blocks ({on_edge})"
+            p_hill > 0.20,
+            "leftover-connected wet packed stone stays on even when the heat tile is cool ({p_hill})"
+        );
+        assert!(
+            p_iso <= 0.0,
+            "wet packed stone behind a bedrock gap stays off ({p_iso})"
         );
         assert!(p_pipe > 0.08, "chimney must stay on P ({p_pipe})");
+        assert!(
+            leftover_is_overlay_rock(w.get_cell(14, 6).unwrap()),
+            "the cool hill is wet packed stone on the same vessel"
+        );
     }
 
     #[test]
