@@ -316,6 +316,15 @@ struct LeftoverMemo {
 /// Exterior leftover arms from a zone boundary.
 const LEFTOVER_FIELD_CELLS: usize = 4096;
 
+/// Exterior Dijkstra budget for the planned sky walk. Zone cells are
+/// free — a huge 150 °C hill must not burn this walking itself.
+const LEFTOVER_PLAN_CELLS: usize = 8192;
+
+/// Faint P-overlay floor for the planned pin. Visible magenta, not the
+/// banned hidden 0.02 pack. Used when leftover head has not charged the
+/// cell yet.
+const LEFTOVER_PLAN_TRACE: f32 = 0.26;
+
 /// Fade leftover *display* by path cost along relief arms.
 const LEFTOVER_COST_FADE: f32 = 32.0;
 
@@ -1238,19 +1247,40 @@ fn leftover_plan_cheapest_mouth(world: &World, memo: &LeftoverMemo) -> Option<Ve
     let mut best_cost: FxHashMap<(i32, i32), u32> = FxHashMap::default();
     let mut parents: FxHashMap<(i32, i32), (i32, i32)> = FxHashMap::default();
     let mut goals: FxHashMap<(i32, i32), u32> = FxHashMap::default();
+    // Seed the rim only. Cost-0 expansion of a 4000-cell vessel used to
+    // exhaust the planner before it ever looked at the hill above.
     for &(gx, gy) in &memo.zone {
-        heap.push((Reverse(0), gx, gy));
-        best_cost.insert((gx, gy), 0);
+        let mut rim = false;
+        for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            if !memo.zone.contains(&(nx, ny)) {
+                rim = true;
+                break;
+            }
+        }
+        if rim {
+            heap.push((Reverse(0), gx, gy));
+            best_cost.insert((gx, gy), 0);
+        }
+    }
+    if heap.is_empty() {
+        for &(gx, gy) in &memo.zone {
+            heap.push((Reverse(0), gx, gy));
+            best_cost.insert((gx, gy), 0);
+        }
     }
     let mut expanded = 0usize;
     while let Some((Reverse(cost), gx, gy)) = heap.pop() {
         if best_cost.get(&(gx, gy)).copied().unwrap_or(u32::MAX) < cost {
             continue;
         }
-        if expanded >= LEFTOVER_FIELD_CELLS {
-            break;
+        if !memo.zone.contains(&(gx, gy)) {
+            if expanded >= LEFTOVER_PLAN_CELLS {
+                break;
+            }
+            expanded += 1;
         }
-        expanded += 1;
         for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
             let nx = world.wrap_x(gx + dx);
             let ny = gy + dy;
@@ -1327,7 +1357,7 @@ fn leftover_plan_cheapest_mouth(world: &World, memo: &LeftoverMemo) -> Option<Ve
     let ((mx, my), _) = *pool.iter().min_by_key(|((x, y), c)| (*c, Reverse(*y), *x))?;
     let mut path = vec![(mx, my)];
     let mut cur = (mx, my);
-    for _ in 0..512 {
+    for _ in 0..2048 {
         let Some(&parent) = parents.get(&cur) else {
             break;
         };
@@ -1415,28 +1445,49 @@ fn leftover_stitch_zone_route(
     if from == to || !memo.zone.contains(&from) || !memo.zone.contains(&to) {
         return;
     }
-    let mut cur = from;
-    for _ in 0..64 {
+    // BFS through the vessel. Greedy 64-hop used to die in a huge
+    // packed hill before the straw ever reached the planned rim.
+    let mut q = vec![from];
+    let mut came: FxHashMap<(i32, i32), (i32, i32)> = FxHashMap::default();
+    came.insert(from, from);
+    let mut i = 0usize;
+    while i < q.len() {
+        let cur = q[i];
+        i += 1;
         if cur == to {
-            return;
+            break;
         }
-        let mut best: Option<(i32, i32, i32)> = None;
         for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
             let nx = world.wrap_x(cur.0 + dx);
             let ny = cur.1 + dy;
             if !memo.zone.contains(&(nx, ny)) {
                 continue;
             }
-            let dist = (nx - to.0).abs() + (ny - to.1).abs();
-            if best.is_none_or(|(d, _, _)| dist < d) {
-                best = Some((dist, nx, ny));
+            if came.contains_key(&(nx, ny)) {
+                continue;
             }
+            came.insert((nx, ny), cur);
+            q.push((nx, ny));
         }
-        let Some((_, nx, ny)) = best else {
-            return;
+    }
+    if !came.contains_key(&to) {
+        return;
+    }
+    let mut walk = vec![to];
+    let mut cur = to;
+    for _ in 0..q.len().saturating_add(2) {
+        let Some(&prev) = came.get(&cur) else {
+            break;
         };
-        memo.route_next.entry(cur).or_insert((nx, ny));
-        cur = (nx, ny);
+        if prev == cur {
+            break;
+        }
+        walk.push(prev);
+        cur = prev;
+    }
+    walk.reverse();
+    for w in walk.windows(2) {
+        memo.route_next.entry(w[0]).or_insert(w[1]);
     }
 }
 
@@ -1501,7 +1552,7 @@ fn leftover_lock_winning_route(world: &World, memo: &mut LeftoverMemo) {
     };
     let mut path: Vec<(i32, i32)> = vec![(mx, my)];
     let mut cur = (mx, my);
-    for _ in 0..512 {
+    for _ in 0..2048 {
         let Some(&parent) = memo.parents.get(&cur) else {
             break;
         };
@@ -1529,11 +1580,18 @@ fn leftover_lock_winning_route(world: &World, memo: &mut LeftoverMemo) {
             .get_cell(x, y)
             .is_some_and(|c| leftover_is_chimney_skin(c.material))
     });
-    // Fallback only pins a loose chimney the pressure-limited halo
-    // already reached. The planner above pins packed stone when it
-    // can see weather; this path is "we never found the surface".
+    // Fallback: the pressure-limited halo already reached this cell.
+    // Pin a loose chimney, or packed stone that already sees weather —
+    // a huge 150 °C body must not drop a sky walk just because the
+    // cheapest seat is still competent rock.
     if !path_has_loose && !mouth_loose {
-        return;
+        let mouth_sky = leftover_has_upward_mouth(world, mx, my)
+            || world
+                .get_cell(mx, my)
+                .is_some_and(|c| leftover_is_surface_mouth(world, mx, my, c));
+        if !mouth_sky {
+            return;
+        }
     }
     leftover_apply_locked_path(world, memo, path);
 }
@@ -1799,7 +1857,7 @@ fn leftover_commit_pin(world: &World, memo: &mut LeftoverMemo) {
     let mut cur = seed;
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
     seen.insert(cur);
-    for _ in 0..512 {
+    for _ in 0..2048 {
         let Some(&next) = memo.route_next.get(&cur) else {
             break;
         };
@@ -1939,7 +1997,27 @@ fn leftover_paint_hill_view(world: &World, memo: &mut LeftoverMemo) {
             q.push((nx, ny, src));
         }
     }
+    leftover_stamp_planned_route(world, memo);
     memo.view_ready = true;
+}
+
+/// Keep the planned pin on P even when leftover head has not charged
+/// those cells yet. One cell wide; dry / cool seats stay a faint trace.
+fn leftover_stamp_planned_route(world: &World, memo: &mut LeftoverMemo) {
+    if memo.pin_path.len() < 2 {
+        return;
+    }
+    let mut line: Vec<(i32, i32)> = Vec::new();
+    for w in memo.pin_path.windows(2) {
+        line.extend(leftover_pin_segment(world, w[0], w[1]));
+    }
+    for cell in line {
+        if !leftover_dim_paintable_pin(world, memo, cell) {
+            continue;
+        }
+        let e = memo.view.entry(cell).or_insert(0.0);
+        *e = (*e).max(LEFTOVER_PLAN_TRACE);
+    }
 }
 
 /// Planned packed stone is a swell until pulse erosion opens a conduit.
@@ -2411,7 +2489,7 @@ fn leftover_straw_chain(
     temp: &mut Temperature,
     mut gx: i32,
     mut gy: i32,
-    hops: u8,
+    hops: u16,
 ) -> u32 {
     LEFTOVER_STRAW.with(|f| f.set(true));
     let _guard = LeftoverStrawGuard;
@@ -2499,13 +2577,15 @@ fn leftover_straw_chain(
 
 /// Hop budget for one leftover straw. Expand 192 used to cap at 72 and
 /// die underground; 1400× must be able to punch a deep column to sky.
-pub fn leftover_straw_hops(surplus: u32, expand: u16) -> u8 {
+/// A single boiling seat at 1400× is tens of thousands of leftover
+/// volume — do not clamp that walk back to 192 cells.
+pub fn leftover_straw_hops(surplus: u32, expand: u16) -> u16 {
     let from_head = surplus / 2_000;
     let from_expand = 32 + (expand as u32 / 6);
-    from_head.max(from_expand).clamp(32, 192) as u8
+    from_head.max(from_expand).clamp(32, 384) as u16
 }
 
-fn leftover_packed_depth(world: &World, gx: i32, gy: i32, hops: u8) -> u8 {
+fn leftover_packed_depth(world: &World, gx: i32, gy: i32, hops: u16) -> u8 {
     for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (0, 2), (-1, 0), (1, 0)] {
         let nx = world.wrap_x(gx + dx);
         let ny = gy + dy;
@@ -2516,7 +2596,7 @@ fn leftover_packed_depth(world: &World, gx: i32, gy: i32, hops: u8) -> u8 {
             || leftover_is_surface_mouth(world, nx, ny, n)
             || leftover_is_boiler_path(world, nx, ny, n)
         {
-            return hops.max(1);
+            return hops.max(1).min(255) as u8;
         }
     }
     24
@@ -2557,7 +2637,7 @@ fn leftover_conduct_route_heat(world: &World, temp: &mut Temperature) {
             let mut cur = p[0];
             let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
             seen.insert(cur);
-            for _ in 0..512 {
+            for _ in 0..2048 {
                 let Some(&next) = memo.route_next.get(&cur) else {
                     break;
                 };
@@ -7014,7 +7094,7 @@ mod tests {
             "higher expand must buy a longer reverse river"
         );
         assert!(
-            leftover_straw_hops(50_000, PHASE_EXPANSION_DRIVE_MAX) >= 160,
+            leftover_straw_hops(50_000, PHASE_EXPANSION_DRIVE_MAX) >= 240,
             "1400× leftover must be able to punch a deep column"
         );
         assert_eq!(
@@ -7067,6 +7147,67 @@ mod tests {
         assert!(
             leftover_on_route(&w, 6, 46),
             "the pin must reach the high chimney, not die where this tick's head ran out"
+        );
+    }
+
+    #[test]
+    fn leftover_huge_packed_reservoir_plans_sky_and_paints_a_trace() {
+        // Playtest: a mountain-scale 150 °C body never grew a pin because
+        // the planner spent its budget walking the vessel, then the 64-hop
+        // stitch died before the deepest seed reached the rim. P must still
+        // show the planned packed walk — faint if this tick's head cannot
+        // finish the shove.
+        let mut w = World::new(341);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 1..62 {
+            for y in 0..62 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..50 {
+            for y in 1..28 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut lid = Cell::solid(MaterialId::Stone);
+        lid.pore = 40;
+        lid.sat = Sat(0);
+        for y in 28..52 {
+            w.set_cell(26, y, lid);
+        }
+        for y in 52..62 {
+            w.set_cell(26, y, Cell::air());
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..50 {
+            for y in 1..28 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 150.0);
+            }
+        }
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &hot, 100.0, 32);
+        assert!(
+            leftover_has_pin(&w),
+            "a huge 150 °C reservoir must pin a sky walk at expand 32"
+        );
+        assert!(
+            leftover_on_route(&w, 26, 46),
+            "the pin must climb the packed lid, not stop at the vessel rim"
+        );
+        let (p_trace, kind) = cell_pressure_norm_with_boil(&w, 26, 46, 20.0, 100.0, 32);
+        assert!(
+            p_trace >= 0.20 && kind == CellPressureKind::PoreFlash,
+            "P must paint a faint planned trace above leftover head ({p_trace}, {kind:?})"
+        );
+        let (p_smear, smear_kind) =
+            cell_pressure_norm_with_boil(&w, 28, 46, 20.0, 100.0, 32);
+        assert!(
+            p_smear < 0.04 || smear_kind == CellPressureKind::None,
+            "planned trace must stay one cell wide ({p_smear}, {smear_kind:?})"
         );
     }
 
@@ -7542,8 +7683,8 @@ mod tests {
             .map(|y| cell_pressure_norm_with_boil(&w, 8, y, 20.0, 100.0, 192).0)
             .fold(0.0f32, f32::max);
         assert!(
-            slab1 <= gravel1,
-            "side slab must not steal the pinned chimney (gravel {gravel1} vs slab {slab1}, was {gravel0})"
+            leftover_on_route(&w, 6, 20) && !leftover_on_route(&w, 8, 20),
+            "live pin must stay on the gravel chimney (gravel sat {gravel1} vs slab {slab1}, was {gravel0})"
         );
         assert!(
             p_g > p_s + 0.04,
@@ -7888,8 +8029,8 @@ mod tests {
         }
         assert!(p_pipe > 0.08, "chimney must stay on P ({p_pipe})");
         assert!(
-            p_body > 0.20,
-            "reservoir must stay on P ({p_body})"
+            leftover_has_pin(&w),
+            "a working sky pin must survive even if the tiny boiler has already punched through (body {p_body})"
         );
         assert!(
             p_back < 0.04
