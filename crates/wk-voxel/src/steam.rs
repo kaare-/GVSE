@@ -1269,21 +1269,35 @@ fn leftover_plan_rim_cells(world: &World, memo: &LeftoverMemo) -> (Vec<(i32, i32
     (up, all)
 }
 
-/// High upward-facing rim cells. A mountain-scale vessel next to the
-/// ocean has a huge perimeter; seeding all of it spends the planner
-/// on a lake halo and never climbs 200 packed seats to the crest.
+/// Highest upward-facing rim cells. The leftover vessel is the boiling
+/// body — its rim is the 100 °C isotherm. A 64-cell band along that
+/// front spends the plan budget on a halo and never climbs cold rock
+/// to the crest. One peak, then a corridor.
 fn leftover_plan_high_upward_rim(world: &World, memo: &LeftoverMemo) -> Vec<(i32, i32)> {
     let (mut up, rim) = leftover_plan_rim_cells(world, memo);
     if up.is_empty() {
         return rim;
     }
     let max_y = up.iter().map(|&(_, y)| y).max().unwrap_or(0);
-    up.retain(|&(_, y)| y + 8 >= max_y);
-    if up.len() > 64 {
-        up.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        up.truncate(64);
+    up.retain(|&(x, y)| y == max_y && !leftover_touches_weather_lake(world, x, y));
+    if up.is_empty() {
+        return rim;
+    }
+    if up.len() > 4 {
+        up.sort_by(|a, b| a.0.cmp(&b.0));
+        up.truncate(4);
     }
     up
+}
+
+/// Planner step: climb first. Sideways / down around a wide 100 °C
+/// body is how the faint sky trace never left the hot reservoir.
+fn leftover_plan_step_cost(perm: u8, dx: i32, dy: i32, loose: bool) -> u32 {
+    let mut cost = leftover_step_cost_ex(perm, dx, dy, loose);
+    if dy <= 0 {
+        cost = cost.saturating_add(if dy == 0 { 32 } else { 96 });
+    }
+    cost
 }
 
 fn leftover_cells_reach_open_sky(world: &World, cells: &[(i32, i32)]) -> bool {
@@ -1459,7 +1473,7 @@ fn leftover_plan_mouths_from_seeds(
                     continue;
                 }
             } else if leftover_pin_cell_walkable(world, nx, ny) {
-                leftover_step_cost_ex(
+                leftover_plan_step_cost(
                     permeability_cell(n, &world.hydro).max(1),
                     dx,
                     dy,
@@ -7446,6 +7460,94 @@ mod tests {
         assert!(
             leftover_on_route(&w, 30, 40),
             "a lake pin must not lock out the crest on the next tick"
+        );
+    }
+
+    #[test]
+    fn leftover_plans_through_cold_strata_below_boil() {
+        // Playtest: leftover overlay dies at the 100 °C isotherm. The
+        // pin must still climb packed rock colder than boil — heat and
+        // leftover follow that faint magenta, not the heat mask.
+        let mut w = World::new(353);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 0..62 {
+            for y in 0..62 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 12..50 {
+            for y in 1..8 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        for x in 1..12 {
+            for y in 1..8 {
+                let mut lake = Cell::air();
+                lake.sat = Sat(255);
+                w.set_cell(x, y, lake);
+            }
+            for y in 8..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut cold = Cell::solid(MaterialId::Stone);
+        cold.pore = 40;
+        cold.sat = Sat(cap);
+        for y in 8..52 {
+            w.set_cell(30, y, cold);
+        }
+        for y in 52..62 {
+            w.set_cell(30, y, Cell::air());
+        }
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 12..50 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 150.0);
+            }
+        }
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &hot, 100.0, PHASE_EXPANSION_DRIVE_MAX);
+        assert!(
+            leftover_has_pin(&w),
+            "1400× leftover must pin a sky walk through rock colder than boil"
+        );
+        assert!(
+            leftover_on_route(&w, 30, 36) && leftover_on_route(&w, 30, 51),
+            "the pin must climb the 20 °C column, not stop at the 100 °C rim"
+        );
+        let last = LEFTOVER_MEMO.with(|s| s.borrow().pin_path.last().copied());
+        assert_eq!(
+            last,
+            Some((30, 52)),
+            "the pin must end at open sky, not the foot ocean"
+        );
+        let (p_trace, kind) =
+            cell_pressure_norm_with_boil(&w, 30, 36, 20.0, 100.0, PHASE_EXPANSION_DRIVE_MAX);
+        assert!(
+            p_trace >= 0.20 && kind == CellPressureKind::PoreFlash,
+            "P must show a faint planned trace on cold packed rock ({p_trace}, {kind:?})"
+        );
+        let t_before = hot.at_cell(30, 36);
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: PHASE_EXPANSION_DRIVE_MAX,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in STEAM_EVERY..=STEAM_EVERY + 4 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let t_after = hot.at_cell(30, 36);
+        assert!(
+            t_after > t_before + 8.0,
+            "leftover must carry heat through rock colder than boil ({t_before} → {t_after})"
         );
     }
 
