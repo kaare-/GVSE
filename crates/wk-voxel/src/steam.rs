@@ -2457,6 +2457,17 @@ fn leftover_is_boiler_path(world: &World, gx: i32, gy: i32, cell: Cell) -> bool 
 /// Cadencing the whole rebuild emptied the hill. Absorbing a heat-front
 /// into a frozen zone did the same on the straw-climb canary. Only skip
 /// when every surplus seat is already in last tick's zone.
+fn leftover_cand_outside_ok(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    zone: &FxHashSet<(i32, i32)>,
+) -> bool {
+    leftover_is_open_pipe(world, gx, gy)
+        || (leftover_touches_chimney_skin(world, gx, gy)
+            && !leftover_near_set(world, gx, gy, zone, 2))
+}
+
 fn leftover_zone_covers_cands(
     world: &World,
     zone: &FxHashSet<(i32, i32)>,
@@ -2469,7 +2480,9 @@ fn leftover_zone_covers_cands(
         if zone.contains(&key) {
             continue;
         }
-        if leftover_is_open_pipe(world, key.0, key.1) {
+        // Open pipes and far 4×4 mouth-sinter smears are not the vessel.
+        // A continent of leftover heat has dozens of them every tick.
+        if leftover_cand_outside_ok(world, key.0, key.1, zone) {
             continue;
         }
         return false;
@@ -2513,15 +2526,6 @@ fn leftover_retouch_stable_heads(
     head = head.min(cap_head);
     memo.heads.insert(id, head);
     let _ = seats;
-}
-
-fn leftover_touches_set(
-    world: &World,
-    gx: i32,
-    gy: i32,
-    set: &FxHashSet<(i32, i32)>,
-) -> bool {
-    leftover_near_set(world, gx, gy, set, 1)
 }
 
 fn leftover_near_set(
@@ -2619,7 +2623,7 @@ fn leftover_try_grow_zone(
         if memo.zone.contains(&key) || grown.contains(&key) {
             continue;
         }
-        if leftover_is_open_pipe(world, key.0, key.1) {
+        if leftover_cand_outside_ok(world, key.0, key.1, &memo.zone) {
             continue;
         }
         return false;
