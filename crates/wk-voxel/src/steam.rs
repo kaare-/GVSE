@@ -2640,7 +2640,7 @@ fn rebuild_leftover_field(
         memo.lock_cooldown -= 1;
         for (cells, head, surplus, id) in &painted {
             if let Some(&(gx, gy)) = cells.iter().max_by_key(|(_, y)| *y) {
-                memo.seeds.push((gx, gy, head.max(*surplus)));
+                memo.seeds.push((gx, gy, (*head).max(*surplus)));
                 memo.seed_zone.push(*id);
             }
         }
