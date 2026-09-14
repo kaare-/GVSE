@@ -2448,6 +2448,105 @@ fn leftover_is_boiler_path(world: &World, gx: i32, gy: i32, cell: Cell) -> bool 
     cell.material == MaterialId::Air && void_is_confined(world, gx, gy)
 }
 
+/// How many new surplus cells may join a live vessel without a full
+/// zone flood. Heat-front creep stays in this band; a second boiler
+/// forces a rebuild.
+const LEFTOVER_STABLE_NEW: usize = 64;
+
+fn leftover_touches_set(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    set: &FxHashSet<(i32, i32)>,
+) -> bool {
+    for (dx, dy) in [
+        (0, 1),
+        (0, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+    ] {
+        if set.contains(&(world.wrap_x(gx + dx), gy + dy)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Live pin + leftover body still the same vessel: skip the 28k flood.
+///
+/// Cadencing the whole rebuild emptied the hill. This keeps last tick's
+/// zone when surplus seats only creep along the existing body.
+fn leftover_stable_newcomers(
+    world: &World,
+    zone: &FxHashSet<(i32, i32)>,
+    cands: &FxHashMap<(i32, i32), (u32, u32)>,
+) -> Option<Vec<(i32, i32)>> {
+    if zone.is_empty() {
+        return None;
+    }
+    let mut newcomers = Vec::new();
+    for &key in cands.keys() {
+        if zone.contains(&key) {
+            continue;
+        }
+        if leftover_is_open_pipe(world, key.0, key.1) {
+            continue;
+        }
+        newcomers.push(key);
+        if newcomers.len() > LEFTOVER_STABLE_NEW {
+            return None;
+        }
+    }
+    for &(gx, gy) in &newcomers {
+        if !leftover_touches_set(world, gx, gy, zone) {
+            return None;
+        }
+    }
+    Some(newcomers)
+}
+
+fn leftover_retouch_stable_heads(
+    memo: &mut LeftoverMemo,
+    cands: &FxHashMap<(i32, i32), (u32, u32)>,
+    old_heads: &FxHashMap<(i32, i32), u32>,
+    old_released: &FxHashMap<(i32, i32), u32>,
+) {
+    let mut surplus = 0u32;
+    let mut seats = 0u32;
+    for (key, &(s, cap)) in cands {
+        if memo.zone.contains(key) {
+            surplus = surplus.saturating_add(s);
+            seats = seats.saturating_add(cap);
+        }
+    }
+    let id = if memo.zone.contains(&memo.pin_id) {
+        memo.pin_id
+    } else {
+        memo.zone
+            .iter()
+            .copied()
+            .min_by_key(|&(x, y)| (y, x))
+            .unwrap_or(memo.pin_id)
+    };
+    let mut head = surplus;
+    if let Some(&prev) = old_heads.get(&id) {
+        head = prev.saturating_add(surplus);
+    } else if let Some(&prev) = old_heads.values().next() {
+        head = prev.saturating_add(surplus);
+    }
+    if let Some(&rel) = old_released.get(&id) {
+        head = head.saturating_sub(rel);
+    }
+    let cap_head = surplus.saturating_mul(8).max(surplus);
+    head = head.min(cap_head);
+    memo.heads.insert(id, head);
+    let _ = seats;
+}
+
 fn leftover_zone_body_pack(head: u32, seats: u32, expand: u16) -> f32 {
     let denom = seats.saturating_mul(expand.max(1) as u32).saturating_mul(2);
     let t = (head as f32 / denom.max(1) as f32).clamp(0.0, 1.0);
@@ -2477,12 +2576,10 @@ fn rebuild_leftover_field(
 ) {
     let old_heads = std::mem::take(&mut memo.heads);
     let old_released = std::mem::take(&mut memo.released);
-    memo.map.clear();
     memo.view.clear();
     memo.view_ready = false;
     memo.seeds.clear();
     memo.seed_zone.clear();
-    memo.zone.clear();
     memo.parents.clear();
     memo.costs.clear();
     memo.route_next.clear();
@@ -2522,6 +2619,8 @@ fn rebuild_leftover_field(
         // Punch-through can empty a tiny boiler. A live *sky* pin stays
         // on P so the planned climb does not vanish the tick leftover
         // hits zero. Lake-only pins still drop.
+        memo.zone.clear();
+        memo.map.clear();
         if leftover_pin_keep_when_cold(world, memo) {
             leftover_stamp_planned_route(world, memo);
             return;
@@ -2529,6 +2628,30 @@ fn rebuild_leftover_field(
         leftover_clear_pin(memo);
         return;
     }
+    // Live pin: keep last tick's zone when surplus only creeps along
+    // the same body. Cadencing the whole rebuild emptied the hill;
+    // this does not skip membership when a second vessel appears.
+    if memo.pin_path.len() >= 2 {
+        let t_stable = Instant::now();
+        if let Some(newcomers) = leftover_stable_newcomers(world, &memo.zone, &cands) {
+            for &(gx, gy) in &newcomers {
+                memo.zone.insert((gx, gy));
+                let e = memo.map.entry((gx, gy)).or_insert(0.0);
+                *e = (*e).max(LEFTOVER_PLAN_TRACE);
+            }
+            leftover_retouch_stable_heads(memo, &cands, &old_heads, &old_released);
+            memo.last_flood_us = t_stable.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+            let t_lock = Instant::now();
+            if leftover_try_reuse_pin(world, memo) {
+                leftover_dim_off_pin_arms(world, memo);
+                leftover_refresh_route_set(memo);
+                memo.last_lock_us = t_lock.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+                return;
+            }
+        }
+    }
+    memo.zone.clear();
+    memo.map.clear();
     let t_flood = Instant::now();
     let mut unvisited: FxHashSet<(i32, i32)> = cands.keys().copied().collect();
     let mut components: Vec<(Vec<(i32, i32)>, u32, u32)> = Vec::new();
