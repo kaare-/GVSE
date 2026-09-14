@@ -46,10 +46,15 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 | `pipe_sides` | 4 | Face fraction `1/sides` |
 | `pipe_stroke` | 1400 | Units per beat |
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
+| `phase_expansion_drive` | 96…1400 | Flash volume |
 
 One connected hot-wet body is one root. Adjacent paths share a
-mouth; the longer climb is kept.
-| `phase_expansion_drive` | 96…1400 | Flash volume |
+mouth; the longer climb is kept. Tab → Climate → cavity humidity
+tunes pipe on/off, leftover field, sides, stroke, beat.
+
+Open-sky mouth leaks **mass** only: hot → sky H, cool → distilled
+liquid at the lip. Deposit is mouth / apron only — never the live
+lumen.
 
 ## Locks
 

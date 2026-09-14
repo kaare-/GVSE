@@ -7,11 +7,14 @@
 use wk_material::MaterialId;
 
 use crate::cell::{is_grain, water_capacity_cell, Cell, Sat};
+use crate::displace::park_orphan_water;
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
-use crate::mineral::carry_with_water;
+use crate::humidity::Humidity;
+use crate::mineral::{carry_with_water, dissolved_at, precipitate_vent_mouth};
 use crate::steam::{
-    void_is_confined, SteamConfig, BOIL_POINT_C, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
+    choke_leak_mass, void_is_confined, SteamConfig, BOIL_POINT_C, PHASE_EXPANSION_DRIVE,
+    STEAM_EVERY,
 };
 use crate::temperature::Temperature;
 use crate::worldgen::{live_surface_y, LIVE_SURFACE_SEARCH};
@@ -498,6 +501,7 @@ pub fn pulse_path(
     expand: u16,
     boil: f32,
     sides: u32,
+    humidity: Option<&mut Humidity>,
 ) {
     if path.cells.len() < 2 || stroke == 0 {
         return;
@@ -534,8 +538,7 @@ pub fn pulse_path(
             .get_cell(mouth.0, mouth.1)
             .is_some_and(|c| is_pipe_mouth(world, mouth.0, mouth.1, c))
         {
-            // Unroofed mouth: residual stays on the book (sky H is a later leak).
-            add_residual(world, mouth.0, mouth.1, steam);
+            leak_pipe_mouth(world, temp, humidity, mouth, steam, expand, boil);
         } else {
             add_residual(world, mouth.0, mouth.1, steam);
         }
@@ -551,6 +554,59 @@ pub fn pulse_path(
             );
         }
     }
+    deposit_pipe_mouth(world, path);
+}
+
+/// Open-sky mouth: mass only. Hot → sky H. Cool → distilled liquid at the lip.
+fn leak_pipe_mouth(
+    world: &mut World,
+    temp: &Temperature,
+    humidity: Option<&mut Humidity>,
+    mouth: (i32, i32),
+    steam: u32,
+    expand: u16,
+    boil: f32,
+) {
+    let exp = expand.max(1) as u32;
+    let (mx, my) = (world.wrap_x(mouth.0), mouth.1);
+    let (parked, _) = take_live(world, mx, my, u32::MAX);
+    let steam = steam.saturating_add(parked);
+    let leak_mass = u32::from(choke_leak_mass(steam, expand, 1));
+    let leak_units = (leak_mass * exp).min(steam);
+    let keep = steam.saturating_sub(leak_units);
+    if keep > 0 {
+        add_residual(world, mx, my, keep);
+    }
+    let mut mass = leak_units / exp;
+    let frac = leak_units % exp;
+    if frac > 0 {
+        add_residual(world, mx, my, frac);
+    }
+    if mass == 0 {
+        return;
+    }
+    let mouth_t = temp.at_cell(mx, my);
+    if mouth_t >= boil {
+        if let Some(h) = humidity {
+            let accepted = h.try_add(mx, my, mass as f32).round().max(0.0) as u32;
+            mass = mass.saturating_sub(accepted);
+        }
+    }
+    if mass > 0 {
+        mass = park_orphan_water(world, mx, my, mass);
+    }
+    if mass > 0 {
+        add_residual(world, mx, my, mass * exp);
+    }
+}
+
+/// Depressurise at the mouth only. Never sinter cells on the live lumen.
+fn deposit_pipe_mouth(world: &mut World, path: &PipePath) {
+    let (mx, my) = (world.wrap_x(path.mouth.0), path.mouth.1);
+    if dissolved_at(world, mx, my) == 0 {
+        return;
+    }
+    let _ = precipitate_vent_mouth(world, mx, my, 0.55);
 }
 
 /// Pool residuals inside each 4×4 heat tile into sat when ≥ expand.
@@ -801,7 +857,12 @@ fn claim_wet_hot_body(
 }
 
 /// Ignite, pulse, join, pool. Off-beat is a no-op besides memo bind.
-pub fn apply_pipe_motor(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig) {
+pub fn apply_pipe_motor(
+    world: &mut World,
+    temp: &mut Temperature,
+    cfg: &SteamConfig,
+    mut humidity: Option<&mut Humidity>,
+) {
     if !cfg.enable_pipe {
         return;
     }
@@ -823,7 +884,16 @@ pub fn apply_pipe_motor(world: &mut World, temp: &mut Temperature, cfg: &SteamCo
     join_adjacent_paths();
     let paths = PIPE_MEMO.with(|slot| slot.borrow().paths.clone());
     for path in &paths {
-        pulse_path(world, temp, path, stroke, expand, boil, sides);
+        pulse_path(
+            world,
+            temp,
+            path,
+            stroke,
+            expand,
+            boil,
+            sides,
+            humidity.as_deref_mut(),
+        );
     }
     pool_residuals(world, expand);
 }
@@ -985,7 +1055,7 @@ mod tests {
             cells: vec![(4, 1), (4, 2), (4, 3)],
             mouth: (4, 3),
         };
-        pulse_path(&mut w, &mut hot, &path, 1400, EXP, 100.0, PIPE_SIDES);
+        pulse_path(&mut w, &mut hot, &path, 1400, EXP, 100.0, PIPE_SIDES, None);
         assert_eq!(pipe_live_at(&w, 4, 2), 0, "steam died on contact");
         let c_sat = w.get_cell(4, 3).unwrap().sat.0;
         assert!(c_sat > 0, "condensate marble reached C, sat={c_sat}");
@@ -1062,7 +1132,7 @@ mod tests {
         let before = sat_totals(&w).cell_total;
         for t in 1..=40 {
             w.tick = t;
-            apply_pipe_motor(&mut w, &mut hot, &cfg);
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
         }
         assert_eq!(sat_totals(&w).cell_total, before);
         let (roots, cells) = pipe_path_stats(&w);
@@ -1074,6 +1144,95 @@ mod tests {
             w.pipe_steam.len() + w.pipe_res.len()
         );
         assert!(crate::steam::leftover_soak_stats(&w).zone == 0);
+    }
+
+    #[test]
+    fn cool_mouth_parks_distilled_liquid() {
+        let mut w = plot();
+        w.set_cell(4, 7, Cell::solid(MaterialId::Stone));
+        for y in 8..12 {
+            w.set_cell(4, y, Cell::air());
+        }
+        set_live(&mut w, 4, 7, 1400, 150.0);
+        let before = sat_totals(&w).cell_total;
+        let mut cool = temp_at(&w, 20.0);
+        let path = PipePath {
+            root: (4, 7),
+            cells: vec![(4, 7), (4, 8)],
+            mouth: (4, 8),
+        };
+        pulse_path(&mut w, &mut cool, &path, 1400, EXP, 100.0, PIPE_SIDES, None);
+        let parked = (8..12)
+            .filter_map(|y| w.get_cell(4, y).map(|c| c.sat.0 as u32))
+            .sum::<u32>();
+        assert!(parked >= 1, "distilled lip sat={parked}");
+        assert_eq!(sat_totals(&w).cell_total, before);
+        assert_eq!(w.get_cell(4, 7).unwrap().material, MaterialId::Stone);
+    }
+
+    #[test]
+    fn hot_mouth_leaks_to_sky_h() {
+        let mut w = plot();
+        w.set_cell(4, 7, Cell::solid(MaterialId::Stone));
+        for y in 8..12 {
+            w.set_cell(4, y, Cell::air());
+        }
+        set_live(&mut w, 4, 7, 1400, 150.0);
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let before_cells = sat_totals(&w).cell_total;
+        let before_h = h.total_mass();
+        let mut hot = temp_at(&w, 150.0);
+        let path = PipePath {
+            root: (4, 7),
+            cells: vec![(4, 7), (4, 8)],
+            mouth: (4, 8),
+        };
+        pulse_path(
+            &mut w,
+            &mut hot,
+            &path,
+            1400,
+            EXP,
+            100.0,
+            PIPE_SIDES,
+            Some(&mut h),
+        );
+        let after_cells = sat_totals(&w).cell_total;
+        let after_h = h.total_mass();
+        assert!(after_h > before_h, "sky H {before_h} → {after_h}");
+        let before = before_cells as f64 + before_h as f64;
+        let after = after_cells as f64 + after_h as f64;
+        assert!((before - after).abs() < 0.6, "book+H {before} → {after}");
+    }
+
+    #[test]
+    fn mouth_deposit_skips_the_lumen() {
+        let mut w = plot();
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.sat = Sat(8);
+        gravel.pore = 200;
+        for y in 1..8 {
+            w.set_cell(5, y, gravel);
+        }
+        for y in 8..12 {
+            w.set_cell(5, y, Cell::air());
+        }
+        crate::mineral::add_dissolved(&mut w, 5, 8, 400);
+        set_live(&mut w, 5, 1, 1400, 150.0);
+        let mut cool = temp_at(&w, 20.0);
+        let path = PipePath {
+            root: (5, 1),
+            cells: (1..=8).map(|y| (5, y)).collect(),
+            mouth: (5, 8),
+        };
+        pulse_path(&mut w, &mut cool, &path, 1400, EXP, 100.0, PIPE_SIDES, None);
+        for y in 1..8 {
+            assert_eq!(
+                w.get_cell(5, y).unwrap().material,
+                MaterialId::Gravel,
+                "live lumen sintered at y={y}"
+            );
+        }
     }
 
     #[test]

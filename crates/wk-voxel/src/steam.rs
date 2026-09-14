@@ -3748,12 +3748,12 @@ pub fn apply_steam_with_weather(
     world: &mut World,
     temp: &mut Temperature,
     cfg: &SteamConfig,
-    humidity: Option<&mut Humidity>,
+    mut humidity: Option<&mut Humidity>,
 ) {
     if !cfg.enabled {
         return;
     }
-    apply_leftover_motor(world, temp, cfg);
+    apply_leftover_motor(world, temp, cfg, humidity.as_deref_mut());
     apply_steam_cadence(world, temp, cfg, humidity);
 }
 
@@ -3765,12 +3765,13 @@ pub(crate) fn apply_leftover_motor(
     world: &mut World,
     temp: &mut Temperature,
     cfg: &SteamConfig,
+    humidity: Option<&mut Humidity>,
 ) {
     if !cfg.enabled {
         return;
     }
     if cfg.enable_pipe {
-        crate::pipe::apply_pipe_motor(world, temp, cfg);
+        crate::pipe::apply_pipe_motor(world, temp, cfg, humidity);
     }
     if !cfg.enable_leftover_field {
         return;
