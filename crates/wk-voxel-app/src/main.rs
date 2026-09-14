@@ -1369,7 +1369,7 @@ async fn main() {
         // seats along least resistance — a mound or a finger, not a thermal blob.
         // Leftover vessel + pin. Skip only leftover 0 (no hide-band).
         if pressure_overlay && overlay_k > 0.01 {
-            wk_voxel::prepare_leftover_pressure(
+            wk_voxel::ensure_leftover_hill_view(
                 &scene.world,
                 &scene.temperature,
                 settings.steam.boil_point_c,
@@ -1747,7 +1747,8 @@ async fn main() {
                 if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
                 if settings.steam.enabled {
-                    format!("{}c", scene.world.steam.len())
+                    let (lz, lp) = wk_voxel::leftover_field_stats(&scene.world);
+                    format!("{}c L={lz}/{lp}", scene.world.steam.len())
                 } else {
                     "off".into()
                 },

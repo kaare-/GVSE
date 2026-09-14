@@ -445,7 +445,7 @@ impl World {
             let chunk = unsafe { &mut *(ptr as *mut Chunk) };
             let prev = chunk.get(lx, ly);
             chunk.set(lx, ly, cell);
-            self.note_sky_topo(prev.material, cell.material);
+            self.note_sky_topo(gx, gy, prev.material, cell.material);
             if prev.material == wk_material::MaterialId::Air
                 && cell.material != wk_material::MaterialId::Air
             {
@@ -464,7 +464,7 @@ impl World {
         chunk.set(lx, ly, cell);
         Self::remember_chunk_ptr(self.chunk_cache_id.0, coord, chunk);
         if let Some(prev) = prev {
-            self.note_sky_topo(prev.material, cell.material);
+            self.note_sky_topo(gx, gy, prev.material, cell.material);
             if prev.material == wk_material::MaterialId::Air
                 && cell.material != wk_material::MaterialId::Air
             {
@@ -474,16 +474,23 @@ impl World {
                 self.maybe_wake_competent_for_solidity(gx, gy, prev.material, cell.material);
             }
         } else {
-            self.note_sky_topo(wk_material::MaterialId::Air, cell.material);
+            self.note_sky_topo(gx, gy, wk_material::MaterialId::Air, cell.material);
         }
     }
 
     #[inline]
-    fn note_sky_topo(&mut self, prev: wk_material::MaterialId, next: wk_material::MaterialId) {
+    fn note_sky_topo(
+        &mut self,
+        gx: i32,
+        gy: i32,
+        prev: wk_material::MaterialId,
+        next: wk_material::MaterialId,
+    ) {
         if prev != next
             && (prev == wk_material::MaterialId::Air || next == wk_material::MaterialId::Air)
         {
             self.sky_topo_gen = self.sky_topo_gen.wrapping_add(1);
+            crate::steam::invalidate_sky_probe_near(self, gx, gy);
         }
     }
 
