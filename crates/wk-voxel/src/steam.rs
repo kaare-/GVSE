@@ -2521,18 +2521,28 @@ fn leftover_touches_set(
     gy: i32,
     set: &FxHashSet<(i32, i32)>,
 ) -> bool {
-    for (dx, dy) in [
-        (0, 1),
-        (0, -1),
-        (-1, 0),
-        (1, 0),
-        (-1, 1),
-        (1, 1),
-        (-1, -1),
-        (1, -1),
-    ] {
-        if set.contains(&(world.wrap_x(gx + dx), gy + dy)) {
-            return true;
+    leftover_near_set(world, gx, gy, set, 1)
+}
+
+fn leftover_near_set(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    set: &FxHashSet<(i32, i32)>,
+    radius: i32,
+) -> bool {
+    if set.contains(&(gx, gy)) {
+        return true;
+    }
+    let r = radius.max(1);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            if set.contains(&(world.wrap_x(gx + dx), gy + dy)) {
+                return true;
+            }
         }
     }
     false
@@ -2548,7 +2558,7 @@ fn leftover_try_grow_zone(
     old_heads: &FxHashMap<(i32, i32), u32>,
     old_released: &FxHashMap<(i32, i32), u32>,
 ) -> bool {
-    const GROW_CELLS: usize = 2048;
+    const GROW_CELLS: usize = 8192;
     if memo.zone.is_empty() || memo.pin_path.len() < 2 {
         return false;
     }
@@ -2562,11 +2572,10 @@ fn leftover_try_grow_zone(
         if leftover_is_open_pipe(world, key.0, key.1) {
             continue;
         }
-        // Leftover heat walks the pin first. Those surplus seats are
-        // not on the 28k rim — they still belong to this vessel.
-        if leftover_touches_set(world, key.0, key.1, &memo.zone)
-            || pin.contains(&key)
-            || leftover_touches_set(world, key.0, key.1, &pin)
+        // Leftover heat walks the pin first. A 2-cell vadose park sits
+        // off the 28k rim and still belongs to this vessel.
+        if leftover_near_set(world, key.0, key.1, &memo.zone, 2)
+            || leftover_near_set(world, key.0, key.1, &pin, 2)
         {
             stack.push(key);
         }
@@ -2597,25 +2606,13 @@ fn leftover_try_grow_zone(
             if memo.zone.contains(&(nx, ny)) || grown.contains(&(nx, ny)) {
                 continue;
             }
-            if cands.contains_key(&(nx, ny)) {
-                if pipe_cands.contains(&(nx, ny)) && leftover_is_open_pipe(world, nx, ny) {
-                    continue;
-                }
-                stack.push((nx, ny));
+            if !cands.contains_key(&(nx, ny)) {
                 continue;
             }
-            let Some(n) = world.get_cell(nx, ny) else {
-                continue;
-            };
-            if n.material != MaterialId::Air && !leftover_is_chimney_skin(n.material) {
+            if pipe_cands.contains(&(nx, ny)) && leftover_is_open_pipe(world, nx, ny) {
                 continue;
             }
-            if leftover_is_open_pipe(world, nx, ny) {
-                continue;
-            }
-            if leftover_is_chamber_fill(world, nx, ny, n) {
-                stack.push((nx, ny));
-            }
+            stack.push((nx, ny));
         }
     }
     for &key in cands.keys() {
