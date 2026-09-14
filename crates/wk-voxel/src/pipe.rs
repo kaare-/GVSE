@@ -999,12 +999,13 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) {
     PIPE_MEMO.with(|slot| {
         let mut memo = slot.borrow_mut();
         for (gx, gy, _) in cands {
-            if let Some(i) = nearest_main_idx(world, (gx, gy), &memo.mains) {
-                if should_feed_main(world, (gx, gy), &memo.mains[i])
+            let feed = nearest_main_idx(world, (gx, gy), &memo.mains)
+                .map(|i| memo.mains[i].clone());
+            if let Some(main) = feed.as_ref() {
+                if should_feed_main(world, (gx, gy), main)
                     && memo.feeders.len() < PIPE_MAX_FEEDERS
                 {
-                    memo.feeders
-                        .push(make_feeder(world, (gx, gy), &memo.mains[i]));
+                    memo.feeders.push(make_feeder(world, (gx, gy), main));
                     continue;
                 }
             }
@@ -1014,9 +1015,8 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) {
                     memo.mains.push(path);
                 }
             } else if memo.feeders.len() < PIPE_MAX_FEEDERS {
-                if let Some(i) = nearest_main_idx(world, (gx, gy), &memo.mains) {
-                    memo.feeders
-                        .push(make_feeder(world, (gx, gy), &memo.mains[i]));
+                if let Some(main) = feed.as_ref() {
+                    memo.feeders.push(make_feeder(world, (gx, gy), main));
                 }
             }
         }
