@@ -23,7 +23,9 @@ use crate::worldgen::{live_surface_y, LIVE_SURFACE_SEARCH};
 pub const PIPE_SIDES: u32 = 4;
 pub const PIPE_MAX_LEN: usize = 512;
 pub const PIPE_STROKE_DEFAULT: u32 = 1400;
-const PIPE_MAX_ROOTS: usize = 64;
+const PIPE_MAX_ROOTS: usize = 8;
+const PIPE_CLAIM_BUDGET: usize = 32_768;
+const PIPE_COLUMN_HALO: i32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PipeSeat {
@@ -127,23 +129,44 @@ pub fn pipe_path_stats(world: &World) -> (usize, usize) {
     })
 }
 
-/// P overlay pack from live steam occupancy on the water grid.
+pub fn pipe_painting(world: &World) -> bool {
+    if !world.pipe_steam.is_empty() || !world.pipe_res.is_empty() {
+        return true;
+    }
+    PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        memo.world_id == world.chunk_cache_id.get() && !memo.paths.is_empty()
+    })
+}
+
+fn on_pipe_path(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        memo.world_id == world.chunk_cache_id.get()
+            && memo
+                .paths
+                .iter()
+                .any(|p| p.cells.iter().any(|&c| c == (gx, gy)))
+    })
+}
+
+/// P overlay: locked straw plus the live puff. Not the leftover hill.
 pub fn pipe_overlay_pack(world: &World, gx: i32, gy: i32) -> Option<f32> {
     let gx = world.wrap_x(gx);
     let live = pipe_live_at(world, gx, gy);
-    let Some(cell) = world.get_cell(gx, gy) else {
-        return None;
-    };
-    let cap = water_capacity_cell(cell, &world.hydro).max(1) as u32;
-    let occ = cell.sat.0 as u32 + live;
-    if live == 0 && occ <= cap {
-        return None;
+    if live > 0 {
+        let cap = world
+            .get_cell(gx, gy)
+            .map(|c| water_capacity_cell(c, &world.hydro).max(1) as u32)
+            .unwrap_or(1);
+        let drive = (live as f32 / (cap as f32 * 8.0).max(1.0)).clamp(0.0, 1.0);
+        return Some((0.42 + drive * 0.50).clamp(0.42, 0.92));
     }
-    if live == 0 {
-        return None;
+    if on_pipe_path(world, gx, gy) {
+        return Some(0.30);
     }
-    let drive = (live as f32 / (cap as f32 * 8.0).max(1.0)).clamp(0.0, 1.0);
-    Some((0.20 + drive * 0.72).clamp(0.20, 0.92))
+    None
 }
 
 pub fn face_water_units(liquid: u8, expand: u16, sides: u32) -> f32 {
@@ -296,7 +319,8 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
             if dist > here_dist && !is_pipe_mouth(world, nx, ny, n) {
                 continue;
             }
-            let score = (rank as i32) * 1000 - dist;
+            let up = if dy > 0 { 40 } else { 0 };
+            let score = (rank as i32) * 1000 - dist + up;
             if best.map(|(s, _, _, _, _)| score > s).unwrap_or(true) {
                 best = Some((score, rank, dist, nx, ny));
             }
@@ -755,6 +779,47 @@ fn existing_path_count() -> usize {
     PIPE_MEMO.with(|slot| slot.borrow().paths.len())
 }
 
+/// Pay sat on an existing straw. Do not walk a new route.
+fn reflash_existing(world: &mut World, temp: &Temperature, expand: u16, boil: f32) {
+    let paths = PIPE_MEMO.with(|slot| slot.borrow().paths.clone());
+    for path in paths {
+        let Some((gx, gy, t)) = path.cells.iter().copied().find_map(|(gx, gy)| {
+            let cell = world.get_cell(gx, gy)?;
+            if cell.sat.0 == 0 || cell.material == MaterialId::Air {
+                return None;
+            }
+            let t = temp.at_cell(gx, gy);
+            (t >= boil).then_some((gx, gy, t))
+        }) else {
+            continue;
+        };
+        let _ = pipe_flash(world, gx, gy, t, expand);
+    }
+}
+
+fn path_column_taken(gx: i32) -> bool {
+    PIPE_MEMO.with(|slot| {
+        slot.borrow().paths.iter().any(|p| {
+            p.cells
+                .iter()
+                .any(|&(x, _)| (x - gx).abs() <= PIPE_COLUMN_HALO)
+        })
+    })
+}
+
+fn claim_path_feed(world: &World, temp: &Temperature, path: &PipePath, boil: f32) {
+    let mut taken = claimed_cells();
+    for &(x, y) in &path.cells {
+        for dy in -2..=2 {
+            for dx in -PIPE_COLUMN_HALO..=PIPE_COLUMN_HALO {
+                taken.insert((world.wrap_x(x + dx), y + dy));
+            }
+        }
+        claim_wet_hot_body(world, temp, x, y, boil, &mut taken);
+    }
+    remember_claimed(&taken);
+}
+
 /// Flash wet cells on 4×4 tiles that are already ≥ boil. Not a wet-world scan.
 fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -> usize {
     let already = existing_path_count();
@@ -780,7 +845,7 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
             for lx in 0..tc {
                 let gx = world.wrap_x(hx * tc + lx);
                 let gy = hy * tc + ly;
-                if taken.contains(&(gx, gy)) {
+                if taken.contains(&(gx, gy)) || path_column_taken(gx) {
                     continue;
                 }
                 let Some(cell) = world.get_cell(gx, gy) else {
@@ -807,7 +872,8 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
     for (gx, gy, t) in cands.iter().copied() {
         let _ = pipe_flash(world, gx, gy, t, expand);
         let path = walk_pipe(world, (gx, gy));
-        upsert_path(world, path);
+        upsert_path(world, path.clone());
+        claim_path_feed(world, temp, &path, boil);
     }
     cands.len()
 }
@@ -828,7 +894,7 @@ fn claim_wet_hot_body(
             continue;
         }
         n += 1;
-        if n > 4096 {
+        if n > PIPE_CLAIM_BUDGET {
             break;
         }
         for dy in -1..=1 {
@@ -880,6 +946,7 @@ pub fn apply_pipe_motor(
     if world.tick % beat != 0 {
         return;
     }
+    reflash_existing(world, temp, expand, boil);
     ignite_roots(world, temp, expand, boil);
     join_adjacent_paths();
     let paths = PIPE_MEMO.with(|slot| slot.borrow().paths.clone());
@@ -1144,6 +1211,25 @@ mod tests {
             w.pipe_steam.len() + w.pipe_res.len()
         );
         assert!(crate::steam::leftover_soak_stats(&w).zone == 0);
+        let first = pipe_path_stats(&w);
+        for t in 41..=50 {
+            w.tick = t;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        assert_eq!(
+            pipe_path_stats(&w),
+            first,
+            "later beats must reuse the straw"
+        );
+        w.pipe_steam.clear();
+        assert!(
+            pipe_overlay_pack(&w, 6, 3).is_some(),
+            "P paints the locked path, not only the puff"
+        );
+        assert!(
+            pipe_overlay_pack(&w, 2, 3).is_none(),
+            "side rock stays off the pipe overlay"
+        );
     }
 
     #[test]

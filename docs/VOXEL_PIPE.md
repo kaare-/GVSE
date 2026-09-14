@@ -48,9 +48,10 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
 | `phase_expansion_drive` | 96…1400 | Flash volume |
 
-One connected hot-wet body is one root. Adjacent paths share a
-mouth; the longer climb is kept. Tab → Climate → cavity humidity
-tunes pipe on/off, leftover field, sides, stroke, beat.
+One connected hot-wet body is one locked straw. Later beats reflash
+that path; they do not pick a new route. P paints the straw plus the
+live puff — not leftover's hill / Dijkstra. Tab → Climate → cavity
+humidity tunes pipe on/off, leftover field, sides, stroke, beat.
 
 Open-sky mouth leaks **mass** only: hot → sky H, cool → distilled
 liquid at the lip. Deposit is mouth / apron only — never the live

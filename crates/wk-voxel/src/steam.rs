@@ -3494,6 +3494,11 @@ pub fn cell_pressure_norm_with_boil(
     // leftover_pack_norm is ~0.99 on every hot wet cell and paints a
     // yellow disk over the whole isotherm — keep it only as a fallback
     // when the field has not been prepared.
+    // The cell pipe owns P when it has a locked straw; do not show
+    // leftover's route picker beside it.
+    if crate::pipe::pipe_painting(world) {
+        return (0.0, CellPressureKind::None);
+    }
     let cap = water_capacity_cell(cell, &world.hydro);
     let vol = vapor_volume_units(cell.sat.0 as u32, temp_c, boil, expand);
     let mut pack = leftover_pack_norm(vol, cap as u32);
