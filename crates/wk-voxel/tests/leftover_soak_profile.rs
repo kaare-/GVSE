@@ -22,7 +22,7 @@ fn ms(d: Duration) -> f32 {
 
 fn print_stats(label: &str, leftover: Duration, steam: Duration, stats: LeftoverSoakStats) {
     eprintln!(
-        "{label} leftover={:.2}ms steam={:.2}ms zone={} pin={} map={} route={} reuse={} steam_c={} topo={} probe={}/{}/{} split={}/{}/{}",
+        "{label} leftover={:.2}ms steam={:.2}ms zone={} pin={} map={} route={} reuse={} grow={} steam_c={} topo={} probe={}/{}/{} split={}/{}/{}",
         ms(leftover),
         ms(steam),
         stats.zone,
@@ -30,6 +30,7 @@ fn print_stats(label: &str, leftover: Duration, steam: Duration, stats: Leftover
         stats.map,
         stats.route_set,
         stats.reused_pin,
+        stats.reused_zone,
         stats.steam_cells,
         stats.sky_topo,
         stats.probe_confined,
@@ -275,7 +276,7 @@ fn leftover_short_sky_world_step_soak() {
         if t == 1 || t % 50 == 0 || t % STEAM_EVERY == 0 && t <= 20 {
             let stats = leftover_soak_stats(&world);
             eprintln!(
-                "t={t:4} wall={:.1} leftover={:.2} steam={:.2} phase={:.2} phys={:.1} zone={} pin={} steam_c={} topo={} probe={}/{}/{} reuse={} split={}/{}/{}",
+                "t={t:4} wall={:.1} leftover={:.2} steam={:.2} phase={:.2} phys={:.1} zone={} pin={} steam_c={} topo={} probe={}/{}/{} reuse={} grow={} split={}/{}/{}",
                 ms(wall_acc / n.max(1) as u32),
                 ms(leftover_acc / n.max(1) as u32),
                 ms(steam_acc / n.max(1) as u32),
@@ -289,6 +290,7 @@ fn leftover_short_sky_world_step_soak() {
                 stats.probe_open,
                 stats.probe_boiler,
                 stats.reused_pin,
+                stats.reused_zone,
                 stats.cands_us,
                 stats.flood_us,
                 stats.lock_us,

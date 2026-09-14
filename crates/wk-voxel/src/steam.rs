@@ -317,6 +317,8 @@ struct LeftoverMemo {
     route_set: FxHashSet<(i32, i32)>,
     /// Last rebuild reused the live pin (skipped exterior halo / Dijkstra).
     reused_pin: bool,
+    /// Last rebuild grew last tick's zone instead of walking the body.
+    reused_zone: bool,
     last_cands_us: u32,
     last_flood_us: u32,
     last_lock_us: u32,
@@ -330,6 +332,7 @@ pub struct LeftoverSoakStats {
     pub map: usize,
     pub route_set: usize,
     pub reused_pin: bool,
+    pub reused_zone: bool,
     pub sky_topo: u64,
     pub probe_confined: usize,
     pub probe_open: usize,
@@ -1068,6 +1071,7 @@ pub fn leftover_soak_stats(world: &World) -> LeftoverSoakStats {
         stats.map = memo.map.len();
         stats.route_set = memo.route_set.len();
         stats.reused_pin = memo.reused_pin;
+        stats.reused_zone = memo.reused_zone;
         stats.cands_us = memo.last_cands_us;
         stats.flood_us = memo.last_flood_us;
         stats.lock_us = memo.last_lock_us;
@@ -2511,6 +2515,120 @@ fn leftover_retouch_stable_heads(
     let _ = seats;
 }
 
+fn leftover_touches_set(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    set: &FxHashSet<(i32, i32)>,
+) -> bool {
+    for (dx, dy) in [
+        (0, 1),
+        (0, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+    ] {
+        if set.contains(&(world.wrap_x(gx + dx), gy + dy)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Grow last tick's vessel from the heat front. A far second boiler
+/// (cands the front cannot reach) still forces a full flood.
+fn leftover_try_grow_zone(
+    world: &World,
+    memo: &mut LeftoverMemo,
+    cands: &FxHashMap<(i32, i32), (u32, u32)>,
+    pipe_cands: &FxHashSet<(i32, i32)>,
+    old_heads: &FxHashMap<(i32, i32), u32>,
+    old_released: &FxHashMap<(i32, i32), u32>,
+) -> bool {
+    const GROW_CELLS: usize = 2048;
+    if memo.zone.is_empty() || memo.pin_path.len() < 2 {
+        return false;
+    }
+    let mut stack: Vec<(i32, i32)> = Vec::new();
+    for &key in cands.keys() {
+        if memo.zone.contains(&key) {
+            continue;
+        }
+        if leftover_is_open_pipe(world, key.0, key.1) {
+            continue;
+        }
+        if leftover_touches_set(world, key.0, key.1, &memo.zone) {
+            stack.push(key);
+        }
+    }
+    if stack.is_empty() {
+        return false;
+    }
+    let mut grown: FxHashSet<(i32, i32)> = FxHashSet::default();
+    while let Some((gx, gy)) = stack.pop() {
+        if !grown.insert((gx, gy)) {
+            continue;
+        }
+        if grown.len() > GROW_CELLS {
+            return false;
+        }
+        for (dx, dy) in [
+            (0, 1),
+            (0, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (1, 1),
+            (-1, -1),
+            (1, -1),
+        ] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            if memo.zone.contains(&(nx, ny)) || grown.contains(&(nx, ny)) {
+                continue;
+            }
+            if cands.contains_key(&(nx, ny)) {
+                if pipe_cands.contains(&(nx, ny)) && leftover_is_open_pipe(world, nx, ny) {
+                    continue;
+                }
+                stack.push((nx, ny));
+                continue;
+            }
+            let Some(n) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if n.material != MaterialId::Air && !leftover_is_chimney_skin(n.material) {
+                continue;
+            }
+            if leftover_is_open_pipe(world, nx, ny) {
+                continue;
+            }
+            if leftover_is_chamber_fill(world, nx, ny, n) {
+                stack.push((nx, ny));
+            }
+        }
+    }
+    for &key in cands.keys() {
+        if memo.zone.contains(&key) || grown.contains(&key) {
+            continue;
+        }
+        if leftover_is_open_pipe(world, key.0, key.1) {
+            continue;
+        }
+        return false;
+    }
+    for &(gx, gy) in &grown {
+        memo.zone.insert((gx, gy));
+        let e = memo.map.entry((gx, gy)).or_insert(0.0);
+        *e = (*e).max(LEFTOVER_PLAN_TRACE);
+    }
+    leftover_retouch_stable_heads(memo, cands, old_heads, old_released);
+    true
+}
+
 fn leftover_zone_body_pack(head: u32, seats: u32, expand: u16) -> f32 {
     let denom = seats.saturating_mul(expand.max(1) as u32).saturating_mul(2);
     let t = (head as f32 / denom.max(1) as f32).clamp(0.0, 1.0);
@@ -2547,6 +2665,7 @@ fn rebuild_leftover_field(
     memo.parents.clear();
     memo.costs.clear();
     memo.route_next.clear();
+    memo.reused_zone = false;
     // pin_* stays. A rebuild must not retarget a live chimney.
     let coords: Vec<ChunkCoord> = world
         .chunks
@@ -2592,13 +2711,26 @@ fn rebuild_leftover_field(
         leftover_clear_pin(memo);
         return;
     }
-    // Live pin: keep last tick's zone when surplus only creeps along
-    // the same body. Cadencing the whole rebuild emptied the hill;
-    // this does not skip membership when a second vessel appears.
+    // Live pin: keep last tick's zone when surplus stays inside it, or
+    // grow from the heat front. A far second boiler still full-floods.
+    // Cadencing the whole rebuild emptied the hill.
     if memo.pin_path.len() >= 2 {
         let t_stable = Instant::now();
-        if leftover_zone_covers_cands(world, &memo.zone, &cands) {
+        let stable = if leftover_zone_covers_cands(world, &memo.zone, &cands) {
             leftover_retouch_stable_heads(memo, &cands, &old_heads, &old_released);
+            true
+        } else {
+            leftover_try_grow_zone(
+                world,
+                memo,
+                &cands,
+                &pipe_cands,
+                &old_heads,
+                &old_released,
+            )
+        };
+        if stable {
+            memo.reused_zone = true;
             memo.last_flood_us = t_stable.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
             let t_lock = Instant::now();
             if leftover_try_reuse_pin(world, memo) {
@@ -2607,6 +2739,7 @@ fn rebuild_leftover_field(
                 memo.last_lock_us = t_lock.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
                 return;
             }
+            memo.reused_zone = false;
         }
     }
     memo.zone.clear();
@@ -5381,7 +5514,9 @@ fn leftover_cell_charged(world: &World, gx: i32, gy: i32) -> bool {
     let id = world.chunk_cache_id.get();
     LEFTOVER_MEMO.with(|slot| {
         let memo = slot.borrow();
-        memo.world_id == id && memo.map.contains_key(&(gx, gy))
+        memo.world_id == id
+            && (memo.zone.contains(&(gx, gy))
+                || memo.map.get(&(gx, gy)).is_some_and(|&p| p > 0.0))
     })
 }
 
