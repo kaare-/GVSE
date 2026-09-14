@@ -2428,7 +2428,6 @@ fn rebuild_leftover_field(
         return;
     }
     let mut unvisited: FxHashSet<(i32, i32)> = cands.keys().copied().collect();
-    let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
     let mut components: Vec<(Vec<(i32, i32)>, u32, u32)> = Vec::new();
     while let Some(&start) = unvisited.iter().next() {
         // Open sky chimneys stay the pipe. Buried loose / sinter /
@@ -2483,6 +2482,7 @@ fn rebuild_leftover_field(
         components.push((cells, surplus, seats));
     }
     let max_zone = components.iter().map(|(c, _, _)| c.len()).max().unwrap_or(0);
+    let mut painted: Vec<(Vec<(i32, i32)>, u32, u32, (i32, i32))> = Vec::new();
     for (cells, surplus, seats) in components {
         // 4×4 smear / mouth sinter next to a live pipe is not a vessel
         // when a real packed reservoir exists.
@@ -2522,9 +2522,7 @@ fn rebuild_leftover_field(
             .max()
             .unwrap_or(1)
             .max(1);
-        let mut in_zone: FxHashSet<(i32, i32)> = FxHashSet::default();
         for &(gx, gy) in &cells {
-            in_zone.insert((gx, gy));
             memo.zone.insert((gx, gy));
             let pack = if let Some(&(s, cap)) = cands.get(&(gx, gy)) {
                 let local = leftover_pack_norm(cap.saturating_add(s), cap.max(1));
@@ -2537,6 +2535,19 @@ fn rebuild_leftover_field(
                 memo.map.insert((gx, gy), pack);
             }
         }
+        painted.push((cells, head, surplus, id));
+    }
+    // Zone membership must stay fresh every tick (cadencing the
+    // rebuild emptied the wet hill). A live pin does not need the
+    // 4096-cell exterior halo or Dijkstra — straw already has a route.
+    if leftover_try_reuse_pin(world, memo) {
+        leftover_dim_off_pin_arms(world, memo);
+        leftover_refresh_route_set(memo);
+        return;
+    }
+    let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
+    for (cells, head, surplus, id) in painted {
+        let in_zone: FxHashSet<(i32, i32)> = cells.iter().copied().collect();
         let mut outlets: Vec<(i32, i32, i32)> = Vec::new();
         for &(gx, gy) in &cells {
             let mut face = 0i32;
@@ -2760,6 +2771,9 @@ fn leftover_erode_planned_route(world: &mut World) {
             break;
         }
         if crate::cell::is_competent_rock(cell.material) {
+            if leftover_route_is_open(world, gx, gy, cell) {
+                continue;
+            }
             let _ = widen_aperture(world, gx, gy, 48, 1.6, 0x51A7_u64, false);
             continue;
         }
@@ -7944,6 +7958,19 @@ mod tests {
             assert!(
                 leftover_on_route(&w, x, y),
                 "route_set must include pin dests, not only keys"
+            );
+        }
+        w.tick = STEAM_EVERY + 1;
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        let last2 = LEFTOVER_MEMO.with(|s| s.borrow().pin_path.last().copied());
+        assert_eq!(
+            last, last2,
+            "a live pin must reuse without a new exterior halo walk"
+        );
+        if let Some((x, y)) = last2 {
+            assert!(
+                leftover_on_route(&w, x, y),
+                "reused pin dests stay leftover-on-route"
             );
         }
     }
