@@ -2719,7 +2719,8 @@ fn rebuild_leftover_field(
         let stable = if leftover_zone_covers_cands(world, &memo.zone, &cands) {
             leftover_retouch_stable_heads(memo, &cands, &old_heads, &old_released);
             true
-        } else {
+        } else if memo.zone.len() > LEFTOVER_FIELD_CELLS {
+            // Small climbing hills still full-flood (straw-climb canary).
             leftover_try_grow_zone(
                 world,
                 memo,
@@ -2728,6 +2729,8 @@ fn rebuild_leftover_field(
                 &old_heads,
                 &old_released,
             )
+        } else {
+            false
         };
         if stable {
             memo.reused_zone = true;
@@ -5514,9 +5517,7 @@ fn leftover_cell_charged(world: &World, gx: i32, gy: i32) -> bool {
     let id = world.chunk_cache_id.get();
     LEFTOVER_MEMO.with(|slot| {
         let memo = slot.borrow();
-        memo.world_id == id
-            && (memo.zone.contains(&(gx, gy))
-                || memo.map.get(&(gx, gy)).is_some_and(|&p| p > 0.0))
+        memo.world_id == id && memo.map.contains_key(&(gx, gy))
     })
 }
 
