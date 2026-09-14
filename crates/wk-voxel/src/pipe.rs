@@ -23,7 +23,8 @@ use crate::worldgen::{live_skin_y, live_surface_y, LIVE_SURFACE_SEARCH};
 pub const PIPE_SIDES: u32 = 4;
 pub const PIPE_MAX_LEN: usize = 512;
 pub const PIPE_STROKE_DEFAULT: u32 = 1400;
-const PIPE_MAX_ROOTS: usize = 8;
+const PIPE_MAX_MAINS: usize = 8;
+const PIPE_MAX_FEEDERS: usize = 24;
 const PIPE_CLAIM_BUDGET: usize = 32_768;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,7 +64,10 @@ pub enum HopKind {
 #[derive(Default)]
 struct PipeMemo {
     world_id: u64,
-    paths: Vec<PipePath>,
+    /// Pipe motor has run on this world — leftover overlay stays off.
+    active: bool,
+    mains: Vec<PipePath>,
+    feeders: Vec<PipePath>,
     claimed: FxHashSet<(i32, i32)>,
 }
 
@@ -124,10 +128,10 @@ pub fn pipe_path_stats(world: &World) -> (usize, usize) {
             return (0, 0);
         }
         let mut cells = memo.claimed.clone();
-        for path in &memo.paths {
+        for path in memo.mains.iter().chain(memo.feeders.iter()) {
             cells.extend(path.cells.iter().copied());
         }
-        (memo.paths.len(), cells.len())
+        (memo.mains.len() + memo.feeders.len(), cells.len())
     })
 }
 
@@ -137,7 +141,7 @@ pub fn pipe_painting(world: &World) -> bool {
     }
     PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
-        memo.world_id == world.chunk_cache_id.get() && !memo.paths.is_empty()
+        memo.world_id == world.chunk_cache_id.get() && memo.active
     })
 }
 
@@ -147,8 +151,9 @@ fn on_pipe_path(world: &World, gx: i32, gy: i32) -> bool {
         let memo = slot.borrow();
         memo.world_id == world.chunk_cache_id.get()
             && memo
-                .paths
+                .mains
                 .iter()
+                .chain(memo.feeders.iter())
                 .any(|p| p.cells.iter().any(|&c| c == (gx, gy)))
     })
 }
@@ -421,25 +426,6 @@ fn walk_toward(world: &World, from: (i32, i32), targets: &[(i32, i32)]) -> Vec<(
     cells
 }
 
-fn splice_onto(world: &World, keep: PipePath, other: &PipePath) -> PipePath {
-    if keep.cells.iter().any(|&c| c == other.root) {
-        return keep;
-    }
-    let link = walk_toward(world, other.root, &keep.cells);
-    let mut cells = link;
-    let mut seen: FxHashSet<(i32, i32)> = cells.iter().copied().collect();
-    for &c in &keep.cells {
-        if seen.insert(c) {
-            cells.push(c);
-        }
-    }
-    PipePath {
-        root: other.root,
-        cells,
-        mouth: keep.mouth,
-    }
-}
-
 fn set_live(world: &mut World, gx: i32, gy: i32, live: u32, t_c: f32) {
     let key = (world.wrap_x(gx), gy);
     if live == 0 {
@@ -691,6 +677,36 @@ pub fn pulse_path(
     deposit_pipe_mouth(world, path);
 }
 
+/// March existing pore water one hop toward the path mouth (main line
+/// or sky). Mass-flat: unplaced sat returns to the donor.
+fn pump_water_along(world: &mut World, path: &PipePath, max_sat: u8) {
+    if max_sat == 0 || path.cells.len() < 2 {
+        return;
+    }
+    for w in path.cells.windows(2) {
+        let from = w[0];
+        let dest = w[1];
+        let Some(cell) = world.get_cell(from.0, from.1) else {
+            continue;
+        };
+        if cell.sat.0 == 0 || cell.material == MaterialId::Air {
+            continue;
+        }
+        let took = take_sat(world, from.0, from.1, cell.sat.0.min(max_sat));
+        if took == 0 {
+            continue;
+        }
+        let left = deliver_liquid(world, from, dest, took);
+        if left > 0 {
+            let _ = add_sat(world, from.0, from.1, left);
+        }
+    }
+}
+
+fn stroke_sat(stroke: u32, expand: u16) -> u8 {
+    (stroke / u32::from(expand.max(1))).clamp(1, 255) as u8
+}
+
 /// Open-sky mouth: mass only. Hot → sky H. Cool → distilled liquid at the lip.
 fn leak_pipe_mouth(
     world: &mut World,
@@ -786,21 +802,11 @@ fn bind_memo(world: &World) {
         let mut memo = slot.borrow_mut();
         if memo.world_id != world.chunk_cache_id.get() {
             memo.world_id = world.chunk_cache_id.get();
-            memo.paths.clear();
+            memo.mains.clear();
+            memo.feeders.clear();
             memo.claimed.clear();
         }
-    });
-}
-
-fn upsert_path(world: &World, path: PipePath) {
-    PIPE_MEMO.with(|slot| {
-        let mut memo = slot.borrow_mut();
-        if let Some(old) = memo.paths.iter_mut().find(|p| p.root == path.root) {
-            *old = path;
-        } else {
-            memo.paths.push(path);
-        }
-        let _ = world;
+        memo.active = true;
     });
 }
 
@@ -825,93 +831,93 @@ fn surface_dist(world: &World, p: (i32, i32)) -> i32 {
     (free_surface_y(world, p.0, p.1) - p.1).max(0)
 }
 
-/// Neighbour reservoir closer than either free surface → one pipe system.
-fn closer_than_surface(world: &World, a: (i32, i32), b: (i32, i32)) -> bool {
-    let d = wrap_chebyshev(world, a, b);
-    d < surface_dist(world, a) || d < surface_dist(world, b)
-}
-
-fn reservoirs_should_join(world: &World, a: &PipePath, b: &PipePath) -> bool {
-    closer_than_surface(world, a.root, b.root)
-}
-
 fn claimed_cells() -> FxHashSet<(i32, i32)> {
     PIPE_MEMO.with(|slot| slot.borrow().claimed.clone())
 }
 
-fn remember_claimed(cells: &FxHashSet<(i32, i32)>) {
+fn dist_to_path(world: &World, p: (i32, i32), path: &PipePath) -> i32 {
+    path.cells
+        .iter()
+        .map(|&c| wrap_chebyshev(world, p, c))
+        .min()
+        .unwrap_or(i32::MAX)
+}
+
+fn nearest_main_idx(world: &World, p: (i32, i32), mains: &[PipePath]) -> Option<usize> {
+    mains
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, m)| dist_to_path(world, p, m))
+        .map(|(i, _)| i)
+}
+
+/// Closer to the locked straw than to this cell's free surface.
+fn should_feed_main(world: &World, boiler: (i32, i32), main: &PipePath) -> bool {
+    dist_to_path(world, boiler, main) < surface_dist(world, boiler)
+}
+
+fn make_feeder(world: &World, root: (i32, i32), main: &PipePath) -> PipePath {
+    let cells = walk_toward(world, root, &main.cells);
+    let mouth = *cells.last().unwrap_or(&root);
+    PipePath {
+        root: (world.wrap_x(root.0), root.1),
+        cells,
+        mouth,
+    }
+}
+
+fn rebuild_claimed(world: &World, temp: &Temperature, boil: f32) {
+    let paths = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        memo.mains
+            .iter()
+            .chain(memo.feeders.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    let mut taken = FxHashSet::default();
+    for path in &paths {
+        claim_wet_hot_body(world, temp, path.root.0, path.root.1, boil, &mut taken);
+        for &(x, y) in &path.cells {
+            claim_wet_hot_body(world, temp, x, y, boil, &mut taken);
+        }
+    }
     PIPE_MEMO.with(|slot| {
-        slot.borrow_mut().claimed.extend(cells.iter().copied());
+        slot.borrow_mut().claimed = taken;
     });
 }
 
-fn path_halo() -> FxHashSet<(i32, i32)> {
-    PIPE_MEMO.with(|slot| {
-        let memo = slot.borrow();
-        let mut cells = FxHashSet::default();
-        for path in &memo.paths {
-            for &(x, y) in &path.cells {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        cells.insert((x + dx, y + dy));
-                    }
-                }
-            }
-        }
-        cells
-    })
-}
-
-fn join_adjacent_paths(world: &World) {
+fn rewalk_network(world: &World) {
     PIPE_MEMO.with(|slot| {
         let mut memo = slot.borrow_mut();
-        if memo.paths.len() < 2 {
-            return;
+        for main in &mut memo.mains {
+            *main = walk_pipe(world, main.root);
         }
-        let n = memo.paths.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-        let find = |parent: &mut [usize], mut i: usize| {
-            while parent[i] != i {
-                parent[i] = parent[parent[i]];
-                i = parent[i];
-            }
-            i
-        };
-        for i in 0..n {
-            for j in (i + 1)..n {
-                if reservoirs_should_join(world, &memo.paths[i], &memo.paths[j]) {
-                    let pi = find(&mut parent, i);
-                    let pj = find(&mut parent, j);
-                    if pi != pj {
-                        parent[pj] = pi;
-                    }
-                }
+        memo.mains.retain(|p| p.cells.len() >= 2);
+        if memo.mains.is_empty() && !memo.feeders.is_empty() {
+            let first = memo.feeders.remove(0);
+            memo.mains.push(walk_pipe(world, first.root));
+            memo.mains.retain(|p| p.cells.len() >= 2);
+        }
+        let mains = memo.mains.clone();
+        for feeder in &mut memo.feeders {
+            if let Some(i) = nearest_main_idx(world, feeder.root, &mains) {
+                *feeder = make_feeder(world, feeder.root, &mains[i]);
             }
         }
-        let mut groups: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-        for i in 0..n {
-            groups.entry(find(&mut parent, i)).or_default().push(i);
-        }
-        let mut joined = Vec::new();
-        for mut idxs in groups.into_values() {
-            idxs.sort_by_key(|&i| std::cmp::Reverse(memo.paths[i].cells.len()));
-            let mut keep = memo.paths[idxs[0]].clone();
-            for &i in &idxs[1..] {
-                keep = splice_onto(world, keep, &memo.paths[i]);
-            }
-            joined.push(keep);
-        }
-        memo.paths = joined;
+        memo.feeders.retain(|p| p.cells.len() >= 2);
     });
 }
 
-fn existing_path_count() -> usize {
-    PIPE_MEMO.with(|slot| slot.borrow().paths.len())
-}
-
-/// Pay sat on an existing straw. Do not walk a new route.
-fn reflash_existing(world: &mut World, temp: &Temperature, expand: u16, boil: f32) {
-    let paths = PIPE_MEMO.with(|slot| slot.borrow().paths.clone());
+fn reflash_network(world: &mut World, temp: &Temperature, expand: u16, boil: f32) {
+    let paths = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        memo.mains
+            .iter()
+            .chain(memo.feeders.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+    });
     for path in paths {
         let Some((gx, gy, t)) = path.cells.iter().copied().find_map(|(gx, gy)| {
             let cell = world.get_cell(gx, gy)?;
@@ -927,46 +933,25 @@ fn reflash_existing(world: &mut World, temp: &Temperature, expand: u16, boil: f3
     }
 }
 
-fn path_near_taken(world: &World, gx: i32, gy: i32) -> bool {
-    PIPE_MEMO.with(|slot| {
-        slot.borrow()
-            .paths
-            .iter()
-            .any(|p| closer_than_surface(world, p.root, (gx, gy)))
-    })
-}
-
-fn cand_near_taken(world: &World, cands: &[(i32, i32, f32)], gx: i32, gy: i32) -> bool {
-    cands
-        .iter()
-        .any(|&(x, y, _)| closer_than_surface(world, (x, y), (gx, gy)))
-}
-
-fn claim_path_feed(world: &World, temp: &Temperature, path: &PipePath, boil: f32) {
-    let mut taken = claimed_cells();
-    for &(x, y) in &path.cells {
-        claim_wet_hot_body(world, temp, x, y, boil, &mut taken);
-    }
-    remember_claimed(&taken);
-}
-
-/// Flash wet cells on 4×4 tiles that are already ≥ boil. Not a wet-world scan.
-fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -> usize {
-    let already = existing_path_count();
-    if already >= PIPE_MAX_ROOTS {
-        return 0;
+fn collect_boiler_cands(
+    world: &World,
+    temp: &Temperature,
+    boil: f32,
+    skip: &FxHashSet<(i32, i32)>,
+    room: usize,
+) -> Vec<(i32, i32, f32)> {
+    if room == 0 {
+        return Vec::new();
     }
     let tc = temp.tile_cols.max(1);
-    let room = PIPE_MAX_ROOTS - already;
     let mut tiles: Vec<(i32, i32, f32)> = temp
         .cells
         .iter()
         .filter_map(|(&(hx, hy), &t)| (t >= boil).then_some((hx, hy, t)))
         .collect();
     tiles.sort_by_key(|&(hx, hy, _)| (hy, hx));
-    let mut boilers = claimed_cells();
-    let halo = path_halo();
-    let mut cands: Vec<(i32, i32, f32)> = Vec::new();
+    let mut cands = Vec::new();
+    let mut seen = skip.clone();
     for (hx, hy, t) in tiles {
         if cands.len() >= room {
             break;
@@ -975,11 +960,7 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
             for lx in 0..tc {
                 let gx = world.wrap_x(hx * tc + lx);
                 let gy = hy * tc + ly;
-                if boilers.contains(&(gx, gy))
-                    || halo.contains(&(gx, gy))
-                    || path_near_taken(world, gx, gy)
-                    || cand_near_taken(world, &cands, gx, gy)
-                {
+                if seen.contains(&(gx, gy)) {
                     continue;
                 }
                 let Some(cell) = world.get_cell(gx, gy) else {
@@ -988,11 +969,8 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
                 if cell.sat.0 == 0 || cell.material == MaterialId::Air {
                     continue;
                 }
-                if pipe_live_at(world, gx, gy) > 0 {
-                    continue;
-                }
                 cands.push((gx, gy, t));
-                claim_wet_hot_body(world, temp, gx, gy, boil, &mut boilers);
+                claim_wet_hot_body(world, temp, gx, gy, boil, &mut seen);
                 if cands.len() >= room {
                     break;
                 }
@@ -1002,14 +980,47 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
             }
         }
     }
-    remember_claimed(&boilers);
-    for (gx, gy, t) in cands.iter().copied() {
-        let _ = pipe_flash(world, gx, gy, t, expand);
-        let path = walk_pipe(world, (gx, gy));
-        upsert_path(world, path.clone());
-        claim_path_feed(world, temp, &path, boil);
+    cands
+}
+
+/// New boilers walk to the main straw when that is closer than the surface.
+fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) {
+    let (mains, feeders) = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        (memo.mains.clone(), memo.feeders.clone())
+    });
+    let room = (PIPE_MAX_MAINS - mains.len().min(PIPE_MAX_MAINS))
+        + (PIPE_MAX_FEEDERS - feeders.len().min(PIPE_MAX_FEEDERS));
+    let skip = claimed_cells();
+    let cands = collect_boiler_cands(world, temp, boil, &skip, room);
+    if cands.is_empty() {
+        return;
     }
-    cands.len()
+    PIPE_MEMO.with(|slot| {
+        let mut memo = slot.borrow_mut();
+        for (gx, gy, _) in cands {
+            if let Some(i) = nearest_main_idx(world, (gx, gy), &memo.mains) {
+                if should_feed_main(world, (gx, gy), &memo.mains[i])
+                    && memo.feeders.len() < PIPE_MAX_FEEDERS
+                {
+                    memo.feeders
+                        .push(make_feeder(world, (gx, gy), &memo.mains[i]));
+                    continue;
+                }
+            }
+            if memo.mains.len() < PIPE_MAX_MAINS {
+                let path = walk_pipe(world, (gx, gy));
+                if path.cells.len() >= 2 {
+                    memo.mains.push(path);
+                }
+            } else if memo.feeders.len() < PIPE_MAX_FEEDERS {
+                if let Some(i) = nearest_main_idx(world, (gx, gy), &memo.mains) {
+                    memo.feeders
+                        .push(make_feeder(world, (gx, gy), &memo.mains[i]));
+                }
+            }
+        }
+    });
 }
 
 /// Mark the connected wet body at/above boil so one hill is one root.
@@ -1063,7 +1074,7 @@ fn claim_wet_hot_body(
     }
 }
 
-/// Ignite, pulse, join, pool. Off-beat is a no-op besides memo bind.
+/// Rewalk, attach feeders, pulse steam + water. Off-beat only binds memo.
 pub fn apply_pipe_motor(
     world: &mut World,
     temp: &mut Temperature,
@@ -1087,11 +1098,18 @@ pub fn apply_pipe_motor(
     if world.tick % beat != 0 {
         return;
     }
-    reflash_existing(world, temp, expand, boil);
-    ignite_roots(world, temp, expand, boil);
-    join_adjacent_paths(world);
-    let paths = PIPE_MEMO.with(|slot| slot.borrow().paths.clone());
-    for path in &paths {
+    rewalk_network(world);
+    rebuild_claimed(world, temp, boil);
+    attach_new_boilers(world, temp, boil);
+    rewalk_network(world);
+    rebuild_claimed(world, temp, boil);
+    reflash_network(world, temp, expand, boil);
+    let (feeders, mains) = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        (memo.feeders.clone(), memo.mains.clone())
+    });
+    let water = stroke_sat(stroke, expand);
+    for path in feeders.iter().chain(mains.iter()) {
         pulse_path(
             world,
             temp,
@@ -1102,6 +1120,7 @@ pub fn apply_pipe_motor(
             sides,
             humidity.as_deref_mut(),
         );
+        pump_water_along(world, path, water);
     }
     pool_residuals(world, expand);
 }
@@ -1467,10 +1486,100 @@ mod tests {
             w.tick = t;
             apply_pipe_motor(&mut w, &mut hot, &cfg, None);
         }
-        let (roots, _) = pipe_path_stats(&w);
-        assert_eq!(
-            roots, 1,
-            "20-cell gap is closer than a 30-cell climb, roots={roots}"
+        let (n, _) = pipe_path_stats(&w);
+        let feeders = PIPE_MEMO.with(|slot| slot.borrow().feeders.len());
+        let mains = PIPE_MEMO.with(|slot| slot.borrow().mains.len());
+        assert_eq!(mains, 1, "one main straw, mains={mains}");
+        assert!(
+            feeders >= 1 || n >= 2,
+            "deep neighbour walks onto the main, n={n} feeders={feeders}"
+        );
+        assert!(
+            pipe_overlay_pack(&w, 4, 1).is_some() && pipe_overlay_pack(&w, 24, 1).is_some(),
+            "both boilers stay on the pipe"
+        );
+    }
+
+    #[test]
+    fn feeder_pumps_water_toward_the_main() {
+        let mut w = plot();
+        for x in 0..16 {
+            w.set_cell(x, 1, {
+                let mut c = Cell::solid(MaterialId::Stone);
+                c.sat = Sat(8);
+                c
+            });
+        }
+        w.set_cell(4, 1, {
+            let mut c = wet_gravel(&w);
+            c.sat = Sat(2);
+            c
+        });
+        w.set_cell(12, 1, {
+            let mut c = wet_gravel(&w);
+            c.sat = Sat(20);
+            c
+        });
+        let path = PipePath {
+            root: (12, 1),
+            cells: (4..=12).rev().map(|x| (x, 1)).collect(),
+            mouth: (4, 1),
+        };
+        let sat_sum = |w: &World| {
+            (0..16)
+                .map(|x| w.get_cell(x, 1).map(|c| c.sat.0 as u32).unwrap_or(0))
+                .sum::<u32>()
+        };
+        let before_src = w.get_cell(12, 1).unwrap().sat.0;
+        let before_mid = w.get_cell(8, 1).unwrap().sat.0;
+        let before_sum = sat_sum(&w);
+        pump_water_along(&mut w, &path, 6);
+        let after_src = w.get_cell(12, 1).unwrap().sat.0;
+        let after_mid = w.get_cell(8, 1).unwrap().sat.0;
+        assert!(after_src < before_src, "feeder sat {before_src} → {after_src}");
+        assert!(
+            after_mid > before_mid,
+            "water should march toward the main, mid {before_mid} → {after_mid}"
+        );
+        assert_eq!(sat_sum(&w), before_sum, "pump is mass-flat");
+    }
+
+    #[test]
+    fn main_rewalks_when_mouth_is_blocked() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..10 {
+            w.set_cell(6, y, wet_gravel(&w));
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for y in 1..10 {
+            let (hx, hy) = hot.tile_of(6, y);
+            hot.set_tile_c(hx, hy, 150.0);
+        }
+        let cfg = pipe_cfg();
+        for t in 1..=20 {
+            w.tick = t;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        let mouth = PIPE_MEMO.with(|slot| slot.borrow().mains[0].mouth);
+        w.set_cell(mouth.0, mouth.1, Cell::solid(MaterialId::Stone));
+        w.set_cell(mouth.0 + 1, mouth.1, Cell::air());
+        w.set_cell(mouth.0 + 1, mouth.1 + 1, Cell::air());
+        for t in 21..=40 {
+            w.tick = t;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        let new_mouth = PIPE_MEMO.with(|slot| slot.borrow().mains[0].mouth);
+        assert_ne!(
+            new_mouth, mouth,
+            "blocked sky mouth must rewalk, still {mouth:?}"
         );
     }
 

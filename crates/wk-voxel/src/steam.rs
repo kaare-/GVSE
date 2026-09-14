@@ -3777,6 +3777,9 @@ pub(crate) fn apply_leftover_motor(
     }
     if cfg.enable_pipe {
         crate::pipe::apply_pipe_motor(world, temp, cfg, humidity);
+        // Pipe owns leftover. The 28k field and its Dijkstra walker
+        // must not shove beside the straw.
+        return;
     }
     if !cfg.enable_leftover_field {
         return;
@@ -3797,6 +3800,11 @@ pub(crate) fn apply_steam_cadence(
     humidity: Option<&mut Humidity>,
 ) {
     if !cfg.enabled {
+        return;
+    }
+    if cfg.enable_pipe {
+        // Cadence boil / flood / assault is the other shortest-route
+        // pressure walker. Pipe is the only leftover motor in play.
         return;
     }
     let period = cfg.period_ticks.max(1);

@@ -48,14 +48,15 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
 | `phase_expansion_drive` | 96…1400 | Flash volume |
 
-One connected hot-wet body is one locked straw. Separate boiling
-blocks join when the neighbour reservoir is **closer than the free
-surface** (rock skin, or the waterline if the column is flooded).
-Shallow springs keep their own vents; two deep boilers under one
-lake become one system (a link is walked between them). Each pulse
-dyes the path a little toward packet T (weak, upward). Later beats
-reflash that path. P paints the straw, the live puff, and every
-boiling cell claimed by the pipe — not leftover's hill / Dijkstra.
+One **main** straw walks to the free surface and is **rewalked every
+beat**, so a carve / collapse / new waterline gets a new route. A new
+boiler that is closer to that straw than to its own surface becomes a
+**feeder**: a shortest walk onto the main. Feeders pulse steam and
+pump pore water toward the junction; the main pulses toward the mouth.
+Shallow springs that are closer to the sky than to the main keep
+their own vent. When the pipe is on, leftover's 28k field / Dijkstra
+and steam cadence (boil / flood / assault) stay off. P paints the
+straw, feeders, live puff, and claimed boilers.
 Tab → Climate → cavity humidity tunes pipe on/off, leftover field,
 sides, stroke, beat.
 
