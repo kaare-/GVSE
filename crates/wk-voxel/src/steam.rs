@@ -346,6 +346,10 @@ pub struct LeftoverSoakStats {
 /// Exterior leftover arms from a zone boundary.
 const LEFTOVER_FIELD_CELLS: usize = 4096;
 
+/// Heat tiles are 4×4. A newly boiling tile next to last tick's vessel
+/// is still this vessel, not a second boiler.
+const LEFTOVER_GROW_RADIUS: i32 = 4;
+
 /// Exterior Dijkstra budget for the planned sky walk. Only the high
 /// upward rim is seeded — a huge perimeter next to the ocean must not
 /// spend this on a 20-cell halo.
@@ -2463,9 +2467,17 @@ fn leftover_cand_outside_ok(
     gy: i32,
     zone: &FxHashSet<(i32, i32)>,
 ) -> bool {
-    leftover_is_open_pipe(world, gx, gy)
-        || (leftover_touches_chimney_skin(world, gx, gy)
-            && !leftover_near_set(world, gx, gy, zone, 2))
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return true;
+    };
+    // Open pipe / mouth sinter / ridge gravel — not a second packed boiler.
+    // Do not leftover_is_open_pipe here: that 128-hop BFS on every chimney
+    // smear was ~6ms/tick after the pin locked.
+    let pipe = cell.material == MaterialId::Air || leftover_is_chimney_skin(cell.material);
+    if pipe || leftover_touches_chimney_skin(world, gx, gy) {
+        return !leftover_near_set(world, gx, gy, zone, LEFTOVER_GROW_RADIUS);
+    }
+    false
 }
 
 fn leftover_zone_covers_cands(
@@ -2552,78 +2564,33 @@ fn leftover_near_set(
     false
 }
 
-/// Grow last tick's vessel from the heat front. A far second boiler
-/// (cands the front cannot reach) still forces a full flood.
+/// Absorb heat-front surplus within one heat tile of last tick's vessel.
+/// A far second packed boiler still forces a full flood.
 fn leftover_try_grow_zone(
     world: &World,
     memo: &mut LeftoverMemo,
     cands: &FxHashMap<(i32, i32), (u32, u32)>,
-    pipe_cands: &FxHashSet<(i32, i32)>,
+    _pipe_cands: &FxHashSet<(i32, i32)>,
     old_heads: &FxHashMap<(i32, i32), u32>,
     old_released: &FxHashMap<(i32, i32), u32>,
 ) -> bool {
-    const GROW_CELLS: usize = 8192;
-    if memo.zone.is_empty() || memo.pin_path.len() < 2 {
+    if memo.zone.is_empty() {
         return false;
     }
     let mut pin: FxHashSet<(i32, i32)> = FxHashSet::default();
     pin.extend(memo.pin_path.iter().copied());
-    let mut stack: Vec<(i32, i32)> = Vec::new();
+    let mut grown: Vec<(i32, i32)> = Vec::new();
     for &key in cands.keys() {
         if memo.zone.contains(&key) {
             continue;
         }
-        if leftover_is_open_pipe(world, key.0, key.1) {
-            continue;
-        }
-        // Leftover heat walks the pin first. A 2-cell vadose park sits
-        // off the 28k rim and still belongs to this vessel.
-        if leftover_near_set(world, key.0, key.1, &memo.zone, 2)
-            || leftover_near_set(world, key.0, key.1, &pin, 2)
-        {
-            stack.push(key);
-        }
-    }
-    if stack.is_empty() {
-        return false;
-    }
-    let mut grown: FxHashSet<(i32, i32)> = FxHashSet::default();
-    while let Some((gx, gy)) = stack.pop() {
-        if !grown.insert((gx, gy)) {
-            continue;
-        }
-        if grown.len() > GROW_CELLS {
-            return false;
-        }
-        for (dx, dy) in [
-            (0, 1),
-            (0, -1),
-            (-1, 0),
-            (1, 0),
-            (-1, 1),
-            (1, 1),
-            (-1, -1),
-            (1, -1),
-        ] {
-            let nx = world.wrap_x(gx + dx);
-            let ny = gy + dy;
-            if memo.zone.contains(&(nx, ny)) || grown.contains(&(nx, ny)) {
-                continue;
-            }
-            if !cands.contains_key(&(nx, ny)) {
-                continue;
-            }
-            if pipe_cands.contains(&(nx, ny)) && leftover_is_open_pipe(world, nx, ny) {
-                continue;
-            }
-            stack.push((nx, ny));
-        }
-    }
-    for &key in cands.keys() {
-        if memo.zone.contains(&key) || grown.contains(&key) {
-            continue;
-        }
         if leftover_cand_outside_ok(world, key.0, key.1, &memo.zone) {
+            continue;
+        }
+        if leftover_near_set(world, key.0, key.1, &memo.zone, LEFTOVER_GROW_RADIUS)
+            || leftover_near_set(world, key.0, key.1, &pin, LEFTOVER_GROW_RADIUS)
+        {
+            grown.push(key);
             continue;
         }
         return false;
@@ -2657,230 +2624,40 @@ fn leftover_hue_pack(local: f32, body: f32) -> f32 {
     }
 }
 
-fn rebuild_leftover_field(
+/// Keep last tick's continent vessel and plan sky from it. Used when
+/// surplus stayed inside the zone (or the heat front was absorbed) so
+/// we must not walk 28k cells again just to seed Dijkstra.
+fn leftover_plan_from_existing_zone(
     world: &World,
-    temp: &Temperature,
-    boil: f32,
-    expand: u16,
     memo: &mut LeftoverMemo,
+    cands: &FxHashMap<(i32, i32), (u32, u32)>,
 ) {
-    let old_heads = std::mem::take(&mut memo.heads);
-    let old_released = std::mem::take(&mut memo.released);
-    memo.view.clear();
-    memo.view_ready = false;
-    memo.seeds.clear();
-    memo.seed_zone.clear();
-    memo.parents.clear();
-    memo.costs.clear();
-    memo.route_next.clear();
-    memo.reused_zone = false;
-    // pin_* stays. A rebuild must not retarget a live chimney.
-    let coords: Vec<ChunkCoord> = world
-        .chunks
-        .iter()
-        .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
-        .map(|(k, _)| *k)
-        .collect();
-    let t_cands = Instant::now();
-    let mut cands: FxHashMap<(i32, i32), (u32, u32)> = FxHashMap::default();
-    let mut pipe_cands: FxHashSet<(i32, i32)> = FxHashSet::default();
-    for coord in coords {
-        for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
-            if cell.material == MaterialId::Air || cell.sat.0 == 0 {
-                return;
-            }
-            let cap = water_capacity_cell(cell, &world.hydro) as u32;
-            if cap == 0 {
-                return;
-            }
-            let vol = vapor_volume_units(cell.sat.0 as u32, t_c, boil, expand);
-            let surplus = overpressure_units(vol, cap);
-            if surplus == 0 {
-                return;
-            }
-            let key = (world.wrap_x(gx), gy);
-            cands.insert(key, (surplus, cap));
-            if cell.material == MaterialId::Air || leftover_is_chimney_skin(cell.material) {
-                pipe_cands.insert(key);
-            }
-        });
-    }
-    memo.last_cands_us = t_cands.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
-    if cands.is_empty() {
-        // Punch-through can empty a tiny boiler. A live *sky* pin stays
-        // on P so the planned climb does not vanish the tick leftover
-        // hits zero. Lake-only pins still drop.
-        memo.zone.clear();
-        memo.map.clear();
-        if leftover_pin_keep_when_cold(world, memo) {
-            leftover_stamp_planned_route(world, memo);
-            return;
-        }
-        leftover_clear_pin(memo);
+    let cells: Vec<(i32, i32)> = memo.zone.iter().copied().collect();
+    if cells.is_empty() {
         return;
     }
-    // Live pin: keep last tick's zone when surplus stays inside it, or
-    // grow from the heat front. A far second boiler still full-floods.
-    // Cadencing the whole rebuild emptied the hill.
-    if memo.pin_path.len() >= 2 {
-        let t_stable = Instant::now();
-        let stable = if leftover_zone_covers_cands(world, &memo.zone, &cands) {
-            leftover_retouch_stable_heads(memo, &cands, &old_heads, &old_released);
-            true
-        } else if memo.zone.len() > LEFTOVER_FIELD_CELLS {
-            // Small climbing hills still full-flood (straw-climb canary).
-            leftover_try_grow_zone(
-                world,
-                memo,
-                &cands,
-                &pipe_cands,
-                &old_heads,
-                &old_released,
-            )
-        } else {
-            false
-        };
-        if stable {
-            memo.reused_zone = true;
-            memo.last_flood_us = t_stable.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
-            let t_lock = Instant::now();
-            if leftover_try_reuse_pin(world, memo) {
-                leftover_dim_off_pin_arms(world, memo);
-                leftover_refresh_route_set(memo);
-                memo.last_lock_us = t_lock.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
-                return;
-            }
-            memo.reused_zone = false;
+    let id = memo
+        .heads
+        .keys()
+        .copied()
+        .find(|k| memo.zone.contains(k))
+        .or_else(|| cells.iter().copied().min_by_key(|&(x, y)| (y, x)))
+        .unwrap_or((0, 0));
+    let mut surplus = 0u32;
+    for (key, &(s, _)) in cands {
+        if memo.zone.contains(key) {
+            surplus = surplus.saturating_add(s);
         }
     }
-    memo.zone.clear();
-    memo.map.clear();
-    let t_flood = Instant::now();
-    let mut unvisited: FxHashSet<(i32, i32)> = cands.keys().copied().collect();
-    let mut components: Vec<(Vec<(i32, i32)>, u32, u32)> = Vec::new();
-    while let Some(&start) = unvisited.iter().next() {
-        // Open sky chimneys stay the pipe. Buried loose / sinter /
-        // roofed voids join the vessel — they are the chamber or the
-        // planned route, not ridge sand.
-        if leftover_is_open_pipe(world, start.0, start.1) {
-            unvisited.remove(&start);
-            continue;
-        }
-        let mut stack = vec![start];
-        unvisited.remove(&start);
-        let mut cells: Vec<(i32, i32)> = Vec::new();
-        let mut in_comp: FxHashSet<(i32, i32)> = FxHashSet::default();
-        let mut surplus = 0u32;
-        let mut seats = 0u32;
-        while let Some((gx, gy)) = stack.pop() {
-            if !in_comp.insert((gx, gy)) {
-                continue;
-            }
-            if let Some(&(s, cap)) = cands.get(&(gx, gy)) {
-                surplus = surplus.saturating_add(s);
-                seats = seats.saturating_add(cap);
-            }
-            cells.push((gx, gy));
-            for (dx, dy) in [
-                (0, 1),
-                (0, -1),
-                (-1, 0),
-                (1, 0),
-                (-1, 1),
-                (1, 1),
-                (-1, -1),
-                (1, -1),
-            ] {
-                let nx = world.wrap_x(gx + dx);
-                let ny = gy + dy;
-                // Packed surplus joins by adjacency. Do not walk 8
-                // open-pipe probes per interior stone cell of a 28k body.
-                if unvisited.contains(&(nx, ny)) {
-                    if pipe_cands.contains(&(nx, ny))
-                        && leftover_is_open_pipe(world, nx, ny)
-                    {
-                        continue;
-                    }
-                    unvisited.remove(&(nx, ny));
-                    stack.push((nx, ny));
-                    continue;
-                }
-                let Some(n) = world.get_cell(nx, ny) else {
-                    continue;
-                };
-                if n.material != MaterialId::Air && !leftover_is_chimney_skin(n.material) {
-                    continue;
-                }
-                if leftover_is_open_pipe(world, nx, ny) {
-                    continue;
-                }
-                if leftover_is_chamber_fill(world, nx, ny, n) && !in_comp.contains(&(nx, ny)) {
-                    stack.push((nx, ny));
-                }
-            }
-        }
-        components.push((cells, surplus, seats));
-    }
-    let max_zone = components.iter().map(|(c, _, _)| c.len()).max().unwrap_or(0);
-    let mut painted: Vec<(Vec<(i32, i32)>, u32, u32, (i32, i32))> = Vec::new();
-    for (cells, surplus, seats) in components {
-        // 4×4 smear / mouth sinter next to a live pipe is not a vessel
-        // when a real packed reservoir exists.
-        if cells.len() <= 3
-            && max_zone > cells.len()
-            && cells
-                .iter()
-                .all(|&(x, y)| leftover_touches_chimney_skin(world, x, y))
-        {
-            continue;
-        }
-        let id = *cells
-            .iter()
-            .min_by_key(|(x, y)| (*y, *x))
-            .unwrap_or(&(0, 0));
-        let mut head = surplus;
-        if let Some(&prev) = old_heads.get(&id) {
-            head = prev.saturating_add(surplus);
-        } else {
-            for &(x, y) in &cells {
-                if let Some(&prev) = old_heads.get(&(x, y)) {
-                    head = head.max(prev.saturating_add(surplus));
-                    break;
-                }
-            }
-        }
-        if let Some(&rel) = old_released.get(&id) {
-            head = head.saturating_sub(rel);
-        }
-        let cap_head = surplus.saturating_mul(8).max(surplus);
-        head = head.min(cap_head);
-        memo.heads.insert(id, head);
-        let body = leftover_zone_body_pack(head, seats.max(1), expand);
-        let max_s = cells
-            .iter()
-            .filter_map(|c| cands.get(c).map(|&(s, _)| s))
-            .max()
-            .unwrap_or(1)
-            .max(1);
-        for &(gx, gy) in &cells {
-            memo.zone.insert((gx, gy));
-            let pack = if let Some(&(s, cap)) = cands.get(&(gx, gy)) {
-                let local = leftover_pack_norm(cap.saturating_add(s), cap.max(1));
-                let rel = s as f32 / max_s as f32;
-                leftover_hue_pack(local * (0.5 + 0.5 * rel), body)
-            } else {
-                leftover_hue_pack(0.5, body)
-            };
-            if pack > 0.0 {
-                memo.map.insert((gx, gy), pack);
-            }
-        }
-        painted.push((cells, head, surplus, id));
-    }
-    memo.last_flood_us = t_flood.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
-    // Zone membership must stay fresh every tick (cadencing the
-    // rebuild emptied the wet hill). A live pin does not need the
-    // 4096-cell exterior halo or Dijkstra — straw already has a route.
+    let head = memo.heads.get(&id).copied().unwrap_or(surplus).max(1);
+    leftover_plan_after_zone(world, memo, vec![(cells, head, surplus, id)]);
+}
+
+fn leftover_plan_after_zone(
+    world: &World,
+    memo: &mut LeftoverMemo,
+    painted: Vec<(Vec<(i32, i32)>, u32, u32, (i32, i32))>,
+) {
     let t_lock = Instant::now();
     if leftover_try_reuse_pin(world, memo) {
         leftover_dim_off_pin_arms(world, memo);
@@ -3035,6 +2812,260 @@ fn rebuild_leftover_field(
     }
     leftover_refresh_route_set(memo);
     memo.last_lock_us = t_lock.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+}
+
+fn rebuild_leftover_field(
+    world: &World,
+    temp: &Temperature,
+    boil: f32,
+    expand: u16,
+    memo: &mut LeftoverMemo,
+) {
+    // Continent + live pin: leftover membership is already the vessel.
+    // Off-cadence ticks keep the pin and skip the 28k cand walk. Small
+    // climbing hills still rebuild every tick (straw-climb canary).
+    if memo.reused_zone
+        && memo.pin_path.len() >= 2
+        && memo.zone.len() > LEFTOVER_FIELD_CELLS
+        && world.tick % STEAM_EVERY != 0
+    {
+        memo.view.clear();
+        memo.view_ready = false;
+        memo.seeds.clear();
+        memo.seed_zone.clear();
+        memo.parents.clear();
+        memo.costs.clear();
+        memo.route_next.clear();
+        if leftover_try_reuse_pin(world, memo) {
+            leftover_dim_off_pin_arms(world, memo);
+            leftover_refresh_route_set(memo);
+            memo.reused_zone = true;
+            memo.last_cands_us = 0;
+            memo.last_flood_us = 0;
+            memo.last_lock_us = 0;
+            return;
+        }
+        memo.reused_zone = false;
+    }
+    let old_heads = std::mem::take(&mut memo.heads);
+    let old_released = std::mem::take(&mut memo.released);
+    memo.view.clear();
+    memo.view_ready = false;
+    memo.seeds.clear();
+    memo.seed_zone.clear();
+    memo.parents.clear();
+    memo.costs.clear();
+    memo.route_next.clear();
+    memo.reused_zone = false;
+    // pin_* stays. A rebuild must not retarget a live chimney.
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
+        .map(|(k, _)| *k)
+        .collect();
+    let t_cands = Instant::now();
+    let mut cands: FxHashMap<(i32, i32), (u32, u32)> = FxHashMap::default();
+    let mut pipe_cands: FxHashSet<(i32, i32)> = FxHashSet::default();
+    for coord in coords {
+        for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
+            if cell.material == MaterialId::Air || cell.sat.0 == 0 {
+                return;
+            }
+            let cap = water_capacity_cell(cell, &world.hydro) as u32;
+            if cap == 0 {
+                return;
+            }
+            let vol = vapor_volume_units(cell.sat.0 as u32, t_c, boil, expand);
+            let surplus = overpressure_units(vol, cap);
+            if surplus == 0 {
+                return;
+            }
+            let key = (world.wrap_x(gx), gy);
+            cands.insert(key, (surplus, cap));
+            if cell.material == MaterialId::Air || leftover_is_chimney_skin(cell.material) {
+                pipe_cands.insert(key);
+            }
+        });
+    }
+    memo.last_cands_us = t_cands.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+    if cands.is_empty() {
+        // Punch-through can empty a tiny boiler. A live *sky* pin stays
+        // on P so the planned climb does not vanish the tick leftover
+        // hits zero. Lake-only pins still drop.
+        memo.zone.clear();
+        memo.map.clear();
+        if leftover_pin_keep_when_cold(world, memo) {
+            leftover_stamp_planned_route(world, memo);
+            return;
+        }
+        leftover_clear_pin(memo);
+        return;
+    }
+    // Keep last tick's zone when surplus stays inside it, or absorb the
+    // heat front. Continent vessels do this *before* a pin locks so the
+    // 28k flood is not every search tick. Small climbing hills still
+    // full-flood (straw-climb canary). A far second boiler still floods.
+    if memo.pin_path.len() >= 2 || memo.zone.len() > LEFTOVER_FIELD_CELLS {
+        let t_stable = Instant::now();
+        let continent = memo.zone.len() > LEFTOVER_FIELD_CELLS;
+        let stable = if leftover_zone_covers_cands(world, &memo.zone, &cands) {
+            leftover_retouch_stable_heads(memo, &cands, &old_heads, &old_released);
+            true
+        } else if continent {
+            leftover_try_grow_zone(
+                world,
+                memo,
+                &cands,
+                &pipe_cands,
+                &old_heads,
+                &old_released,
+            )
+        } else {
+            false
+        };
+        if stable {
+            memo.reused_zone = true;
+            memo.last_flood_us = t_stable.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+            if leftover_try_reuse_pin(world, memo) {
+                leftover_dim_off_pin_arms(world, memo);
+                leftover_refresh_route_set(memo);
+                memo.last_lock_us = 0;
+                return;
+            }
+            if continent {
+                leftover_plan_from_existing_zone(world, memo, &cands);
+                return;
+            }
+            memo.reused_zone = false;
+        }
+    }
+    memo.zone.clear();
+    memo.map.clear();
+    let t_flood = Instant::now();
+    let mut unvisited: FxHashSet<(i32, i32)> = cands.keys().copied().collect();
+    let mut components: Vec<(Vec<(i32, i32)>, u32, u32)> = Vec::new();
+    while let Some(&start) = unvisited.iter().next() {
+        // Open sky chimneys stay the pipe. Buried loose / sinter /
+        // roofed voids join the vessel — they are the chamber or the
+        // planned route, not ridge sand.
+        if leftover_is_open_pipe(world, start.0, start.1) {
+            unvisited.remove(&start);
+            continue;
+        }
+        let mut stack = vec![start];
+        unvisited.remove(&start);
+        let mut cells: Vec<(i32, i32)> = Vec::new();
+        let mut in_comp: FxHashSet<(i32, i32)> = FxHashSet::default();
+        let mut surplus = 0u32;
+        let mut seats = 0u32;
+        while let Some((gx, gy)) = stack.pop() {
+            if !in_comp.insert((gx, gy)) {
+                continue;
+            }
+            if let Some(&(s, cap)) = cands.get(&(gx, gy)) {
+                surplus = surplus.saturating_add(s);
+                seats = seats.saturating_add(cap);
+            }
+            cells.push((gx, gy));
+            for (dx, dy) in [
+                (0, 1),
+                (0, -1),
+                (-1, 0),
+                (1, 0),
+                (-1, 1),
+                (1, 1),
+                (-1, -1),
+                (1, -1),
+            ] {
+                let nx = world.wrap_x(gx + dx);
+                let ny = gy + dy;
+                // Packed surplus joins by adjacency. Do not walk 8
+                // open-pipe probes per interior stone cell of a 28k body.
+                if unvisited.contains(&(nx, ny)) {
+                    if pipe_cands.contains(&(nx, ny))
+                        && leftover_is_open_pipe(world, nx, ny)
+                    {
+                        continue;
+                    }
+                    unvisited.remove(&(nx, ny));
+                    stack.push((nx, ny));
+                    continue;
+                }
+                let Some(n) = world.get_cell(nx, ny) else {
+                    continue;
+                };
+                if n.material != MaterialId::Air && !leftover_is_chimney_skin(n.material) {
+                    continue;
+                }
+                if leftover_is_open_pipe(world, nx, ny) {
+                    continue;
+                }
+                if leftover_is_chamber_fill(world, nx, ny, n) && !in_comp.contains(&(nx, ny)) {
+                    stack.push((nx, ny));
+                }
+            }
+        }
+        components.push((cells, surplus, seats));
+    }
+    let max_zone = components.iter().map(|(c, _, _)| c.len()).max().unwrap_or(0);
+    let mut painted: Vec<(Vec<(i32, i32)>, u32, u32, (i32, i32))> = Vec::new();
+    for (cells, surplus, seats) in components {
+        // 4×4 smear / mouth sinter next to a live pipe is not a vessel
+        // when a real packed reservoir exists.
+        if cells.len() <= 3
+            && max_zone > cells.len()
+            && cells
+                .iter()
+                .all(|&(x, y)| leftover_touches_chimney_skin(world, x, y))
+        {
+            continue;
+        }
+        let id = *cells
+            .iter()
+            .min_by_key(|(x, y)| (*y, *x))
+            .unwrap_or(&(0, 0));
+        let mut head = surplus;
+        if let Some(&prev) = old_heads.get(&id) {
+            head = prev.saturating_add(surplus);
+        } else {
+            for &(x, y) in &cells {
+                if let Some(&prev) = old_heads.get(&(x, y)) {
+                    head = head.max(prev.saturating_add(surplus));
+                    break;
+                }
+            }
+        }
+        if let Some(&rel) = old_released.get(&id) {
+            head = head.saturating_sub(rel);
+        }
+        let cap_head = surplus.saturating_mul(8).max(surplus);
+        head = head.min(cap_head);
+        memo.heads.insert(id, head);
+        let body = leftover_zone_body_pack(head, seats.max(1), expand);
+        let max_s = cells
+            .iter()
+            .filter_map(|c| cands.get(c).map(|&(s, _)| s))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        for &(gx, gy) in &cells {
+            memo.zone.insert((gx, gy));
+            let pack = if let Some(&(s, cap)) = cands.get(&(gx, gy)) {
+                let local = leftover_pack_norm(cap.saturating_add(s), cap.max(1));
+                let rel = s as f32 / max_s as f32;
+                leftover_hue_pack(local * (0.5 + 0.5 * rel), body)
+            } else {
+                leftover_hue_pack(0.5, body)
+            };
+            if pack > 0.0 {
+                memo.map.insert((gx, gy), pack);
+            }
+        }
+        painted.push((cells, head, surplus, id));
+    }
+    memo.last_flood_us = t_flood.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+    leftover_plan_after_zone(world, memo, painted);
 }
 
 /// Standing leftover head: shove leftover mass every tick from each seed.
