@@ -26,6 +26,7 @@
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -316,9 +317,9 @@ struct LeftoverMemo {
     route_set: FxHashSet<(i32, i32)>,
     /// Last rebuild reused the live pin (skipped exterior halo / Dijkstra).
     reused_pin: bool,
-    /// Ticks to skip exterior Dijkstra after a huge zone failed to lock
-    /// a sky walk. Zone membership still rebuilds every tick.
-    lock_cooldown: u8,
+    last_cands_us: u32,
+    last_flood_us: u32,
+    last_lock_us: u32,
 }
 
 /// Soak / F1 counters for leftover + sky-probe growth.
@@ -334,6 +335,9 @@ pub struct LeftoverSoakStats {
     pub probe_open: usize,
     pub probe_boiler: usize,
     pub steam_cells: usize,
+    pub cands_us: u32,
+    pub flood_us: u32,
+    pub lock_us: u32,
 }
 
 /// Exterior leftover arms from a zone boundary.
@@ -1064,6 +1068,9 @@ pub fn leftover_soak_stats(world: &World) -> LeftoverSoakStats {
         stats.map = memo.map.len();
         stats.route_set = memo.route_set.len();
         stats.reused_pin = memo.reused_pin;
+        stats.cands_us = memo.last_cands_us;
+        stats.flood_us = memo.last_flood_us;
+        stats.lock_us = memo.last_lock_us;
     });
     SKY_PROBE.with(|slot| {
         let c = slot.borrow();
@@ -2486,7 +2493,9 @@ fn rebuild_leftover_field(
         .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
         .map(|(k, _)| *k)
         .collect();
+    let t_cands = Instant::now();
     let mut cands: FxHashMap<(i32, i32), (u32, u32)> = FxHashMap::default();
+    let mut pipe_cands: FxHashSet<(i32, i32)> = FxHashSet::default();
     for coord in coords {
         for_each_hot_tile_cell(world, temp, coord, boil, |gx, gy, t_c, cell| {
             if cell.material == MaterialId::Air || cell.sat.0 == 0 {
@@ -2501,9 +2510,14 @@ fn rebuild_leftover_field(
             if surplus == 0 {
                 return;
             }
-            cands.insert((world.wrap_x(gx), gy), (surplus, cap));
+            let key = (world.wrap_x(gx), gy);
+            cands.insert(key, (surplus, cap));
+            if cell.material == MaterialId::Air || leftover_is_chimney_skin(cell.material) {
+                pipe_cands.insert(key);
+            }
         });
     }
+    memo.last_cands_us = t_cands.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
     if cands.is_empty() {
         // Punch-through can empty a tiny boiler. A live *sky* pin stays
         // on P so the planned climb does not vanish the tick leftover
@@ -2515,6 +2529,7 @@ fn rebuild_leftover_field(
         leftover_clear_pin(memo);
         return;
     }
+    let t_flood = Instant::now();
     let mut unvisited: FxHashSet<(i32, i32)> = cands.keys().copied().collect();
     let mut components: Vec<(Vec<(i32, i32)>, u32, u32)> = Vec::new();
     while let Some(&start) = unvisited.iter().next() {
@@ -2552,16 +2567,27 @@ fn rebuild_leftover_field(
             ] {
                 let nx = world.wrap_x(gx + dx);
                 let ny = gy + dy;
-                if leftover_is_open_pipe(world, nx, ny) {
-                    continue;
-                }
-                if unvisited.remove(&(nx, ny)) {
+                // Packed surplus joins by adjacency. Do not walk 8
+                // open-pipe probes per interior stone cell of a 28k body.
+                if unvisited.contains(&(nx, ny)) {
+                    if pipe_cands.contains(&(nx, ny))
+                        && leftover_is_open_pipe(world, nx, ny)
+                    {
+                        continue;
+                    }
+                    unvisited.remove(&(nx, ny));
                     stack.push((nx, ny));
                     continue;
                 }
                 let Some(n) = world.get_cell(nx, ny) else {
                     continue;
                 };
+                if n.material != MaterialId::Air && !leftover_is_chimney_skin(n.material) {
+                    continue;
+                }
+                if leftover_is_open_pipe(world, nx, ny) {
+                    continue;
+                }
                 if leftover_is_chamber_fill(world, nx, ny, n) && !in_comp.contains(&(nx, ny)) {
                     stack.push((nx, ny));
                 }
@@ -2625,26 +2651,15 @@ fn rebuild_leftover_field(
         }
         painted.push((cells, head, surplus, id));
     }
+    memo.last_flood_us = t_flood.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
     // Zone membership must stay fresh every tick (cadencing the
     // rebuild emptied the wet hill). A live pin does not need the
     // 4096-cell exterior halo or Dijkstra — straw already has a route.
+    let t_lock = Instant::now();
     if leftover_try_reuse_pin(world, memo) {
-        memo.lock_cooldown = 0;
         leftover_dim_off_pin_arms(world, memo);
         leftover_refresh_route_set(memo);
-        return;
-    }
-    // Continent-scale vessels miss a sky walk inside LEFTOVER_PLAN_CELLS.
-    // Retry Dijkstra on a slow cadence; zone membership stays fresh.
-    if memo.zone.len() > LEFTOVER_FIELD_CELLS && memo.lock_cooldown > 0 {
-        memo.lock_cooldown -= 1;
-        for (cells, head, surplus, id) in &painted {
-            if let Some(&(gx, gy)) = cells.iter().max_by_key(|(_, y)| *y) {
-                memo.seeds.push((gx, gy, (*head).max(*surplus)));
-                memo.seed_zone.push(*id);
-            }
-        }
-        leftover_refresh_route_set(memo);
+        memo.last_lock_us = t_lock.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
         return;
     }
     let mut heap: BinaryHeap<(Reverse<u32>, i32, i32, u32)> = BinaryHeap::new();
@@ -2786,19 +2801,14 @@ fn rebuild_leftover_field(
         }
     }
     if leftover_try_reuse_pin(world, memo) {
-        memo.lock_cooldown = 0;
         leftover_dim_off_pin_arms(world, memo);
     } else {
         leftover_lock_winning_route(world, memo);
         leftover_commit_pin(world, memo);
         leftover_dim_off_pin_arms(world, memo);
-        if memo.pin_path.len() >= 2 {
-            memo.lock_cooldown = 0;
-        } else if memo.zone.len() > LEFTOVER_FIELD_CELLS {
-            memo.lock_cooldown = 7;
-        }
     }
     leftover_refresh_route_set(memo);
+    memo.last_lock_us = t_lock.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
 }
 
 /// Standing leftover head: shove leftover mass every tick from each seed.

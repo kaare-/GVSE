@@ -22,7 +22,7 @@ fn ms(d: Duration) -> f32 {
 
 fn print_stats(label: &str, leftover: Duration, steam: Duration, stats: LeftoverSoakStats) {
     eprintln!(
-        "{label} leftover={:.2}ms steam={:.2}ms zone={} pin={} map={} route={} reuse={} steam_c={} topo={} probe={}/{}/{}",
+        "{label} leftover={:.2}ms steam={:.2}ms zone={} pin={} map={} route={} reuse={} steam_c={} topo={} probe={}/{}/{} split={}/{}/{}",
         ms(leftover),
         ms(steam),
         stats.zone,
@@ -35,6 +35,9 @@ fn print_stats(label: &str, leftover: Duration, steam: Duration, stats: Leftover
         stats.probe_confined,
         stats.probe_open,
         stats.probe_boiler,
+        stats.cands_us,
+        stats.flood_us,
+        stats.lock_us,
     );
 }
 
@@ -187,7 +190,7 @@ fn leftover_short_sky_world_step_soak() {
         params.wrap_x,
     );
     let heated = heat_wet_stone(&world, &mut temperature, 150.0);
-    let mut steam = SteamConfig {
+    let steam = SteamConfig {
         phase_expansion_drive: PHASE_EXPANSION_DRIVE_MAX,
         ..SteamConfig::default()
     };
@@ -272,7 +275,7 @@ fn leftover_short_sky_world_step_soak() {
         if t == 1 || t % 50 == 0 || t % STEAM_EVERY == 0 && t <= 20 {
             let stats = leftover_soak_stats(&world);
             eprintln!(
-                "t={t:4} wall={:.1} leftover={:.2} steam={:.2} phase={:.2} phys={:.1} zone={} pin={} steam_c={} topo={} probe={}/{}/{} reuse={}",
+                "t={t:4} wall={:.1} leftover={:.2} steam={:.2} phase={:.2} phys={:.1} zone={} pin={} steam_c={} topo={} probe={}/{}/{} reuse={} split={}/{}/{}",
                 ms(wall_acc / n.max(1) as u32),
                 ms(leftover_acc / n.max(1) as u32),
                 ms(steam_acc / n.max(1) as u32),
@@ -286,6 +289,9 @@ fn leftover_short_sky_world_step_soak() {
                 stats.probe_open,
                 stats.probe_boiler,
                 stats.reused_pin,
+                stats.cands_us,
+                stats.flood_us,
+                stats.lock_us,
             );
             leftover_acc = Duration::ZERO;
             steam_acc = Duration::ZERO;
