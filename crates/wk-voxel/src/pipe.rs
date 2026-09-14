@@ -25,7 +25,8 @@ pub const PIPE_MAX_LEN: usize = 512;
 pub const PIPE_STROKE_DEFAULT: u32 = 1400;
 const PIPE_MAX_ROOTS: usize = 8;
 const PIPE_CLAIM_BUDGET: usize = 32_768;
-const PIPE_COLUMN_HALO: i32 = 8;
+/// Boiling blocks this close share one straw (Chebyshev, cells).
+const PIPE_JOIN_RADIUS: i32 = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PipeSeat {
@@ -694,16 +695,21 @@ fn upsert_path(world: &World, path: PipePath) {
     });
 }
 
+fn chebyshev(a: (i32, i32), b: (i32, i32)) -> i32 {
+    (a.0 - b.0).abs().max((a.1 - b.1).abs())
+}
+
+fn within_join_radius(a: (i32, i32), b: (i32, i32)) -> bool {
+    chebyshev(a, b) <= PIPE_JOIN_RADIUS
+}
+
 fn paths_touch(a: &PipePath, b: &PipePath) -> bool {
-    let mut cells: FxHashSet<(i32, i32)> = FxHashSet::default();
-    for &(x, y) in &a.cells {
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                cells.insert((x + dx, y + dy));
-            }
-        }
+    if within_join_radius(a.root, b.root) || within_join_radius(a.mouth, b.mouth) {
+        return true;
     }
-    b.cells.iter().any(|c| cells.contains(c))
+    a.cells
+        .iter()
+        .any(|&p| b.cells.iter().any(|&q| within_join_radius(p, q)))
 }
 
 fn claimed_cells() -> FxHashSet<(i32, i32)> {
@@ -797,24 +803,42 @@ fn reflash_existing(world: &mut World, temp: &Temperature, expand: u16, boil: f3
     }
 }
 
-fn path_column_taken(gx: i32) -> bool {
+fn path_near_taken(gx: i32, gy: i32) -> bool {
     PIPE_MEMO.with(|slot| {
-        slot.borrow().paths.iter().any(|p| {
-            p.cells
-                .iter()
-                .any(|&(x, _)| (x - gx).abs() <= PIPE_COLUMN_HALO)
-        })
+        slot.borrow()
+            .paths
+            .iter()
+            .any(|p| p.cells.iter().any(|&c| within_join_radius(c, (gx, gy))))
     })
+}
+
+fn cand_near_taken(cands: &[(i32, i32, f32)], gx: i32, gy: i32) -> bool {
+    cands
+        .iter()
+        .any(|&(x, y, _)| within_join_radius((x, y), (gx, gy)))
 }
 
 fn claim_path_feed(world: &World, temp: &Temperature, path: &PipePath, boil: f32) {
     let mut taken = claimed_cells();
-    for &(x, y) in &path.cells {
-        for dy in -2..=2 {
-            for dx in -PIPE_COLUMN_HALO..=PIPE_COLUMN_HALO {
-                taken.insert((world.wrap_x(x + dx), y + dy));
+    if let Some(&(x0, y0)) = path.cells.first() {
+        let mut xmin = x0;
+        let mut xmax = x0;
+        let mut ymin = y0;
+        let mut ymax = y0;
+        for &(x, y) in &path.cells {
+            xmin = xmin.min(x);
+            xmax = xmax.max(x);
+            ymin = ymin.min(y);
+            ymax = ymax.max(y);
+        }
+        let r = PIPE_JOIN_RADIUS;
+        for y in (ymin - r)..=(ymax + r) {
+            for x in (xmin - r)..=(xmax + r) {
+                taken.insert((world.wrap_x(x), y));
             }
         }
+    }
+    for &(x, y) in &path.cells {
         claim_wet_hot_body(world, temp, x, y, boil, &mut taken);
     }
     remember_claimed(&taken);
@@ -845,7 +869,10 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
             for lx in 0..tc {
                 let gx = world.wrap_x(hx * tc + lx);
                 let gy = hy * tc + ly;
-                if taken.contains(&(gx, gy)) || path_column_taken(gx) {
+                if taken.contains(&(gx, gy))
+                    || path_near_taken(gx, gy)
+                    || cand_near_taken(&cands, gx, gy)
+                {
                     continue;
                 }
                 let Some(cell) = world.get_cell(gx, gy) else {
@@ -1230,6 +1257,51 @@ mod tests {
             pipe_overlay_pack(&w, 2, 3).is_none(),
             "side rock stays off the pipe overlay"
         );
+    }
+
+    #[test]
+    fn boiling_blocks_within_radius_share_one_straw() {
+        let mut w = plot();
+        for x in 0..32 {
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for &x in &[4, 24] {
+            for y in 1..8 {
+                w.set_cell(x, y, {
+                    let mut c = Cell::solid(MaterialId::Gravel);
+                    let cap = water_capacity_cell(c, &w.hydro);
+                    c.sat = Sat(cap.min(10));
+                    c
+                });
+            }
+            for y in 8..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for &x in &[4, 24] {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 150.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pipe: true,
+            enable_leftover_field: false,
+            phase_expansion_drive: EXP,
+            boil_point_c: 100.0,
+            pipe_beat: 5,
+            pipe_stroke: 1400,
+            ..SteamConfig::default()
+        };
+        for t in 1..=20 {
+            w.tick = t;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        let (roots, _) = pipe_path_stats(&w);
+        assert_eq!(roots, 1, "20-cell gap is one boiling block, roots={roots}");
     }
 
     #[test]

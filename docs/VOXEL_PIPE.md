@@ -48,7 +48,8 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
 | `phase_expansion_drive` | 96…1400 | Flash volume |
 
-One connected hot-wet body is one locked straw. Later beats reflash
+One connected hot-wet body is one locked straw. Boiling blocks
+within 48 cells (Chebyshev) share that straw. Later beats reflash
 that path; they do not pick a new route. P paints the straw plus the
 live puff — not leftover's hill / Dijkstra. Tab → Climate → cavity
 humidity tunes pipe on/off, leftover field, sides, stroke, beat.
