@@ -2448,47 +2448,19 @@ fn leftover_is_boiler_path(world: &World, gx: i32, gy: i32, cell: Cell) -> bool 
     cell.material == MaterialId::Air && void_is_confined(world, gx, gy)
 }
 
-/// How many new surplus cells may join a live vessel without a full
-/// zone flood. Heat-front creep stays in this band; a second boiler
-/// forces a rebuild.
-const LEFTOVER_STABLE_NEW: usize = 64;
-
-fn leftover_touches_set(
-    world: &World,
-    gx: i32,
-    gy: i32,
-    set: &FxHashSet<(i32, i32)>,
-) -> bool {
-    for (dx, dy) in [
-        (0, 1),
-        (0, -1),
-        (-1, 0),
-        (1, 0),
-        (-1, 1),
-        (1, 1),
-        (-1, -1),
-        (1, -1),
-    ] {
-        if set.contains(&(world.wrap_x(gx + dx), gy + dy)) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Live pin + leftover body still the same vessel: skip the 28k flood.
 ///
-/// Cadencing the whole rebuild emptied the hill. This keeps last tick's
-/// zone when surplus seats only creep along the existing body.
-fn leftover_stable_newcomers(
+/// Cadencing the whole rebuild emptied the hill. Absorbing a heat-front
+/// into a frozen zone did the same on the straw-climb canary. Only skip
+/// when every surplus seat is already in last tick's zone.
+fn leftover_zone_covers_cands(
     world: &World,
     zone: &FxHashSet<(i32, i32)>,
     cands: &FxHashMap<(i32, i32), (u32, u32)>,
-) -> Option<Vec<(i32, i32)>> {
+) -> bool {
     if zone.is_empty() {
-        return None;
+        return false;
     }
-    let mut newcomers = Vec::new();
     for &key in cands.keys() {
         if zone.contains(&key) {
             continue;
@@ -2496,17 +2468,9 @@ fn leftover_stable_newcomers(
         if leftover_is_open_pipe(world, key.0, key.1) {
             continue;
         }
-        newcomers.push(key);
-        if newcomers.len() > LEFTOVER_STABLE_NEW {
-            return None;
-        }
+        return false;
     }
-    for &(gx, gy) in &newcomers {
-        if !leftover_touches_set(world, gx, gy, zone) {
-            return None;
-        }
-    }
-    Some(newcomers)
+    true
 }
 
 fn leftover_retouch_stable_heads(
@@ -2633,12 +2597,7 @@ fn rebuild_leftover_field(
     // this does not skip membership when a second vessel appears.
     if memo.pin_path.len() >= 2 {
         let t_stable = Instant::now();
-        if let Some(newcomers) = leftover_stable_newcomers(world, &memo.zone, &cands) {
-            for &(gx, gy) in &newcomers {
-                memo.zone.insert((gx, gy));
-                let e = memo.map.entry((gx, gy)).or_insert(0.0);
-                *e = (*e).max(LEFTOVER_PLAN_TRACE);
-            }
+        if leftover_zone_covers_cands(world, &memo.zone, &cands) {
             leftover_retouch_stable_heads(memo, &cands, &old_heads, &old_released);
             memo.last_flood_us = t_stable.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
             let t_lock = Instant::now();
