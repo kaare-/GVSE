@@ -2552,6 +2552,8 @@ fn leftover_try_grow_zone(
     if memo.zone.is_empty() || memo.pin_path.len() < 2 {
         return false;
     }
+    let mut pin: FxHashSet<(i32, i32)> = FxHashSet::default();
+    pin.extend(memo.pin_path.iter().copied());
     let mut stack: Vec<(i32, i32)> = Vec::new();
     for &key in cands.keys() {
         if memo.zone.contains(&key) {
@@ -2560,7 +2562,12 @@ fn leftover_try_grow_zone(
         if leftover_is_open_pipe(world, key.0, key.1) {
             continue;
         }
-        if leftover_touches_set(world, key.0, key.1, &memo.zone) {
+        // Leftover heat walks the pin first. Those surplus seats are
+        // not on the 28k rim — they still belong to this vessel.
+        if leftover_touches_set(world, key.0, key.1, &memo.zone)
+            || pin.contains(&key)
+            || leftover_touches_set(world, key.0, key.1, &pin)
+        {
             stack.push(key);
         }
     }
