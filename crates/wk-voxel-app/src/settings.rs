@@ -275,7 +275,11 @@ impl SimSettings {
             wet_darken: crate::palette::WET_DARKEN_DEFAULT,
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
-            steam: SteamConfig::default(),
+            steam: SteamConfig {
+                enable_pipe: true,
+                enable_leftover_field: false,
+                ..SteamConfig::default()
+            },
             grain: GrainConfig::default(),
             fungi: FungiConfig {
                 // Slower than crate default so Organic cream beds linger

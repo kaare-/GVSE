@@ -164,6 +164,16 @@ pub struct SteamConfig {
     pub max_escapes_per_tick: u8,
     /// Max Air cells per pocket flood-fill.
     pub void_flood_budget: u16,
+    /// Cell-resolution steam pipe (face mix / leftover field replacement).
+    pub enable_pipe: bool,
+    /// Keep the leftover zone field. Play turns this off when the pipe is on.
+    pub enable_leftover_field: bool,
+    /// Face fraction is `1 / pipe_sides` (4 = one side of a rectangle).
+    pub pipe_sides: u8,
+    /// Steam units moved per beat.
+    pub pipe_stroke: u32,
+    /// Ticks between pipe pulses.
+    pub pipe_beat: u64,
 }
 
 impl Default for SteamConfig {
@@ -184,6 +194,11 @@ impl Default for SteamConfig {
             escape_pressure_min: ESCAPE_PRESSURE_MIN,
             max_escapes_per_tick: MAX_ESCAPES_PER_TICK,
             void_flood_budget: VOID_FLOOD_BUDGET as u16,
+            enable_pipe: false,
+            enable_leftover_field: true,
+            pipe_sides: 4,
+            pipe_stroke: 1400,
+            pipe_beat: STEAM_EVERY,
         }
     }
 }
@@ -3444,6 +3459,9 @@ pub fn cell_pressure_norm_with_boil(
     boil_c: f32,
     expand: u16,
 ) -> (f32, CellPressureKind) {
+    if let Some(p) = crate::pipe::pipe_overlay_pack(world, gx, gy) {
+        return (p, CellPressureKind::PoreFlash);
+    }
     let steam = steam_at(world, gx, gy);
     let Some(cell) = world.get_cell(gx, gy) else {
         return (0.0, CellPressureKind::None);
@@ -3749,6 +3767,12 @@ pub(crate) fn apply_leftover_motor(
     cfg: &SteamConfig,
 ) {
     if !cfg.enabled {
+        return;
+    }
+    if cfg.enable_pipe {
+        crate::pipe::apply_pipe_motor(world, temp, cfg);
+    }
+    if !cfg.enable_leftover_field {
         return;
     }
     prepare_leftover_pressure(world, temp, cfg.boil_point_c, cfg.phase_expansion_drive);

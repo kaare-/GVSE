@@ -1747,8 +1747,17 @@ async fn main() {
                 if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
                 if settings.steam.enabled {
-                    let (lz, lp) = wk_voxel::leftover_field_stats(&scene.world);
-                    format!("{}c L={lz}/{lp}", scene.world.steam.len())
+                    if settings.steam.enable_pipe {
+                        let (n, cells) = wk_voxel::pipe_path_stats(&scene.world);
+                        format!(
+                            "{}c P={n}/{cells} u={}",
+                            scene.world.steam.len(),
+                            scene.world.pipe_steam.len()
+                        )
+                    } else {
+                        let (lz, lp) = wk_voxel::leftover_field_stats(&scene.world);
+                        format!("{}c L={lz}/{lp}", scene.world.steam.len())
+                    }
                 } else {
                     "off".into()
                 },
