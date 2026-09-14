@@ -48,12 +48,16 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
 | `phase_expansion_drive` | 96…1400 | Flash volume |
 
-One connected hot-wet body is one locked straw. Boiling blocks
-within 96 cells, or parallel straws whose x-bands are within 80
-cells, share that straw. Each pulse dyes the path a little toward
-packet T (weak, upward). Later beats reflash that path. P paints the straw plus the
-live puff — not leftover's hill / Dijkstra. Tab → Climate → cavity
-humidity tunes pipe on/off, leftover field, sides, stroke, beat.
+One connected hot-wet body is one locked straw. Separate boiling
+blocks join when the neighbour reservoir is **closer than the free
+surface** (rock skin, or the waterline if the column is flooded).
+Shallow springs keep their own vents; two deep boilers under one
+lake become one system (a link is walked between them). Each pulse
+dyes the path a little toward packet T (weak, upward). Later beats
+reflash that path. P paints the straw, the live puff, and every
+boiling cell claimed by the pipe — not leftover's hill / Dijkstra.
+Tab → Climate → cavity humidity tunes pipe on/off, leftover field,
+sides, stroke, beat.
 
 Open-sky mouth leaks **mass** only: hot → sky H, cool → distilled
 liquid at the lip. Deposit is mouth / apron only — never the live

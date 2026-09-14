@@ -17,7 +17,7 @@ use crate::steam::{
     STEAM_EVERY,
 };
 use crate::temperature::Temperature;
-use crate::worldgen::{live_surface_y, LIVE_SURFACE_SEARCH};
+use crate::worldgen::{live_skin_y, live_surface_y, LIVE_SURFACE_SEARCH};
 
 /// Incoming puff sees one side of the cell, not the whole pond.
 pub const PIPE_SIDES: u32 = 4;
@@ -25,10 +25,6 @@ pub const PIPE_MAX_LEN: usize = 512;
 pub const PIPE_STROKE_DEFAULT: u32 = 1400;
 const PIPE_MAX_ROOTS: usize = 8;
 const PIPE_CLAIM_BUDGET: usize = 32_768;
-/// Boiling blocks this close share one straw (Chebyshev, cells).
-const PIPE_JOIN_RADIUS: i32 = 96;
-/// Parallel straws on the same hill join when their x-bands are this close.
-const PIPE_JOIN_X: i32 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PipeSeat {
@@ -127,8 +123,11 @@ pub fn pipe_path_stats(world: &World) -> (usize, usize) {
         if memo.world_id != world.chunk_cache_id.get() {
             return (0, 0);
         }
-        let cells: usize = memo.paths.iter().map(|p| p.cells.len()).sum();
-        (memo.paths.len(), cells)
+        let mut cells = memo.claimed.clone();
+        for path in &memo.paths {
+            cells.extend(path.cells.iter().copied());
+        }
+        (memo.paths.len(), cells.len())
     })
 }
 
@@ -154,7 +153,7 @@ fn on_pipe_path(world: &World, gx: i32, gy: i32) -> bool {
     })
 }
 
-/// P overlay: locked straw plus the live puff. Not the leftover hill.
+/// P overlay: locked straw, live puff, and claimed boiling cells.
 pub fn pipe_overlay_pack(world: &World, gx: i32, gy: i32) -> Option<f32> {
     let gx = world.wrap_x(gx);
     let live = pipe_live_at(world, gx, gy);
@@ -169,7 +168,18 @@ pub fn pipe_overlay_pack(world: &World, gx: i32, gy: i32) -> Option<f32> {
     if on_pipe_path(world, gx, gy) {
         return Some(0.30);
     }
+    if on_pipe_boiler(world, gx, gy) {
+        return Some(0.24);
+    }
     None
+}
+
+fn on_pipe_boiler(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        memo.world_id == world.chunk_cache_id.get() && memo.claimed.contains(&(gx, gy))
+    })
 }
 
 pub fn face_water_units(liquid: u8, expand: u16, sides: u32) -> f32 {
@@ -345,6 +355,88 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
         root: (rx, ry),
         cells,
         mouth,
+    }
+}
+
+/// Greedy most-open walk that closes on `targets` (another reservoir / straw).
+fn walk_toward(world: &World, from: (i32, i32), targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let (rx, ry) = (world.wrap_x(from.0), from.1);
+    if targets.is_empty() {
+        return vec![(rx, ry)];
+    }
+    let nearest = |p: (i32, i32)| {
+        targets
+            .iter()
+            .map(|&t| wrap_chebyshev(world, p, t))
+            .min()
+            .unwrap_or(0)
+    };
+    let mut cells = vec![(rx, ry)];
+    let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
+    seen.insert((rx, ry));
+    let mut cur = (rx, ry);
+    for _ in 0..PIPE_MAX_LEN {
+        if nearest(cur) <= 1 {
+            break;
+        }
+        let here = nearest(cur);
+        let mut best: Option<(i32, i32, i32)> = None;
+        for (dx, dy) in [
+            (0, 1),
+            (-1, 1),
+            (1, 1),
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (-1, -1),
+            (1, -1),
+        ] {
+            let nx = world.wrap_x(cur.0 + dx);
+            let ny = cur.1 + dy;
+            if !seen.insert((nx, ny)) {
+                continue;
+            }
+            let Some(n) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            let rank = openness_rank(n);
+            if rank == 0 {
+                continue;
+            }
+            let dist = nearest((nx, ny));
+            if dist > here {
+                continue;
+            }
+            let score = (rank as i32) * 1000 - dist;
+            if best.map(|(s, _, _)| score > s).unwrap_or(true) {
+                best = Some((score, nx, ny));
+            }
+        }
+        let Some((_, nx, ny)) = best else {
+            break;
+        };
+        cells.push((nx, ny));
+        cur = (nx, ny);
+    }
+    cells
+}
+
+fn splice_onto(world: &World, keep: PipePath, other: &PipePath) -> PipePath {
+    if keep.cells.iter().any(|&c| c == other.root) {
+        return keep;
+    }
+    let link = walk_toward(world, other.root, &keep.cells);
+    let mut cells = link;
+    let mut seen: FxHashSet<(i32, i32)> = cells.iter().copied().collect();
+    for &c in &keep.cells {
+        if seen.insert(c) {
+            cells.push(c);
+        }
+    }
+    PipePath {
+        root: other.root,
+        cells,
+        mouth: keep.mouth,
     }
 }
 
@@ -712,46 +804,35 @@ fn upsert_path(world: &World, path: PipePath) {
     });
 }
 
-fn chebyshev(a: (i32, i32), b: (i32, i32)) -> i32 {
-    (a.0 - b.0).abs().max((a.1 - b.1).abs())
-}
-
-fn within_join_radius(a: (i32, i32), b: (i32, i32)) -> bool {
-    chebyshev(a, b) <= PIPE_JOIN_RADIUS
-}
-
-fn path_x_span(path: &PipePath) -> (i32, i32) {
-    let mut lo = path.root.0;
-    let mut hi = path.root.0;
-    for &(x, _) in &path.cells {
-        lo = lo.min(x);
-        hi = hi.max(x);
-    }
-    (lo, hi)
-}
-
-fn path_x_gap(a: &PipePath, b: &PipePath) -> i32 {
-    let (alo, ahi) = path_x_span(a);
-    let (blo, bhi) = path_x_span(b);
-    if ahi < blo {
-        blo - ahi
-    } else if bhi < alo {
-        alo - bhi
-    } else {
-        0
+fn wrap_dx(world: &World, ax: i32, bx: i32) -> i32 {
+    let d = (ax - bx).abs();
+    match world.wrap_width {
+        Some(w) if w > 0 => d.min(w - d),
+        _ => d,
     }
 }
 
-fn paths_touch(a: &PipePath, b: &PipePath) -> bool {
-    if path_x_gap(a, b) <= PIPE_JOIN_X {
-        return true;
-    }
-    if within_join_radius(a.root, b.root) || within_join_radius(a.mouth, b.mouth) {
-        return true;
-    }
-    a.cells
-        .iter()
-        .any(|&p| b.cells.iter().any(|&q| within_join_radius(p, q)))
+fn wrap_chebyshev(world: &World, a: (i32, i32), b: (i32, i32)) -> i32 {
+    wrap_dx(world, a.0, b.0).max((a.1 - b.1).abs())
+}
+
+fn free_surface_y(world: &World, gx: i32, gy: i32) -> i32 {
+    let rock = live_surface_y(world, gx, gy, LIVE_SURFACE_SEARCH);
+    live_skin_y(world, gx, rock)
+}
+
+fn surface_dist(world: &World, p: (i32, i32)) -> i32 {
+    (free_surface_y(world, p.0, p.1) - p.1).max(0)
+}
+
+/// Neighbour reservoir closer than either free surface → one pipe system.
+fn closer_than_surface(world: &World, a: (i32, i32), b: (i32, i32)) -> bool {
+    let d = wrap_chebyshev(world, a, b);
+    d < surface_dist(world, a) || d < surface_dist(world, b)
+}
+
+fn reservoirs_should_join(world: &World, a: &PipePath, b: &PipePath) -> bool {
+    closer_than_surface(world, a.root, b.root)
 }
 
 fn claimed_cells() -> FxHashSet<(i32, i32)> {
@@ -781,7 +862,7 @@ fn path_halo() -> FxHashSet<(i32, i32)> {
     })
 }
 
-fn join_adjacent_paths() {
+fn join_adjacent_paths(world: &World) {
     PIPE_MEMO.with(|slot| {
         let mut memo = slot.borrow_mut();
         if memo.paths.len() < 2 {
@@ -798,7 +879,7 @@ fn join_adjacent_paths() {
         };
         for i in 0..n {
             for j in (i + 1)..n {
-                if paths_touch(&memo.paths[i], &memo.paths[j]) {
+                if reservoirs_should_join(world, &memo.paths[i], &memo.paths[j]) {
                     let pi = find(&mut parent, i);
                     let pj = find(&mut parent, j);
                     if pi != pj {
@@ -807,19 +888,20 @@ fn join_adjacent_paths() {
                 }
             }
         }
-        let mut best: FxHashMap<usize, usize> = FxHashMap::default();
+        let mut groups: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
         for i in 0..n {
-            let p = find(&mut parent, i);
-            let len = memo.paths[i].cells.len();
-            match best.get(&p).copied() {
-                Some(j) if memo.paths[j].cells.len() >= len => {}
-                _ => {
-                    best.insert(p, i);
-                }
-            }
+            groups.entry(find(&mut parent, i)).or_default().push(i);
         }
-        let keep: FxHashSet<(i32, i32)> = best.values().map(|&i| memo.paths[i].root).collect();
-        memo.paths.retain(|p| keep.contains(&p.root));
+        let mut joined = Vec::new();
+        for mut idxs in groups.into_values() {
+            idxs.sort_by_key(|&i| std::cmp::Reverse(memo.paths[i].cells.len()));
+            let mut keep = memo.paths[idxs[0]].clone();
+            for &i in &idxs[1..] {
+                keep = splice_onto(world, keep, &memo.paths[i]);
+            }
+            joined.push(keep);
+        }
+        memo.paths = joined;
     });
 }
 
@@ -845,41 +927,23 @@ fn reflash_existing(world: &mut World, temp: &Temperature, expand: u16, boil: f3
     }
 }
 
-fn path_near_taken(gx: i32, gy: i32) -> bool {
+fn path_near_taken(world: &World, gx: i32, gy: i32) -> bool {
     PIPE_MEMO.with(|slot| {
         slot.borrow()
             .paths
             .iter()
-            .any(|p| p.cells.iter().any(|&c| within_join_radius(c, (gx, gy))))
+            .any(|p| closer_than_surface(world, p.root, (gx, gy)))
     })
 }
 
-fn cand_near_taken(cands: &[(i32, i32, f32)], gx: i32, gy: i32) -> bool {
+fn cand_near_taken(world: &World, cands: &[(i32, i32, f32)], gx: i32, gy: i32) -> bool {
     cands
         .iter()
-        .any(|&(x, y, _)| within_join_radius((x, y), (gx, gy)))
+        .any(|&(x, y, _)| closer_than_surface(world, (x, y), (gx, gy)))
 }
 
 fn claim_path_feed(world: &World, temp: &Temperature, path: &PipePath, boil: f32) {
     let mut taken = claimed_cells();
-    if let Some(&(x0, y0)) = path.cells.first() {
-        let mut xmin = x0;
-        let mut xmax = x0;
-        let mut ymin = y0;
-        let mut ymax = y0;
-        for &(x, y) in &path.cells {
-            xmin = xmin.min(x);
-            xmax = xmax.max(x);
-            ymin = ymin.min(y);
-            ymax = ymax.max(y);
-        }
-        let r = PIPE_JOIN_RADIUS;
-        for y in (ymin - r)..=(ymax + r) {
-            for x in (xmin - r)..=(xmax + r) {
-                taken.insert((world.wrap_x(x), y));
-            }
-        }
-    }
     for &(x, y) in &path.cells {
         claim_wet_hot_body(world, temp, x, y, boil, &mut taken);
     }
@@ -900,8 +964,8 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
         .filter_map(|(&(hx, hy), &t)| (t >= boil).then_some((hx, hy, t)))
         .collect();
     tiles.sort_by_key(|&(hx, hy, _)| (hy, hx));
-    let mut taken = claimed_cells();
-    taken.extend(path_halo());
+    let mut boilers = claimed_cells();
+    let halo = path_halo();
     let mut cands: Vec<(i32, i32, f32)> = Vec::new();
     for (hx, hy, t) in tiles {
         if cands.len() >= room {
@@ -911,9 +975,10 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
             for lx in 0..tc {
                 let gx = world.wrap_x(hx * tc + lx);
                 let gy = hy * tc + ly;
-                if taken.contains(&(gx, gy))
-                    || path_near_taken(gx, gy)
-                    || cand_near_taken(&cands, gx, gy)
+                if boilers.contains(&(gx, gy))
+                    || halo.contains(&(gx, gy))
+                    || path_near_taken(world, gx, gy)
+                    || cand_near_taken(world, &cands, gx, gy)
                 {
                     continue;
                 }
@@ -927,7 +992,7 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
                     continue;
                 }
                 cands.push((gx, gy, t));
-                claim_wet_hot_body(world, temp, gx, gy, boil, &mut taken);
+                claim_wet_hot_body(world, temp, gx, gy, boil, &mut boilers);
                 if cands.len() >= room {
                     break;
                 }
@@ -937,7 +1002,7 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
             }
         }
     }
-    remember_claimed(&taken);
+    remember_claimed(&boilers);
     for (gx, gy, t) in cands.iter().copied() {
         let _ = pipe_flash(world, gx, gy, t, expand);
         let path = walk_pipe(world, (gx, gy));
@@ -956,7 +1021,14 @@ fn claim_wet_hot_body(
     boil: f32,
     taken: &mut FxHashSet<(i32, i32)>,
 ) {
-    let mut stack = vec![(world.wrap_x(gx), gy)];
+    let gx = world.wrap_x(gx);
+    let Some(start) = world.get_cell(gx, gy) else {
+        return;
+    };
+    if start.sat.0 == 0 || start.material == MaterialId::Air || temp.at_cell(gx, gy) < boil {
+        return;
+    }
+    let mut stack = vec![(gx, gy)];
     let mut n = 0usize;
     while let Some((x, y)) = stack.pop() {
         if !taken.insert((x, y)) {
@@ -1017,7 +1089,7 @@ pub fn apply_pipe_motor(
     }
     reflash_existing(world, temp, expand, boil);
     ignite_roots(world, temp, expand, boil);
-    join_adjacent_paths();
+    join_adjacent_paths(world);
     let paths = PIPE_MEMO.with(|slot| slot.borrow().paths.clone());
     for path in &paths {
         pulse_path(
@@ -1321,35 +1393,8 @@ mod tests {
         assert!(up < 80.0, "must stay a dye, not a slam, T={up}");
     }
 
-    #[test]
-    fn boiling_blocks_within_radius_share_one_straw() {
-        let mut w = plot();
-        for x in 0..32 {
-            for y in 1..12 {
-                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
-            }
-        }
-        for &x in &[4, 24] {
-            for y in 1..8 {
-                w.set_cell(x, y, {
-                    let mut c = Cell::solid(MaterialId::Gravel);
-                    let cap = water_capacity_cell(c, &w.hydro);
-                    c.sat = Sat(cap.min(10));
-                    c
-                });
-            }
-            for y in 8..12 {
-                w.set_cell(x, y, Cell::air());
-            }
-        }
-        let mut hot = temp_at(&w, 20.0);
-        for &x in &[4, 24] {
-            for y in 1..8 {
-                let (hx, hy) = hot.tile_of(x, y);
-                hot.set_tile_c(hx, hy, 150.0);
-            }
-        }
-        let cfg = SteamConfig {
+    fn pipe_cfg() -> SteamConfig {
+        SteamConfig {
             enable_pipe: true,
             enable_leftover_field: false,
             phase_expansion_drive: EXP,
@@ -1357,13 +1402,111 @@ mod tests {
             pipe_beat: 5,
             pipe_stroke: 1400,
             ..SteamConfig::default()
-        };
+        }
+    }
+
+    fn wet_gravel(world: &World) -> Cell {
+        let mut c = Cell::solid(MaterialId::Gravel);
+        let cap = water_capacity_cell(c, &world.hydro);
+        c.sat = Sat(cap.min(10));
+        c
+    }
+
+    #[test]
+    fn shallow_springs_stay_two_pipes() {
+        let mut w = plot();
+        for x in 0..32 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for &x in &[4, 24] {
+            w.set_cell(x, 1, wet_gravel(&w));
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for &x in &[4, 24] {
+            let (hx, hy) = hot.tile_of(x, 1);
+            hot.set_tile_c(hx, hy, 150.0);
+        }
+        let cfg = pipe_cfg();
         for t in 1..=20 {
             w.tick = t;
             apply_pipe_motor(&mut w, &mut hot, &cfg, None);
         }
         let (roots, _) = pipe_path_stats(&w);
-        assert_eq!(roots, 1, "20-cell gap is one boiling block, roots={roots}");
+        assert_eq!(
+            roots, 2,
+            "20-cell gap is farther than a 7-cell climb, roots={roots}"
+        );
+    }
+
+    #[test]
+    fn deep_reservoirs_join_when_closer_than_surface() {
+        let mut w = plot();
+        for x in 0..32 {
+            for y in 1..32 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 32..36 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for &x in &[4, 24] {
+            w.set_cell(x, 1, wet_gravel(&w));
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for &x in &[4, 24] {
+            let (hx, hy) = hot.tile_of(x, 1);
+            hot.set_tile_c(hx, hy, 150.0);
+        }
+        let cfg = pipe_cfg();
+        for t in 1..=20 {
+            w.tick = t;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        let (roots, _) = pipe_path_stats(&w);
+        assert_eq!(
+            roots, 1,
+            "20-cell gap is closer than a 30-cell climb, roots={roots}"
+        );
+    }
+
+    #[test]
+    fn overlay_marks_boiling_cells_on_the_pipe() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 5..=6 {
+            for y in 1..8 {
+                w.set_cell(x, y, wet_gravel(&w));
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 5..=6 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 150.0);
+            }
+        }
+        let cfg = pipe_cfg();
+        for t in 1..=20 {
+            w.tick = t;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        assert_eq!(pipe_path_stats(&w).0, 1);
+        assert!(
+            pipe_overlay_pack(&w, 5, 2).is_some() && pipe_overlay_pack(&w, 6, 2).is_some(),
+            "P marks the whole boiling block, not only the 1-cell straw"
+        );
     }
 
     #[test]
