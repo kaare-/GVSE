@@ -1289,7 +1289,7 @@ impl SimSettings {
                         ui,
                         hash!(),
                         "Pipe stroke (units / beat)",
-                        200.0..1400.0,
+                        200.0..7000.0,
                         &mut pipe_stroke,
                     );
                     labeled_slider(
@@ -1300,7 +1300,7 @@ impl SimSettings {
                         &mut pipe_beat,
                     );
                     self.steam.pipe_sides = pipe_sides.round().clamp(1.0, 8.0) as u8;
-                    self.steam.pipe_stroke = pipe_stroke.round().clamp(200.0, 1400.0) as u32;
+                    self.steam.pipe_stroke = pipe_stroke.round().clamp(200.0, 7000.0) as u32;
                     self.steam.pipe_beat = pipe_beat.round().clamp(1.0, 60.0) as u64;
                     self.steam.boil_max_per_cell = boil_max.round().clamp(1.0, 255.0) as u8;
                     self.steam.pore_boil_max_per_cell = pore_max.round().clamp(0.0, 255.0) as u8;

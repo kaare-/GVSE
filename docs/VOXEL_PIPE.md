@@ -44,13 +44,14 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 | `enable_pipe` | play yes / tests no | Run this motor |
 | `enable_leftover_field` | play no / tests yes | Old 28k leftover zone |
 | `pipe_sides` | 4 | Face fraction `1/sides` |
-| `pipe_stroke` | 1400 | Units per beat |
+| `pipe_stroke` | 1400 (Tab max 7000) | Units per beat |
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
 | `phase_expansion_drive` | 96…1400 | Flash volume |
 
 One connected hot-wet body is one locked straw. Boiling blocks
-within 48 cells (Chebyshev) share that straw. Later beats reflash
-that path; they do not pick a new route. P paints the straw plus the
+within 96 cells, or parallel straws whose x-bands are within 80
+cells, share that straw. Each pulse dyes the path a little toward
+packet T (weak, upward). Later beats reflash that path. P paints the straw plus the
 live puff — not leftover's hill / Dijkstra. Tab → Climate → cavity
 humidity tunes pipe on/off, leftover field, sides, stroke, beat.
 

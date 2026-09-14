@@ -26,7 +26,9 @@ pub const PIPE_STROKE_DEFAULT: u32 = 1400;
 const PIPE_MAX_ROOTS: usize = 8;
 const PIPE_CLAIM_BUDGET: usize = 32_768;
 /// Boiling blocks this close share one straw (Chebyshev, cells).
-const PIPE_JOIN_RADIUS: i32 = 48;
+const PIPE_JOIN_RADIUS: i32 = 96;
+/// Parallel straws on the same hill join when their x-bands are this close.
+const PIPE_JOIN_X: i32 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PipeSeat {
@@ -413,6 +415,20 @@ fn blend_tile_t(temp: &mut Temperature, gx: i32, gy: i32, mix_t: f32) {
     temp.set_tile_c(hx, hy, next);
 }
 
+/// Weak heat dye up the straw. Does not mint T; only pulls a cool tile
+/// a little toward the packet.
+fn couple_path_heat(temp: &mut Temperature, gx: i32, gy: i32, steam_t: f32) {
+    if !steam_t.is_finite() {
+        return;
+    }
+    let (hx, hy) = temp.tile_of(gx, gy);
+    let t = temp.at_cell(gx, gy);
+    if !t.is_finite() || steam_t <= t + 0.4 {
+        return;
+    }
+    temp.set_tile_c(hx, hy, t + (steam_t - t) * 0.16);
+}
+
 /// Flash liquid on a cell into live steam units. Mass-flat.
 pub fn pipe_flash(world: &mut World, gx: i32, gy: i32, t_c: f32, expand: u16) -> u32 {
     let gx = world.wrap_x(gx);
@@ -536,6 +552,7 @@ pub fn pulse_path(
     if steam == 0 {
         return;
     }
+    let dye_t = steam_t;
     let mut liquid = 0u8;
     let mut liquid_from = root;
     for &dest in &path.cells[1..] {
@@ -545,17 +562,17 @@ pub fn pulse_path(
                 liquid_from = dest;
             }
         }
-        if steam == 0 {
-            continue;
+        if steam > 0 {
+            let (steam_out, liquid_out, t_out) =
+                apply_arrival(world, temp, dest, steam, steam_t, expand, boil, sides);
+            steam = steam_out;
+            steam_t = t_out;
+            if liquid_out > 0 {
+                liquid = liquid.saturating_add(liquid_out);
+                liquid_from = dest;
+            }
         }
-        let (steam_out, liquid_out, t_out) =
-            apply_arrival(world, temp, dest, steam, steam_t, expand, boil, sides);
-        steam = steam_out;
-        steam_t = t_out;
-        if liquid_out > 0 {
-            liquid = liquid.saturating_add(liquid_out);
-            liquid_from = dest;
-        }
+        couple_path_heat(temp, dest.0, dest.1, dye_t);
     }
     if steam > 0 {
         let mouth = path.mouth;
@@ -703,7 +720,32 @@ fn within_join_radius(a: (i32, i32), b: (i32, i32)) -> bool {
     chebyshev(a, b) <= PIPE_JOIN_RADIUS
 }
 
+fn path_x_span(path: &PipePath) -> (i32, i32) {
+    let mut lo = path.root.0;
+    let mut hi = path.root.0;
+    for &(x, _) in &path.cells {
+        lo = lo.min(x);
+        hi = hi.max(x);
+    }
+    (lo, hi)
+}
+
+fn path_x_gap(a: &PipePath, b: &PipePath) -> i32 {
+    let (alo, ahi) = path_x_span(a);
+    let (blo, bhi) = path_x_span(b);
+    if ahi < blo {
+        blo - ahi
+    } else if bhi < alo {
+        alo - bhi
+    } else {
+        0
+    }
+}
+
 fn paths_touch(a: &PipePath, b: &PipePath) -> bool {
+    if path_x_gap(a, b) <= PIPE_JOIN_X {
+        return true;
+    }
     if within_join_radius(a.root, b.root) || within_join_radius(a.mouth, b.mouth) {
         return true;
     }
@@ -1257,6 +1299,26 @@ mod tests {
             pipe_overlay_pack(&w, 2, 3).is_none(),
             "side rock stays off the pipe overlay"
         );
+    }
+
+    #[test]
+    fn pulse_dyes_cool_path_tiles() {
+        let mut w = plot();
+        for y in 1..6 {
+            w.set_cell(4, y, Cell::solid(MaterialId::Stone));
+        }
+        w.set_cell(4, 6, Cell::air());
+        set_live(&mut w, 4, 1, 1400, 150.0);
+        let mut cool = temp_at(&w, 20.0);
+        let path = PipePath {
+            root: (4, 1),
+            cells: vec![(4, 1), (4, 2), (4, 3), (4, 4)],
+            mouth: (4, 4),
+        };
+        pulse_path(&mut w, &mut cool, &path, 1400, EXP, 100.0, PIPE_SIDES, None);
+        let up = cool.at_cell(4, 4);
+        assert!(up > 22.0, "weak heat should climb the straw, T={up}");
+        assert!(up < 80.0, "must stay a dye, not a slam, T={up}");
     }
 
     #[test]
