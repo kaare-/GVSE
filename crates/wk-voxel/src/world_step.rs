@@ -31,7 +31,9 @@
 //! 16. Humidity diffuse if due (**after** the CA increment)
 //! 17. Temperature step if due, then surplus again (hold shrank)
 //! 18. Cold avalanche (same period as phase)
-//! 19. Phase (I) — after T so a Tab snap applies this step
+//! 19. Leftover straw, then steam cadence, then phase (I) — after T so a
+//!     Tab snap applies this step. Leftover / steam are timed separately
+//!     from freeze/thaw.
 //! 20. Organisms (`O`) last so they see ice that just formed / melted
 //!
 //! Shell scans enable rayon; the CA follows [`PerfConfig::parallel_physics`].
@@ -54,7 +56,7 @@ use crate::parallel::set_parallel_enabled;
 use crate::phase::{apply_phase, PhaseConfig};
 use crate::pore_ice::apply_pore_ice;
 use crate::cave_humidity::apply_cave_humidity;
-use crate::steam::{apply_steam_with_weather, SteamConfig};
+use crate::steam::{apply_leftover_motor, apply_steam_cadence, SteamConfig};
 use crate::plant::{collect_live_root_world_cells, sail_plants_on_wind_rafts_cfg};
 use crate::rules::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity_climate,
@@ -147,6 +149,8 @@ pub struct WorldStepTimings {
     pub temperature: Duration,
     pub temperature_calls: u64,
     pub cold_avalanche: Duration,
+    pub leftover: Duration,
+    pub steam: Duration,
     pub phase: Duration,
     pub organisms: Duration,
 }
@@ -473,9 +477,22 @@ pub fn step_world(
 
     {
         let t0 = profile.then(Instant::now);
-        // Steam first so thaw sees cavity heat on the same tick (130 °C
-        // ice at a vent was phase-then-steam leftover).
-        apply_steam_with_weather(world, temperature, cfg.steam, Some(humidity));
+        // Leftover straw first so thaw sees cavity heat on the same
+        // tick (130 °C ice at a vent was phase-then-steam leftover).
+        apply_leftover_motor(world, temperature, cfg.steam);
+        if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
+            t.leftover += t0.elapsed();
+        }
+    }
+    {
+        let t0 = profile.then(Instant::now);
+        apply_steam_cadence(world, temperature, cfg.steam, Some(humidity));
+        if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
+            t.steam += t0.elapsed();
+        }
+    }
+    {
+        let t0 = profile.then(Instant::now);
         apply_phase(world, temperature, cfg.phase);
         apply_pore_ice(world, temperature, cfg.phase.freeze_point_c);
         apply_cave_humidity(world, temperature, humidity);

@@ -53,6 +53,8 @@ struct PassAccum {
     temperature: Duration,
     temperature_calls: u64,
     cold_avalanche: Duration,
+    leftover: Duration,
+    steam: Duration,
     phase: Duration,
     organisms: Duration,
 }
@@ -76,6 +78,8 @@ impl PassAccum {
             temperature: Duration::ZERO,
             temperature_calls: 0,
             cold_avalanche: Duration::ZERO,
+            leftover: Duration::ZERO,
+            steam: Duration::ZERO,
             phase: Duration::ZERO,
             organisms: Duration::ZERO,
         }
@@ -96,6 +100,8 @@ impl PassAccum {
             + self.humidity_diffuse
             + self.temperature
             + self.cold_avalanche
+            + self.leftover
+            + self.steam
             + self.phase
             + self.organisms
     }
@@ -304,6 +310,8 @@ fn add_step_timings(accum: &mut PassAccum, step: &WorldStepTimings) {
     accum.temperature += step.temperature;
     accum.temperature_calls += step.temperature_calls;
     accum.cold_avalanche += step.cold_avalanche;
+    accum.leftover += step.leftover;
+    accum.steam += step.steam;
     accum.phase += step.phase;
     accum.organisms += step.organisms;
 }
@@ -442,6 +450,11 @@ fn print_pass_table(accum: &PassAccum, n: u64, wall: Duration) {
         "  cold avalanche       {:>8.3} ms/tick",
         ms_per(accum.cold_avalanche, n)
     );
+    eprintln!(
+        "  leftover             {:>8.3} ms/tick",
+        ms_per(accum.leftover, n)
+    );
+    eprintln!("  steam                {:>8.3} ms/tick", ms_per(accum.steam, n));
     eprintln!("  phase                {:>8.3} ms/tick", ms_per(accum.phase, n));
     eprintln!(
         "  organisms            {:>8.3} ms/tick",

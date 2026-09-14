@@ -311,6 +311,9 @@ struct LeftoverMemo {
     pin_id: (i32, i32),
     /// Path cells that were loose when pinned (debug / overlay).
     pin_loose: Vec<bool>,
+    /// `route_next` / `pin_next` keys **and** dests. Straw membership
+    /// used to walk both maps every hop (`O(pin)`).
+    route_set: FxHashSet<(i32, i32)>,
 }
 
 /// Exterior leftover arms from a zone boundary.
@@ -332,12 +335,20 @@ const LEFTOVER_COST_FADE: f32 = 32.0;
 /// Magenta pin floor so a cool gravel chimney still reads as a line.
 const LEFTOVER_PIN_PACK: f32 = 0.58;
 
+#[derive(Default)]
+struct OpenPipeCache {
+    world_id: u64,
+    tick: u64,
+    map: FxHashMap<(i32, i32), bool>,
+}
+
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
     static STEAM_HAZE_MEMO: RefCell<Option<SteamHazeMemo>> = const { RefCell::new(None) };
     static PRESS_MEMO: RefCell<PressMemo> = RefCell::new(PressMemo::default());
     static LEFTOVER_MEMO: RefCell<LeftoverMemo> = RefCell::new(LeftoverMemo::default());
     static LEFTOVER_STRAW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static OPEN_PIPE: RefCell<OpenPipeCache> = RefCell::new(OpenPipeCache::default());
 }
 
 fn bind_sky_probe(world: &World) {
@@ -966,6 +977,30 @@ pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32,
     });
 }
 
+/// P-overlay hill silhouette. Sim ticks skip this flood; call when
+/// the leftover field is actually drawn.
+pub fn ensure_leftover_hill_view(world: &World, temp: &Temperature, boil_c: f32, expand: u16) {
+    prepare_leftover_pressure(world, temp, boil_c, expand);
+    LEFTOVER_MEMO.with(|slot| {
+        let mut memo = slot.borrow_mut();
+        if leftover_memo_bound(&memo, world, boil_c, expand) && !memo.view_ready {
+            leftover_paint_hill_view(world, &mut memo);
+        }
+    });
+}
+
+/// Leftover zone cells and pinned chimney length (HUD / soak counters).
+pub fn leftover_field_stats(world: &World) -> (usize, usize) {
+    let id = world.chunk_cache_id.get();
+    LEFTOVER_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        if memo.world_id != id {
+            return (0, 0);
+        }
+        (memo.zone.len(), memo.pin_path.len())
+    })
+}
+
 fn leftover_field_lookup(world: &World, gx: i32, gy: i32, boil_c: f32, expand: u16) -> f32 {
     let gx = world.wrap_x(gx);
     LEFTOVER_MEMO.with(|slot| {
@@ -1074,6 +1109,33 @@ fn leftover_is_dump_cell(world: &World, gx: i32, gy: i32) -> bool {
 /// chamber. A ridge chimney that reaches sky must not join the zone
 /// (that was dest-pick walking sand back into the mountain).
 fn leftover_is_open_pipe(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    let id = world.chunk_cache_id.get();
+    let tick = world.tick;
+    if let Some(hit) = OPEN_PIPE.with(|slot| {
+        let c = slot.borrow();
+        if c.world_id == id && c.tick == tick {
+            c.map.get(&(gx, gy)).copied()
+        } else {
+            None
+        }
+    }) {
+        return hit;
+    }
+    let hit = leftover_is_open_pipe_uncached(world, gx, gy);
+    OPEN_PIPE.with(|slot| {
+        let mut c = slot.borrow_mut();
+        if c.world_id != id || c.tick != tick {
+            c.world_id = id;
+            c.tick = tick;
+            c.map.clear();
+        }
+        c.map.insert((gx, gy), hit);
+    });
+    hit
+}
+
+fn leftover_is_open_pipe_uncached(world: &World, gx: i32, gy: i32) -> bool {
     let Some(cell) = world.get_cell(gx, gy) else {
         return false;
     };
@@ -1586,6 +1648,7 @@ fn leftover_apply_locked_path(world: &World, memo: &mut LeftoverMemo, path: Vec<
     memo.seed_zone.clear();
     memo.seeds.push((id.0, id.1, head));
     memo.seed_zone.push(id);
+    leftover_refresh_route_set(memo);
 }
 
 /// Walk leftover through the vessel to the planned exit so the straw
@@ -1901,12 +1964,25 @@ fn leftover_is_heat_sink(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
             && !void_is_confined(world, gx, gy))
 }
 
+fn leftover_refresh_route_set(memo: &mut LeftoverMemo) {
+    memo.route_set.clear();
+    for (&from, &to) in &memo.route_next {
+        memo.route_set.insert(from);
+        memo.route_set.insert(to);
+    }
+    for (&from, &to) in &memo.pin_next {
+        memo.route_set.insert(from);
+        memo.route_set.insert(to);
+    }
+}
+
 fn leftover_clear_pin(memo: &mut LeftoverMemo) {
     memo.pin_path.clear();
     memo.pin_next.clear();
     memo.pin_loose.clear();
     memo.pin_seed = (0, 0);
     memo.pin_id = (0, 0);
+    leftover_refresh_route_set(memo);
 }
 
 fn leftover_pin_cell_walkable(world: &World, gx: i32, gy: i32) -> bool {
@@ -1973,6 +2049,7 @@ fn leftover_try_reuse_pin(world: &World, memo: &mut LeftoverMemo) -> bool {
         return false;
     }
     memo.route_next = memo.pin_next.clone();
+    leftover_refresh_route_set(memo);
     let seed = if memo.zone.contains(&memo.pin_seed) && memo.pin_next.contains_key(&memo.pin_seed)
     {
         memo.pin_seed
@@ -2029,6 +2106,7 @@ fn leftover_install_pin(
         memo.pin_next.insert(w[0], w[1]);
     }
     memo.route_next = memo.pin_next.clone();
+    leftover_refresh_route_set(memo);
     memo.pin_seed = seed;
     memo.pin_id = memo.seed_zone.first().copied().unwrap_or(seed);
 }
@@ -2344,7 +2422,6 @@ fn rebuild_leftover_field(
         // hits zero. Lake-only pins still drop.
         if leftover_pin_keep_when_cold(world, memo) {
             leftover_stamp_planned_route(world, memo);
-            leftover_paint_hill_view(world, memo);
             return;
         }
         leftover_clear_pin(memo);
@@ -2602,7 +2679,7 @@ fn rebuild_leftover_field(
         leftover_commit_pin(world, memo);
         leftover_dim_off_pin_arms(world, memo);
     }
-    leftover_paint_hill_view(world, memo);
+    leftover_refresh_route_set(memo);
 }
 
 /// Standing leftover head: shove leftover mass every tick from each seed.
@@ -2638,6 +2715,34 @@ fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
     });
     leftover_erode_planned_route(world);
     leftover_conduct_wet_route(world, temp);
+}
+
+/// Heat rides leftover mass already on the pin. Dry planned cells stay
+/// cold — leftover volume *is* that pore water / steam, not a heat walk.
+fn leftover_conduct_wet_route(world: &World, temp: &mut Temperature) {
+    let path = LEFTOVER_MEMO.with(|slot| slot.borrow().pin_path.clone());
+    if path.len() < 2 {
+        return;
+    }
+    for w in path.windows(2) {
+        let (ax, ay) = w[0];
+        let (bx, by) = w[1];
+        let Some(a) = world.get_cell(ax, ay) else {
+            break;
+        };
+        let Some(b) = world.get_cell(bx, by) else {
+            break;
+        };
+        let src_mass = a.sat.0.max(steam_at(world, ax, ay));
+        let dest_mass = b.sat.0.max(steam_at(world, bx, by));
+        if src_mass == 0 || dest_mass == 0 {
+            continue;
+        }
+        leftover_boost_route_heat(world, temp, ax, ay, bx, by, dest_mass.min(16).max(1));
+        if leftover_is_heat_sink(world, bx, by, b) {
+            break;
+        }
+    }
 }
 
 /// Pulse-erode the pinned chimney. Head may not finish the walk this
@@ -2858,34 +2963,6 @@ fn leftover_packed_depth(world: &World, gx: i32, gy: i32, hops: u16) -> u8 {
         }
     }
     24
-}
-
-/// Heat rides leftover mass already on the pin. Dry planned cells stay
-/// cold — leftover volume *is* that pore water / steam, not a heat walk.
-fn leftover_conduct_wet_route(world: &World, temp: &mut Temperature) {
-    let path = LEFTOVER_MEMO.with(|slot| slot.borrow().pin_path.clone());
-    if path.len() < 2 {
-        return;
-    }
-    for w in path.windows(2) {
-        let (ax, ay) = w[0];
-        let (bx, by) = w[1];
-        let Some(a) = world.get_cell(ax, ay) else {
-            break;
-        };
-        let Some(b) = world.get_cell(bx, by) else {
-            break;
-        };
-        let src_mass = a.sat.0.max(steam_at(world, ax, ay));
-        let dest_mass = b.sat.0.max(steam_at(world, bx, by));
-        if src_mass == 0 || dest_mass == 0 {
-            continue;
-        }
-        leftover_boost_route_heat(world, temp, ax, ay, bx, by, dest_mass.min(16).max(1));
-        if leftover_is_heat_sink(world, bx, by, b) {
-            break;
-        }
-    }
 }
 
 fn leftover_boost_route_heat(
@@ -3269,45 +3346,68 @@ pub fn apply_steam_with_weather(
     if !cfg.enabled {
         return;
     }
-    let period = cfg.period_ticks.max(1);
-    let due = world.tick % period == 0;
-    let max_cells = cfg.max_steam_cells.max(1) as usize;
-    let boil = cfg.boil_point_c;
-    let recondense_below = boil - RECONDENSE_MARGIN_C;
+    apply_leftover_motor(world, temp, cfg);
+    apply_steam_cadence(world, temp, cfg, humidity);
+}
 
-    // Leftover is a standing head. Rebuild + shove every tick so
-    // seepage cannot erase the water-table bump on the 4 ticks the
-    // boil cadence is idle. Flood / boil stay periodic (FPS).
-    prepare_leftover_pressure(world, temp, boil, cfg.phase_expansion_drive);
+/// Standing leftover head + straw. Rebuilds the leftover field and
+/// shoves leftover mass every tick so seepage cannot erase the
+/// water-table bump while the boil cadence is idle. Overlay hill
+/// paint is deferred to [`ensure_leftover_hill_view`].
+pub(crate) fn apply_leftover_motor(
+    world: &mut World,
+    temp: &mut Temperature,
+    cfg: &SteamConfig,
+) {
+    if !cfg.enabled {
+        return;
+    }
+    prepare_leftover_pressure(world, temp, cfg.boil_point_c, cfg.phase_expansion_drive);
     clear_leftover_lake_vents(world.chunk_cache_id.get());
     // Leftover mass *is* the pressure. Shove pore water / steam first so
     // a cadence boil cannot steal the reverse river into a dry vent.
     shove_phreatic_bump(world, temp);
-    if due {
-        scrub_invalid_steam_seats(world, max_cells);
-        recondense_cool(world, temp, recondense_below);
-        boil_hot_air(world, temp, cfg, max_cells);
-        if cfg.enable_pore_boil {
-            boil_hot_pores(world, temp, cfg, max_cells);
-        }
+}
+
+/// Cadence boil / flood / assault / escape. Leftover lives in
+/// [`apply_leftover_motor`].
+pub(crate) fn apply_steam_cadence(
+    world: &mut World,
+    temp: &mut Temperature,
+    cfg: &SteamConfig,
+    humidity: Option<&mut Humidity>,
+) {
+    if !cfg.enabled {
+        return;
     }
+    let period = cfg.period_ticks.max(1);
+    let due = world.tick % period == 0;
     if !due {
         return;
     }
+    let max_cells = cfg.max_steam_cells.max(1) as usize;
+    let recondense_below = cfg.boil_point_c - RECONDENSE_MARGIN_C;
+    scrub_invalid_steam_seats(world, max_cells);
+    recondense_cool(world, temp, recondense_below);
+    boil_hot_air(world, temp, cfg, max_cells);
+    if cfg.enable_pore_boil {
+        boil_hot_pores(world, temp, cfg, max_cells);
+    }
     // Flood + assault only on cadence (every-tick flood crushed FPS).
-    if !world.steam.is_empty() {
-        flood_equalize_steam(world, cfg, max_cells);
-        leak_choked_boiler_mouth(world, temp, cfg, humidity);
-        // Density-driven push + heat deposit continue past the boil isotherm.
-        transmit_cavity_pressure(world, temp, cfg);
-        assault_steam_walls(world, temp, cfg);
-        if cfg.enable_escape {
-            let escaped = escape_pressurized(world, temp, cfg, max_cells);
-            // Second flood is only needed when a burst / tube actually
-            // relocated vapour. Pore-only widen leaves the field in place.
-            if escaped > 0 && !world.steam.is_empty() {
-                flood_equalize_steam(world, cfg, max_cells);
-            }
+    if world.steam.is_empty() {
+        return;
+    }
+    flood_equalize_steam(world, cfg, max_cells);
+    leak_choked_boiler_mouth(world, temp, cfg, humidity);
+    // Density-driven push + heat deposit continue past the boil isotherm.
+    transmit_cavity_pressure(world, temp, cfg);
+    assault_steam_walls(world, temp, cfg);
+    if cfg.enable_escape {
+        let escaped = escape_pressurized(world, temp, cfg, max_cells);
+        // Second flood is only needed when a burst / tube actually
+        // relocated vapour. Pore-only widen leaves the field in place.
+        if escaped > 0 && !world.steam.is_empty() {
+            flood_equalize_steam(world, cfg, max_cells);
         }
     }
 }
@@ -5094,13 +5194,7 @@ fn leftover_on_route(world: &World, gx: i32, gy: i32) -> bool {
     let id = world.chunk_cache_id.get();
     LEFTOVER_MEMO.with(|slot| {
         let memo = slot.borrow();
-        if memo.world_id != id {
-            return false;
-        }
-        memo.route_next.contains_key(&(gx, gy))
-            || memo.route_next.values().any(|&p| p == (gx, gy))
-            || memo.pin_next.contains_key(&(gx, gy))
-            || memo.pin_next.values().any(|&p| p == (gx, gy))
+        memo.world_id == id && memo.route_set.contains(&(gx, gy))
     })
 }
 
@@ -7804,6 +7898,57 @@ mod tests {
     }
 
     #[test]
+    fn leftover_hill_view_paints_on_demand() {
+        let mut w = World::new(319);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 2..14 {
+            for y in 0..16 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..10 {
+            for y in 1..8 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        w.set_cell(6, 8, Cell::air());
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 4..10 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        w.tick = STEAM_EVERY;
+        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        let (z0, _) = leftover_field_stats(&w);
+        assert!(z0 > 0, "prepare must seed leftover");
+        assert!(
+            leftover_in_zone(&w, 6, 4),
+            "straw membership must still see the vessel"
+        );
+        assert!(
+            !LEFTOVER_MEMO.with(|s| s.borrow().view_ready),
+            "sim prepare must not flood the P-overlay hill"
+        );
+        ensure_leftover_hill_view(&w, &hot, 100.0, 192);
+        assert!(
+            LEFTOVER_MEMO.with(|s| s.borrow().view_ready),
+            "P overlay must paint the leftover hill on demand"
+        );
+        let last = LEFTOVER_MEMO.with(|s| s.borrow().pin_path.last().copied());
+        if let Some((x, y)) = last {
+            assert!(
+                leftover_on_route(&w, x, y),
+                "route_set must include pin dests, not only keys"
+            );
+        }
+    }
+
+    #[test]
     fn leftover_pin_survives_gravel_weld_to_stone() {
         let mut w = World::new(321);
         w.ensure_chunk(ChunkCoord::new(0, 0));
@@ -8492,7 +8637,7 @@ mod tests {
             }
         }
         w.tick = 7;
-        prepare_leftover_pressure(&w, &hot, 100.0, 192);
+        ensure_leftover_hill_view(&w, &hot, 100.0, 192);
         let (p_core, _) = cell_pressure_norm_with_boil(&w, 6, 6, 122.0, 100.0, 192);
         let (p_hill, _) = cell_pressure_norm_with_boil(&w, 14, 6, 20.0, 100.0, 192);
         let (p_iso, _) = cell_pressure_norm_with_boil(&w, 20, 6, 20.0, 100.0, 192);
