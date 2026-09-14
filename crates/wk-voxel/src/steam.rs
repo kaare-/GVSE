@@ -314,6 +314,26 @@ struct LeftoverMemo {
     /// `route_next` / `pin_next` keys **and** dests. Straw membership
     /// used to walk both maps every hop (`O(pin)`).
     route_set: FxHashSet<(i32, i32)>,
+    /// Last rebuild reused the live pin (skipped exterior halo / Dijkstra).
+    reused_pin: bool,
+    /// Ticks to skip exterior Dijkstra after a huge zone failed to lock
+    /// a sky walk. Zone membership still rebuilds every tick.
+    lock_cooldown: u8,
+}
+
+/// Soak / F1 counters for leftover + sky-probe growth.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LeftoverSoakStats {
+    pub zone: usize,
+    pub pin: usize,
+    pub map: usize,
+    pub route_set: usize,
+    pub reused_pin: bool,
+    pub sky_topo: u64,
+    pub probe_confined: usize,
+    pub probe_open: usize,
+    pub probe_boiler: usize,
+    pub steam_cells: usize,
 }
 
 /// Exterior leftover arms from a zone boundary.
@@ -355,14 +375,44 @@ fn bind_sky_probe(world: &World) {
     SKY_PROBE.with(|slot| {
         let mut c = slot.borrow_mut();
         let id = world.chunk_cache_id.get();
-        let topo = world.sky_topo_gen;
-        if c.world_id != id || c.topo != topo {
+        if c.world_id != id {
             c.world_id = id;
-            c.topo = topo;
+            c.topo = world.sky_topo_gen;
             c.confined.clear();
             c.open.clear();
             c.boiler.clear();
+            return;
         }
+        c.topo = world.sky_topo_gen;
+    });
+}
+
+/// Drop sky-probe entries a nearby Air↔solid flip could change.
+///
+/// Wiping the whole cache on every grain of beach sand is why leftover's
+/// 28k-cell zone flood paid cold 192-BFS vessel probes every soak tick.
+pub(crate) fn invalidate_sky_probe_near(world: &World, gx: i32, gy: i32) {
+    const R: i32 = 192;
+    SKY_PROBE.with(|slot| {
+        let mut c = slot.borrow_mut();
+        if c.confined.is_empty() && c.open.is_empty() && c.boiler.is_empty() {
+            return;
+        }
+        let wrap = world.wrap_width.unwrap_or(0);
+        let near = |x: i32, y: i32| -> bool {
+            let dy = (y - gy).abs();
+            if dy > R {
+                return false;
+            }
+            let mut dx = (x - gx).abs();
+            if wrap > 0 {
+                dx = dx.min(wrap - dx);
+            }
+            dx <= R
+        };
+        c.confined.retain(|&(x, y), _| !near(x, y));
+        c.open.retain(|&(x, y), _| !near(x, y));
+        c.boiler.retain(|&(x, y), _| !near(x, y));
     });
 }
 
@@ -991,14 +1041,37 @@ pub fn ensure_leftover_hill_view(world: &World, temp: &Temperature, boil_c: f32,
 
 /// Leftover zone cells and pinned chimney length (HUD / soak counters).
 pub fn leftover_field_stats(world: &World) -> (usize, usize) {
+    let s = leftover_soak_stats(world);
+    (s.zone, s.pin)
+}
+
+/// Leftover body + sky-probe sizes. Grows with soak if leftover heat
+/// enlarges the 100 °C vessel or Air topology keeps invalidating probes.
+pub fn leftover_soak_stats(world: &World) -> LeftoverSoakStats {
     let id = world.chunk_cache_id.get();
+    let mut stats = LeftoverSoakStats {
+        sky_topo: world.sky_topo_gen,
+        steam_cells: world.steam.len(),
+        ..LeftoverSoakStats::default()
+    };
     LEFTOVER_MEMO.with(|slot| {
         let memo = slot.borrow();
         if memo.world_id != id {
-            return (0, 0);
+            return;
         }
-        (memo.zone.len(), memo.pin_path.len())
-    })
+        stats.zone = memo.zone.len();
+        stats.pin = memo.pin_path.len();
+        stats.map = memo.map.len();
+        stats.route_set = memo.route_set.len();
+        stats.reused_pin = memo.reused_pin;
+    });
+    SKY_PROBE.with(|slot| {
+        let c = slot.borrow();
+        stats.probe_confined = c.confined.len();
+        stats.probe_open = c.open.len();
+        stats.probe_boiler = c.boiler.len();
+    });
+    stats
 }
 
 fn leftover_field_lookup(world: &World, gx: i32, gy: i32, boil_c: f32, expand: u16) -> f32 {
@@ -1110,6 +1183,14 @@ fn leftover_is_dump_cell(world: &World, gx: i32, gy: i32) -> bool {
 /// (that was dest-pick walking sand back into the mountain).
 fn leftover_is_open_pipe(world: &World, gx: i32, gy: i32) -> bool {
     let gx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return false;
+    };
+    // Packed stone / bedrock cannot be a sky pipe. Caching every
+    // interior neighbour of a 28k vessel was leftover's HashMap tax.
+    if cell.material != MaterialId::Air && !leftover_is_chimney_skin(cell.material) {
+        return false;
+    }
     let id = world.chunk_cache_id.get();
     let tick = world.tick;
     if let Some(hit) = OPEN_PIPE.with(|slot| {
@@ -1915,6 +1996,9 @@ fn leftover_is_weather_relief(world: &World, gx: i32, gy: i32, cell: Cell) -> bo
     if cell.material != MaterialId::Air {
         return false;
     }
+    if !void_is_confined(world, gx, gy) {
+        return true;
+    }
     if vessel_is_boiler(world, gx, gy) {
         return false;
     }
@@ -1937,14 +2021,19 @@ fn leftover_is_surface_mouth(world: &World, gx: i32, gy: i32, cell: Cell) -> boo
     if cell.material != MaterialId::Air {
         return false;
     }
+    // Unroofed Air is weather. The 48-up probe is enough — a 192-cell
+    // vessel BFS here was leftover's soak tax on every zone-rim sky cell.
+    if !void_is_confined(world, gx, gy) {
+        return true;
+    }
     if vessel_is_boiler(world, gx, gy) {
         return false;
     }
     let wet = crate::rules::is_standing_water(world, gx, gy) || cell.sat.0 > STEAM_VOID_SAT_MAX;
-    if wet && void_is_confined(world, gx, gy) {
+    if wet {
         return false;
     }
-    air_void_open_to_sky(world, gx, gy) || wet
+    air_void_open_to_sky(world, gx, gy)
 }
 
 /// Open sky / unroofed air — not a weather lake at the hill foot.
@@ -2024,6 +2113,7 @@ fn leftover_pin_touches_zone(world: &World, memo: &LeftoverMemo) -> bool {
 /// Keep last tick's chimney if the pipe still holds. A grain of sand,
 /// pore widen, or sat flicker must not retarget the spring.
 fn leftover_try_reuse_pin(world: &World, memo: &mut LeftoverMemo) -> bool {
+    memo.reused_pin = false;
     if memo.pin_path.len() < 2 || memo.pin_next.is_empty() {
         leftover_clear_pin(memo);
         return false;
@@ -2079,6 +2169,7 @@ fn leftover_try_reuse_pin(world: &World, memo: &mut LeftoverMemo) -> bool {
     memo.seed_zone.push(id);
     memo.pin_seed = seed;
     memo.pin_id = id;
+    memo.reused_pin = true;
     true
 }
 
@@ -2344,13 +2435,10 @@ fn leftover_has_pin(world: &World) -> bool {
 }
 
 fn leftover_is_boiler_path(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
-    if cell.material != MaterialId::Air {
-        return false;
-    }
-    vessel_is_boiler(world, gx, gy)
-        || (is_steam_void(cell) && void_is_confined(world, gx, gy))
-        || (void_is_confined(world, gx, gy)
-            && (cell.sat.0 > STEAM_VOID_SAT_MAX || crate::rules::is_standing_water(world, gx, gy)))
+    // Roofed Air is a chamber hop (dry void or wet pool). Unroofed is
+    // weather. The old vessel BFS was equivalent: every confined seat
+    // already matched steam-void or standing/wet.
+    cell.material == MaterialId::Air && void_is_confined(world, gx, gy)
 }
 
 fn leftover_zone_body_pack(head: u32, seats: u32, expand: u16) -> f32 {
@@ -2541,7 +2629,21 @@ fn rebuild_leftover_field(
     // rebuild emptied the wet hill). A live pin does not need the
     // 4096-cell exterior halo or Dijkstra — straw already has a route.
     if leftover_try_reuse_pin(world, memo) {
+        memo.lock_cooldown = 0;
         leftover_dim_off_pin_arms(world, memo);
+        leftover_refresh_route_set(memo);
+        return;
+    }
+    // Continent-scale vessels miss a sky walk inside LEFTOVER_PLAN_CELLS.
+    // Retry Dijkstra on a slow cadence; zone membership stays fresh.
+    if memo.zone.len() > LEFTOVER_FIELD_CELLS && memo.lock_cooldown > 0 {
+        memo.lock_cooldown -= 1;
+        for (cells, head, surplus, id) in &painted {
+            if let Some(&(gx, gy)) = cells.iter().max_by_key(|(_, y)| *y) {
+                memo.seeds.push((gx, gy, head.max(*surplus)));
+                memo.seed_zone.push(*id);
+            }
+        }
         leftover_refresh_route_set(memo);
         return;
     }
@@ -2684,11 +2786,17 @@ fn rebuild_leftover_field(
         }
     }
     if leftover_try_reuse_pin(world, memo) {
+        memo.lock_cooldown = 0;
         leftover_dim_off_pin_arms(world, memo);
     } else {
         leftover_lock_winning_route(world, memo);
         leftover_commit_pin(world, memo);
         leftover_dim_off_pin_arms(world, memo);
+        if memo.pin_path.len() >= 2 {
+            memo.lock_cooldown = 0;
+        } else if memo.zone.len() > LEFTOVER_FIELD_CELLS {
+            memo.lock_cooldown = 7;
+        }
     }
     leftover_refresh_route_set(memo);
 }

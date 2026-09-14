@@ -140,6 +140,7 @@ pub use steam::{
     air_void_open_to_sky, apply_steam, apply_steam_with_weather, cavity_humidity_at,
     cell_pressure_norm, cell_pressure_norm_with_boil, choke_leak_mass, classify_air_vessel,
     ensure_leftover_hill_view, expansion_drive_units, leftover_field_stats, leftover_pack_norm,
+    leftover_soak_stats, LeftoverSoakStats,
     leftover_straw_hops, overpressure_units, phase_heat_drive_scale, prepare_leftover_pressure,
     steam_at, steam_haze_wash,
     steam_is_pressure_confined, steam_pressure_norm, steam_pressure_rate_scale, steam_total,
