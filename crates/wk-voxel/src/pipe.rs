@@ -60,13 +60,12 @@ pub enum HopKind {
 struct PipeMemo {
     world_id: u64,
     paths: Vec<PipePath>,
+    claimed: FxHashSet<(i32, i32)>,
 }
 
 thread_local! {
-    static PIPE_MEMO: std::cell::RefCell<PipeMemo> = const { std::cell::RefCell::new(PipeMemo {
-        world_id: 0,
-        paths: Vec::new(),
-    }) };
+    static PIPE_MEMO: std::cell::RefCell<PipeMemo> =
+        std::cell::RefCell::new(PipeMemo::default());
 }
 
 #[inline]
@@ -598,6 +597,7 @@ fn bind_memo(world: &World) {
         if memo.world_id != world.chunk_cache_id.get() {
             memo.world_id = world.chunk_cache_id.get();
             memo.paths.clear();
+            memo.claimed.clear();
         }
     });
 }
@@ -614,69 +614,140 @@ fn upsert_path(world: &World, path: PipePath) {
     });
 }
 
+fn paths_touch(a: &PipePath, b: &PipePath) -> bool {
+    let mut cells: FxHashSet<(i32, i32)> = FxHashSet::default();
+    for &(x, y) in &a.cells {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                cells.insert((x + dx, y + dy));
+            }
+        }
+    }
+    b.cells.iter().any(|c| cells.contains(c))
+}
+
+fn claimed_cells() -> FxHashSet<(i32, i32)> {
+    PIPE_MEMO.with(|slot| slot.borrow().claimed.clone())
+}
+
+fn remember_claimed(cells: &FxHashSet<(i32, i32)>) {
+    PIPE_MEMO.with(|slot| {
+        slot.borrow_mut().claimed.extend(cells.iter().copied());
+    });
+}
+
+fn path_halo() -> FxHashSet<(i32, i32)> {
+    PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        let mut cells = FxHashSet::default();
+        for path in &memo.paths {
+            for &(x, y) in &path.cells {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        cells.insert((x + dx, y + dy));
+                    }
+                }
+            }
+        }
+        cells
+    })
+}
+
 fn join_adjacent_paths() {
     PIPE_MEMO.with(|slot| {
         let mut memo = slot.borrow_mut();
         if memo.paths.len() < 2 {
             return;
         }
-        let mut drop: FxHashSet<(i32, i32)> = FxHashSet::default();
-        for i in 0..memo.paths.len() {
-            for j in (i + 1)..memo.paths.len() {
-                let a = memo.paths[i].root;
-                let b = memo.paths[j].root;
-                let dx = (a.0 - b.0).abs();
-                let dy = (a.1 - b.1).abs();
-                if dx <= 1 && dy <= 1 {
-                    if memo.paths[i].cells.len() <= memo.paths[j].cells.len() {
-                        drop.insert(b);
-                    } else {
-                        drop.insert(a);
+        let n = memo.paths.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        let find = |parent: &mut [usize], mut i: usize| {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        };
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if paths_touch(&memo.paths[i], &memo.paths[j]) {
+                    let pi = find(&mut parent, i);
+                    let pj = find(&mut parent, j);
+                    if pi != pj {
+                        parent[pj] = pi;
                     }
                 }
             }
         }
-        memo.paths.retain(|p| !drop.contains(&p.root));
+        let mut best: FxHashMap<usize, usize> = FxHashMap::default();
+        for i in 0..n {
+            let p = find(&mut parent, i);
+            let len = memo.paths[i].cells.len();
+            match best.get(&p).copied() {
+                Some(j) if memo.paths[j].cells.len() >= len => {}
+                _ => {
+                    best.insert(p, i);
+                }
+            }
+        }
+        let keep: FxHashSet<(i32, i32)> = best.values().map(|&i| memo.paths[i].root).collect();
+        memo.paths.retain(|p| keep.contains(&p.root));
     });
 }
 
+fn existing_path_count() -> usize {
+    PIPE_MEMO.with(|slot| slot.borrow().paths.len())
+}
+
+/// Flash wet cells on 4×4 tiles that are already ≥ boil. Not a wet-world scan.
 fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -> usize {
+    let already = existing_path_count();
+    if already >= PIPE_MAX_ROOTS {
+        return 0;
+    }
+    let tc = temp.tile_cols.max(1);
+    let room = PIPE_MAX_ROOTS - already;
+    let mut tiles: Vec<(i32, i32, f32)> = temp
+        .cells
+        .iter()
+        .filter_map(|(&(hx, hy), &t)| (t >= boil).then_some((hx, hy, t)))
+        .collect();
+    tiles.sort_by_key(|&(hx, hy, _)| (hy, hx));
+    let mut taken = claimed_cells();
+    taken.extend(path_halo());
     let mut cands: Vec<(i32, i32, f32)> = Vec::new();
-    let coords: Vec<_> = world.chunks.keys().copied().collect();
-    for coord in coords {
-        if cands.len() >= PIPE_MAX_ROOTS {
+    for (hx, hy, t) in tiles {
+        if cands.len() >= room {
             break;
         }
-        let Some(chunk) = world.chunks.get(&coord) else {
-            continue;
-        };
-        if !chunk.has_wet_pores {
-            continue;
-        }
-        let x0 = coord.cx * crate::chunk::CHUNK_CELLS_W as i32;
-        let y0 = coord.cy * crate::chunk::CHUNK_CELLS_H as i32;
-        for ly in 0..crate::chunk::CHUNK_CELLS_H {
-            for lx in 0..crate::chunk::CHUNK_CELLS_W {
-                let cell = chunk.get(lx, ly);
-                if cell.sat.0 == 0 || cell.material == MaterialId::Air {
+        for ly in 0..tc {
+            for lx in 0..tc {
+                let gx = world.wrap_x(hx * tc + lx);
+                let gy = hy * tc + ly;
+                if taken.contains(&(gx, gy)) {
                     continue;
                 }
-                let gx = world.wrap_x(x0 + lx as i32);
-                let gy = y0 + ly as i32;
-                let t = temp.at_cell(gx, gy);
-                if t < boil {
+                let Some(cell) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if cell.sat.0 == 0 || cell.material == MaterialId::Air {
                     continue;
                 }
                 if pipe_live_at(world, gx, gy) > 0 {
                     continue;
                 }
                 cands.push((gx, gy, t));
-                if cands.len() >= PIPE_MAX_ROOTS {
+                claim_wet_hot_body(world, temp, gx, gy, boil, &mut taken);
+                if cands.len() >= room {
                     break;
                 }
             }
+            if cands.len() >= room {
+                break;
+            }
         }
     }
+    remember_claimed(&taken);
     for (gx, gy, t) in cands.iter().copied() {
         let _ = pipe_flash(world, gx, gy, t, expand);
         let path = walk_pipe(world, (gx, gy));
@@ -685,7 +756,51 @@ fn ignite_roots(world: &mut World, temp: &Temperature, expand: u16, boil: f32) -
     cands.len()
 }
 
-/// Ignite, pulse, join, pool. Cheap when no roots and nothing is at boil.
+/// Mark the connected wet body at/above boil so one hill is one root.
+fn claim_wet_hot_body(
+    world: &World,
+    temp: &Temperature,
+    gx: i32,
+    gy: i32,
+    boil: f32,
+    taken: &mut FxHashSet<(i32, i32)>,
+) {
+    let mut stack = vec![(world.wrap_x(gx), gy)];
+    let mut n = 0usize;
+    while let Some((x, y)) = stack.pop() {
+        if !taken.insert((x, y)) {
+            continue;
+        }
+        n += 1;
+        if n > 4096 {
+            break;
+        }
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let nx = world.wrap_x(x + dx);
+                let ny = y + dy;
+                if taken.contains(&(nx, ny)) {
+                    continue;
+                }
+                let Some(cell) = world.get_cell(nx, ny) else {
+                    continue;
+                };
+                if cell.sat.0 == 0 || cell.material == MaterialId::Air {
+                    continue;
+                }
+                if temp.at_cell(nx, ny) < boil {
+                    continue;
+                }
+                stack.push((nx, ny));
+            }
+        }
+    }
+}
+
+/// Ignite, pulse, join, pool. Off-beat is a no-op besides memo bind.
 pub fn apply_pipe_motor(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig) {
     if !cfg.enable_pipe {
         return;
@@ -701,15 +816,16 @@ pub fn apply_pipe_motor(world: &mut World, temp: &mut Temperature, cfg: &SteamCo
     let beat = cfg.pipe_beat.max(1);
     world.pipe_expand = expand;
     bind_memo(world);
+    if world.tick % beat != 0 {
+        return;
+    }
     ignite_roots(world, temp, expand, boil);
     join_adjacent_paths();
-    if world.tick % beat == 0 {
-        let paths = PIPE_MEMO.with(|slot| slot.borrow().paths.clone());
-        for path in &paths {
-            pulse_path(world, temp, path, stroke, expand, boil, sides);
-        }
-        pool_residuals(world, expand);
+    let paths = PIPE_MEMO.with(|slot| slot.borrow().paths.clone());
+    for path in &paths {
+        pulse_path(world, temp, path, stroke, expand, boil, sides);
     }
+    pool_residuals(world, expand);
 }
 
 pub fn default_pipe_expand() -> u16 {
@@ -908,6 +1024,56 @@ mod tests {
         assert!(path.cells.len() >= 3, "path={:?}", path.cells);
         let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
         assert_eq!(mouth.material, MaterialId::Air);
+    }
+
+    #[test]
+    fn pipe_motor_stays_on_a_path() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for y in 1..8 {
+            w.set_cell(6, y, {
+                let mut c = Cell::solid(MaterialId::Gravel);
+                let cap = water_capacity_cell(c, &w.hydro);
+                c.sat = Sat(cap.min(10));
+                c
+            });
+        }
+        for y in 8..12 {
+            w.set_cell(6, y, Cell::air());
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for y in 1..8 {
+            let (hx, hy) = hot.tile_of(6, y);
+            hot.set_tile_c(hx, hy, 150.0);
+        }
+        let cfg = SteamConfig {
+            enable_pipe: true,
+            enable_leftover_field: false,
+            phase_expansion_drive: EXP,
+            boil_point_c: 100.0,
+            pipe_beat: 5,
+            pipe_stroke: 1400,
+            ..SteamConfig::default()
+        };
+        let before = sat_totals(&w).cell_total;
+        for t in 1..=40 {
+            w.tick = t;
+            apply_pipe_motor(&mut w, &mut hot, &cfg);
+        }
+        assert_eq!(sat_totals(&w).cell_total, before);
+        let (roots, cells) = pipe_path_stats(&w);
+        assert_eq!(roots, 1, "one hill is one pipe, roots={roots}");
+        assert!(cells >= 3, "path cells={cells}");
+        assert!(
+            w.pipe_steam.len() + w.pipe_res.len() <= cells + 8,
+            "book={} path={cells}",
+            w.pipe_steam.len() + w.pipe_res.len()
+        );
+        assert!(crate::steam::leftover_soak_stats(&w).zone == 0);
     }
 
     #[test]

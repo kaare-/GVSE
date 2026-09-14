@@ -34,7 +34,8 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
    cell: steam takes the seat, liquid continues.
 6. Collapse ≠ boil. Boil is this cell’s own liquid flashing.
 7. Seepage never moves steam. Solute rides liquid only.
-8. 4×4 tiles only **ignite** and **pool residuals**.
+8. 4×4 tiles only **ignite** and **pool residuals**. Ignite walks
+   hot tiles on the beat, not the wet world.
 
 ## Tunables (`SteamConfig`)
 
@@ -45,6 +46,9 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 | `pipe_sides` | 4 | Face fraction `1/sides` |
 | `pipe_stroke` | 1400 | Units per beat |
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
+
+One connected hot-wet body is one root. Adjacent paths share a
+mouth; the longer climb is kept.
 | `phase_expansion_drive` | 96…1400 | Flash volume |
 
 ## Locks

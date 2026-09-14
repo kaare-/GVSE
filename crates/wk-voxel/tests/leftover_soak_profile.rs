@@ -305,3 +305,169 @@ fn leftover_short_sky_world_step_soak() {
     }
     let _ = steam;
 }
+
+#[test]
+#[ignore]
+fn pipe_compact_hill_soak() {
+    let (mut w, mut hot, mut cfg) = compact_hot_hill();
+    cfg.enable_pipe = true;
+    cfg.enable_leftover_field = false;
+    cfg.enable_pore_boil = false;
+    eprintln!("=== pipe compact hill 1400× ===");
+    let mut acc = Duration::ZERO;
+    let mut n = 0u64;
+    for t in 1..=1_200 {
+        w.tick = t;
+        let t0 = Instant::now();
+        wk_voxel::apply_steam(&mut w, &mut hot, &cfg);
+        acc += t0.elapsed();
+        n += 1;
+        if t == 1 || t % 200 == 0 {
+            let (roots, cells) = wk_voxel::pipe_path_stats(&w);
+            eprintln!(
+                "t={t:4} steam={:.2}ms P={roots}/{cells} live={} res={} leftover_zone={}",
+                ms(acc / n.max(1) as u32),
+                w.pipe_steam.len(),
+                w.pipe_res.len(),
+                leftover_soak_stats(&w).zone,
+            );
+            acc = Duration::ZERO;
+            n = 0;
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn pipe_short_sky_world_step_soak() {
+    let params = short_sky_params();
+    let mut world = World::new(params.seed);
+    stamp_world(&mut world, &params);
+    let mut humidity = Humidity::with_world_bounds(
+        4,
+        0,
+        params.bedrock_floor_y,
+        params.width_cols,
+        params.sky_ceiling_y,
+    );
+    humidity.wrap_x = params.wrap_x;
+    let mut wind = Wind::climate(
+        4,
+        0.05,
+        params.seed,
+        params.width_cols,
+        params.sea_level_y,
+        params.bedrock_floor_y,
+        params.sky_ceiling_y,
+        params.wrap_x,
+    );
+    let mut temperature = Temperature::with_world_bounds(
+        4,
+        0,
+        params.bedrock_floor_y,
+        params.width_cols,
+        params.sky_ceiling_y,
+        params.seed,
+        params.width_cols,
+        params.sea_level_y,
+        params.wrap_x,
+    );
+    let heated = heat_wet_stone(&world, &mut temperature, 150.0);
+    let steam = SteamConfig {
+        enable_pipe: true,
+        enable_leftover_field: false,
+        phase_expansion_drive: PHASE_EXPANSION_DRIVE_MAX,
+        ..SteamConfig::default()
+    };
+    let mut clouds = CloudStore::new();
+    let mut carbon = CarbonBudget::default();
+    let climate = ClimateConfig::default();
+    let perf = PerfConfig::default();
+    let failure = FailureConfig::default();
+    let evap = EvapConfig::default();
+    let cond = CondensationConfig {
+        top_y: params.sky_ceiling_y - 2,
+        ..CondensationConfig::default()
+    };
+    let oro = OrographicConfig {
+        width_cols: params.width_cols,
+        sea_level_y: params.sea_level_y,
+        ..OrographicConfig::default()
+    };
+    let karst = KarstConfig::default();
+    let cloud = CloudConfig::default();
+    let phase = PhaseConfig::default();
+    let carbon_cfg = CarbonConfig::default();
+    let grain = GrainConfig::default();
+    let fungi = FungiConfig::default();
+    let competent = CompetentFallConfig::default();
+
+    eprintln!("=== pipe short-sky step_world (heated {heated} wet stone cells) ===");
+    let mut leftover_acc = Duration::ZERO;
+    let mut steam_acc = Duration::ZERO;
+    let mut wall_acc = Duration::ZERO;
+    let mut n = 0u64;
+    for t in 1..=200 {
+        let cfg = WorldStepConfig {
+            perf: &perf,
+            failure: &failure,
+            evap: &evap,
+            cond: &cond,
+            oro: Some(&oro),
+            karst: &karst,
+            cloud: &cloud,
+            phase: &phase,
+            steam: &steam,
+            climate: &climate,
+            carbon: &carbon_cfg,
+            grain: &grain,
+            fungi: &fungi,
+            competent: &competent,
+            humidity_diffusion_alpha: 0.15,
+            sea_level_y: params.sea_level_y,
+            sky_ceiling_y: params.sky_ceiling_y,
+            evap_on: true,
+            cond_rain_on: true,
+            karst_on: true,
+            organisms_on: false,
+        };
+        let mut timings = WorldStepTimings::default();
+        let t0 = Instant::now();
+        let _ = step_world(
+            WorldStep {
+                world: &mut world,
+                humidity: &mut humidity,
+                wind: &mut wind,
+                temperature: &mut temperature,
+                clouds: &mut clouds,
+                carbon: &mut carbon,
+                organisms: None,
+                landscape: None,
+                geotech: None,
+                support: None,
+            },
+            &cfg,
+            Some(&mut timings),
+        );
+        wall_acc += t0.elapsed();
+        leftover_acc += timings.leftover;
+        steam_acc += timings.steam;
+        n += 1;
+        if t == 1 || t % 50 == 0 || t % STEAM_EVERY == 0 && t <= 20 {
+            let (roots, cells) = wk_voxel::pipe_path_stats(&world);
+            eprintln!(
+                "t={t:4} wall={:.1} leftover={:.2} steam={:.2} P={roots}/{cells} live={} res={} zone={}",
+                ms(wall_acc / n.max(1) as u32),
+                ms(leftover_acc / n.max(1) as u32),
+                ms(steam_acc / n.max(1) as u32),
+                world.pipe_steam.len(),
+                world.pipe_res.len(),
+                leftover_soak_stats(&world).zone,
+            );
+            leftover_acc = Duration::ZERO;
+            steam_acc = Duration::ZERO;
+            wall_acc = Duration::ZERO;
+            n = 0;
+        }
+    }
+}
