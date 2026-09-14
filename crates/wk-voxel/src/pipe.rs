@@ -692,7 +692,16 @@ fn pump_water_along(world: &mut World, path: &PipePath, max_sat: u8) {
         if cell.sat.0 == 0 || cell.material == MaterialId::Air {
             continue;
         }
-        let took = take_sat(world, from.0, from.1, cell.sat.0.min(max_sat));
+        let Some(dest_cell) = world.get_cell(dest.0, dest.1) else {
+            continue;
+        };
+        let dest_cap = water_capacity_cell(dest_cell, &world.hydro);
+        let room = dest_cap.saturating_sub(dest_cell.sat.0);
+        let want = cell.sat.0.min(max_sat).min(room);
+        if want == 0 {
+            continue;
+        }
+        let took = take_sat(world, from.0, from.1, want);
         if took == 0 {
             continue;
         }
@@ -1033,13 +1042,32 @@ fn claim_wet_hot_body(
     taken: &mut FxHashSet<(i32, i32)>,
 ) {
     let gx = world.wrap_x(gx);
-    let Some(start) = world.get_cell(gx, gy) else {
-        return;
+    let wet_hot = |world: &World, x: i32, y: i32| -> bool {
+        let Some(cell) = world.get_cell(x, y) else {
+            return false;
+        };
+        cell.sat.0 > 0 && cell.material != MaterialId::Air && temp.at_cell(x, y) >= boil
     };
-    if start.sat.0 == 0 || start.material == MaterialId::Air || temp.at_cell(gx, gy) < boil {
+    let mut stack = Vec::new();
+    if wet_hot(world, gx, gy) {
+        stack.push((gx, gy));
+    } else {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let nx = world.wrap_x(gx + dx);
+                let ny = gy + dy;
+                if wet_hot(world, nx, ny) {
+                    stack.push((nx, ny));
+                }
+            }
+        }
+    }
+    if stack.is_empty() {
         return;
     }
-    let mut stack = vec![(gx, gy)];
     let mut n = 0usize;
     while let Some((x, y)) = stack.pop() {
         if !taken.insert((x, y)) {
@@ -1504,22 +1532,15 @@ mod tests {
     fn feeder_pumps_water_toward_the_main() {
         let mut w = plot();
         for x in 0..16 {
-            w.set_cell(x, 1, {
-                let mut c = Cell::solid(MaterialId::Stone);
-                c.sat = Sat(8);
-                c
-            });
-        }
-        w.set_cell(4, 1, {
-            let mut c = wet_gravel(&w);
+            let mut c = Cell::solid(MaterialId::Sand);
+            c.pore = 255;
             c.sat = Sat(2);
-            c
-        });
-        w.set_cell(12, 1, {
-            let mut c = wet_gravel(&w);
-            c.sat = Sat(20);
-            c
-        });
+            w.set_cell(x, 1, c);
+        }
+        let mut src = Cell::solid(MaterialId::Sand);
+        src.pore = 255;
+        src.sat = Sat(30);
+        w.set_cell(12, 1, src);
         let path = PipePath {
             root: (12, 1),
             cells: (4..=12).rev().map(|x| (x, 1)).collect(),
@@ -1531,15 +1552,15 @@ mod tests {
                 .sum::<u32>()
         };
         let before_src = w.get_cell(12, 1).unwrap().sat.0;
-        let before_mid = w.get_cell(8, 1).unwrap().sat.0;
+        let before_dst = w.get_cell(4, 1).unwrap().sat.0;
         let before_sum = sat_sum(&w);
         pump_water_along(&mut w, &path, 6);
         let after_src = w.get_cell(12, 1).unwrap().sat.0;
-        let after_mid = w.get_cell(8, 1).unwrap().sat.0;
+        let after_dst = w.get_cell(4, 1).unwrap().sat.0;
         assert!(after_src < before_src, "feeder sat {before_src} → {after_src}");
         assert!(
-            after_mid > before_mid,
-            "water should march toward the main, mid {before_mid} → {after_mid}"
+            after_dst > before_dst,
+            "water should arrive at the main, dest {before_dst} → {after_dst}"
         );
         assert_eq!(sat_sum(&w), before_sum, "pump is mass-flat");
     }
