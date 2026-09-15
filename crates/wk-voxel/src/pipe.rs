@@ -1267,18 +1267,44 @@ fn rewalk_network(world: &World) {
             *main = walk_pipe(world, main.root);
         }
         memo.mains.retain(|p| p.cells.len() >= 2);
-        if memo.mains.is_empty() && !memo.feeders.is_empty() {
-            let first = memo.feeders.remove(0);
-            memo.mains.push(walk_pipe(world, first.root));
-            memo.mains.retain(|p| p.cells.len() >= 2);
+        // With no main on the book every feeder is an orphan. Keep trying
+        // orphans until one walks; the old code spent a single attempt on
+        // `feeders[0]` and, when that root was unroutable, left the whole
+        // book frozen with no main and every feeder stale.
+        if memo.mains.is_empty() {
+            let mut rest = Vec::new();
+            for o in std::mem::take(&mut memo.feeders) {
+                if !memo.mains.is_empty() {
+                    rest.push(o);
+                    continue;
+                }
+                let p = walk_pipe(world, o.root);
+                if p.cells.len() >= 2 {
+                    memo.mains.push(p);
+                }
+                // An unroutable orphan is dropped rather than kept: if its
+                // root is still a live boiler it is re-detected next beat.
+            }
+            memo.feeders = rest;
         }
         let mains = memo.mains.clone();
-        for feeder in &mut memo.feeders {
-            if let Some(i) = nearest_main_idx(world, feeder.root, &mains) {
-                *feeder = make_feeder(world, feeder.root, &mains[i]);
-            }
-        }
-        memo.feeders.retain(|p| p.cells.len() >= 2);
+        // A feeder that cannot land on a main is dropped. Leaving it in
+        // place meant it was never rewalked again — a straw frozen over
+        // terrain that had since changed, which is what put routes in
+        // mid-air, and its stale cells still drove `rebuild_claimed`.
+        memo.feeders.retain_mut(|feeder| {
+            let Some(i) = nearest_main_idx(world, feeder.root, &mains) else {
+                return false;
+            };
+            *feeder = make_feeder(world, feeder.root, &mains[i]);
+            feeder.cells.len() >= 2
+        });
+        // One straw per root. A root on the book twice is the same spring
+        // drawn twice: it doubles its intake and paints a second needle
+        // beside the first. The soak showed 24 feeders where the claim
+        // should have collapsed them into far fewer springs.
+        let mut roots: FxHashSet<(i32, i32)> = memo.mains.iter().map(|p| p.root).collect();
+        memo.feeders.retain(|f| roots.insert(f.root));
         memo.reindex();
     });
 }
@@ -1303,10 +1329,18 @@ fn reflash_network(
             .cloned()
             .collect::<Vec<_>>()
     });
+    // One flash per cell per beat, however many straws run through it.
+    // Paths overlap — a feeder splices onto a main and shares its cells —
+    // so keying off the path alone let a shared cell flash once per path,
+    // multiplying intake by the overlap and defeating the per-beat cap.
+    let mut fired: FxHashSet<(i32, i32)> = FxHashSet::default();
     for path in paths {
         let Some((gx, gy, t)) = path.cells.iter().copied().find_map(|(gx, gy)| {
             let cell = world.get_cell(gx, gy)?;
             if cell.sat.0 == 0 || cell.material == MaterialId::Air {
+                return None;
+            }
+            if fired.contains(&(gx, gy)) {
                 return None;
             }
             let t = temp.at_cell(gx, gy);
@@ -1314,6 +1348,7 @@ fn reflash_network(
         }) else {
             continue;
         };
+        fired.insert((gx, gy));
         let _ = pipe_flash_capped(world, gx, gy, t, expand, max_sat);
     }
 }
@@ -2394,6 +2429,227 @@ mod tests {
             before,
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
+        );
+    }
+
+    /// One straw per root. A duplicated root is the same spring drawn
+    /// twice: double intake and a second needle beside the first.
+    #[test]
+    fn one_root_never_carries_two_straws() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..8 {
+            w.set_cell(6, y, wet_gravel(&w));
+        }
+        let main = PipePath {
+            root: (6, 1),
+            cells: (1..=8).map(|y| (6, y)).collect(),
+            mouth: (6, 8),
+        };
+        PIPE_MEMO.with(|slot| {
+            let mut memo = slot.borrow_mut();
+            memo.world_id = w.chunk_cache_id.get();
+            memo.mains.clear();
+            memo.feeders.clear();
+            memo.mains.push(main.clone());
+            // The same root smuggled onto the book five more times.
+            for _ in 0..5 {
+                memo.feeders.push(main.clone());
+            }
+            memo.reindex();
+        });
+
+        rewalk_network(&w);
+
+        let roots = PIPE_MEMO.with(|slot| {
+            let memo = slot.borrow();
+            memo.mains
+                .iter()
+                .chain(memo.feeders.iter())
+                .map(|p| p.root)
+                .collect::<Vec<_>>()
+        });
+        let unique: FxHashSet<(i32, i32)> = roots.iter().copied().collect();
+        assert_eq!(
+            roots.len(),
+            unique.len(),
+            "the same root appears on several straws: {roots:?}"
+        );
+    }
+
+    /// Overlapping straws must not multiply intake. A feeder splices onto a
+    /// main and shares its cells, so flashing "the first hot wet cell of
+    /// each path" fired a shared cell once per path and blew straight
+    /// through the per-beat cap the flash cap exists to enforce.
+    #[test]
+    fn a_shared_cell_flashes_once_per_beat_however_many_straws_cross_it() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for y in 1..8 {
+            let mut c = Cell::solid(MaterialId::Sand);
+            c.sat = Sat(cap);
+            w.set_cell(6, y, c);
+        }
+        let hot = temp_at(&w, 150.0);
+        // Eight straws over the very same column.
+        let shared = PipePath {
+            root: (6, 1),
+            cells: (1..=8).map(|y| (6, y)).collect(),
+            mouth: (6, 8),
+        };
+        PIPE_MEMO.with(|slot| {
+            let mut memo = slot.borrow_mut();
+            memo.world_id = w.chunk_cache_id.get();
+            memo.mains.clear();
+            memo.feeders.clear();
+            memo.mains.push(shared.clone());
+            for _ in 0..7 {
+                memo.feeders.push(shared.clone());
+            }
+            memo.reindex();
+        });
+        let sat_before = w.get_cell(6, 1).unwrap().sat.0;
+        let one_stroke = stroke_sat(1400, EXP);
+        reflash_network(&mut w, &hot, EXP, 100.0, one_stroke);
+        let spent = sat_before - w.get_cell(6, 1).unwrap().sat.0;
+        assert!(
+            spent <= one_stroke,
+            "eight straws over one column flashed {spent} sat, cap is \
+             {one_stroke} for the beat"
+        );
+    }
+
+    /// Soak regression: the HUD read `P=0+24/21132` — no mains, feeders
+    /// pinned at the cap, with straws overlapping and "some ending in the
+    /// air".
+    ///
+    /// `rewalk_network` rewalked mains every beat but left a feeder alone
+    /// whenever `nearest_main_idx` came back `None`. With no main on the
+    /// book that is every feeder, so all of them kept whatever path they
+    /// were built with and were never recomputed again: zombie straws over
+    /// terrain that had changed under them. Their stale cells also drove
+    /// `rebuild_claimed`, so the claim followed geometry that no longer
+    /// existed.
+    #[test]
+    fn a_feeder_with_no_main_is_never_left_stale() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..8 {
+            w.set_cell(6, y, wet_gravel(&w));
+        }
+
+        // A stale straw: a path through cells that are now open air, of the
+        // kind a rewalk would never produce.
+        let stale = PipePath {
+            root: (6, 1),
+            cells: vec![(6, 1), (6, 9), (6, 10), (6, 11)],
+            mouth: (6, 11),
+        };
+        PIPE_MEMO.with(|slot| {
+            let mut memo = slot.borrow_mut();
+            memo.world_id = w.chunk_cache_id.get();
+            memo.mains.clear();
+            memo.feeders.clear();
+            memo.feeders.push(stale.clone());
+            memo.reindex();
+        });
+
+        rewalk_network(&w);
+
+        let (mains, feeders) = PIPE_MEMO.with(|slot| {
+            let memo = slot.borrow();
+            (memo.mains.clone(), memo.feeders.clone())
+        });
+        assert!(
+            !feeders.iter().any(|f| f.cells == stale.cells),
+            "a feeder with no main kept its stale path: {:?}",
+            feeders.iter().map(|f| &f.cells).collect::<Vec<_>>()
+        );
+        assert!(
+            mains.len() + feeders.len() > 0,
+            "the root was still a live boiler, so it should have been \
+             promoted to a main rather than dropped on the floor"
+        );
+        for p in mains.iter().chain(feeders.iter()) {
+            assert!(
+                p.cells.len() >= 2,
+                "every retained path needs a real route: {p:?}"
+            );
+        }
+    }
+
+    /// Every feeder must be promoted when there is no main, not just the
+    /// first one. Promoting one per rewalk left the rest stale for that
+    /// beat, and if that one walk failed the whole book stayed frozen.
+    #[test]
+    fn all_orphan_feeders_get_a_chance_to_be_promoted() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..8 {
+            w.set_cell(6, y, wet_gravel(&w));
+        }
+        // First orphan cannot walk at all (root off the loaded world), so
+        // the old code consumed it, left mains empty, and froze the rest.
+        assert!(
+            walk_pipe(&w, (5000, 5000)).cells.len() < 2,
+            "setup: the first orphan must fail to promote"
+        );
+        PIPE_MEMO.with(|slot| {
+            let mut memo = slot.borrow_mut();
+            memo.world_id = w.chunk_cache_id.get();
+            memo.mains.clear();
+            memo.feeders.clear();
+            memo.feeders.push(PipePath {
+                root: (5000, 5000),
+                cells: vec![(5000, 5000), (5000, 5001)],
+                mouth: (5000, 5001),
+            });
+            memo.feeders.push(PipePath {
+                root: (6, 1),
+                cells: vec![(6, 1), (6, 9)],
+                mouth: (6, 9),
+            });
+            memo.reindex();
+        });
+
+        rewalk_network(&w);
+
+        let stats = pipe_network_stats(&w);
+        assert!(
+            stats.mains > 0,
+            "a promotable orphan behind an unpromotable one must still \
+             become a main: mains={} feeders={}",
+            stats.mains,
+            stats.feeders
         );
     }
 
