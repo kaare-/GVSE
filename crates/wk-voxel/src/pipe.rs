@@ -69,6 +69,38 @@ struct PipeMemo {
     mains: Vec<PipePath>,
     feeders: Vec<PipePath>,
     claimed: FxHashSet<(i32, i32)>,
+    /// Every cell on any straw, indexed for O(1) overlay lookup.
+    ///
+    /// The `P` overlay asks "is this cell on the pipe?" once per visible
+    /// cell per frame. Scanning `mains`/`feeders` for that answer is
+    /// O(total path cells) per query, which cost ~14 FPS on a soaked
+    /// mountain (1.6k path cells × ~150k screen cells per frame).
+    path_cells: FxHashSet<(i32, i32)>,
+    /// Mouth of each straw, so the overlay can mark the discharge point.
+    mouths: FxHashSet<(i32, i32)>,
+    /// `path_cells ∪ claimed` size, cached so the HUD never clones a
+    /// 32k-entry set per frame.
+    cells_total: usize,
+}
+
+impl PipeMemo {
+    /// Rebuild the overlay indexes after any change to `mains` / `feeders`
+    /// / `claimed`. Cheap relative to a walk; must not be skipped or the
+    /// overlay paints a stale straw.
+    fn reindex(&mut self) {
+        self.path_cells.clear();
+        self.mouths.clear();
+        for path in self.mains.iter().chain(self.feeders.iter()) {
+            self.path_cells.extend(path.cells.iter().copied());
+            self.mouths.insert(path.mouth);
+        }
+        self.cells_total = self
+            .path_cells
+            .iter()
+            .chain(self.claimed.iter())
+            .collect::<FxHashSet<_>>()
+            .len();
+    }
 }
 
 thread_local! {
@@ -143,14 +175,10 @@ pub fn pipe_network_stats(world: &World) -> PipeNetworkStats {
         if memo.world_id != world.chunk_cache_id.get() {
             return PipeNetworkStats::default();
         }
-        let mut cells = memo.claimed.clone();
-        for path in memo.mains.iter().chain(memo.feeders.iter()) {
-            cells.extend(path.cells.iter().copied());
-        }
         PipeNetworkStats {
             mains: memo.mains.len(),
             feeders: memo.feeders.len(),
-            cells: cells.len(),
+            cells: memo.cells_total,
         }
     })
 }
@@ -169,18 +197,36 @@ fn on_pipe_path(world: &World, gx: i32, gy: i32) -> bool {
     let gx = world.wrap_x(gx);
     PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
-        memo.world_id == world.chunk_cache_id.get()
-            && memo
-                .mains
-                .iter()
-                .chain(memo.feeders.iter())
-                .any(|p| p.cells.iter().any(|&c| c == (gx, gy)))
+        memo.world_id == world.chunk_cache_id.get() && memo.path_cells.contains(&(gx, gy))
     })
 }
 
-/// P overlay: locked straw, live puff, and claimed boiling cells.
+fn is_pipe_mouth_cell(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        memo.world_id == world.chunk_cache_id.get() && memo.mouths.contains(&(gx, gy))
+    })
+}
+
+/// `P` overlay bands, low to high. The bands are deliberately far apart:
+/// a claimed boiling body is thousands of cells and the straw threading it
+/// is one cell wide, so 0.24 vs 0.30 made the route invisible against its
+/// own reservoir.
+const PACK_BOILER: f32 = 0.12;
+const PACK_STRAW: f32 = 0.52;
+const PACK_MOUTH: f32 = 1.0;
+const PACK_LIVE_LO: f32 = 0.62;
+const PACK_LIVE_HI: f32 = 0.95;
+
+/// P overlay: claimed boiling body (dim), locked straw (mid), mouth (top),
+/// live puff (bright ramp).
 pub fn pipe_overlay_pack(world: &World, gx: i32, gy: i32) -> Option<f32> {
     let gx = world.wrap_x(gx);
+    // Mouth first: the operator's main question is "where does it vent?".
+    if is_pipe_mouth_cell(world, gx, gy) {
+        return Some(PACK_MOUTH);
+    }
     let live = pipe_live_at(world, gx, gy);
     if live > 0 {
         let cap = world
@@ -188,13 +234,13 @@ pub fn pipe_overlay_pack(world: &World, gx: i32, gy: i32) -> Option<f32> {
             .map(|c| water_capacity_cell(c, &world.hydro).max(1) as u32)
             .unwrap_or(1);
         let drive = (live as f32 / (cap as f32 * 8.0).max(1.0)).clamp(0.0, 1.0);
-        return Some((0.42 + drive * 0.50).clamp(0.42, 0.92));
+        return Some((PACK_LIVE_LO + drive * (PACK_LIVE_HI - PACK_LIVE_LO)).clamp(PACK_LIVE_LO, PACK_LIVE_HI));
     }
     if on_pipe_path(world, gx, gy) {
-        return Some(0.30);
+        return Some(PACK_STRAW);
     }
     if on_pipe_boiler(world, gx, gy) {
-        return Some(0.24);
+        return Some(PACK_BOILER);
     }
     None
 }
@@ -624,12 +670,36 @@ fn couple_path_heat(temp: &mut Temperature, gx: i32, gy: i32, steam_t: f32) {
 }
 
 /// Flash liquid on a cell into live steam units. Mass-flat.
+///
+/// Flashes the whole cell. Prefer [`pipe_flash_capped`] on the sim path:
+/// an unbounded flash mints far more volume per beat than one stroke can
+/// carry away, so live + residual grows without bound.
 pub fn pipe_flash(world: &mut World, gx: i32, gy: i32, t_c: f32, expand: u16) -> u32 {
+    pipe_flash_capped(world, gx, gy, t_c, expand, u8::MAX)
+}
+
+/// [`pipe_flash`] bounded to `max_sat` of liquid per call.
+///
+/// The boiler is a full water cell often enough (255 sat) that an
+/// uncapped flash mints `255 × expand` units in one beat — 24 480 at the
+/// play default — while the pulse only carries `pipe_stroke` (1400). The
+/// surplus banked as live / residual forever, which is what drove the HUD
+/// `sat=` counter from 316 to 653 over a soak and left the straw looking
+/// like it had no route out. Capping the flash to one stroke's worth of
+/// sat puts intake and throughput on the same scale.
+pub fn pipe_flash_capped(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    t_c: f32,
+    expand: u16,
+    max_sat: u8,
+) -> u32 {
     let gx = world.wrap_x(gx);
     let Some(cell) = world.get_cell(gx, gy) else {
         return 0;
     };
-    let paid = cell.sat.0;
+    let paid = cell.sat.0.min(max_sat);
     if paid == 0 {
         return 0;
     }
@@ -727,7 +797,30 @@ fn deliver_liquid(world: &mut World, from: (i32, i32), dest: (i32, i32), amt: u8
     amt.saturating_sub(put)
 }
 
+/// Mass-weighted blend of two steam packet temperatures.
+fn blend_packet_t(a_units: u32, a_t: f32, b_units: u32, b_t: f32) -> f32 {
+    let total = a_units as f32 + b_units as f32;
+    if total <= 0.0 {
+        return a_t;
+    }
+    (a_t * a_units as f32 + b_t * b_units as f32) / total
+}
+
+/// Cap on the packet a single pulse may sweep up, as a multiple of stroke.
+/// Keeps one beat's work bounded on a long lumen without letting steam
+/// stagnate.
+const PIPE_SWEEP_STROKES: u32 = 8;
+
 /// One stroke along a path. Mix before displace on every hop.
+///
+/// The pulse is a **conveyor**, not a single shot: at every hop it first
+/// lifts whatever live steam a previous beat parked in that cell and adds
+/// it to the packet it is carrying. Without that sweep, `HopKind::Park`
+/// and the `steam_stays` half of `HopKind::Displace` stranded units in the
+/// lumen permanently — `pulse_path` only ever drew from `cells[0]`, so
+/// live piled up cell by cell, the puff never reached the mouth, and the
+/// HUD `sat=` counter climbed without bound. That is what made a working
+/// spring look like it had no route to the surface.
 pub fn pulse_path(
     world: &mut World,
     temp: &mut Temperature,
@@ -743,9 +836,7 @@ pub fn pulse_path(
     }
     let root = path.cells[0];
     let (mut steam, mut steam_t) = take_live(world, root.0, root.1, stroke);
-    if steam == 0 {
-        return;
-    }
+    let sweep_cap = stroke.saturating_mul(PIPE_SWEEP_STROKES);
     let dye_t = steam_t;
     let mut liquid = 0u8;
     let mut liquid_from = root;
@@ -754,6 +845,17 @@ pub fn pulse_path(
             liquid = deliver_liquid(world, liquid_from, dest, liquid);
             if liquid == 0 {
                 liquid_from = dest;
+            }
+        }
+        // Sweep this cell's parked live into the packet so a previous
+        // beat's puff keeps marching toward the mouth. Bounded so one
+        // beat cannot drag the whole lumen at once.
+        let room = sweep_cap.saturating_sub(steam);
+        if room > 0 {
+            let (picked, picked_t) = take_live(world, dest.0, dest.1, room);
+            if picked > 0 {
+                steam_t = blend_packet_t(steam, steam_t, picked, picked_t);
+                steam = steam.saturating_add(picked);
             }
         }
         if steam > 0 {
@@ -804,11 +906,18 @@ pub fn pulse_path(
 
 /// March existing pore water one hop toward the path mouth (main line
 /// or sky). Mass-flat: unplaced sat returns to the donor.
+///
+/// Walks the path **mouth-first**. Root-first only ever moved water into
+/// a destination that was still full from the previous beat, so `room`
+/// was 0 for every pair below the front and the groundwater table barely
+/// twitched. Draining the front cell first opens room for the cell behind
+/// it, so one beat advances the whole column by a hop instead of only the
+/// last pair.
 fn pump_water_along(world: &mut World, path: &PipePath, max_sat: u8) {
     if max_sat == 0 || path.cells.len() < 2 {
         return;
     }
-    for w in path.cells.windows(2) {
+    for w in path.cells.windows(2).rev() {
         let from = w[0];
         let dest = w[1];
         let Some(cell) = world.get_cell(from.0, from.1) else {
@@ -939,6 +1048,7 @@ fn bind_memo(world: &World) {
             memo.mains.clear();
             memo.feeders.clear();
             memo.claimed.clear();
+            memo.reindex();
         }
         memo.active = true;
     });
@@ -1017,7 +1127,9 @@ fn rebuild_claimed(world: &World, temp: &Temperature, boil: f32) {
         }
     }
     PIPE_MEMO.with(|slot| {
-        slot.borrow_mut().claimed = taken;
+        let mut memo = slot.borrow_mut();
+        memo.claimed = taken;
+        memo.reindex();
     });
 }
 
@@ -1040,10 +1152,22 @@ fn rewalk_network(world: &World) {
             }
         }
         memo.feeders.retain(|p| p.cells.len() >= 2);
+        memo.reindex();
     });
 }
 
-fn reflash_network(world: &mut World, temp: &Temperature, expand: u16, boil: f32) {
+/// Flash one hot wet cell per straw, bounded to what the pulse can carry.
+///
+/// `max_sat` is one stroke's worth so intake matches throughput. Without
+/// it a full water cell mints ~17× a stroke every beat and the network
+/// banks the difference forever.
+fn reflash_network(
+    world: &mut World,
+    temp: &Temperature,
+    expand: u16,
+    boil: f32,
+    max_sat: u8,
+) {
     let paths = PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
         memo.mains
@@ -1063,7 +1187,7 @@ fn reflash_network(world: &mut World, temp: &Temperature, expand: u16, boil: f32
         }) else {
             continue;
         };
-        let _ = pipe_flash(world, gx, gy, t, expand);
+        let _ = pipe_flash_capped(world, gx, gy, t, expand, max_sat);
     }
 }
 
@@ -1154,6 +1278,7 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) {
                 }
             }
         }
+        memo.reindex();
     });
 }
 
@@ -1256,7 +1381,7 @@ pub fn apply_pipe_motor(
     attach_new_boilers(world, temp, boil);
     rewalk_network(world);
     rebuild_claimed(world, temp, boil);
-    reflash_network(world, temp, expand, boil);
+    reflash_network(world, temp, expand, boil, stroke_sat(stroke, expand));
     let (feeders, mains) = PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
         (memo.feeders.clone(), memo.mains.clone())
@@ -1568,12 +1693,6 @@ mod tests {
         }
         let cells = sat_totals(&w).cell_total;
         let h_mass = h.total_mass() as i64;
-        // cell_total counts everything except sky humidity; humidity is the
-        // sky path leak, so cell_total + humidity must equal the initial
-        // wet mass plus the recharge we injected.
-        // Rebuild the reference: initial sat on all cells before we started.
-        // Simpler: assert the whole thing didn't blow up — cell_total is
-        // non-negative and finite, book stays bounded, no root drift.
         assert!(cells >= 0, "cell_total went negative");
         assert!(h_mass >= 0, "humidity went negative");
         assert!(
@@ -1581,8 +1700,6 @@ mod tests {
             "pipe_steam book grew unbounded: {}",
             w.pipe_steam.len()
         );
-        // Some of the recharge must have exited the world (sky H) or still
-        // be sitting in the pipe / mouth as res / cavity humidity.
         let banked = pipe_units_total(&w);
         let exp = pipe_expand(&w) as i64;
         let banked_sat = banked / exp;
@@ -1596,6 +1713,195 @@ mod tests {
             "banked mass should not explode past a handful of strokes ({banked_sat} vs cap {})",
             stroke_sat * 16
         );
+    }
+
+    /// Playtest regression, and the one that explains the report. `pulse_path`
+    /// only ever drew live from `cells[0]`, so the units `HopKind::Park` and
+    /// `Displace` left behind sat in the lumen forever: the puff never
+    /// reached the mouth (looked like "no route to the surface") and the
+    /// live book grew every beat (HUD `sat=` 316 → 418 → 653). The pulse is
+    /// now a conveyor that sweeps parked live along with it.
+    #[test]
+    fn a_pulse_sweeps_live_parked_by_earlier_beats() {
+        let mut w = plot();
+        let expand = PHASE_EXPANSION_DRIVE;
+        w.pipe_expand = expand;
+        for x in 0..16 {
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..10 {
+            w.set_cell(4, y, wet_gravel(&w));
+        }
+        let mut hot = temp_at(&w, 150.0);
+        let path = PipePath {
+            root: (4, 1),
+            cells: (1..=10).map(|y| (4, y)).collect(),
+            mouth: (4, 10),
+        };
+        // Strand live in the middle of the lumen, as an earlier beat would.
+        let stranded = u32::from(expand) * 3;
+        set_live(&mut w, 4, 5, stranded, 150.0);
+        let mid_before = pipe_live_at(&w, 4, 5);
+        assert_eq!(mid_before, stranded, "setup: mid-lumen should hold live");
+        // Now pulse from the root. The packet must pick the stranded units up.
+        set_live(&mut w, 4, 1, u32::from(expand) * 2, 150.0);
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        pulse_path(
+            &mut w,
+            &mut hot,
+            &path,
+            u32::from(expand) * 2,
+            expand,
+            100.0,
+            PIPE_SIDES,
+            Some(&mut h),
+        );
+        let mid_after = pipe_live_at(&w, 4, 5);
+        assert!(
+            mid_after < mid_before,
+            "the pulse must sweep mid-lumen live onward ({mid_before} → {mid_after})"
+        );
+    }
+
+    /// A working spring must actually converge: with intake capped and the
+    /// lumen swept, repeated beats should not grow the live book without
+    /// bound even when the boiler is refilled every beat.
+    #[test]
+    fn a_recharged_spring_converges_instead_of_banking_forever() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..10 {
+            w.set_cell(4, y, wet_gravel(&w));
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for y in 1..10 {
+            let (hx, hy) = hot.tile_of(4, y);
+            hot.set_tile_c(hx, hy, 150.0);
+        }
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let cfg = pipe_cfg();
+        let exp = cfg.phase_expansion_drive as i64;
+        let mut early_peak = 0i64;
+        let mut late_peak = 0i64;
+        for t in 1..=600u64 {
+            w.tick = t;
+            // Recharge the whole boiler column every beat.
+            if t % cfg.pipe_beat == 0 {
+                for y in 1..10 {
+                    w.set_cell(4, y, wet_gravel(&w));
+                }
+            }
+            apply_pipe_motor(&mut w, &mut hot, &cfg, Some(&mut h));
+            let banked = pipe_units_total(&w) / exp;
+            if t <= 150 {
+                early_peak = early_peak.max(banked);
+            } else if t > 450 {
+                late_peak = late_peak.max(banked);
+            }
+        }
+        // The late window must not be dramatically worse than the early one.
+        // Pre-fix this grew monotonically because nothing swept the lumen.
+        assert!(
+            late_peak <= early_peak.max(16) * 4,
+            "live book keeps growing: early peak {early_peak} sat, late peak {late_peak} sat"
+        );
+    }
+
+    /// Playtest regression. The HUD `sat=` counter climbed 316 → 418 → 653
+    /// over a soak because `reflash_network` flashed a whole 255-sat water
+    /// cell every beat (24 480 units at expand 96) while the pulse only
+    /// carried one 1400-unit stroke. Everything above throughput banked as
+    /// live / residual forever, which also made the straw read as having no
+    /// route out. Intake is now capped to one stroke's worth of sat.
+    #[test]
+    fn a_full_water_boiler_does_not_bank_mass_without_bound() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // The boiler is a FULL water cell — the case the playtest hit.
+        for y in 1..8 {
+            w.set_cell(6, y, Cell::water());
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for y in 1..8 {
+            let (hx, hy) = hot.tile_of(6, y);
+            hot.set_tile_c(hx, hy, 150.0);
+        }
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let cfg = pipe_cfg();
+        let exp = cfg.phase_expansion_drive as i64;
+        let stroke_sat = cfg.pipe_stroke as i64 / exp;
+        let mut peak_banked_sat = 0i64;
+        for t in 1..=600u64 {
+            w.tick = t;
+            // Keep the boiler topped up to full every beat: the worst case
+            // for intake-vs-throughput balance.
+            if t % cfg.pipe_beat == 0 {
+                w.set_cell(6, 1, Cell::water());
+            }
+            apply_pipe_motor(&mut w, &mut hot, &cfg, Some(&mut h));
+            peak_banked_sat = peak_banked_sat.max(pipe_units_total(&w) / exp);
+        }
+        // One eruption period banks at most period × stroke. Allow 4× that
+        // for pooling slack; the pre-fix behaviour blew past 600.
+        let ceiling = stroke_sat * PIPE_ERUPT_PERIOD as i64 * 4;
+        assert!(
+            peak_banked_sat <= ceiling,
+            "banked mass ran away: peak {peak_banked_sat} sat vs ceiling {ceiling} \
+             (stroke={stroke_sat} sat, period={PIPE_ERUPT_PERIOD})"
+        );
+    }
+
+    #[test]
+    fn overlay_bands_are_visually_distinct() {
+        // The playtest could not see the route because the straw painted
+        // 0.30 against a claimed body at 0.24 — a 0.06 step in the colour
+        // ramp across thousands of cells. Bands must stay far apart.
+        let steps = [PACK_BOILER, PACK_STRAW, PACK_LIVE_LO, PACK_MOUTH];
+        for pair in steps.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= 0.08,
+                "overlay bands {} and {} are too close to tell apart",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(PACK_LIVE_HI <= PACK_MOUTH, "live ramp must not exceed mouth");
+    }
+
+    #[test]
+    fn flash_cap_bounds_one_beat_of_intake() {
+        let mut w = plot();
+        w.set_cell(4, 1, Cell::water());
+        let full = w.get_cell(4, 1).unwrap().sat.0;
+        assert!(full > 20, "water cell should start near full, got {full}");
+        let before = sat_totals(&w).cell_total;
+        let units = pipe_flash_capped(&mut w, 4, 1, 150.0, 96, 14);
+        assert_eq!(units, 14 * 96, "cap should bound the minted volume");
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().sat.0,
+            full - 14,
+            "only the capped sat should be paid"
+        );
+        assert_eq!(sat_totals(&w).cell_total, before, "capped flash is mass-flat");
     }
 
     #[test]
