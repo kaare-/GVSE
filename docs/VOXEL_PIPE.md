@@ -70,6 +70,13 @@ so successive pulses can mint 1 sat. Deposit is mouth / apron only
 the STEAM_EVERY beat so stale cavity vapour cannot strand when a
 boiler dies.
 
+**Eruption rhythm.** Feeders simmer every beat (steady water pump
++ steam trickle toward the main). The main itself follows a
+`PIPE_ERUPT_PERIOD = 8` cycle: seven simmer beats at `stroke / 8`
+so most of each beat's flash stays banked as live at the root, then
+one erupt beat that unleashes everything live has accumulated. A
+geyser plays as a real periodic jet, not a constant thin puff.
+
 ## Locks
 
 Mass-flat. `mint_void = false`. No sealed steam → sky H. Volume never

@@ -1262,7 +1262,7 @@ pub fn apply_pipe_motor(
         (memo.feeders.clone(), memo.mains.clone())
     });
     let water = stroke_sat(stroke, expand);
-    for path in feeders.iter().chain(mains.iter()) {
+    for path in feeders.iter() {
         pulse_path(
             world,
             temp,
@@ -1275,7 +1275,46 @@ pub fn apply_pipe_motor(
         );
         pump_water_along(world, path, water);
     }
+    let is_erupt = (world.tick / beat) % PIPE_ERUPT_PERIOD == 0;
+    for path in mains.iter() {
+        let main_stroke = main_stroke_for_beat(world, path.root, stroke, is_erupt);
+        if main_stroke > 0 {
+            pulse_path(
+                world,
+                temp,
+                path,
+                main_stroke,
+                expand,
+                boil,
+                sides,
+                humidity.as_deref_mut(),
+            );
+        }
+        pump_water_along(world, path, water);
+    }
     pool_residuals(world, expand);
+}
+
+/// Every `PIPE_ERUPT_PERIOD` beats a main erupts: it unleashes everything
+/// live has managed to bank at the root. In between it simmers at one
+/// period's worth so most of a beat's flash accumulates for the next
+/// eruption. A geyser's rhythm — not a constant thin puff.
+const PIPE_ERUPT_PERIOD: u64 = 8;
+
+fn main_stroke_for_beat(world: &World, root: (i32, i32), stroke: u32, is_erupt: bool) -> u32 {
+    let root_live = pipe_live_at(world, root.0, root.1);
+    if is_erupt {
+        // Unleash everything the root has banked. `take_live` inside
+        // pulse_path is the actual bounded consumer, so passing the full
+        // live count fires up to `root_live` units and leaves nothing.
+        root_live.max(stroke)
+    } else {
+        // Simmer at 1/period so most of a beat's flash stays as live
+        // for the next eruption. Never zero so the P overlay keeps the
+        // straw painted between shots.
+        let simmer = stroke / PIPE_ERUPT_PERIOD as u32;
+        simmer.max(1)
+    }
 }
 
 pub fn default_pipe_expand() -> u16 {
@@ -1479,6 +1518,30 @@ mod tests {
             "mouth={:?} path={:?}",
             path.mouth,
             path.cells
+        );
+    }
+
+    #[test]
+    fn erupt_cadence_unleashes_live_on_the_beat_and_simmers_between() {
+        let mut w = plot();
+        w.pipe_expand = EXP;
+        set_live(&mut w, 4, 1, 20_000, 150.0);
+        let stroke = 1400u32;
+        let erupt = main_stroke_for_beat(&w, (4, 1), stroke, true);
+        let simmer = main_stroke_for_beat(&w, (4, 1), stroke, false);
+        assert!(
+            erupt >= 20_000,
+            "erupt pulse should unleash all root live, got {erupt}"
+        );
+        assert!(
+            simmer >= 1 && simmer < stroke,
+            "simmer must be a small non-zero fraction of stroke, got {simmer}"
+        );
+        // The simmer stroke is a small fraction so most of a beat's flash
+        // stays as live for the next eruption.
+        assert!(
+            simmer * (PIPE_ERUPT_PERIOD as u32) >= stroke.saturating_sub(PIPE_ERUPT_PERIOD as u32),
+            "period simmer strokes should sum to about one stroke, got {simmer} × {PIPE_ERUPT_PERIOD}"
         );
     }
 
