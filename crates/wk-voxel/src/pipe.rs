@@ -1753,6 +1753,58 @@ mod tests {
     }
 
     #[test]
+    fn feeder_pump_carries_solute_downstream_and_is_mass_flat() {
+        use crate::audit::mineral_total;
+        use crate::mineral::{add_dissolved, dissolved_at};
+        let mut w = plot();
+        let expand = PHASE_EXPANSION_DRIVE;
+        w.pipe_expand = expand;
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Sand column so the pump has real capacity and receiving room.
+        for y in 1..=4 {
+            let mut c = Cell::solid(MaterialId::Sand);
+            let cap = water_capacity_cell(c, &w.hydro);
+            c.sat = Sat(cap / 2);
+            w.set_cell(4, y, c);
+        }
+        // Load sits on the mid-column donor. pump_water_along should
+        // carry it up alongside the water it moves.
+        add_dissolved(&mut w, 4, 2, 40);
+        let before_mineral = mineral_total(&w);
+        let before_at_donor = dissolved_at(&w, 4, 2);
+        let path = PipePath {
+            root: (4, 1),
+            cells: vec![(4, 1), (4, 2), (4, 3), (4, 4)],
+            mouth: (4, 4),
+        };
+        for _ in 0..8 {
+            pump_water_along(&mut w, &path, 8);
+        }
+        let donor_after = dissolved_at(&w, 4, 2);
+        let downstream: u32 = (3..=4)
+            .map(|y| dissolved_at(&w, 4, y) as u32)
+            .sum();
+        assert!(
+            donor_after < before_at_donor,
+            "donor should shed solute as water leaves ({before_at_donor} → {donor_after})"
+        );
+        assert!(
+            downstream > 0,
+            "downstream cells should hold the shed load (downstream={downstream})"
+        );
+        assert_eq!(
+            mineral_total(&w),
+            before_mineral,
+            "solute + rock mineral must stay flat"
+        );
+    }
+
+    #[test]
     fn sealed_mouth_deposits_cavity_humidity_not_sky_h() {
         let mut w = plot();
         let expand = PHASE_EXPANSION_DRIVE;
