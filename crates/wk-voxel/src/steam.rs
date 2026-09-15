@@ -3778,7 +3778,14 @@ pub(crate) fn apply_leftover_motor(
     if cfg.enable_pipe {
         crate::pipe::apply_pipe_motor(world, temp, cfg, humidity);
         // Pipe owns leftover. The 28k field and its Dijkstra walker
-        // must not shove beside the straw.
+        // must not shove beside the straw. Cadence is off too — recondense
+        // any stale cavity-humidity seat so a hot patch that cools does
+        // not strand vapour when the boiler dies.
+        let period = cfg.period_ticks.max(1);
+        if world.tick % period == 0 && !world.steam.is_empty() {
+            let below = cfg.boil_point_c - RECONDENSE_MARGIN_C;
+            recondense_cool(world, temp, below);
+        }
         return;
     }
     if !cfg.enable_leftover_field {
