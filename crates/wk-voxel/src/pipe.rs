@@ -374,14 +374,46 @@ fn deposit_cavity_humidity(
     steam
 }
 
-/// Greedy most-open walk that still reduces distance to the column surface.
+const WALK_SCAN_HALFWIDTH: i32 = 16;
+
+/// Nearest easier column in a small window: argmin of `live_surface_y`.
+/// Wrap-aware. Ties break toward the root so a symmetric mountain does
+/// not oscillate. Unloaded columns (`get_cell` = None) return hint from
+/// `live_surface_y`; treat those as "no signal" so the scan does not
+/// bolt off the edge of the loaded world.
+fn easiest_target(world: &World, root: (i32, i32)) -> (i32, i32) {
+    let (rx, ry) = root;
+    let mut best_x = rx;
+    let mut best_y = live_surface_y(world, rx, ry, LIVE_SURFACE_SEARCH);
+    for d in 1..=WALK_SCAN_HALFWIDTH {
+        for sign in [-1, 1] {
+            let x = world.wrap_x(rx + sign * d);
+            if world.get_cell(x, ry).is_none() {
+                continue;
+            }
+            let y = live_surface_y(world, x, ry, LIVE_SURFACE_SEARCH);
+            if y < best_y {
+                best_y = y;
+                best_x = x;
+            }
+        }
+    }
+    (best_x, best_y)
+}
+
+/// Greedy most-open walk that still reduces distance to a projected mouth
+/// column. When the straight-up column is capped by stone but an easier
+/// column sits nearby, the horizontal pull term lets the walker sidestep
+/// toward it instead of plowing through rock.
 pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
     let (rx, ry) = (world.wrap_x(root.0), root.1);
-    let hint = live_surface_y(world, rx, ry, LIVE_SURFACE_SEARCH);
+    let (target_x, target_y) = easiest_target(world, (rx, ry));
     let mut cells = vec![(rx, ry)];
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
     seen.insert((rx, ry));
     let mut cur = (rx, ry);
+    let dx_here = |x: i32| wrap_dx(world, x, target_x).abs();
+    let dy_here = |y: i32| (target_y - y).abs();
     for _ in 0..PIPE_MAX_LEN {
         let Some(here) = world.get_cell(cur.0, cur.1) else {
             break;
@@ -389,7 +421,8 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
         if is_pipe_mouth(world, cur.0, cur.1, here) && cells.len() > 1 {
             break;
         }
-        let here_dist = (hint - cur.1).abs();
+        let here_dy = dy_here(cur.1);
+        let here_manh = here_dy + dx_here(cur.0);
         let mut best: Option<(i32, u8, i32, i32, i32)> = None;
         for (dx, dy) in [
             (0, 1),
@@ -413,14 +446,17 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
             if rank == 0 {
                 continue;
             }
-            let dist = (hint - ny).abs();
-            if dist > here_dist && !is_pipe_mouth(world, nx, ny, n) {
+            let step_dy = dy_here(ny);
+            let step_manh = step_dy + dx_here(nx);
+            // Never step away from the target unless the destination is
+            // itself a sky mouth (a wider mouth is a valid finish).
+            if step_manh > here_manh && !is_pipe_mouth(world, nx, ny, n) {
                 continue;
             }
             let up = if dy > 0 { 40 } else { 0 };
-            let score = (rank as i32) * 1000 - dist + up;
+            let score = (rank as i32) * 1000 - step_manh + up;
             if best.map(|(s, _, _, _, _)| score > s).unwrap_or(true) {
-                best = Some((score, rank, dist, nx, ny));
+                best = Some((score, rank, step_dy, nx, ny));
             }
         }
         let Some((_, _, _, nx, ny)) = best else {
@@ -1437,7 +1473,48 @@ mod tests {
         let path = walk_pipe(&w, (5, 1));
         assert!(path.cells.len() >= 3, "path={:?}", path.cells);
         let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
-        assert_eq!(mouth.material, MaterialId::Air);
+        assert_eq!(
+            mouth.material,
+            MaterialId::Air,
+            "mouth={:?} path={:?}",
+            path.mouth,
+            path.cells
+        );
+    }
+
+    #[test]
+    fn walker_sidesteps_around_a_capped_column() {
+        let mut w = plot();
+        // Wide stone plateau with a narrow Air chimney offset from the
+        // boiler. The walker used to plow straight up through stone; with
+        // the horizontal target pull it should drift toward the chimney.
+        for x in 0..16 {
+            for y in 1..14 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for y in 1..3 {
+            w.set_cell(4, y, wet_gravel(&w));
+        }
+        for y in 3..14 {
+            w.set_cell(9, y, Cell::air());
+        }
+        let path = walk_pipe(&w, (4, 1));
+        let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
+        assert_eq!(
+            mouth.material,
+            MaterialId::Air,
+            "walker should reach the offset chimney, mouth={:?} path={:?}",
+            path.mouth,
+            path.cells
+        );
+        // The path should drift toward x=9 rather than staying pinned to x=4.
+        let ended_near_chimney = (path.mouth.0 - 9).abs() <= 1;
+        assert!(
+            ended_near_chimney,
+            "mouth should be at or beside the chimney (x=9), got {:?}",
+            path.mouth
+        );
     }
 
     #[test]
