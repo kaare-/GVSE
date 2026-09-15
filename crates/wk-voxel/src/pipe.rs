@@ -976,30 +976,84 @@ fn pump_water_along(world: &mut World, path: &PipePath, max_sat: u8) {
         return;
     }
     for w in path.cells.windows(2).rev() {
-        let from = w[0];
-        let dest = w[1];
-        let Some(cell) = world.get_cell(from.0, from.1) else {
-            continue;
-        };
-        if cell.sat.0 == 0 || cell.material == MaterialId::Air {
-            continue;
+        hand_sat(world, w[0], w[1], max_sat);
+    }
+}
+
+/// Move up to `max_sat` of liquid one hop, bounded by what `dest` can hold.
+/// Returns what actually landed. Mass-flat: anything `deliver_liquid`
+/// refuses goes back where it came from.
+fn hand_sat(world: &mut World, from: (i32, i32), dest: (i32, i32), max_sat: u8) -> u8 {
+    let Some(cell) = world.get_cell(from.0, from.1) else {
+        return 0;
+    };
+    if cell.sat.0 == 0 || cell.material == MaterialId::Air {
+        return 0;
+    }
+    let Some(dest_cell) = world.get_cell(dest.0, dest.1) else {
+        return 0;
+    };
+    let dest_cap = water_capacity_cell(dest_cell, &world.hydro);
+    let room = dest_cap.saturating_sub(dest_cell.sat.0);
+    let want = cell.sat.0.min(max_sat).min(room);
+    if want == 0 {
+        return 0;
+    }
+    let took = take_sat(world, from.0, from.1, want);
+    if took == 0 {
+        return 0;
+    }
+    let left = deliver_liquid(world, from, dest, took);
+    if left > 0 {
+        let _ = add_sat(world, from.0, from.1, left);
+    }
+    took - left
+}
+
+/// Draw the claimed reservoir toward the straw that drains it.
+///
+/// Without this the claimed body was only paint. Intake was whatever sat
+/// happened to stand in the straw's own cells, refilled purely by ordinary
+/// seepage through its walls — so a 5.8k-cell boiling reservoir fed a
+/// one-cell-wide straw by sipping, and the spring ran at seepage rate no
+/// matter how much hot water stood behind it.
+///
+/// Multi-source BFS outward from the straw across claimed cells, then each
+/// claimed cell hands `max_sat` to the neighbour one hop closer in. BFS
+/// order means the cells touching the straw move first, so draining the
+/// front opens room for the cell behind it and one beat advances the whole
+/// body by a hop — the same ordering that `pump_water_along` needs.
+fn wick_reservoir(
+    world: &mut World,
+    path: &PipePath,
+    claimed: &FxHashSet<(i32, i32)>,
+    max_sat: u8,
+) {
+    if max_sat == 0 || claimed.is_empty() {
+        return;
+    }
+    let mut inward: FxHashMap<(i32, i32), (i32, i32)> = FxHashMap::default();
+    let mut order: Vec<(i32, i32)> = Vec::new();
+    let mut seen: FxHashSet<(i32, i32)> = path.cells.iter().copied().collect();
+    let mut frontier: Vec<(i32, i32)> = path.cells.iter().copied().collect();
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for &(cx, cy) in &frontier {
+            for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                let n = (world.wrap_x(cx + dx), cy + dy);
+                if !claimed.contains(&n) || !seen.insert(n) {
+                    continue;
+                }
+                inward.insert(n, (cx, cy));
+                order.push(n);
+                next.push(n);
+            }
         }
-        let Some(dest_cell) = world.get_cell(dest.0, dest.1) else {
-            continue;
-        };
-        let dest_cap = water_capacity_cell(dest_cell, &world.hydro);
-        let room = dest_cap.saturating_sub(dest_cell.sat.0);
-        let want = cell.sat.0.min(max_sat).min(room);
-        if want == 0 {
-            continue;
-        }
-        let took = take_sat(world, from.0, from.1, want);
-        if took == 0 {
-            continue;
-        }
-        let left = deliver_liquid(world, from, dest, took);
-        if left > 0 {
-            let _ = add_sat(world, from.0, from.1, left);
+        frontier = next;
+    }
+    for from in order {
+        if let Some(&dest) = inward.get(&from) {
+            let _ = hand_sat(world, from, dest, max_sat);
         }
     }
 }
@@ -1454,12 +1508,18 @@ pub fn apply_pipe_motor(
     attach_new_boilers(world, temp, boil);
     rewalk_network(world);
     rebuild_claimed(world, temp, boil);
-    reflash_network(world, temp, expand, boil, stroke_sat(stroke, expand));
     let (feeders, mains) = PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
         (memo.feeders.clone(), memo.mains.clone())
     });
     let water = stroke_sat(stroke, expand);
+    // Charge the straws from their reservoirs before firing, so a beat's
+    // flash is fed by the standing body and not only by wall seepage.
+    let claimed = claimed_cells();
+    for path in feeders.iter().chain(mains.iter()) {
+        wick_reservoir(world, path, &claimed, water);
+    }
+    reflash_network(world, temp, expand, boil, stroke_sat(stroke, expand));
     for path in feeders.iter() {
         pulse_path(
             world,
@@ -2224,6 +2284,117 @@ mod tests {
         let cap = water_capacity_cell(c, &world.hydro);
         c.sat = Sat(cap.min(10));
         c
+    }
+
+    /// The claimed reservoir must actually feed the straw. Before the wick
+    /// it was only paint: intake was whatever stood in the straw's own
+    /// cells, so a wide boiling body drained no faster than wall seepage.
+    #[test]
+    fn the_reservoir_feeds_the_straw_and_stays_mass_flat() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // A wide saturated body, one column of which becomes the straw.
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for x in 2..14 {
+            for y in 1..8 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(cap);
+                w.set_cell(x, y, c);
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 2..14 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 150.0);
+            }
+        }
+        let before = sat_totals(&w).cell_total;
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let cfg = pipe_cfg();
+
+        // Water standing far from the straw must end up closer to it.
+        let far_before: u32 = (1..8)
+            .filter_map(|y| w.get_cell(2, y).map(|c| c.sat.0 as u32))
+            .sum();
+        for t in 1..=40u64 {
+            w.tick = t;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, Some(&mut h));
+        }
+        let far_after: u32 = (1..8)
+            .filter_map(|y| w.get_cell(2, y).map(|c| c.sat.0 as u32))
+            .sum();
+        assert!(
+            far_after < far_before,
+            "the far edge of the reservoir should have drained toward the \
+             straw, {far_before} -> {far_after}"
+        );
+
+        // `sat_totals::cell_total` already folds in `pipe_mass_sat`.
+        let after = sat_totals(&w).cell_total;
+        let h_mass = h.total_mass() as i64;
+        assert_eq!(
+            before, after + h_mass,
+            "wicking the reservoir must be mass-flat: before={before} \
+             after={after} h={h_mass}"
+        );
+    }
+
+    /// The wick is a conveyor, so one beat may only advance the body by a
+    /// hop. Nearest-first ordering is what makes that work; reversing it
+    /// stalls behind full cells the way root-first pumping did.
+    #[test]
+    fn the_wick_advances_the_body_one_hop_per_beat() {
+        let mut w = plot();
+        for x in 0..16 {
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for x in 4..=8 {
+            let mut c = Cell::solid(MaterialId::Sand);
+            c.sat = Sat(cap);
+            w.set_cell(x, 1, c);
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 4..=8 {
+            let (hx, hy) = hot.tile_of(x, 1);
+            hot.set_tile_c(hx, hy, 150.0);
+        }
+        // The straw needs room, or the body is gridlocked at capacity and
+        // correctly refuses to move — flash is what normally makes room.
+        let mut drained = Cell::solid(MaterialId::Sand);
+        drained.sat = Sat(0);
+        w.set_cell(4, 1, drained);
+        let claimed: FxHashSet<(i32, i32)> = (5..=8).map(|x| (x, 1)).collect();
+        let path = PipePath {
+            root: (4, 1),
+            cells: vec![(4, 1)],
+            mouth: (4, 1),
+        };
+        let before = sat_totals(&w).cell_total;
+        let tail_before = w.get_cell(8, 1).unwrap().sat.0;
+        wick_reservoir(&mut w, &path, &claimed, 8);
+        assert!(
+            w.get_cell(8, 1).unwrap().sat.0 < tail_before,
+            "the far end of the body should hand water inward"
+        );
+        assert_eq!(
+            before,
+            sat_totals(&w).cell_total,
+            "a wick pass only moves water, it never mints or drops it"
+        );
     }
 
     #[test]

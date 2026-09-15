@@ -34,16 +34,47 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 3. The pulse is a **conveyor**: at every hop it lifts live steam parked by
    earlier beats and carries it along (bounded by `PIPE_SWEEP_STROKES`).
    Without the sweep, `Park` / `Displace` stranded units permanently.
-3. Mix **on the incoming face** (`heat / sides`, default 4) **before**
+4. Mix **on the incoming face** (`heat / sides`, default 4) **before**
    displacement.
-4. `mix_T < boil` → collapse. 1400 units → +1 sat; leftover `< expand`
+5. `mix_T < boil` → collapse. 1400 units → +1 sat; leftover `< expand`
    stays residual. Full seat → liquid overpressure along the path.
-5. `mix_T ≥ boil` → steam lives. Spare seats: park beside liquid. Full
+6. `mix_T ≥ boil` → steam lives. Spare seats: park beside liquid. Full
    cell: steam takes the seat, liquid continues.
-6. Collapse ≠ boil. Boil is this cell’s own liquid flashing.
-7. Seepage never moves steam. Solute rides liquid only.
-8. 4×4 tiles only **ignite** and **pool residuals**. Ignite walks
+7. Collapse ≠ boil. Boil is this cell’s own liquid flashing.
+8. Seepage never moves steam. Solute rides liquid only.
+9. 4×4 tiles only **ignite** and **pool residuals**. Ignite walks
    hot tiles on the beat, not the wet world.
+
+## Intake
+
+Each beat, before flashing, `wick_reservoir` draws the **claimed body**
+toward the straw that drains it: multi-source BFS out from the straw's
+cells, then every claimed cell hands one stroke's sat to the neighbour one
+hop closer in. Nearest cells move first, so the whole body advances a hop
+per beat instead of stalling behind full cells.
+
+Without the wick the claimed set was only paint. Intake was whatever sat
+happened to stand in the straw's own cells, refilled purely by seepage
+through its walls, so a thousand-cell reservoir fed a one-cell straw at
+sipping rate no matter how much hot water stood behind it.
+
+The body is allowed to be gridlocked: when the straw is at capacity there
+is nowhere for the water to go and nothing moves. Flash is what makes room.
+
+## Mass
+
+Every hop is conservative, and two paths used to break that:
+
+- `pool_residuals` discarded `add_sat`'s shortfall. A full park cell
+  refuses the minted sat, and dropping the return value deleted it — a
+  saturated reservoir leaked hundreds of sat per beat. The mint now spreads
+  across the tile and whatever still will not fit stays residual.
+- The carried condensate packet was a `u8`. A pulse accumulates liquid at
+  every hop, so on a long lumen `saturating_add` truncated it. It is now
+  `u32`, handed over in 255-sat chunks by `deliver_liquid_bulk`.
+
+`long_soak_of_apply_pipe_motor_is_mass_flat` asserts exact conservation
+over 1000 beats: opening sat + recharge == cells + humidity.
 
 ## Tunables (`SteamConfig`)
 
