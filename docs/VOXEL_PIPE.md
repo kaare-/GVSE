@@ -61,8 +61,14 @@ Tab → Climate → cavity humidity tunes pipe on/off, leftover field,
 sides, stroke, beat.
 
 Open-sky mouth leaks **mass** only: hot → sky H, cool → distilled
-liquid at the lip. Deposit is mouth / apron only — never the live
-lumen.
+liquid at the lip. **Sealed-void mouth** (walker terminates in a
+roofed cavity) deposits units into `World.steam` cavity humidity
+instead — sub-`expand` remainder banks in `pipe_res` at the mouth
+so successive pulses can mint 1 sat. Deposit is mouth / apron only
+— never the live lumen. While the pipe is on, cadence is off, but
+[`recondense_cool`](../crates/wk-voxel/src/steam.rs) still runs on
+the STEAM_EVERY beat so stale cavity vapour cannot strand when a
+boiler dies.
 
 ## Locks
 

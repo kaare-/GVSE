@@ -13,8 +13,8 @@ use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::mineral::{carry_with_water, dissolved_at, precipitate_vent_mouth};
 use crate::steam::{
-    choke_leak_mass, void_is_confined, SteamConfig, BOIL_POINT_C, PHASE_EXPANSION_DRIVE,
-    STEAM_EVERY,
+    add_steam, choke_leak_mass, steam_at, void_is_confined, SteamConfig, BOIL_POINT_C,
+    MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
 };
 use crate::temperature::Temperature;
 use crate::worldgen::{live_skin_y, live_surface_y, LIVE_SURFACE_SEARCH};
@@ -292,6 +292,66 @@ pub fn openness_rank(cell: Cell) -> u8 {
 
 fn is_pipe_mouth(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
     cell.material == MaterialId::Air && !void_is_confined(world, gx, gy)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MouthKind {
+    Sky,
+    SealedVoid,
+    Rock,
+}
+
+fn classify_mouth(world: &World, gx: i32, gy: i32, cell: Cell) -> MouthKind {
+    if cell.material != MaterialId::Air {
+        return MouthKind::Rock;
+    }
+    if void_is_confined(world, gx, gy) {
+        MouthKind::SealedVoid
+    } else {
+        MouthKind::Sky
+    }
+}
+
+/// Route pipe residuals into `World.steam` cavity humidity when the mouth is
+/// a sealed void. Mass-flat: pool the incoming units with the existing
+/// mouth-cell residual so multiple pulses can mint one sat once
+/// `expand` units are on the book. Sub-`expand` remainder stays in
+/// `pipe_res` at the mouth. Returns units consumed from `steam`.
+fn deposit_cavity_humidity(
+    world: &mut World,
+    mouth: (i32, i32),
+    steam: u32,
+    expand: u16,
+) -> u32 {
+    let exp = expand.max(1) as u32;
+    let (mx, my) = (world.wrap_x(mouth.0), mouth.1);
+    let banked = pipe_res_at(world, mx, my);
+    let total = steam.saturating_add(banked);
+    let want_sat = total / exp;
+    if want_sat == 0 {
+        add_residual(world, mx, my, steam);
+        return steam;
+    }
+    let cur = steam_at(world, mx, my) as u32;
+    if cur == 0 && world.steam.len() >= MAX_STEAM_CELLS {
+        return 0;
+    }
+    let room = 255u32.saturating_sub(cur);
+    let take = want_sat.min(room).min(255);
+    if take == 0 {
+        return 0;
+    }
+    let placed = add_steam(world, mx, my, take as u8) as u32;
+    let placed_units = placed * exp;
+    world.pipe_res.remove(&(mx, my));
+    let banked_left = total.saturating_sub(placed_units);
+    if banked_left > 0 {
+        add_residual(world, mx, my, banked_left);
+    }
+    // Report how many *incoming* units we absorbed. Anything not banked as
+    // sat or residual returns to the caller so it can try elsewhere; but we
+    // banked all of `steam` (either into sat or into pipe_res).
+    steam
 }
 
 /// Greedy most-open walk that still reduces distance to the column surface.
@@ -654,13 +714,22 @@ pub fn pulse_path(
     }
     if steam > 0 {
         let mouth = path.mouth;
-        if world
-            .get_cell(mouth.0, mouth.1)
-            .is_some_and(|c| is_pipe_mouth(world, mouth.0, mouth.1, c))
-        {
-            leak_pipe_mouth(world, temp, humidity, mouth, steam, expand, boil);
-        } else {
-            add_residual(world, mouth.0, mouth.1, steam);
+        let mouth_cell = world.get_cell(mouth.0, mouth.1);
+        let mouth_kind = mouth_cell.map(|c| classify_mouth(world, mouth.0, mouth.1, c));
+        match mouth_kind {
+            Some(MouthKind::Sky) => {
+                leak_pipe_mouth(world, temp, humidity, mouth, steam, expand, boil);
+            }
+            Some(MouthKind::SealedVoid) => {
+                let placed = deposit_cavity_humidity(world, mouth, steam, expand);
+                let stranded = steam.saturating_sub(placed);
+                if stranded > 0 {
+                    add_residual(world, mouth.0, mouth.1, stranded);
+                }
+            }
+            _ => {
+                add_residual(world, mouth.0, mouth.1, steam);
+            }
         }
     }
     if liquid > 0 {
@@ -1661,6 +1730,53 @@ mod tests {
         assert!(parked >= 1, "distilled lip sat={parked}");
         assert_eq!(sat_totals(&w).cell_total, before);
         assert_eq!(w.get_cell(4, 7).unwrap().material, MaterialId::Stone);
+    }
+
+    #[test]
+    fn sealed_mouth_deposits_cavity_humidity_not_sky_h() {
+        let mut w = plot();
+        let expand = PHASE_EXPANSION_DRIVE;
+        w.pipe_expand = expand;
+        for x in 0..16 {
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Sealed cavity: 3×3 Air under a stone roof, surrounded by stone.
+        for x in 4..=6 {
+            for y in 3..=5 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Boiler cell just below the cavity roof-floor.
+        w.set_cell(4, 2, wet_gravel(&w));
+        let mut hot = temp_at(&w, 150.0);
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let before_h = h.total_mass();
+        let path = PipePath {
+            root: (4, 2),
+            cells: vec![(4, 2), (4, 3)],
+            mouth: (4, 3),
+        };
+        let puff = u32::from(expand) * 4;
+        set_live(&mut w, 4, 2, puff, 150.0);
+        let before_cells = sat_totals(&w).cell_total;
+        pulse_path(&mut w, &mut hot, &path, puff, expand, 100.0, PIPE_SIDES, Some(&mut h));
+        assert!(
+            crate::steam::steam_at(&w, 4, 3) > 0,
+            "sealed void should hold cavity humidity, steam={}",
+            crate::steam::steam_at(&w, 4, 3)
+        );
+        assert!(
+            (h.total_mass() - before_h).abs() < 0.5,
+            "sealed steam must not leak to sky H (H {before_h} → {})",
+            h.total_mass()
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before_cells,
+            "cavity route is mass-flat"
+        );
     }
 
     #[test]
