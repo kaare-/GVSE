@@ -830,6 +830,29 @@ fn deliver_liquid(world: &mut World, from: (i32, i32), dest: (i32, i32), amt: u8
     amt.saturating_sub(put)
 }
 
+/// [`deliver_liquid`] for a packet that can exceed a `u8`, handed over in
+/// 255-sat chunks. Returns what did not fit.
+///
+/// A pulse accumulates condensate across every hop, so on a long lumen the
+/// carried packet outgrows `u8`. `saturating_add` into a `u8` truncated it
+/// and deleted the overflow outright.
+fn deliver_liquid_bulk(
+    world: &mut World,
+    from: (i32, i32),
+    dest: (i32, i32),
+    mut amt: u32,
+) -> u32 {
+    while amt > 0 {
+        let chunk = amt.min(u32::from(u8::MAX)) as u8;
+        let left = deliver_liquid(world, from, dest, chunk);
+        amt -= u32::from(chunk - left);
+        if left > 0 {
+            break;
+        }
+    }
+    amt
+}
+
 /// Mass-weighted blend of two steam packet temperatures.
 fn blend_packet_t(a_units: u32, a_t: f32, b_units: u32, b_t: f32) -> f32 {
     let total = a_units as f32 + b_units as f32;
@@ -871,11 +894,13 @@ pub fn pulse_path(
     let (mut steam, mut steam_t) = take_live(world, root.0, root.1, stroke);
     let sweep_cap = stroke.saturating_mul(PIPE_SWEEP_STROKES);
     let dye_t = steam_t;
-    let mut liquid = 0u8;
+    // Wide: condensate accumulates across hops and a `u8` truncated the
+    // packet on a long lumen, deleting the overflow.
+    let mut liquid = 0u32;
     let mut liquid_from = root;
     for &dest in &path.cells[1..] {
         if liquid > 0 {
-            liquid = deliver_liquid(world, liquid_from, dest, liquid);
+            liquid = deliver_liquid_bulk(world, liquid_from, dest, liquid);
             if liquid == 0 {
                 liquid_from = dest;
             }
@@ -897,7 +922,7 @@ pub fn pulse_path(
             steam = steam_out;
             steam_t = t_out;
             if liquid_out > 0 {
-                liquid = liquid.saturating_add(liquid_out);
+                liquid += u32::from(liquid_out);
                 liquid_from = dest;
             }
         }
@@ -924,13 +949,13 @@ pub fn pulse_path(
         }
     }
     if liquid > 0 {
-        let left = deliver_liquid(world, liquid_from, path.mouth, liquid);
+        let left = deliver_liquid_bulk(world, liquid_from, path.mouth, liquid);
         if left > 0 {
             add_residual(
                 world,
                 path.mouth.0,
                 path.mouth.1,
-                left as u32 * expand.max(1) as u32,
+                left.saturating_mul(u32::from(expand.max(1))),
             );
         }
     }
@@ -1056,8 +1081,11 @@ pub fn pool_residuals(world: &mut World, expand: u16) {
         if sum < exp {
             continue;
         }
+        // `add_sat` takes a u8, so anything past 255 sat stays as units.
+        // Deriving `keep` from what was actually minted covers both the
+        // sub-expand remainder and that clamp.
         let mint = (sum / exp).min(u32::from(u8::MAX)) as u8;
-        let keep = sum % exp;
+        let mut keep = sum - u32::from(mint) * exp;
         let park = cells
             .iter()
             .max_by_key(|c| c.2)
@@ -1066,10 +1094,22 @@ pub fn pool_residuals(world: &mut World, expand: u16) {
         for &(gx, gy, _) in &cells {
             world.pipe_res.remove(&(gx, gy));
         }
+        // A full cell refuses the sat, and discarding `add_sat`'s shortfall
+        // deleted that water outright — a saturated reservoir leaked several
+        // hundred sat per beat. Spread across the tile, then hold whatever
+        // still does not fit as residual: the water has nowhere to go, but
+        // it must not vanish.
+        let mut left = mint;
+        for &(gx, gy, _) in &cells {
+            if left == 0 {
+                break;
+            }
+            left -= add_sat(world, gx, gy, left);
+        }
+        keep += u32::from(left) * exp;
         if keep > 0 {
             world.pipe_res.insert(park, keep);
         }
-        let _ = add_sat(world, park.0, park.1, mint);
     }
 }
 
@@ -1704,6 +1744,7 @@ mod tests {
         }
         let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
         let cfg = pipe_cfg();
+        let opening = sat_totals(&w).cell_total;
         let mut budget = 0i64;
         for t in 1..=1000u64 {
             w.tick = t;
@@ -1728,6 +1769,15 @@ mod tests {
         let h_mass = h.total_mass() as i64;
         assert!(cells >= 0, "cell_total went negative");
         assert!(h_mass >= 0, "humidity went negative");
+        // Strict now that `pool_residuals` no longer discards `add_sat`'s
+        // shortfall and the carried condensate is no longer truncated to a
+        // `u8`. 1000 beats must not lose or mint a single sat.
+        assert_eq!(
+            opening + budget,
+            cells + h_mass,
+            "1000 beats drifted: opened {opening} + recharged {budget} \
+             != cells {cells} + humidity {h_mass}"
+        );
         assert!(
             w.pipe_steam.len() < 512,
             "pipe_steam book grew unbounded: {}",
