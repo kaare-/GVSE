@@ -1055,7 +1055,16 @@ pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32,
 
 /// P-overlay hill silhouette. Sim ticks skip this flood; call when
 /// the leftover field is actually drawn.
+///
+/// No-op while the cell pipe owns `P`. The memo keys on `world.tick`, so a
+/// running sim invalidates it every frame, and `cell_pressure_norm` then
+/// discards the result for every cell — measured at 7 ms steady and 46 ms
+/// on a rebuild frame, spent to produce nothing. That was the overlay
+/// dropping 20 fps to 12.
 pub fn ensure_leftover_hill_view(world: &World, temp: &Temperature, boil_c: f32, expand: u16) {
+    if crate::pipe::pipe_painting(world) {
+        return;
+    }
     prepare_leftover_pressure(world, temp, boil_c, expand);
     LEFTOVER_MEMO.with(|slot| {
         let mut memo = slot.borrow_mut();
