@@ -122,16 +122,36 @@ pub fn pipe_units_total(world: &World) -> i64 {
 }
 
 pub fn pipe_path_stats(world: &World) -> (usize, usize) {
+    let s = pipe_network_stats(world);
+    (s.mains + s.feeders, s.cells)
+}
+
+/// Playtest-facing counters for the pipe network.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PipeNetworkStats {
+    /// Independent main straws (one root each, walked to the free surface).
+    pub mains: usize,
+    /// Feeder straws attached onto a main.
+    pub feeders: usize,
+    /// Unique cells across all straws + claimed boiling cells.
+    pub cells: usize,
+}
+
+pub fn pipe_network_stats(world: &World) -> PipeNetworkStats {
     PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
         if memo.world_id != world.chunk_cache_id.get() {
-            return (0, 0);
+            return PipeNetworkStats::default();
         }
         let mut cells = memo.claimed.clone();
         for path in memo.mains.iter().chain(memo.feeders.iter()) {
             cells.extend(path.cells.iter().copied());
         }
-        (memo.mains.len() + memo.feeders.len(), cells.len())
+        PipeNetworkStats {
+            mains: memo.mains.len(),
+            feeders: memo.feeders.len(),
+            cells: cells.len(),
+        }
     })
 }
 

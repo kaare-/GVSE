@@ -1750,11 +1750,15 @@ async fn main() {
                 if settings.phase.enabled { "on" } else { "off" },
                 if settings.steam.enabled {
                     if settings.steam.enable_pipe {
-                        let (n, cells) = wk_voxel::pipe_path_stats(&scene.world);
+                        let s = wk_voxel::pipe_network_stats(&scene.world);
+                        let mass = wk_voxel::pipe_mass_sat(&scene.world);
                         format!(
-                            "{}c P={n}/{cells} u={}",
+                            "{}c P={m}+{f}/{cells} sat={mass} u={u}",
                             scene.world.steam.len(),
-                            scene.world.pipe_steam.len()
+                            m = s.mains,
+                            f = s.feeders,
+                            cells = s.cells,
+                            u = scene.world.pipe_steam.len()
                         )
                     } else {
                         let (lz, lp) = wk_voxel::leftover_field_stats(&scene.world);
