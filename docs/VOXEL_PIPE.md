@@ -22,10 +22,18 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 
 ## Pulse
 
-1. Flash: pay sat, credit `sat × expand` live units at tile T.
-2. Walk most-open neighbor that still goes toward surface
-   (`live_surface_y` / unroofed Air). Openness: Air > snow/water/ice >
-   loose > sand > gravel > stone > bedrock.
+1. Flash: pay sat, credit `sat × expand` live units at tile T. Intake is
+   **capped to one stroke's worth of sat** per beat (`pipe_flash_capped`).
+   An uncapped flash mints far more volume than a stroke can carry, so the
+   surplus banked in the lumen forever.
+2. Walk most-open neighbor that still reduces Manhattan distance to the
+   column's **sky-open vent** (`sky_open_y`, not `live_surface_y` — the
+   latter stops at the first non-solid cell, so an enclosed cavity read as
+   a surface and the straw dead-ended inside rock). Openness: Air >
+   snow/water/ice > loose > sand > gravel > stone > bedrock.
+3. The pulse is a **conveyor**: at every hop it lifts live steam parked by
+   earlier beats and carries it along (bounded by `PIPE_SWEEP_STROKES`).
+   Without the sweep, `Park` / `Displace` stranded units permanently.
 3. Mix **on the incoming face** (`heat / sides`, default 4) **before**
    displacement.
 4. `mix_T < boil` → collapse. 1400 units → +1 sat; leftover `< expand`

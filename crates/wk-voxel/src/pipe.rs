@@ -422,29 +422,62 @@ fn deposit_cavity_humidity(
 
 const WALK_SCAN_HALFWIDTH: i32 = 16;
 
-/// Nearest easier column in a small window: argmin of `live_surface_y`.
-/// Wrap-aware. Ties break toward the root so a symmetric mountain does
-/// not oscillate. Unloaded columns (`get_cell` = None) return hint from
-/// `live_surface_y`; treat those as "no signal" so the scan does not
-/// bolt off the edge of the loaded world.
+/// How far up a column to hunt for a genuinely sky-open cell.
+const PIPE_VENT_SEARCH: i32 = 512;
+
+/// Altitude of the first cell in this column that is Air **and open to the
+/// sky** — the true vent, not merely the first non-solid cell.
+///
+/// [`live_surface_y`] stops at the first non-solid cell, and an *enclosed*
+/// cavity is non-solid. Under a mountain that made the walker adopt the
+/// first internal void as its surface: it arrived there, could no longer
+/// reduce its distance to the target, and terminated inside sealed rock.
+/// The straw then had no discharge and every beat's units banked in the
+/// lumen — the "no route to the surface" report.
+///
+/// Cost is one upward pass per column. The `material == Air` test
+/// short-circuits before [`void_is_confined`], so solid rock (the bulk of
+/// a mountain) never pays the roof probe, and the probe itself is memoized
+/// in the sky cache.
+fn sky_open_y(world: &World, gx: i32, from_y: i32) -> Option<i32> {
+    let gx = world.wrap_x(gx);
+    for dy in 0..PIPE_VENT_SEARCH {
+        let y = from_y + dy;
+        let Some(cell) = world.get_cell(gx, y) else {
+            // Ran off the top of the loaded world: the last loaded cell is
+            // as close to sky as this column gets.
+            return (dy > 0).then_some(y - 1);
+        };
+        if cell.material == MaterialId::Air && !void_is_confined(world, gx, y) {
+            return Some(y);
+        }
+    }
+    None
+}
+
+/// Nearest column with the lowest **sky-open** vent in a small window.
+/// Wrap-aware. Ties break toward the root so a symmetric mountain does not
+/// oscillate. Columns with no vent at all are skipped rather than treated
+/// as easy, so the scan cannot bolt off the edge of the loaded world.
 fn easiest_target(world: &World, root: (i32, i32)) -> (i32, i32) {
     let (rx, ry) = root;
-    let mut best_x = rx;
-    let mut best_y = live_surface_y(world, rx, ry, LIVE_SURFACE_SEARCH);
+    let fallback = live_surface_y(world, rx, ry, LIVE_SURFACE_SEARCH);
+    let mut best: Option<(i32, i32)> = sky_open_y(world, rx, ry).map(|y| (rx, y));
     for d in 1..=WALK_SCAN_HALFWIDTH {
         for sign in [-1, 1] {
             let x = world.wrap_x(rx + sign * d);
             if world.get_cell(x, ry).is_none() {
                 continue;
             }
-            let y = live_surface_y(world, x, ry, LIVE_SURFACE_SEARCH);
-            if y < best_y {
-                best_y = y;
-                best_x = x;
+            let Some(y) = sky_open_y(world, x, ry) else {
+                continue;
+            };
+            if best.map(|(_, by)| y < by).unwrap_or(true) {
+                best = Some((x, y));
             }
         }
     }
-    (best_x, best_y)
+    best.unwrap_or((rx, fallback))
 }
 
 /// Greedy most-open walk that still reduces distance to a projected mouth
@@ -1925,6 +1958,78 @@ mod tests {
         assert!(
             simmer * (PIPE_ERUPT_PERIOD as u32) >= stroke.saturating_sub(PIPE_ERUPT_PERIOD as u32),
             "period simmer strokes should sum to about one stroke, got {simmer} × {PIPE_ERUPT_PERIOD}"
+        );
+    }
+
+    /// Playtest regression: "the route treated the first air block it
+    /// encountered as a surface, even if it was enclosed completely."
+    ///
+    /// A sealed cavity sits between the boiler and the real sky. The target
+    /// used to be that cavity (because `live_surface_y` stops at the first
+    /// non-solid cell), so the walker arrived, could not reduce distance,
+    /// and terminated in sealed rock with no discharge.
+    #[test]
+    fn a_sealed_cavity_is_not_mistaken_for_the_surface() {
+        let mut w = plot();
+        // Wide plateau: the ±16 vent scan must stay inside rock, otherwise
+        // the walker legitimately escapes to the open air beyond the plot.
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..30 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 30..40 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Fully enclosed cavity at y=8..=11, well below the real sky at 30.
+        for x in 30..=34 {
+            for y in 8..=11 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..8 {
+            w.set_cell(32, y, wet_gravel(&w));
+        }
+        // The cavity must really be sealed, or the test proves nothing.
+        assert!(
+            void_is_confined(&w, 32, 10),
+            "setup: the cavity should read as confined"
+        );
+        assert!(
+            !void_is_confined(&w, 32, 31),
+            "setup: the sky should read as open"
+        );
+        // The naive surface probe still reports the cavity floor...
+        let naive = live_surface_y(&w, 32, 1, LIVE_SURFACE_SEARCH);
+        assert!(
+            naive < 30,
+            "setup: live_surface_y should stop at the cavity ({naive})"
+        );
+        // ...but the vent probe must climb past it to the real sky.
+        let vent = sky_open_y(&w, 32, 1).expect("column should have a vent");
+        assert!(
+            vent >= 30,
+            "vent must be the real sky, not the sealed cavity (got {vent})"
+        );
+        let path = walk_pipe(&w, (32, 1));
+        let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
+        assert_eq!(
+            mouth.material,
+            MaterialId::Air,
+            "mouth should be air, got {:?} at {:?}",
+            mouth.material,
+            path.mouth
+        );
+        assert!(
+            !void_is_confined(&w, path.mouth.0, path.mouth.1),
+            "mouth must be sky-open, not the sealed cavity, got {:?}",
+            path.mouth
+        );
+        assert!(
+            path.mouth.1 >= 30,
+            "mouth should reach the real surface, got {:?}",
+            path.mouth
         );
     }
 
