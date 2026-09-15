@@ -1,8 +1,10 @@
 # Geyser landscape motor
 
 **Status:** P0–P3 + three-store humidity model (sky H / sealed
-`cave_humidity` / pressurized cavity humidity (`steam` wire)). Open hot water is accelerated
-evap into sky H. **P4** episodic jet still waits on the FPS gate below.
+`cave_humidity` / pressurized cavity humidity (`steam` wire)). Play leftover
+pressure is the cell-resolution **steam pipe** ([`VOXEL_PIPE.md`](VOXEL_PIPE.md)).
+Open hot water is accelerated evap into sky H. **P4** episodic jet still
+waits on the FPS gate below.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** native **upward** landscape builder (hot springs → geysers →
 sinter pipes/hills) that balances existing **downhill** erosion, without a

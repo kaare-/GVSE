@@ -1053,6 +1053,8 @@ fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig
 ///
 /// Period-gated [`thaw_column`] plus steam-after-phase left 130 °C ice
 /// on lake vents and snow sitting in 12 °C water between cadence ticks.
+/// A cold alpine cap used to hide buried snow in a 160 °C geothermal
+/// tile: only the pack top was visited, then the column stopped.
 fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
@@ -1066,21 +1068,13 @@ fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig
             if !is_frozen_solid(cell.material) {
                 continue;
             }
-            let top_of_stack = match world.get_cell(gx, y + 1) {
-                None => true,
-                Some(above) if !is_frozen_solid(above.material) => true,
-                _ => false,
-            };
-            if !top_of_stack {
-                continue;
-            }
-            // Only the absurd case (vent ice at 100 °C+). Mild warm pack
-            // still uses period-gated [`thaw_column`] so hillside snaps
-            // stay rate-limited.
+            // Absurd heat only (vent ice / pipe-heated snow at 100 °C+).
+            // Mild warm pack still uses period-gated [`thaw_column`] so
+            // hillside snaps stay rate-limited. Visit the whole stack:
+            // a colder lid must not protect 160 °C snow underneath.
             if temp.at_cell(gx, y) > hot {
                 world.set_cell(gx, y, Cell::water());
             }
-            break;
         }
     }
 }
@@ -2284,6 +2278,64 @@ mod tests {
             w.get_cell(3, 2).map(|c| c.material),
             Some(MaterialId::Ice),
             "130 °C ice must melt without waiting for the phase period"
+        );
+    }
+
+    #[test]
+    fn scalding_snow_thaws_every_tick() {
+        let mut w = World::new(63);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::solid(MaterialId::Snow));
+        let mut temp = cold_temp(16, 16, 160.0);
+        temp.cells.insert((0, 0), 160.0);
+        let cfg = PhaseConfig {
+            period_ticks: 64,
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        assert_ne!(
+            w.get_cell(3, 1).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "160 °C snow must melt without waiting for the phase period"
+        );
+    }
+
+    #[test]
+    fn buried_scalding_snow_thaws_under_cold_cap() {
+        let mut w = World::new(64);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        // tile hy=0 (y 0..3) is 160 °C; hy=1 (y 4..7) is a cold alpine lid.
+        w.set_cell(3, 1, Cell::solid(MaterialId::Snow));
+        w.set_cell(3, 2, Cell::solid(MaterialId::Snow));
+        w.set_cell(3, 3, Cell::solid(MaterialId::Snow));
+        w.set_cell(3, 4, Cell::solid(MaterialId::Snow));
+        w.set_cell(3, 5, Cell::solid(MaterialId::Snow));
+        let mut temp = cold_temp(16, 16, -5.0);
+        temp.cells.insert((0, 0), 160.0);
+        temp.cells.insert((0, 1), -5.0);
+        let cfg = PhaseConfig {
+            period_ticks: 64,
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        assert_ne!(
+            w.get_cell(3, 1).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "160 °C snow under a cold cap must still melt"
+        );
+        assert_ne!(
+            w.get_cell(3, 3).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "the whole hot band under the lid must melt, not only one cell"
+        );
+        assert_eq!(
+            w.get_cell(3, 5).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "cold alpine cap stays frozen"
         );
     }
 

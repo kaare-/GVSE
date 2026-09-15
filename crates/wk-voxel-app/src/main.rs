@@ -187,6 +187,14 @@ fn pressure_overlay_color(p: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
+/// Do two `P` values land on the same drawn colour, so their cells can
+/// share one rectangle? The palette's steepest channel moves 255 units
+/// across the full range, so 1/256 steps merge only pixel-identical cells.
+fn same_p_band(a: f32, b: f32) -> bool {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 256.0) as u16;
+    q(a) == q(b)
+}
+
 
 /// Sparse conduit steam as soft humidity-like haze (4×4 tiles).
 /// Pressure/heat raise alpha and warmth; never an opaque blue plug.
@@ -1369,12 +1377,15 @@ async fn main() {
         // seats along least resistance — a mound or a finger, not a thermal blob.
         // Leftover vessel + pin. Skip only leftover 0 (no hide-band).
         if pressure_overlay && overlay_k > 0.01 {
-            wk_voxel::ensure_leftover_hill_view(
-                &scene.world,
-                &scene.temperature,
-                settings.steam.boil_point_c,
-                settings.steam.phase_expansion_drive,
-            );
+            // No-ops while the cell pipe owns P — see ensure_leftover_hill_view.
+            if settings.steam.enable_leftover_field {
+                wk_voxel::ensure_leftover_hill_view(
+                    &scene.world,
+                    &scene.temperature,
+                    settings.steam.boil_point_c,
+                    settings.steam.phase_expansion_drive,
+                );
+            }
             let (xr, xn) = view_cell_x_ranges(
                 origin_x,
                 cell_px,
@@ -1382,6 +1393,22 @@ async fn main() {
                 scene.params.width_cols,
                 sw,
             );
+            // Merged vertical runs, as terrain does. A claimed boiling body
+            // is thousands of cells at one flat band, so per-cell rects put
+            // ~30k quads per frame in the buffer for what is a handful of
+            // columns of solid colour.
+            let bedrock_y = scene.params.bedrock_floor_y;
+            let draw_p_run = |sx: f32, y0: i32, y1: i32, p: f32| {
+                let top = origin_y - (y1 - bedrock_y) as f32 * cell_px - cell_px;
+                let h = (y1 - y0 + 1) as f32 * cell_px;
+                draw_rectangle(
+                    sx,
+                    top,
+                    cell_px,
+                    h,
+                    scale_color_alpha(pressure_overlay_color(p), overlay_k),
+                );
+            };
             for i in 0..xn as usize {
                 let (x0, x1) = xr[i];
                 for x in x0..=x1 {
@@ -1391,34 +1418,50 @@ async fn main() {
                         if sx + cell_px < 0.0 || sx > sw {
                             continue;
                         }
+                        // Open run: first world-y, last world-y, band.
+                        let mut run: Option<(i32, i32, f32)> = None;
                         for y in y_min_vis..y_max_vis {
-                            let sy =
-                                origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
-                            if sy + cell_px < 0.0 || sy > sh {
-                                continue;
+                            let sy = origin_y - (y - bedrock_y) as f32 * cell_px;
+                            let band = if sy + cell_px < 0.0 || sy > sh {
+                                None
+                            } else if scene.world.get_cell(x, y).is_none() {
+                                None
+                            } else {
+                                let temp_c = scene.temperature.at_cell(x, y);
+                                let (p, kind) = wk_voxel::cell_pressure_norm_with_boil(
+                                    &scene.world,
+                                    x,
+                                    y,
+                                    temp_c,
+                                    settings.steam.boil_point_c,
+                                    settings.steam.phase_expansion_drive,
+                                );
+                                if kind == wk_voxel::CellPressureKind::None || p <= 0.0 {
+                                    None
+                                } else {
+                                    Some(p)
+                                }
+                            };
+                            match (band, run) {
+                                (Some(p), Some((y0, _, rp))) if same_p_band(p, rp) => {
+                                    run = Some((y0, y, rp));
+                                }
+                                (Some(p), prev) => {
+                                    if let Some((y0, y1, rp)) = prev {
+                                        draw_p_run(sx, y0, y1, rp);
+                                    }
+                                    run = Some((y, y, p));
+                                }
+                                (None, prev) => {
+                                    if let Some((y0, y1, rp)) = prev {
+                                        draw_p_run(sx, y0, y1, rp);
+                                    }
+                                    run = None;
+                                }
                             }
-                            if scene.world.get_cell(x, y).is_none() {
-                                continue;
-                            }
-                            let temp_c = scene.temperature.at_cell(x, y);
-                            let (p, kind) = wk_voxel::cell_pressure_norm_with_boil(
-                                &scene.world,
-                                x,
-                                y,
-                                temp_c,
-                                settings.steam.boil_point_c,
-                                settings.steam.phase_expansion_drive,
-                            );
-                            if kind == wk_voxel::CellPressureKind::None || p <= 0.0 {
-                                continue;
-                            }
-                            draw_rectangle(
-                                sx,
-                                sy - cell_px,
-                                cell_px,
-                                cell_px,
-                                scale_color_alpha(pressure_overlay_color(p), overlay_k),
-                            );
+                        }
+                        if let Some((y0, y1, rp)) = run {
+                            draw_p_run(sx, y0, y1, rp);
                         }
                     }
                 }
@@ -1747,8 +1790,21 @@ async fn main() {
                 if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
                 if settings.steam.enabled {
-                    let (lz, lp) = wk_voxel::leftover_field_stats(&scene.world);
-                    format!("{}c L={lz}/{lp}", scene.world.steam.len())
+                    if settings.steam.enable_pipe {
+                        let s = wk_voxel::pipe_network_stats(&scene.world);
+                        let mass = wk_voxel::pipe_mass_sat(&scene.world);
+                        format!(
+                            "{}c P={m}+{f}/{cells} sat={mass} u={u}",
+                            scene.world.steam.len(),
+                            m = s.mains,
+                            f = s.feeders,
+                            cells = s.cells,
+                            u = scene.world.pipe_steam.len()
+                        )
+                    } else {
+                        let (lz, lp) = wk_voxel::leftover_field_stats(&scene.world);
+                        format!("{}c L={lz}/{lp}", scene.world.steam.len())
+                    }
                 } else {
                     "off".into()
                 },

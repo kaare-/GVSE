@@ -275,7 +275,11 @@ impl SimSettings {
             wet_darken: crate::palette::WET_DARKEN_DEFAULT,
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
-            steam: SteamConfig::default(),
+            steam: SteamConfig {
+                enable_pipe: true,
+                enable_leftover_field: false,
+                ..SteamConfig::default()
+            },
             grain: GrainConfig::default(),
             fungi: FungiConfig {
                 // Slower than crate default so Organic cream beds linger
@@ -1260,6 +1264,44 @@ impl SimSettings {
                         &mut max_cells,
                     );
                     labeled_slider(ui, hash!(), "Steam period (ticks)", 1.0..30.0, &mut period);
+                    ui.separator();
+                    ui.label(
+                        None,
+                        "Cell pipe: one crest per hot-wet hill. Face mix before displace. Leftover field is the old 28k zone.",
+                    );
+                    ui.checkbox(hash!(), "Steam pipe", &mut self.steam.enable_pipe);
+                    ui.checkbox(
+                        hash!(),
+                        "Leftover field (28k zone)",
+                        &mut self.steam.enable_leftover_field,
+                    );
+                    let mut pipe_sides = self.steam.pipe_sides as f32;
+                    let mut pipe_stroke = self.steam.pipe_stroke as f32;
+                    let mut pipe_beat = self.steam.pipe_beat as f32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pipe face sides (heat/sides)",
+                        1.0..8.0,
+                        &mut pipe_sides,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pipe stroke (units / beat)",
+                        200.0..7000.0,
+                        &mut pipe_stroke,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pipe beat (ticks)",
+                        1.0..20.0,
+                        &mut pipe_beat,
+                    );
+                    self.steam.pipe_sides = pipe_sides.round().clamp(1.0, 8.0) as u8;
+                    self.steam.pipe_stroke = pipe_stroke.round().clamp(200.0, 7000.0) as u32;
+                    self.steam.pipe_beat = pipe_beat.round().clamp(1.0, 60.0) as u64;
                     self.steam.boil_max_per_cell = boil_max.round().clamp(1.0, 255.0) as u8;
                     self.steam.pore_boil_max_per_cell = pore_max.round().clamp(0.0, 255.0) as u8;
                     self.steam.phase_expansion_drive =

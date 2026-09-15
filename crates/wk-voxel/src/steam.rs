@@ -164,6 +164,16 @@ pub struct SteamConfig {
     pub max_escapes_per_tick: u8,
     /// Max Air cells per pocket flood-fill.
     pub void_flood_budget: u16,
+    /// Cell-resolution steam pipe (face mix / leftover field replacement).
+    pub enable_pipe: bool,
+    /// Keep the leftover zone field. Play turns this off when the pipe is on.
+    pub enable_leftover_field: bool,
+    /// Face fraction is `1 / pipe_sides` (4 = one side of a rectangle).
+    pub pipe_sides: u8,
+    /// Steam units moved per beat.
+    pub pipe_stroke: u32,
+    /// Ticks between pipe pulses.
+    pub pipe_beat: u64,
 }
 
 impl Default for SteamConfig {
@@ -184,6 +194,11 @@ impl Default for SteamConfig {
             escape_pressure_min: ESCAPE_PRESSURE_MIN,
             max_escapes_per_tick: MAX_ESCAPES_PER_TICK,
             void_flood_budget: VOID_FLOOD_BUDGET as u16,
+            enable_pipe: false,
+            enable_leftover_field: true,
+            pipe_sides: 4,
+            pipe_stroke: 1400,
+            pipe_beat: STEAM_EVERY,
         }
     }
 }
@@ -1040,7 +1055,16 @@ pub fn prepare_leftover_pressure(world: &World, temp: &Temperature, boil_c: f32,
 
 /// P-overlay hill silhouette. Sim ticks skip this flood; call when
 /// the leftover field is actually drawn.
+///
+/// No-op while the cell pipe owns `P`. The memo keys on `world.tick`, so a
+/// running sim invalidates it every frame, and `cell_pressure_norm` then
+/// discards the result for every cell — measured at 7 ms steady and 46 ms
+/// on a rebuild frame, spent to produce nothing. That was the overlay
+/// dropping 20 fps to 12.
 pub fn ensure_leftover_hill_view(world: &World, temp: &Temperature, boil_c: f32, expand: u16) {
+    if crate::pipe::pipe_painting(world) {
+        return;
+    }
     prepare_leftover_pressure(world, temp, boil_c, expand);
     LEFTOVER_MEMO.with(|slot| {
         let mut memo = slot.borrow_mut();
@@ -3444,6 +3468,9 @@ pub fn cell_pressure_norm_with_boil(
     boil_c: f32,
     expand: u16,
 ) -> (f32, CellPressureKind) {
+    if let Some(p) = crate::pipe::pipe_overlay_pack(world, gx, gy) {
+        return (p, CellPressureKind::PoreFlash);
+    }
     let steam = steam_at(world, gx, gy);
     let Some(cell) = world.get_cell(gx, gy) else {
         return (0.0, CellPressureKind::None);
@@ -3476,6 +3503,11 @@ pub fn cell_pressure_norm_with_boil(
     // leftover_pack_norm is ~0.99 on every hot wet cell and paints a
     // yellow disk over the whole isotherm — keep it only as a fallback
     // when the field has not been prepared.
+    // The cell pipe owns P when it has a locked straw; do not show
+    // leftover's route picker beside it.
+    if crate::pipe::pipe_painting(world) {
+        return (0.0, CellPressureKind::None);
+    }
     let cap = water_capacity_cell(cell, &world.hydro);
     let vol = vapor_volume_units(cell.sat.0 as u32, temp_c, boil, expand);
     let mut pack = leftover_pack_norm(vol, cap as u32);
@@ -3730,12 +3762,12 @@ pub fn apply_steam_with_weather(
     world: &mut World,
     temp: &mut Temperature,
     cfg: &SteamConfig,
-    humidity: Option<&mut Humidity>,
+    mut humidity: Option<&mut Humidity>,
 ) {
     if !cfg.enabled {
         return;
     }
-    apply_leftover_motor(world, temp, cfg);
+    apply_leftover_motor(world, temp, cfg, humidity.as_deref_mut());
     apply_steam_cadence(world, temp, cfg, humidity);
 }
 
@@ -3747,8 +3779,25 @@ pub(crate) fn apply_leftover_motor(
     world: &mut World,
     temp: &mut Temperature,
     cfg: &SteamConfig,
+    humidity: Option<&mut Humidity>,
 ) {
     if !cfg.enabled {
+        return;
+    }
+    if cfg.enable_pipe {
+        crate::pipe::apply_pipe_motor(world, temp, cfg, humidity);
+        // Pipe owns leftover. The 28k field and its Dijkstra walker
+        // must not shove beside the straw. Cadence is off too — recondense
+        // any stale cavity-humidity seat so a hot patch that cools does
+        // not strand vapour when the boiler dies.
+        let period = cfg.period_ticks.max(1);
+        if world.tick % period == 0 && !world.steam.is_empty() {
+            let below = cfg.boil_point_c - RECONDENSE_MARGIN_C;
+            recondense_cool(world, temp, below);
+        }
+        return;
+    }
+    if !cfg.enable_leftover_field {
         return;
     }
     prepare_leftover_pressure(world, temp, cfg.boil_point_c, cfg.phase_expansion_drive);
@@ -3767,6 +3816,11 @@ pub(crate) fn apply_steam_cadence(
     humidity: Option<&mut Humidity>,
 ) {
     if !cfg.enabled {
+        return;
+    }
+    if cfg.enable_pipe {
+        // Cadence boil / flood / assault is the other shortest-route
+        // pressure walker. Pipe is the only leftover motor in play.
         return;
     }
     let period = cfg.period_ticks.max(1);

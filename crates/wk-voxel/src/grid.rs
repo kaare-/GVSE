@@ -22,6 +22,10 @@ pub type ChunkMap = FxHashMap<ChunkCoord, Chunk>;
 
 static NEXT_CHUNK_CACHE_ID: AtomicU64 = AtomicU64::new(1);
 
+fn default_world_pipe_expand() -> u16 {
+    crate::steam::PHASE_EXPANSION_DRIVE
+}
+
 fn next_chunk_cache_id() -> u64 {
     NEXT_CHUNK_CACHE_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -180,6 +184,19 @@ pub struct World {
     /// Sparse and saved (`#[serde(default)]` so older snaps load empty).
     #[serde(default)]
     pub cave_humidity: FxHashMap<(i32, i32), u8>,
+    /// Live pipe steam units (1 sat = [`Self::pipe_expand`] units).
+    /// Water-grid book, not the 4×4 heat tile. Not cavity `steam` u8.
+    #[serde(default)]
+    pub pipe_steam: FxHashMap<(i32, i32), u32>,
+    /// Collapsed pipe remainder (`< pipe_expand`). Does not occupy seats.
+    #[serde(default)]
+    pub pipe_res: FxHashMap<(i32, i32), u32>,
+    /// Live pipe steam temperature (°C) per cell.
+    #[serde(default)]
+    pub pipe_steam_t: FxHashMap<(i32, i32), f32>,
+    /// Sat ↔ unit scale for the pipe book. Set from steam expand on flash.
+    #[serde(default = "default_world_pipe_expand")]
+    pub pipe_expand: u16,
     /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
     /// Same strain keeps one book across spatial split / reconnect.
     ///
@@ -285,6 +302,10 @@ impl World {
             pore_ice: FxHashMap::default(),
             steam: FxHashMap::default(),
             cave_humidity: FxHashMap::default(),
+            pipe_steam: FxHashMap::default(),
+            pipe_res: FxHashMap::default(),
+            pipe_steam_t: FxHashMap::default(),
+            pipe_expand: default_world_pipe_expand(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),
             competent_cell_moves: Vec::new(),

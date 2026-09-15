@@ -33,6 +33,7 @@ pub mod landscape_body;
 pub mod mineral;
 pub mod organism;
 pub mod parallel;
+pub mod pipe;
 pub mod phase;
 pub mod plant;
 pub mod pore_ice;
@@ -164,6 +165,12 @@ pub use organism::{
     OrganismStepStats, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
     CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
+};
+pub use pipe::{
+    apply_pipe_motor, classify_hop, face_mix_t, openness_rank, pipe_flash, pipe_live_at,
+    pipe_mass_sat, pipe_network_stats, pipe_overlay_pack, pipe_painting, pipe_path_stats,
+    pulse_path, walk_pipe,
+    HopKind, PipeNetworkStats, PipePath, PIPE_SIDES, PIPE_STROKE_DEFAULT,
 };
 pub use phase::{
     apply_freeze, apply_phase, deposit_condensate_on_surface, deposit_precip_on_surface,
