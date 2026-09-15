@@ -129,6 +129,37 @@ fn overlay_skips_the_leftover_flood_while_the_pipe_owns_p() {
     assert_eq!(stats.zone, 0, "leftover zone was flooded anyway");
 }
 
+/// Cost of one motor beat at soak scale. The soak reported `[sim skip]` at
+/// 3 fps with a 21k-cell network, so the beat itself matters, not just the
+/// overlay.
+#[test]
+#[ignore]
+fn pipe_motor_beat_cost() {
+    let (mut world, mut temp, _) = hot_hill();
+    run_motor(&mut world, &mut temp, 40);
+    let stats = pipe_network_stats(&world);
+    eprintln!(
+        "network: mains={} feeders={} cells={}",
+        stats.mains, stats.feeders, stats.cells
+    );
+    let mut cfg = SteamConfig::default();
+    cfg.enable_pipe = true;
+    cfg.phase_expansion_drive = PHASE_EXPANSION_DRIVE_MAX;
+    let mut total = Duration::ZERO;
+    const BEATS: u32 = 20;
+    for _ in 0..BEATS {
+        world.tick += STEAM_EVERY;
+        let start = Instant::now();
+        apply_pipe_motor(&mut world, &mut temp, &cfg, None);
+        total += start.elapsed();
+    }
+    let avg = total / BEATS;
+    eprintln!(
+        "apply_pipe_motor: {:.2}ms per beat (every {STEAM_EVERY} ticks)",
+        ms(avg)
+    );
+}
+
 #[test]
 #[ignore]
 fn pipe_overlay_frame_cost() {

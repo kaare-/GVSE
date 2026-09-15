@@ -45,6 +45,27 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 9. 4×4 tiles only **ignite** and **pool residuals**. Ignite walks
    hot tiles on the beat, not the wet world.
 
+## Book invariants
+
+Enforced by `rewalk_network` every beat:
+
+- Mains are rewalked from their roots, and one that no longer routes is
+  dropped.
+- A feeder that cannot land on a main is **dropped**, never kept. Keeping
+  it meant it was never rewalked again — a straw frozen over terrain that
+  had changed under it, which is what put routes in mid-air, and its stale
+  cells still drove `rebuild_claimed`.
+- With no main on the book, orphans are tried **until one walks**. Spending
+  a single attempt on `feeders[0]` left the whole book frozen when that one
+  root was unroutable: no main, every feeder stale, and the stale claim
+  starving `collect_boiler_cands` so no main could ever be rebuilt. That
+  deadlock read `P=0+24/21132` on the HUD.
+- **One straw per root.** A duplicated root is one spring drawn twice: it
+  doubles intake and paints a second needle beside the first.
+- A cell flashes **once per beat** however many straws cross it. Feeders
+  share their main's cells, so flashing per path multiplied intake by the
+  overlap and defeated the per-beat cap.
+
 ## Intake
 
 Each beat, before flashing, `wick_reservoir` draws the **claimed body**
@@ -60,6 +81,25 @@ sipping rate no matter how much hot water stood behind it.
 
 The body is allowed to be gridlocked: when the straw is at capacity there
 is nowhere for the water to go and nothing moves. Flash is what makes room.
+
+The sweep is seeded from **every** straw at once, and hands water inward at
+BFS discovery rather than through a parent map — discovery order already is
+nearest-first. Running it per path flooded the same reservoir once per
+straw.
+
+## Cost
+
+`apply_pipe_motor` on a 31k-cell reservoir, measured by
+`tests/pipe_overlay_profile.rs`: **12.5 ms → 5.8 ms** per beat.
+
+- `rebuild_claimed` floods the body, so it is skipped on the second pass
+  unless `attach_new_boilers` actually changed the book — which is nearly
+  every beat.
+- `claim_wet_hot_body` claims on **push**, not pop. Popping made a cell
+  discovered by several neighbours pay a chunk lookup and a temperature
+  lookup once per discovering edge, up to eight times per cell.
+- The `P` overlay: no leftover flood while the pipe owns `P`, and vertical
+  runs merged (31.6k quads → 535).
 
 ## Mass
 

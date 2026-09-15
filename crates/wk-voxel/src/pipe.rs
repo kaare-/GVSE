@@ -1023,19 +1023,25 @@ fn hand_sat(world: &mut World, from: (i32, i32), dest: (i32, i32), max_sat: u8) 
 /// order means the cells touching the straw move first, so draining the
 /// front opens room for the cell behind it and one beat advances the whole
 /// body by a hop — the same ordering that `pump_water_along` needs.
-fn wick_reservoir(
+/// Seeded from **every** straw at once, not once per path. A soak with 24
+/// feeders over a 21k-cell body ran this per path, so the same reservoir
+/// was flooded 24 times a beat. One sweep is also more correct: each cell
+/// drains toward whichever straw is actually nearest.
+fn wick_reservoir<'a>(
     world: &mut World,
-    path: &PipePath,
+    paths: impl Iterator<Item = &'a PipePath>,
     claimed: &FxHashSet<(i32, i32)>,
     max_sat: u8,
 ) {
     if max_sat == 0 || claimed.is_empty() {
         return;
     }
-    let mut inward: FxHashMap<(i32, i32), (i32, i32)> = FxHashMap::default();
-    let mut order: Vec<(i32, i32)> = Vec::new();
-    let mut seen: FxHashSet<(i32, i32)> = path.cells.iter().copied().collect();
-    let mut frontier: Vec<(i32, i32)> = path.cells.iter().copied().collect();
+    let seeds: Vec<(i32, i32)> = paths.flat_map(|p| p.cells.iter().copied()).collect();
+    if seeds.is_empty() {
+        return;
+    }
+    let mut seen: FxHashSet<(i32, i32)> = seeds.iter().copied().collect();
+    let mut frontier: Vec<(i32, i32)> = seeds;
     while !frontier.is_empty() {
         let mut next = Vec::new();
         for &(cx, cy) in &frontier {
@@ -1044,17 +1050,15 @@ fn wick_reservoir(
                 if !claimed.contains(&n) || !seen.insert(n) {
                     continue;
                 }
-                inward.insert(n, (cx, cy));
-                order.push(n);
+                // Discovery order *is* nearest-first, so handing inward the
+                // moment a cell is reached gives the right cascade without
+                // a parent map: `(cx, cy)` is by construction one hop
+                // closer to a straw than `n`.
+                let _ = hand_sat(world, n, (cx, cy), max_sat);
                 next.push(n);
             }
         }
         frontier = next;
-    }
-    for from in order {
-        if let Some(&dest) = inward.get(&from) {
-            let _ = hand_sat(world, from, dest, max_sat);
-        }
     }
 }
 
@@ -1404,7 +1408,10 @@ fn collect_boiler_cands(
 }
 
 /// New boilers walk to the main straw when that is closer than the surface.
-fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) {
+///
+/// Returns whether the book changed, so the caller can skip a second
+/// rewalk + reclaim on the overwhelming majority of beats where it did not.
+fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) -> bool {
     let (mains, feeders) = PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
         (memo.mains.clone(), memo.feeders.clone())
@@ -1414,10 +1421,11 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) {
     let skip = claimed_cells();
     let cands = collect_boiler_cands(world, temp, boil, &skip, room);
     if cands.is_empty() {
-        return;
+        return false;
     }
     PIPE_MEMO.with(|slot| {
         let mut memo = slot.borrow_mut();
+        let before = (memo.mains.len(), memo.feeders.len());
         for (gx, gy, _) in cands {
             let feed = nearest_main_idx(world, (gx, gy), &memo.mains)
                 .map(|i| memo.mains[i].clone());
@@ -1441,7 +1449,8 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) {
             }
         }
         memo.reindex();
-    });
+        (memo.mains.len(), memo.feeders.len()) != before
+    })
 }
 
 /// Mark the connected wet body at/above boil so one hill is one root.
@@ -1460,9 +1469,15 @@ fn claim_wet_hot_body(
         };
         cell.sat.0 > 0 && cell.material != MaterialId::Air && temp.at_cell(x, y) >= boil
     };
+    // Claim on **push**, not on pop. Popping meant a cell discovered by
+    // several neighbours paid for a chunk lookup and a temperature lookup
+    // once per discovering edge — up to eight times per cell across a 30k
+    // cell reservoir.
     let mut stack = Vec::new();
     if wet_hot(world, gx, gy) {
-        stack.push((gx, gy));
+        if taken.insert((gx, gy)) {
+            stack.push((gx, gy));
+        }
     } else {
         for dy in -1..=1 {
             for dx in -1..=1 {
@@ -1471,7 +1486,7 @@ fn claim_wet_hot_body(
                 }
                 let nx = world.wrap_x(gx + dx);
                 let ny = gy + dy;
-                if wet_hot(world, nx, ny) {
+                if wet_hot(world, nx, ny) && taken.insert((nx, ny)) {
                     stack.push((nx, ny));
                 }
             }
@@ -1482,9 +1497,6 @@ fn claim_wet_hot_body(
     }
     let mut n = 0usize;
     while let Some((x, y)) = stack.pop() {
-        if !taken.insert((x, y)) {
-            continue;
-        }
         n += 1;
         if n > PIPE_CLAIM_BUDGET {
             break;
@@ -1508,6 +1520,7 @@ fn claim_wet_hot_body(
                 if temp.at_cell(nx, ny) < boil {
                     continue;
                 }
+                taken.insert((nx, ny));
                 stack.push((nx, ny));
             }
         }
@@ -1540,9 +1553,12 @@ pub fn apply_pipe_motor(
     }
     rewalk_network(world);
     rebuild_claimed(world, temp, boil);
-    attach_new_boilers(world, temp, boil);
-    rewalk_network(world);
-    rebuild_claimed(world, temp, boil);
+    // Reclaiming floods the whole body, ~3.7ms on a 31k-cell reservoir, and
+    // it only needs redoing when a boiler actually joined the book.
+    if attach_new_boilers(world, temp, boil) {
+        rewalk_network(world);
+        rebuild_claimed(world, temp, boil);
+    }
     let (feeders, mains) = PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
         (memo.feeders.clone(), memo.mains.clone())
@@ -1551,9 +1567,7 @@ pub fn apply_pipe_motor(
     // Charge the straws from their reservoirs before firing, so a beat's
     // flash is fed by the standing body and not only by wall seepage.
     let claimed = claimed_cells();
-    for path in feeders.iter().chain(mains.iter()) {
-        wick_reservoir(world, path, &claimed, water);
-    }
+    wick_reservoir(world, feeders.iter().chain(mains.iter()), &claimed, water);
     reflash_network(world, temp, expand, boil, stroke_sat(stroke, expand));
     for path in feeders.iter() {
         pulse_path(
@@ -2420,7 +2434,7 @@ mod tests {
         };
         let before = sat_totals(&w).cell_total;
         let tail_before = w.get_cell(8, 1).unwrap().sat.0;
-        wick_reservoir(&mut w, &path, &claimed, 8);
+        wick_reservoir(&mut w, std::iter::once(&path), &claimed, 8);
         assert!(
             w.get_cell(8, 1).unwrap().sat.0 < tail_before,
             "the far end of the body should hand water inward"
