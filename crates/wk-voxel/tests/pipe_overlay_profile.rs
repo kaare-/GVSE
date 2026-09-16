@@ -239,4 +239,20 @@ fn pipe_overlay_frame_cost() {
         "quads per frame: {painted} per-cell -> {runs} merged runs ({:.0}x fewer)",
         painted as f32 / runs.max(1) as f32
     );
+
+    // A real view is mostly sky, and the soak ran with `steam=0c` — an empty
+    // `world.steam`. Every one of those air cells still went through the
+    // cavity branch's vessel probe.
+    let sky_rows = 220;
+    let mut sky_total = Duration::ZERO;
+    for _ in 0..FRAMES {
+        let (d, _) = scan_frame(&world, &temp, cols, sky_rows);
+        sky_total += d;
+    }
+    eprintln!(
+        "sky-heavy view ({} visible, {} sky): cell_scan={:.2}ms",
+        cols * (sky_rows - 1),
+        cols * (sky_rows - rows),
+        ms(sky_total / FRAMES),
+    );
 }

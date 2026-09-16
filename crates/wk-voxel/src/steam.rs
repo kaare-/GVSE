@@ -3484,6 +3484,14 @@ pub fn cell_pressure_norm_with_boil(
     let expand = expand.max(1);
 
     if cell.material == MaterialId::Air {
+        // No vapour in the cell means this branch cannot paint anything
+        // whatever the vessel probe decides, and `vessel_is_boiler` is a
+        // 192-cell BFS whenever the sky memo misses. The sky is most of the
+        // screen, so ask the one-lookup question first: with `world.steam`
+        // empty, every sky pixel used to pay for a vessel probe.
+        if steam == 0 {
+            return (0.0, CellPressureKind::None);
+        }
         // Open landscape / wide U: weather, not a pressure overlay.
         if !vessel_is_boiler(world, gx, gy) {
             return (0.0, CellPressureKind::None);
