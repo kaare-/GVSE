@@ -2,6 +2,17 @@
 
 **Status:** implemented beside the leftover field. Play default: pipe on,
 leftover field off. Leftover tests keep the field (`SteamConfig` defaults).
+
+## Where the code lives
+
+| File | Holds |
+|------|-------|
+| `pipe.rs` | This motor: straws, the book, flash / pulse / wick, eruption, the `P` overlay. |
+| `steam.rs` | What both motors share, and what only the pipe now uses: the sky probe, vessel classification (weather vs boiler), cavity humidity, haze, recondense, and the cadence. |
+| `steam/leftover.rs` | The legacy pre-pipe motor — Dijkstra pressure field, chimney pinning, straw chains, route locking — behind `enable_leftover_field`, with its own tests. |
+
+`steam.rs` was 10.9k lines with the two motors interleaved; the split is a
+pure move, verified line by line against the commit before it.
 **Crate:** `wk-voxel` (`pipe.rs`).
 
 Temperature only **ignites**. Steam, pressure, and the overlay live on the
