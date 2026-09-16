@@ -57,6 +57,18 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 9. 4×4 tiles only **ignite** and **pool residuals**. Ignite walks
    hot tiles on the beat, not the wet world.
 
+## Eruption
+
+Every `PIPE_ERUPT_PERIOD` beats a main erupts; in between it simmers at
+`stroke / period` so a charge accumulates.
+
+On an eruption beat a **sky** mouth throws its charge up the open air as
+`World.steam`, which renders — a visible plume, densest at the lip and
+thinning with height, taller for a bigger charge (`erupt_jet`). It stops at
+rock rather than tunnelling, and only what will not fit falls through to the
+sky humidity field, where it stops being visible. The geyser is the visible
+part of this whole machine, so the burst should read as one.
+
 ## Book invariants
 
 Enforced by `rewalk_network` every beat:
@@ -74,6 +86,16 @@ Enforced by `rewalk_network` every beat:
   deadlock read `P=0+24/21132` on the HUD.
 - **One straw per root.** A duplicated root is one spring drawn twice: it
   doubles intake and paints a second needle beside the first.
+- A straw whose root has gone cold, been dug out, or turned to air is
+  **retired** (`retire_cold_straws`). Nothing did this, so dead straws held
+  their slots forever; with the book at `PIPE_MAX_MAINS + PIPE_MAX_FEEDERS`
+  there is zero room, `collect_boiler_cands` returns nothing, and a
+  genuinely full hot reservoir could never get a straw and never triggered.
+  Temperature is the signal rather than wetness: a root is routinely dry for
+  a beat right after it flashes.
+- Candidates for a free slot are weighed by the **size of the body** each
+  would drain, largest first. Bottom-left tile order meant whoever arrived
+  first kept a slot regardless of what it was draining.
 - A cell flashes **once per beat** however many straws cross it. Feeders
   share their main's cells, so flashing per path multiplied intake by the
   overlap and defeated the per-beat cap.

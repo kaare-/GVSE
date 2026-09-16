@@ -955,6 +955,25 @@ pub fn pulse_path(
     sides: u32,
     humidity: Option<&mut Humidity>,
 ) {
+    pulse_path_erupting(
+        world, temp, path, stroke, expand, boil, sides, humidity, false,
+    )
+}
+
+/// [`pulse_path`], told whether this stroke is an eruption so a sky mouth
+/// can throw its charge up the air as a visible plume.
+#[allow(clippy::too_many_arguments)]
+pub fn pulse_path_erupting(
+    world: &mut World,
+    temp: &mut Temperature,
+    path: &PipePath,
+    stroke: u32,
+    expand: u16,
+    boil: f32,
+    sides: u32,
+    humidity: Option<&mut Humidity>,
+    erupting: bool,
+) {
     if path.cells.len() < 2 || stroke == 0 {
         return;
     }
@@ -1002,7 +1021,9 @@ pub fn pulse_path(
         let mouth_kind = mouth_cell.map(|c| classify_mouth(world, mouth.0, mouth.1, c));
         match mouth_kind {
             Some(MouthKind::Sky) => {
-                leak_pipe_mouth(world, temp, humidity, mouth, steam, expand, boil);
+                leak_pipe_mouth(
+                    world, temp, humidity, mouth, steam, expand, boil, erupting,
+                );
             }
             Some(MouthKind::SealedVoid) => {
                 let placed = deposit_cavity_humidity(world, mouth, steam, expand);
@@ -1134,7 +1155,60 @@ fn stroke_sat(stroke: u32, expand: u16) -> u8 {
     (stroke / u32::from(expand.max(1))).clamp(1, 255) as u8
 }
 
+/// How tall a jet one sat of erupted mass buys, and the ceiling on it.
+///
+/// A geyser is the visible part of this whole machine, so an eruption
+/// throws its charge up the open air as `World.steam` — which renders — and
+/// only what will not fit falls through to the sky humidity field, where it
+/// vanishes from view.
+const PIPE_JET_CELLS_PER_SAT: i32 = 2;
+const PIPE_JET_MAX_HEIGHT: i32 = 96;
+
+/// Throw erupted mass up the air column above the mouth. Returns the sat
+/// that would not fit, for the caller to dispose of.
+///
+/// Front-loaded: the plume is densest at the lip and thins with height, so
+/// a big charge reads as a tall column rather than a uniform smear.
+fn erupt_jet(world: &mut World, mouth: (i32, i32), mass: u32) -> u32 {
+    if mass == 0 {
+        return 0;
+    }
+    let (mx, my) = (world.wrap_x(mouth.0), mouth.1);
+    let height = ((mass as i32) * PIPE_JET_CELLS_PER_SAT).clamp(1, PIPE_JET_MAX_HEIGHT);
+    let mut left = mass;
+    for dy in 1..=height {
+        if left == 0 {
+            break;
+        }
+        let y = my + dy;
+        match world.get_cell(mx, y) {
+            // Off the loaded world, or the jet hit rock: stop climbing.
+            None => break,
+            Some(c) if c.material != MaterialId::Air => break,
+            Some(_) => {}
+        }
+        if !can_admit_steam_cell(world, mx, y) {
+            break;
+        }
+        // Front-loaded: half of what remains at each step, min one sat.
+        let want = ((left + 1) / 2).max(1).min(u32::from(u8::MAX));
+        let placed = u32::from(add_steam(world, mx, y, want as u8));
+        left -= placed;
+        if placed == 0 {
+            break;
+        }
+    }
+    left
+}
+
+/// Room for a new `World.steam` cell without blowing the sparse-map budget.
+fn can_admit_steam_cell(world: &World, gx: i32, gy: i32) -> bool {
+    world.steam.contains_key(&(world.wrap_x(gx), gy)) || world.steam.len() < MAX_STEAM_CELLS
+}
+
 /// Open-sky mouth: mass only. Hot → sky H. Cool → distilled liquid at the lip.
+///
+/// `erupting` sends the charge up the air as a visible plume first.
 fn leak_pipe_mouth(
     world: &mut World,
     temp: &Temperature,
@@ -1143,6 +1217,7 @@ fn leak_pipe_mouth(
     steam: u32,
     expand: u16,
     boil: f32,
+    erupting: bool,
 ) {
     let exp = expand.max(1) as u32;
     let (mx, my) = (world.wrap_x(mouth.0), mouth.1);
@@ -1163,6 +1238,11 @@ fn leak_pipe_mouth(
         return;
     }
     let mouth_t = temp.at_cell(mx, my);
+    // The burst goes up the air where it can be seen, before any of it is
+    // handed to the humidity field.
+    if erupting && mouth_t >= boil {
+        mass = erupt_jet(world, (mx, my), mass);
+    }
     if mouth_t >= boil {
         if let Some(h) = humidity {
             let accepted = h.try_add(mx, my, mass as f32).round().max(0.0) as u32;
@@ -1713,7 +1793,7 @@ pub fn apply_pipe_motor(
     for path in mains.iter() {
         let main_stroke = main_stroke_for_beat(world, path.root, stroke, is_erupt);
         if main_stroke > 0 {
-            pulse_path(
+            pulse_path_erupting(
                 world,
                 temp,
                 path,
@@ -1722,6 +1802,7 @@ pub fn apply_pipe_motor(
                 boil,
                 sides,
                 humidity.as_deref_mut(),
+                is_erupt,
             );
         }
         pump_water_along(world, path, water);
@@ -2638,6 +2719,153 @@ mod tests {
             before,
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
+        );
+    }
+
+    /// "A powerful burst should shoot up into the air, thats the geysir."
+    ///
+    /// An eruption throws its charge up the open air as `World.steam`, which
+    /// renders, rather than handing it all to the sky humidity field where it
+    /// disappears. Mass-flat, and taller for a bigger charge.
+    #[test]
+    fn an_eruption_throws_a_visible_plume_up_the_air() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..60 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let before = sat_totals(&w).cell_total;
+        let left = erupt_jet(&mut w, (6, 8), 12);
+        let plume: Vec<(i32, u8)> = (9..60)
+            .filter_map(|y| {
+                let s = steam_at(&w, 6, y);
+                (s > 0).then_some((y, s))
+            })
+            .collect();
+        assert!(
+            plume.len() >= 2,
+            "a burst should occupy a column of air, got {plume:?}"
+        );
+        // Densest at the lip, thinning with height.
+        assert!(
+            plume[0].1 >= plume[plume.len() - 1].1,
+            "the plume should be front-loaded, got {plume:?}"
+        );
+        let placed: i64 = plume.iter().map(|&(_, s)| s as i64).sum();
+        assert_eq!(
+            placed + left as i64,
+            12,
+            "the jet must place or return every sat: placed {placed} left {left}"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before + 12,
+            "World.steam is counted as cell mass, so the jet is mass-flat \
+             against what it was handed"
+        );
+
+        // A bigger charge climbs higher.
+        let mut w2 = plot();
+        for x in 0..32 {
+            w2.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..8 {
+                w2.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..60 {
+                w2.set_cell(x, y, Cell::air());
+            }
+        }
+        let _ = erupt_jet(&mut w2, (6, 8), 200);
+        let tall = (9..60).filter(|&y| steam_at(&w2, 6, y) > 0).count();
+        assert!(
+            tall > plume.len(),
+            "200 sat should climb higher than 12: {tall} vs {}",
+            plume.len()
+        );
+    }
+
+    /// The jet must actually fire from the motor on an eruption beat, not
+    /// only when called directly, and the whole loop stays mass-flat.
+    #[test]
+    fn the_motor_erupts_a_plume_and_stays_mass_flat() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..60 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for x in 4..12 {
+            for y in 1..8 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(cap);
+                w.set_cell(x, y, c);
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 4..12 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 170.0);
+            }
+        }
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let cfg = pipe_cfg();
+        let opening = sat_totals(&w).cell_total;
+        // Long enough to cross several eruption periods.
+        for t in 1..=(PIPE_ERUPT_PERIOD * 6) {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, Some(&mut h));
+        }
+        assert!(
+            !w.steam.is_empty(),
+            "an erupting spring under open sky should have put a visible \
+             plume into World.steam"
+        );
+        assert_eq!(
+            opening,
+            sat_totals(&w).cell_total + h.total_mass() as i64,
+            "erupting must not mint or drop mass"
+        );
+    }
+
+    /// A jet must stop at rock rather than tunnel through it.
+    #[test]
+    fn a_jet_stops_at_a_roof() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+            for y in 12..16 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let left = erupt_jet(&mut w, (6, 8), 200);
+        for y in 12..16 {
+            assert_eq!(
+                steam_at(&w, 6, y),
+                0,
+                "the jet put steam inside rock at y={y}"
+            );
+        }
+        assert!(
+            left > 0,
+            "a capped jet cannot place everything, so the caller must get \
+             the remainder back"
         );
     }
 
