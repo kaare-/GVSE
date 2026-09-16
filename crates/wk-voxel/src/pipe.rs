@@ -1203,42 +1203,107 @@ fn stroke_sat(stroke: u32, expand: u16) -> u8 {
 /// throws its charge up the open air as `World.steam` — which renders — and
 /// only what will not fit falls through to the sky humidity field, where it
 /// vanishes from view.
-const PIPE_JET_CELLS_PER_SAT: i32 = 2;
-const PIPE_JET_MAX_HEIGHT: i32 = 96;
+/// Sat of charge each cell of plume height costs.
+///
+/// A burst of `M` sat can be short and dense or tall and thin, not both.
+/// Spending two sat per cell keeps the base around four units — visible —
+/// while the height still grows with the charge, so force reads as reach.
+const PIPE_JET_SAT_PER_CELL: u32 = 2;
+const PIPE_JET_MAX_HEIGHT: i32 = 128;
 
-/// Throw erupted mass up the air column above the mouth. Returns the sat
+/// Share of a burst thrown up as **liquid**, in eighths.
+///
+/// A geyser is water first and vapour second. Liquid has weight, so it rides
+/// the lower column and rains back down, which is the part that reads as
+/// force; steam carries on above it. All of it is ordinary cell water and
+/// cavity humidity, so gravity and the water rules take it from here.
+const PIPE_JET_LIQUID_EIGHTHS: u32 = 3;
+
+/// Throw an erupted charge up the air column above the mouth. Returns the sat
 /// that would not fit, for the caller to dispose of.
 ///
-/// Front-loaded: the plume is densest at the lip and thins with height, so
-/// a big charge reads as a tall column rather than a uniform smear.
+/// Tapered, not halved. Halving put half the charge in the first cell and a
+/// quarter in the second, so every burst was a blip above the lip no matter
+/// how much was behind it. A linear taper spends the charge over the whole
+/// height — densest at the base, thinning to the tip — and the height grows
+/// with the charge, so a big eruption reads as a tall column.
 fn erupt_jet(world: &mut World, mouth: (i32, i32), mass: u32) -> u32 {
     if mass == 0 {
         return 0;
     }
     let (mx, my) = (world.wrap_x(mouth.0), mouth.1);
-    let height = ((mass as i32) * PIPE_JET_CELLS_PER_SAT).clamp(1, PIPE_JET_MAX_HEIGHT);
-    let mut left = mass;
+    let height = ((mass / PIPE_JET_SAT_PER_CELL) as i32).clamp(1, PIPE_JET_MAX_HEIGHT);
+
+    // How far the column is actually open. A jet stops at rock rather than
+    // tunnelling, and knowing the reach up front lets the taper spend the
+    // charge over the room it really has.
+    let mut reach = 0i32;
     for dy in 1..=height {
+        match world.get_cell(mx, my + dy) {
+            Some(c) if c.material == MaterialId::Air => reach = dy,
+            _ => break,
+        }
+    }
+    if reach == 0 {
+        return mass;
+    }
+
+    // Linear weights, base heaviest: reach, reach-1, ... 1.
+    let total_w = (reach as u32) * (reach as u32 + 1) / 2;
+    let liquid_budget = mass * PIPE_JET_LIQUID_EIGHTHS / 8;
+    let liquid_top = (reach / 2).max(1);
+
+    let mut left = mass;
+    let mut liquid_left = liquid_budget;
+    for dy in 1..=reach {
         if left == 0 {
             break;
         }
         let y = my + dy;
-        match world.get_cell(mx, y) {
-            // Off the loaded world, or the jet hit rock: stop climbing.
-            None => break,
-            Some(c) if c.material != MaterialId::Air => break,
-            Some(_) => {}
+        let w = (reach - dy + 1) as u32;
+        let share = (mass * w / total_w).max(1).min(left);
+
+        // Water rides the lower column, vapour the whole of it.
+        let want_liquid = if dy <= liquid_top {
+            share.min(liquid_left)
+        } else {
+            0
+        };
+        if want_liquid > 0 {
+            let placed = u32::from(add_sat(
+                world,
+                mx,
+                y,
+                want_liquid.min(u32::from(u8::MAX)) as u8,
+            ));
+            left -= placed;
+            liquid_left -= placed;
         }
+        let want_steam = share.saturating_sub(want_liquid).min(left);
+        if want_steam > 0 && can_admit_steam_cell(world, mx, y) {
+            let placed = u32::from(add_steam(
+                world,
+                mx,
+                y,
+                want_steam.min(u32::from(u8::MAX)) as u8,
+            ));
+            left -= placed;
+        }
+    }
+
+    // Integer shares round down, so a remainder is normal. Bank it at the
+    // base rather than the tip: the tip is where the plume should be
+    // thinnest, and dumping the remainder there inverted the taper.
+    for dy in 1..=reach {
+        if left == 0 {
+            break;
+        }
+        let y = my + dy;
         if !can_admit_steam_cell(world, mx, y) {
-            break;
+            continue;
         }
-        // Front-loaded: half of what remains at each step, min one sat.
-        let want = ((left + 1) / 2).max(1).min(u32::from(u8::MAX));
-        let placed = u32::from(add_steam(world, mx, y, want as u8));
+        let placed = u32::from(add_steam(world, mx, y, left.min(u32::from(u8::MAX)) as u8));
         left -= placed;
-        if placed == 0 {
-            break;
-        }
     }
     left
 }
@@ -3129,70 +3194,114 @@ mod tests {
         );
     }
 
-    /// "A powerful burst should shoot up into the air, thats the geysir."
+    /// "A powerful burst should shoot up into the air, thats the geysir" —
+    /// and then: "we should let the water blow into the air if it has some
+    /// force or is a large burst, right now its a one blip above surface
+    /// event."
     ///
-    /// An eruption throws its charge up the open air as `World.steam`, which
-    /// renders, rather than handing it all to the sky humidity field where it
-    /// disappears. Mass-flat, and taller for a bigger charge.
+    /// A burst spends itself over the whole column rather than dumping half
+    /// into the first cell, throws liquid at the base where it will fall
+    /// back, and climbs higher for a bigger charge.
     #[test]
     fn an_eruption_throws_a_visible_plume_up_the_air() {
+        /// What the jet left in a cell: cavity vapour plus airborne water.
+        fn in_air(w: &World, gx: i32, gy: i32) -> u32 {
+            u32::from(steam_at(w, gx, gy))
+                + w.get_cell(gx, gy).map_or(0, |c| u32::from(c.sat.0))
+        }
+        fn sky_plot() -> World {
+            let mut w = plot();
+            for x in 0..32 {
+                w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+                for y in 1..8 {
+                    w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+                }
+                for y in 8..140 {
+                    w.set_cell(x, y, Cell::air());
+                }
+            }
+            w
+        }
+
+        let mut w = sky_plot();
+        let before = sat_totals(&w).cell_total;
+        let left = erupt_jet(&mut w, (6, 8), 24);
+        let column: Vec<(i32, u32)> = (9..140)
+            .filter_map(|y| {
+                let v = in_air(&w, 6, y);
+                (v > 0).then_some((y, v))
+            })
+            .collect();
+        assert!(
+            column.len() >= 6,
+            "a burst should spend itself up the column, not blip above the \
+             lip: {column:?}"
+        );
+        // Densest at the base, thinning toward the tip.
+        assert!(
+            column[0].1 > column[column.len() - 1].1,
+            "the plume should taper with height, got {column:?}"
+        );
+        // Water rides the lower column so it can fall back.
+        let airborne_water: u32 = (9..140)
+            .filter_map(|y| w.get_cell(6, y).map(|c| u32::from(c.sat.0)))
+            .sum();
+        assert!(
+            airborne_water > 0,
+            "a burst should throw water into the air, not only vapour"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before + 24 - left as i64,
+            "the jet must place or hand back every sat it was given"
+        );
+
+        // A bigger charge climbs higher.
+        let mut w2 = sky_plot();
+        let _ = erupt_jet(&mut w2, (6, 8), 96);
+        let tall = (9..140).filter(|&y| in_air(&w2, 6, y) > 0).count();
+        assert!(
+            tall > column.len(),
+            "96 sat should climb higher than 24: {tall} vs {}",
+            column.len()
+        );
+    }
+
+    /// A jet must stop at rock rather than tunnel through it, and hand back
+    /// whatever the open column could not take.
+    #[test]
+    fn a_jet_stops_at_a_roof() {
         let mut w = plot();
         for x in 0..32 {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
             for y in 1..8 {
                 w.set_cell(x, y, Cell::solid(MaterialId::Stone));
             }
-            for y in 8..60 {
+            for y in 8..12 {
                 w.set_cell(x, y, Cell::air());
+            }
+            for y in 12..16 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
             }
         }
         let before = sat_totals(&w).cell_total;
-        let left = erupt_jet(&mut w, (6, 8), 12);
-        let plume: Vec<(i32, u8)> = (9..60)
-            .filter_map(|y| {
-                let s = steam_at(&w, 6, y);
-                (s > 0).then_some((y, s))
-            })
-            .collect();
-        assert!(
-            plume.len() >= 2,
-            "a burst should occupy a column of air, got {plume:?}"
-        );
-        // Densest at the lip, thinning with height.
-        assert!(
-            plume[0].1 >= plume[plume.len() - 1].1,
-            "the plume should be front-loaded, got {plume:?}"
-        );
-        let placed: i64 = plume.iter().map(|&(_, s)| s as i64).sum();
-        assert_eq!(
-            placed + left as i64,
-            12,
-            "the jet must place or return every sat: placed {placed} left {left}"
-        );
+        let left = erupt_jet(&mut w, (6, 8), 200);
+        for y in 12..16 {
+            assert_eq!(
+                steam_at(&w, 6, y),
+                0,
+                "the jet put vapour inside rock at y={y}"
+            );
+            assert_eq!(
+                w.get_cell(6, y).unwrap().sat.0,
+                0,
+                "the jet put water inside rock at y={y}"
+            );
+        }
         assert_eq!(
             sat_totals(&w).cell_total,
-            before + 12,
-            "World.steam is counted as cell mass, so the jet is mass-flat \
-             against what it was handed"
-        );
-
-        // A bigger charge climbs higher.
-        let mut w2 = plot();
-        for x in 0..32 {
-            w2.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-            for y in 1..8 {
-                w2.set_cell(x, y, Cell::solid(MaterialId::Stone));
-            }
-            for y in 8..60 {
-                w2.set_cell(x, y, Cell::air());
-            }
-        }
-        let _ = erupt_jet(&mut w2, (6, 8), 200);
-        let tall = (9..60).filter(|&y| steam_at(&w2, 6, y) > 0).count();
-        assert!(
-            tall > plume.len(),
-            "200 sat should climb higher than 12: {tall} vs {}",
-            plume.len()
+            before + 200 - left as i64,
+            "a capped jet still accounts for every sat"
         );
     }
 
@@ -3245,36 +3354,6 @@ mod tests {
         );
     }
 
-    /// A jet must stop at rock rather than tunnel through it.
-    #[test]
-    fn a_jet_stops_at_a_roof() {
-        let mut w = plot();
-        for x in 0..32 {
-            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-            for y in 1..8 {
-                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
-            }
-            for y in 8..12 {
-                w.set_cell(x, y, Cell::air());
-            }
-            for y in 12..16 {
-                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
-            }
-        }
-        let left = erupt_jet(&mut w, (6, 8), 200);
-        for y in 12..16 {
-            assert_eq!(
-                steam_at(&w, 6, y),
-                0,
-                "the jet put steam inside rock at y={y}"
-            );
-        }
-        assert!(
-            left > 0,
-            "a capped jet cannot place everything, so the caller must get \
-             the remainder back"
-        );
-    }
 
     /// Soak regression: "one is very full and dont trigger".
     ///
@@ -3516,6 +3595,7 @@ mod tests {
             cells: (1..=8).map(|y| (6, y)).collect(),
             mouth: (6, 8),
         };
+        let hot = temp_at(&w, 20.0);
         PIPE_MEMO.with(|slot| {
             let mut memo = slot.borrow_mut();
             memo.world_id = w.chunk_cache_id.get();
