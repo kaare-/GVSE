@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use wk_material::MaterialId;
 use wk_voxel::{
     apply_pipe_motor, cell_pressure_norm_with_boil, ensure_leftover_hill_view, pipe_network_stats,
-    leftover_soak_stats, pipe_painting, stamp_world, water_capacity_cell, CellPressureKind, Sat,
+    leftover_soak_stats, pipe_overlay_cells, pipe_painting, stamp_world, water_capacity_cell,
+    CellPressureKind, Sat,
     SteamConfig,
     Temperature, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, PHASE_EXPANSION_DRIVE_MAX,
     STEAM_EVERY,
@@ -238,6 +239,32 @@ fn pipe_overlay_frame_cost() {
     eprintln!(
         "quads per frame: {painted} per-cell -> {runs} merged runs ({:.0}x fewer)",
         painted as f32 / runs.max(1) as f32
+    );
+
+    // What the renderer does now: ask the pipe for its cells instead of
+    // asking every visible cell whether it paints.
+    let mut list_total = Duration::ZERO;
+    let mut listed = 0usize;
+    for _ in 0..FRAMES {
+        let start = Instant::now();
+        let cells = pipe_overlay_cells(&world);
+        list_total += start.elapsed();
+        listed = cells.len();
+    }
+    let list_avg = list_total / FRAMES;
+    eprintln!(
+        "cell-driven overlay: {:.2}ms for {listed} cells (vs {:.2}ms scanning {visible})",
+        ms(list_avg),
+        ms(scan_avg),
+    );
+    // The point is the scaling, not this world: cost now follows the network
+    // instead of the window. This slab is pathological — nearly every cell is
+    // claimed. A soak network of ~4.6k cells under a ~112k-cell view is the
+    // realistic shape.
+    eprintln!(
+        "  per cell {:.0}ns, so a 4.6k-cell network costs ~{:.2}ms",
+        list_avg.as_secs_f64() * 1e9 / listed.max(1) as f64,
+        list_avg.as_secs_f64() * 1000.0 * 4600.0 / listed.max(1) as f64,
     );
 
     // A real view is mostly sky, and the soak ran with `steam=0c` — an empty

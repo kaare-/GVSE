@@ -232,12 +232,7 @@ pub fn pipe_overlay_pack(world: &World, gx: i32, gy: i32) -> Option<f32> {
     }
     let live = pipe_live_at(world, gx, gy);
     if live > 0 {
-        let cap = world
-            .get_cell(gx, gy)
-            .map(|c| water_capacity_cell(c, &world.hydro).max(1) as u32)
-            .unwrap_or(1);
-        let drive = (live as f32 / (cap as f32 * 8.0).max(1.0)).clamp(0.0, 1.0);
-        return Some((PACK_LIVE_LO + drive * (PACK_LIVE_HI - PACK_LIVE_LO)).clamp(PACK_LIVE_LO, PACK_LIVE_HI));
+        return Some(live_band(world, gx, gy, live));
     }
     if on_pipe_path(world, gx, gy) {
         return Some(PACK_STRAW);
@@ -246,6 +241,50 @@ pub fn pipe_overlay_pack(world: &World, gx: i32, gy: i32) -> Option<f32> {
         return Some(PACK_BOILER);
     }
     None
+}
+
+/// Every cell the `P` overlay would paint, with its band, sorted by column
+/// then altitude so a caller can merge vertical runs.
+///
+/// The overlay used to ask "do you paint?" once per visible cell, which is
+/// ~112k questions a frame to find the few thousand cells a network
+/// actually occupies — and it scaled with the window, not the pipe. Ask the
+/// pipe instead: this is proportional to the network.
+pub fn pipe_overlay_cells(world: &World) -> Vec<((i32, i32), f32)> {
+    let mut out: Vec<((i32, i32), f32)> = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        if memo.world_id != world.chunk_cache_id.get() {
+            return Vec::new();
+        }
+        let mut v = Vec::with_capacity(memo.cells_total + world.pipe_steam.len());
+        v.extend(memo.claimed.iter().map(|&c| (c, PACK_BOILER)));
+        v.extend(memo.path_cells.iter().map(|&c| (c, PACK_STRAW)));
+        v.extend(memo.mouths.iter().map(|&c| (c, PACK_MOUTH)));
+        v
+    });
+    // Live steam outranks the static bands and is not confined to the memo.
+    out.extend(world.pipe_steam.iter().filter_map(|(&c, &live)| {
+        (live > 0).then(|| (c, live_band(world, c.0, c.1, live)))
+    }));
+    // Highest band wins per cell: mouth and live over straw over boiler.
+    out.sort_unstable_by(|a, b| {
+        a.0 .0
+            .cmp(&b.0 .0)
+            .then(a.0 .1.cmp(&b.0 .1))
+            .then(b.1.total_cmp(&a.1))
+    });
+    out.dedup_by_key(|&mut (c, _)| c);
+    out
+}
+
+/// Brightness ramp for a cell holding `live` units.
+fn live_band(world: &World, gx: i32, gy: i32, live: u32) -> f32 {
+    let cap = world
+        .get_cell(gx, gy)
+        .map(|c| water_capacity_cell(c, &world.hydro).max(1) as u32)
+        .unwrap_or(1);
+    let drive = (live as f32 / (cap as f32 * 8.0).max(1.0)).clamp(0.0, 1.0);
+    (PACK_LIVE_LO + drive * (PACK_LIVE_HI - PACK_LIVE_LO)).clamp(PACK_LIVE_LO, PACK_LIVE_HI)
 }
 
 fn on_pipe_boiler(world: &World, gx: i32, gy: i32) -> bool {
@@ -2560,6 +2599,68 @@ mod tests {
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
         );
+    }
+
+    /// The cell-driven overlay must agree with the per-cell query it
+    /// replaced, or the two paths drift and `P` paints differently depending
+    /// on which the renderer took.
+    #[test]
+    fn the_overlay_cell_list_matches_the_per_cell_query() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..10 {
+            w.set_cell(6, y, wet_gravel(&w));
+            w.set_cell(20, y, wet_gravel(&w));
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in [6, 20] {
+            for y in 1..10 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 150.0);
+            }
+        }
+        let cfg = pipe_cfg();
+        for t in 1..=12u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+
+        let listed: FxHashMap<(i32, i32), f32> =
+            pipe_overlay_cells(&w).into_iter().collect();
+        assert!(!listed.is_empty(), "setup: the overlay should have cells");
+        // The list is sorted by column then altitude, which the renderer
+        // relies on to merge runs.
+        let cells = pipe_overlay_cells(&w);
+        let mut sorted = cells.clone();
+        sorted.sort_by_key(|&((x, y), _)| (x, y));
+        assert_eq!(
+            cells.iter().map(|c| c.0).collect::<Vec<_>>(),
+            sorted.iter().map(|c| c.0).collect::<Vec<_>>(),
+            "the list must be sorted by column then altitude"
+        );
+        for y in 0..16 {
+            for x in 0..32 {
+                let queried = pipe_overlay_pack(&w, x, y);
+                match (queried, listed.get(&(x, y)).copied()) {
+                    (None, None) => {}
+                    (Some(a), Some(b)) => assert!(
+                        (a - b).abs() < 1e-6,
+                        "band disagrees at ({x},{y}): query {a} vs list {b}"
+                    ),
+                    (a, b) => panic!(
+                        "presence disagrees at ({x},{y}): query {a:?} vs list {b:?}"
+                    ),
+                }
+            }
+        }
     }
 
     /// Soak regression: `sat=` climbed 5.6k -> 32k with `P=8+24`.

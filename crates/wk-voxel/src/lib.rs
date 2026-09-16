@@ -168,7 +168,8 @@ pub use organism::{
 };
 pub use pipe::{
     apply_pipe_motor, classify_hop, face_mix_t, openness_rank, pipe_flash, pipe_live_at,
-    pipe_mass_sat, pipe_network_stats, pipe_overlay_pack, pipe_painting, pipe_path_stats,
+    pipe_mass_sat, pipe_network_stats, pipe_overlay_cells, pipe_overlay_pack, pipe_painting,
+    pipe_path_stats,
     pulse_path, walk_pipe,
     HopKind, PipeNetworkStats, PipePath, PIPE_SIDES, PIPE_STROKE_DEFAULT,
 };

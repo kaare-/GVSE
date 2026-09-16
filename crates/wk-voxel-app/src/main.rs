@@ -1398,6 +1398,11 @@ async fn main() {
             // ~30k quads per frame in the buffer for what is a handful of
             // columns of solid colour.
             let bedrock_y = scene.params.bedrock_floor_y;
+            // When the cell pipe owns P, the only cells that can paint are
+            // the pipe's own. Asking every visible cell "do you paint?" cost
+            // ~112k queries a frame to find a few thousand answers, and
+            // scaled with the window instead of the network.
+            let pipe_owns_p = wk_voxel::pipe_painting(&scene.world);
             let draw_p_run = |sx: f32, y0: i32, y1: i32, p: f32| {
                 let top = origin_y - (y1 - bedrock_y) as f32 * cell_px - cell_px;
                 let h = (y1 - y0 + 1) as f32 * cell_px;
@@ -1409,59 +1414,95 @@ async fn main() {
                     scale_color_alpha(pressure_overlay_color(p), overlay_k),
                 );
             };
-            for i in 0..xn as usize {
-                let (x0, x1) = xr[i];
-                for x in x0..=x1 {
-                    for &x_copy in x_copies {
-                        let sx = origin_x
-                            + (x + x_copy * scene.params.width_cols) as f32 * cell_px;
-                        if sx + cell_px < 0.0 || sx > sw {
-                            continue;
-                        }
-                        // Open run: first world-y, last world-y, band.
-                        let mut run: Option<(i32, i32, f32)> = None;
-                        for y in y_min_vis..y_max_vis {
-                            let sy = origin_y - (y - bedrock_y) as f32 * cell_px;
-                            let band = if sy + cell_px < 0.0 || sy > sh {
-                                None
-                            } else if scene.world.get_cell(x, y).is_none() {
-                                None
-                            } else {
-                                let temp_c = scene.temperature.at_cell(x, y);
-                                let (p, kind) = wk_voxel::cell_pressure_norm_with_boil(
-                                    &scene.world,
-                                    x,
-                                    y,
-                                    temp_c,
-                                    settings.steam.boil_point_c,
-                                    settings.steam.phase_expansion_drive,
-                                );
-                                if kind == wk_voxel::CellPressureKind::None || p <= 0.0 {
-                                    None
-                                } else {
-                                    Some(p)
-                                }
-                            };
-                            match (band, run) {
-                                (Some(p), Some((y0, _, rp))) if same_p_band(p, rp) => {
-                                    run = Some((y0, y, rp));
-                                }
-                                (Some(p), prev) => {
-                                    if let Some((y0, y1, rp)) = prev {
-                                        draw_p_run(sx, y0, y1, rp);
-                                    }
-                                    run = Some((y, y, p));
-                                }
-                                (None, prev) => {
-                                    if let Some((y0, y1, rp)) = prev {
-                                        draw_p_run(sx, y0, y1, rp);
-                                    }
-                                    run = None;
-                                }
+            if pipe_owns_p {
+                // Sorted by column then altitude, so a run is a contiguous
+                // slice of the list.
+                let cells = wk_voxel::pipe_overlay_cells(&scene.world);
+                for &x_copy in x_copies {
+                    let mut run: Option<(i32, i32, i32, f32)> = None; // x, y0, y1, band
+                    let flush = |run: Option<(i32, i32, i32, f32)>| {
+                        if let Some((x, y0, y1, p)) = run {
+                            let sx = origin_x
+                                + (x + x_copy * scene.params.width_cols) as f32 * cell_px;
+                            if sx + cell_px >= 0.0 && sx <= sw {
+                                draw_p_run(sx, y0, y1, p);
                             }
                         }
-                        if let Some((y0, y1, rp)) = run {
-                            draw_p_run(sx, y0, y1, rp);
+                    };
+                    for &((x, y), p) in &cells {
+                        if y < y_min_vis || y >= y_max_vis {
+                            flush(run.take());
+                            continue;
+                        }
+                        match run {
+                            Some((rx, y0, y1, rp))
+                                if rx == x && y == y1 + 1 && same_p_band(p, rp) =>
+                            {
+                                run = Some((rx, y0, y, rp));
+                            }
+                            prev => {
+                                flush(prev);
+                                run = Some((x, y, y, p));
+                            }
+                        }
+                    }
+                    flush(run);
+                }
+            } else {
+                for i in 0..xn as usize {
+                    let (x0, x1) = xr[i];
+                    for x in x0..=x1 {
+                        for &x_copy in x_copies {
+                            let sx = origin_x
+                                + (x + x_copy * scene.params.width_cols) as f32 * cell_px;
+                            if sx + cell_px < 0.0 || sx > sw {
+                                continue;
+                            }
+                            // Open run: first world-y, last world-y, band.
+                            let mut run: Option<(i32, i32, f32)> = None;
+                            for y in y_min_vis..y_max_vis {
+                                let sy = origin_y - (y - bedrock_y) as f32 * cell_px;
+                                let band = if sy + cell_px < 0.0 || sy > sh {
+                                    None
+                                } else if scene.world.get_cell(x, y).is_none() {
+                                    None
+                                } else {
+                                    let temp_c = scene.temperature.at_cell(x, y);
+                                    let (p, kind) = wk_voxel::cell_pressure_norm_with_boil(
+                                        &scene.world,
+                                        x,
+                                        y,
+                                        temp_c,
+                                        settings.steam.boil_point_c,
+                                        settings.steam.phase_expansion_drive,
+                                    );
+                                    if kind == wk_voxel::CellPressureKind::None || p <= 0.0 {
+                                        None
+                                    } else {
+                                        Some(p)
+                                    }
+                                };
+                                match (band, run) {
+                                    (Some(p), Some((y0, _, rp))) if same_p_band(p, rp) => {
+                                        run = Some((y0, y, rp));
+                                    }
+                                    (Some(p), prev) => {
+                                        if let Some((y0, y1, rp)) = prev {
+                                            draw_p_run(sx, y0, y1, rp);
+                                        }
+                                        run = Some((y, y, p));
+                                    }
+                                    (None, prev) => {
+                                        if let Some((y0, y1, rp)) = prev {
+                                            draw_p_run(sx, y0, y1, rp);
+                                        }
+                                        run = None;
+                                    }
+                                }
+                            }
+                            if let Some((y0, y1, rp)) = run {
+                                draw_p_run(sx, y0, y1, rp);
+                            }
                         }
                     }
                 }
