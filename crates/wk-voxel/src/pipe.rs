@@ -1582,6 +1582,60 @@ fn collect_boiler_cands(
     cands.into_iter().map(|(_, (x, y), t)| (x, y, t)).collect()
 }
 
+/// Condense lumen left behind when a route moves.
+///
+/// A main is rewalked every beat, so its route shifts as the hill changes.
+/// `pulse_path` only lifts live steam from cells on its **current** path, and
+/// nothing else touches `pipe_steam`, so units parked in the cells a route
+/// abandoned stayed there forever. That is the old straw still painted beside
+/// the new one, `u=` climbing every time a route moved (4 → 13 → 118 → 355),
+/// and water wicked out of the hill vanishing into orphaned lumen it had no
+/// way to leave.
+///
+/// An abandoned conduit is just rock again, so its vapour recondenses there:
+/// into the cell if it has room, else parked as standing water, and only a
+/// sub-sat remainder stays as residual for `pool_residuals`.
+fn reclaim_orphan_lumen(world: &mut World, expand: u16) {
+    let on_path = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        if memo.world_id != world.chunk_cache_id.get() {
+            return FxHashSet::default();
+        }
+        memo.path_cells.clone()
+    });
+    let orphans: Vec<(i32, i32)> = world
+        .pipe_steam
+        .keys()
+        .copied()
+        .filter(|c| !on_path.contains(c))
+        .collect();
+    if orphans.is_empty() {
+        return;
+    }
+    let exp = u32::from(expand.max(1));
+    for (gx, gy) in orphans {
+        let (units, _) = take_live(world, gx, gy, u32::MAX);
+        if units == 0 {
+            continue;
+        }
+        let mut sat = units / exp;
+        let mut back = units % exp;
+        while sat > 0 {
+            let chunk = sat.min(u32::from(u8::MAX)) as u8;
+            let put = u32::from(add_sat(world, gx, gy, chunk));
+            if put == 0 {
+                break;
+            }
+            sat -= put;
+        }
+        if sat > 0 {
+            sat = park_orphan_water(world, gx, gy, sat);
+        }
+        back += sat.saturating_mul(exp);
+        add_residual(world, gx, gy, back);
+    }
+}
+
 /// Drop straws whose spring has stopped boiling.
 ///
 /// Nothing retired a path once its root went cold, so dead straws held
@@ -1673,6 +1727,20 @@ fn claim_wet_hot_body(
         };
         cell.sat.0 > 0 && cell.material != MaterialId::Air && temp.at_cell(x, y) >= boil
     };
+    // Spread through hot **porous** rock, wet or not. Requiring water in
+    // every cell meant a draining reservoir tore into fragments as its pores
+    // emptied, and each fragment then read as its own spring — which is how
+    // one well-behaved pipe became several needles side by side. The vessel
+    // is the hot rock; the water in it comes and goes. The seed still has to
+    // be wet, so a dry hot mass never invents a spring.
+    let hot_pore = |world: &World, x: i32, y: i32| -> bool {
+        let Some(cell) = world.get_cell(x, y) else {
+            return false;
+        };
+        cell.material != MaterialId::Air
+            && water_capacity_cell(cell, &world.hydro) > 0
+            && temp.at_cell(x, y) >= boil
+    };
     // Claim on **push**, not on pop. Popping meant a cell discovered by
     // several neighbours paid for a chunk lookup and a temperature lookup
     // once per discovering edge — up to eight times per cell across a 30k
@@ -1715,13 +1783,7 @@ fn claim_wet_hot_body(
                 if taken.contains(&(nx, ny)) {
                     continue;
                 }
-                let Some(cell) = world.get_cell(nx, ny) else {
-                    continue;
-                };
-                if cell.sat.0 == 0 || cell.material == MaterialId::Air {
-                    continue;
-                }
-                if temp.at_cell(nx, ny) < boil {
+                if !hot_pore(world, nx, ny) {
                     continue;
                 }
                 taken.insert((nx, ny));
@@ -1769,6 +1831,9 @@ pub fn apply_pipe_motor(
         (memo.feeders.clone(), memo.mains.clone())
     });
     let water = stroke_sat(stroke, expand);
+    // Routes have settled for this beat, so anything still holding lumen off
+    // the book was abandoned by a rewalk and nothing else will ever sweep it.
+    reclaim_orphan_lumen(world, expand);
     // Charge the straws from their reservoirs before firing, so a beat's
     // flash is fed by the standing body and not only by wall seepage.
     let claimed = claimed_cells();
@@ -2084,6 +2149,21 @@ mod tests {
         let h_mass = h.total_mass() as i64;
         assert!(cells >= 0, "cell_total went negative");
         assert!(h_mass >= 0, "humidity went negative");
+        // No lumen off the book. Routes move as the hill changes, and units
+        // left in an abandoned route are swept by nothing.
+        let on_path = PIPE_MEMO.with(|slot| slot.borrow().path_cells.clone());
+        let stranded: Vec<(i32, i32)> = w
+            .pipe_steam
+            .keys()
+            .copied()
+            .filter(|c| !on_path.contains(c))
+            .collect();
+        assert!(
+            stranded.is_empty(),
+            "{} cells hold live steam off every straw: {:?}",
+            stranded.len(),
+            &stranded[..stranded.len().min(8)]
+        );
         // Strict now that `pool_residuals` no longer discards `add_sat`'s
         // shortfall and the carried condensate is no longer truncated to a
         // `u8`. 1000 beats must not lose or mint a single sat.
@@ -2717,6 +2797,228 @@ mod tests {
             before,
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
+        );
+    }
+
+    /// Soak trace: "it starts well, with one well behaved pipe, but then we
+    /// get several, i dont think we should have several close to one another,
+    /// doesnt make sense from a natural perspective either".
+    ///
+    /// The claim used to spread only through cells that currently held water,
+    /// so a reservoir tore into fragments as its pores drained and each
+    /// fragment read as its own spring. One hot aquifer is one spring however
+    /// patchy its water is.
+    #[test]
+    fn a_draining_reservoir_stays_one_spring() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // One hot porous body, drained into a patchwork: wet, dry, wet, dry.
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for x in 4..20 {
+            for y in 1..9 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(if (x + y) % 3 == 0 { cap } else { 0 });
+                w.set_cell(x, y, c);
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 4..20 {
+            for y in 1..9 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 160.0);
+            }
+        }
+
+        // The whole patchwork must claim as a single body from one wet seed.
+        let seed = (4..20)
+            .flat_map(|x| (1..9).map(move |y| (x, y)))
+            .find(|&(x, y)| w.get_cell(x, y).is_some_and(|c| c.sat.0 > 0))
+            .expect("setup: some cell should be wet");
+        let mut taken = FxHashSet::default();
+        claim_wet_hot_body(&w, &hot, seed.0, seed.1, 100.0, &mut taken);
+        let dry_claimed = taken
+            .iter()
+            .filter(|&&(x, y)| w.get_cell(x, y).is_some_and(|c| c.sat.0 == 0))
+            .count();
+        assert!(
+            dry_claimed > 0,
+            "the claim should bridge drained pores, took {} cells",
+            taken.len()
+        );
+        assert!(
+            taken.len() > 100,
+            "one patchy body should claim as one, took {} cells",
+            taken.len()
+        );
+
+        // And through the motor it stays a single spring, not a comb.
+        let cfg = pipe_cfg();
+        for t in 1..=20u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        let stats = pipe_network_stats(&w);
+        assert!(
+            stats.mains + stats.feeders <= 2,
+            "a single patchy reservoir grew {} mains and {} feeders",
+            stats.mains,
+            stats.feeders
+        );
+    }
+
+    /// The motor must reclaim abandoned lumen, not just the helper in
+    /// isolation. Blocking a live straw forces a rewalk onto a new column,
+    /// which is exactly what the soak saw when "mainpipe moves to the left".
+    #[test]
+    fn the_motor_reclaims_lumen_when_a_route_is_forced_to_move() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 12..18 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for x in 5..10 {
+            for y in 1..6 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(cap);
+                w.set_cell(x, y, c);
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 5..10 {
+            for y in 1..6 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 165.0);
+            }
+        }
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let cfg = pipe_cfg();
+        let mut tick = 0u64;
+        let mut beat = |w: &mut World, hot: &mut Temperature, h: &mut crate::humidity::Humidity, tick: &mut u64| {
+            *tick += 1;
+            w.tick = *tick * cfg.pipe_beat;
+            apply_pipe_motor(w, hot, &cfg, Some(h));
+        };
+        for _ in 0..20 {
+            beat(&mut w, &mut hot, &mut h, &mut tick);
+        }
+        let route = PIPE_MEMO.with(|slot| slot.borrow().mains.first().map(|p| p.cells.clone()));
+        let route = route.expect("setup: a main should exist");
+        assert!(!w.pipe_steam.is_empty(), "setup: lumen should be charged");
+
+        // Wall off everything the straw climbed through with bedrock, which
+        // has openness rank 0, so the rewalk must find a different column.
+        for &(x, y) in route.iter().filter(|&&(_, y)| y >= 6) {
+            w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+        }
+        // Stamping bedrock discards whatever those cells held, so the ledger
+        // starts from after the excavation, not before it.
+        let opening = sat_totals(&w).cell_total + h.total_mass() as i64;
+        for _ in 0..20 {
+            beat(&mut w, &mut hot, &mut h, &mut tick);
+        }
+
+        let on_path = PIPE_MEMO.with(|slot| slot.borrow().path_cells.clone());
+        let stranded: Vec<(i32, i32)> = w
+            .pipe_steam
+            .keys()
+            .copied()
+            .filter(|c| !on_path.contains(c))
+            .collect();
+        assert!(
+            stranded.is_empty(),
+            "{} cells still hold live steam off every straw after the route \
+             moved: {:?}",
+            stranded.len(),
+            &stranded[..stranded.len().min(8)]
+        );
+        assert_eq!(
+            opening,
+            sat_totals(&w).cell_total + h.total_mass() as i64,
+            "and the move must not mint or drop mass"
+        );
+    }
+
+    /// Soak trace: "mainpipe moves to the left, small extension, or leftover
+    /// of the old pipe can be seen to the right", with `u=` climbing 4 -> 13
+    /// -> 118 -> 355 as it happened.
+    ///
+    /// `pulse_path` only lifts live from cells on its current path, and
+    /// nothing else touches `pipe_steam`, so a rewalk that moved a route
+    /// stranded every unit parked along the old one — permanently.
+    #[test]
+    fn a_route_that_moves_does_not_strand_its_old_lumen() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..10 {
+            w.set_cell(6, y, wet_gravel(&w));
+        }
+        // A straw on column 6, holding live steam up its length.
+        PIPE_MEMO.with(|slot| {
+            let mut memo = slot.borrow_mut();
+            memo.world_id = w.chunk_cache_id.get();
+            memo.mains.clear();
+            memo.feeders.clear();
+            memo.mains.push(PipePath {
+                root: (6, 1),
+                cells: (1..=10).map(|y| (6, y)).collect(),
+                mouth: (6, 10),
+            });
+            memo.reindex();
+        });
+        for y in 2..9 {
+            set_live(&mut w, 6, y, u32::from(EXP) * 2, 150.0);
+        }
+        let before = sat_totals(&w).cell_total;
+        let stranded_cells = w.pipe_steam.len();
+        assert!(stranded_cells >= 5, "setup: lumen should be charged");
+
+        // The route moves to column 10 — the old column is abandoned.
+        PIPE_MEMO.with(|slot| {
+            let mut memo = slot.borrow_mut();
+            memo.mains.clear();
+            memo.mains.push(PipePath {
+                root: (10, 1),
+                cells: (1..=10).map(|y| (10, y)).collect(),
+                mouth: (10, 10),
+            });
+            memo.reindex();
+        });
+
+        reclaim_orphan_lumen(&mut w, EXP);
+
+        for y in 2..9 {
+            assert_eq!(
+                pipe_live_at(&w, 6, y),
+                0,
+                "the abandoned route still holds live steam at y={y}"
+            );
+        }
+        assert_eq!(
+            before,
+            sat_totals(&w).cell_total,
+            "reclaiming abandoned lumen must be mass-flat"
         );
     }
 

@@ -121,6 +121,31 @@ BFS discovery rather than through a parent map — discovery order already is
 nearest-first. Running it per path flooded the same reservoir once per
 straw.
 
+## Abandoned lumen
+
+A main is rewalked every beat, so its route shifts as the hill changes.
+`pulse_path` only lifts live steam from cells on its **current** path, and
+nothing else touches `pipe_steam`, so units parked along a route that moved
+used to stay there forever: the old straw kept painting beside the new one,
+`u=` climbed each time a route moved, and water wicked out of the hill
+disappeared into lumen it had no way to leave.
+
+`reclaim_orphan_lumen` runs once routes have settled for the beat. An
+abandoned conduit is rock again, so its vapour recondenses there: into the
+cell if it has room, else parked as standing water, and only a sub-sat
+remainder stays residual. The soak asserts no cell holds live steam off the
+book.
+
+## The claim is the vessel, not the water
+
+`claim_wet_hot_body` spreads through hot **porous** rock whether or not a
+cell currently holds water. Requiring water in every cell meant a draining
+reservoir tore into fragments as its pores emptied, and each fragment then
+read as its own spring — one well-behaved pipe becoming several needles side
+by side. A patchy body claimed 2 cells instead of its whole extent.
+
+The **seed** must still be wet, so a dry hot mass never invents a spring.
+
 ## Cost
 
 `apply_pipe_motor` on a 31k-cell reservoir, measured by
