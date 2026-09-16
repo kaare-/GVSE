@@ -551,8 +551,6 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
         if is_pipe_mouth(world, cur.0, cur.1, here) && cells.len() > 1 {
             break;
         }
-        let here_dy = dy_here(cur.1);
-        let here_manh = here_dy + dx_here(cur.0);
         let mut best: Option<(i32, u8, i32, i32, i32)> = None;
         for (dx, dy) in [
             (0, 1),

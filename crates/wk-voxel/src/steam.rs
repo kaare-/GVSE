@@ -4035,7 +4035,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
         // Prefer dry gas voids for seating, but wet Air that contributed steam
         // must remain eligible seats — excluding them (or truncating share to
         // u8) silently destroyed multi-cell vapour totals.
-        let mut voids: Vec<(i32, i32)> = component
+        let voids: Vec<(i32, i32)> = component
             .iter()
             .copied()
             .filter(|&(x, y)| world.get_cell(x, y).is_some_and(is_steam_void))
