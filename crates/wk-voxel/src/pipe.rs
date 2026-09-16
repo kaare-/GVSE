@@ -1154,15 +1154,22 @@ pub fn pool_residuals(world: &mut World, expand: u16) {
         }
         // A full cell refuses the sat, and discarding `add_sat`'s shortfall
         // deleted that water outright — a saturated reservoir leaked several
-        // hundred sat per beat. Spread across the tile, then hold whatever
-        // still does not fit as residual: the water has nowhere to go, but
-        // it must not vanish.
+        // hundred sat per beat.
         let mut left = mint;
         for &(gx, gy, _) in &cells {
             if left == 0 {
                 break;
             }
             left -= add_sat(world, gx, gy, left);
+        }
+        // Under a saturated hill the whole tile refuses, and merely holding
+        // the mint as residual banked it forever: the book grew every beat
+        // and the water was never seen again, which reads in play as water
+        // vanishing the moment it reaches the pipe. Let it run off as
+        // standing water instead, the same escape `leak_pipe_mouth` uses.
+        if left > 0 {
+            left = park_orphan_water(world, park.0, park.1, u32::from(left))
+                .min(u32::from(u8::MAX)) as u8;
         }
         keep += u32::from(left) * exp;
         if keep > 0 {
@@ -2443,6 +2450,69 @@ mod tests {
             before,
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
+        );
+    }
+
+    /// Soak regression: `sat=` climbed 5.6k -> 32k with `P=8+24`.
+    ///
+    /// Only a **main mouth** vents; a feeder discharges onto its main, which
+    /// just moves units around inside the book. Flash was capped per path,
+    /// so 32 straws drew 32 strokes of intake a beat against the one stroke
+    /// of egress eight simmering mains could carry. The aquifer emptied into
+    /// the lumen and stayed there — water that "disappears once it reaches
+    /// the pipe".
+    #[test]
+    fn a_many_straw_network_does_not_bank_the_aquifer() {
+        let mut w = plot();
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..18 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // A wide saturated hot slab: many springs, one shared sky.
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for x in 4..60 {
+            for y in 1..10 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(cap);
+                w.set_cell(x, y, c);
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 4..60 {
+            for y in 1..10 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 160.0);
+            }
+        }
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 128, 64);
+        let cfg = pipe_cfg();
+        let opening = sat_totals(&w).cell_total;
+        let mut peak = 0i64;
+        for t in 1..=300u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, Some(&mut h));
+            peak = peak.max(pipe_mass_sat(&w));
+        }
+        let stats = pipe_network_stats(&w);
+        let banked = pipe_mass_sat(&w);
+        // The book may hold a working charge, but not the aquifer. Bound it
+        // by what the network could plausibly have in flight: a few strokes
+        // per straw.
+        let straws = (stats.mains + stats.feeders).max(1) as i64;
+        let ceiling = stroke_sat(cfg.pipe_stroke, EXP) as i64 * straws * 8;
+        assert!(
+            banked <= ceiling,
+            "pipe banked {banked} sat (peak {peak}) across {straws} straws, \
+             ceiling {ceiling}; opening world sat was {opening}"
+        );
+        assert!(
+            sat_totals(&w).cell_total + h.total_mass() as i64 == opening,
+            "and it must stay mass-flat while doing so"
         );
     }
 
