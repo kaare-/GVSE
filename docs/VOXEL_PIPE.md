@@ -26,11 +26,23 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
    **capped to one stroke's worth of sat** per beat (`pipe_flash_capped`).
    An uncapped flash mints far more volume than a stroke can carry, so the
    surplus banked in the lumen forever.
-2. Walk most-open neighbor that still reduces Manhattan distance to the
-   column's **sky-open vent** (`sky_open_y`, not `live_surface_y` — the
-   latter stops at the first non-solid cell, so an enclosed cavity read as
-   a surface and the straw dead-ended inside rock). Openness: Air >
-   snow/water/ice > loose > sand > gravel > stone > bedrock.
+2. Walk toward the column's **sky-open vent** (`sky_open_y`, not
+   `live_surface_y` — the latter stops at the first non-solid cell, so an
+   enclosed cavity read as a surface and the straw dead-ended inside rock).
+   Score, in descending weight:
+   - `openness_rank`: Air > snow/water/ice > loose > sand > gravel > stone >
+     bedrock. Dominant, so Air always beats rock.
+   - **permeability**, which separates beds that `openness_rank` lumps
+     together — the tight and fractured parts of one rock type. Without it
+     the walk was a dead-straight vertical bore, ignoring a fractured seam
+     one column over.
+   - distance to the vent, then a climb bonus. Dipping back down is
+     penalised or the straw wobbles into a bed it has already crossed.
+
+   A step may drift `WALK_DETOUR_SLACK` past the **best** distance reached
+   so far, which lets the straw track along a bed to an easier crossing.
+   Measuring against the best rather than the current cell is what stops
+   drift compounding into a wander.
 3. The pulse is a **conveyor**: at every hop it lifts live steam parked by
    earlier beats and carries it along (bounded by `PIPE_SWEEP_STROKES`).
    Without the sweep, `Park` / `Displace` stranded units permanently.
@@ -127,10 +139,29 @@ over 1000 beats: opening sat + recharge == cells + humidity.
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
 | `phase_expansion_drive` | 96…1400 | Flash volume |
 
+## Joining
+
+A boiler becomes a **feeder** when reaching an existing straw is cheaper
+than boring its own bore to the surface:
+
+```text
+dist_to_path(boiler, main) < surface_dist(boiler) × PIPE_JOIN_BIAS
+```
+
+The bias exists because the two sides are not alike. `dist_to_path` is
+measured through whatever rock is in the way; `surface_dist` is a plain
+vertical count that ignores how hard the climb would be. Without it a
+spring ten cells under a broad hill always preferred its own bore to a
+trunk forty cells sideways, and a soak grew parallel mains straight to the
+surface (`P=8+24`) instead of one mainline. Reaching a conduit that already
+exists is worth several times its distance in fresh rock.
+
+`PIPE_MAX_MAINS` is a backstop, not a target: a soak that reaches it is
+drawing needles rather than a network.
+
 One **main** straw walks to the free surface and is **rewalked every
-beat**, so a carve / collapse / new waterline gets a new route. A new
-boiler that is closer to that straw than to its own surface becomes a
-**feeder**: a shortest walk onto the main. Feeders pulse steam and
+beat**, so a carve / collapse / new waterline gets a new route. Feeders
+pulse steam and
 pump pore water toward the junction; the main pulses toward the mouth.
 Shallow springs that are closer to the sky than to the main keep
 their own vent. When the pipe is on, leftover's 28k field / Dijkstra

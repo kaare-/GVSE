@@ -6,7 +6,7 @@
 
 use wk_material::MaterialId;
 
-use crate::cell::{is_grain, water_capacity_cell, Cell, Sat};
+use crate::cell::{is_grain, permeability_cell, water_capacity_cell, Cell, Sat};
 use crate::displace::park_orphan_water;
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
@@ -23,7 +23,10 @@ use crate::worldgen::{live_skin_y, live_surface_y, LIVE_SURFACE_SEARCH};
 pub const PIPE_SIDES: u32 = 4;
 pub const PIPE_MAX_LEN: usize = 512;
 pub const PIPE_STROKE_DEFAULT: u32 = 1400;
-const PIPE_MAX_MAINS: usize = 8;
+/// A hill may hold a few genuinely independent springs, but a soak that
+/// reaches this cap is drawing parallel needles rather than a network —
+/// see `PIPE_JOIN_BIAS`, which is what should collapse them into a trunk.
+const PIPE_MAX_MAINS: usize = 4;
 const PIPE_MAX_FEEDERS: usize = 24;
 const PIPE_CLAIM_BUDGET: usize = 32_768;
 
@@ -422,6 +425,10 @@ fn deposit_cavity_humidity(
 
 const WALK_SCAN_HALFWIDTH: i32 = 16;
 
+/// How far a straw may wander past its best distance-to-vent to follow a
+/// bed. Measured against the best reached so far, so drift cannot compound.
+const WALK_DETOUR_SLACK: i32 = 2;
+
 /// How far up a column to hunt for a genuinely sky-open cell.
 const PIPE_VENT_SEARCH: i32 = 512;
 
@@ -493,6 +500,11 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
     let mut cur = (rx, ry);
     let dx_here = |x: i32| wrap_dx(world, x, target_x).abs();
     let dy_here = |y: i32| (target_y - y).abs();
+    // Best distance-to-vent reached so far. The detour budget is measured
+    // against this, not against the current cell, so drift cannot compound:
+    // the walker may wander `WALK_DETOUR_SLACK` past its best but has to
+    // beat it to earn more room.
+    let mut best_manh = dy_here(ry) + dx_here(rx);
     for _ in 0..PIPE_MAX_LEN {
         let Some(here) = world.get_cell(cur.0, cur.1) else {
             break;
@@ -527,13 +539,29 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
             }
             let step_dy = dy_here(ny);
             let step_manh = step_dy + dx_here(nx);
-            // Never step away from the target unless the destination is
-            // itself a sky mouth (a wider mouth is a valid finish).
-            if step_manh > here_manh && !is_pipe_mouth(world, nx, ny, n) {
+            // Strata run sideways. Demanding that every step reduce the
+            // distance to the vent forbade travelling along one at all, so a
+            // straw bored dead-straight up through whatever happened to be
+            // above it. A small detour budget lets it slide along a bed to
+            // reach an easier crossing while still being drawn to the vent.
+            if step_manh > best_manh + WALK_DETOUR_SLACK
+                && !is_pipe_mouth(world, nx, ny, n)
+            {
                 continue;
             }
-            let up = if dy > 0 { 40 } else { 0 };
-            let score = (rank as i32) * 1000 - step_manh + up;
+            // Permeability separates beds that `openness_rank` lumps
+            // together — the difference between a tight and an open band of
+            // the same rock. Kept well under the rank term so Air still
+            // beats stone outright; this only chooses among comparable rock.
+            let perm = i32::from(permeability_cell(n, &world.hydro)) / 4;
+            // Climbing is the point; dipping back down is a last resort, or
+            // the straw wobbles into a bed it has already crossed.
+            let up = match dy.cmp(&0) {
+                std::cmp::Ordering::Greater => 40,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Less => -40,
+            };
+            let score = (rank as i32) * 1000 + perm - step_manh * 16 + up;
             if best.map(|(s, _, _, _, _)| score > s).unwrap_or(true) {
                 best = Some((score, rank, step_dy, nx, ny));
             }
@@ -543,6 +571,7 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
         };
         cells.push((nx, ny));
         cur = (nx, ny);
+        best_manh = best_manh.min(dy_here(ny) + dx_here(nx));
         if world
             .get_cell(nx, ny)
             .is_some_and(|c| is_pipe_mouth(world, nx, ny, c))
@@ -1233,9 +1262,21 @@ fn nearest_main_idx(world: &World, p: (i32, i32), mains: &[PipePath]) -> Option<
         .map(|(i, _)| i)
 }
 
-/// Closer to the locked straw than to this cell's free surface.
+/// How much cheaper an existing conduit is than boring fresh rock.
+///
+/// The bare comparison `dist_to_path < surface_dist` weighs two unlike
+/// things: reaching a straw is measured through whatever rock is in the
+/// way, while `surface_dist` is a plain vertical count that ignores how
+/// hard the climb would be. So a spring ten cells under a broad hill
+/// always preferred its own bore over a trunk forty cells sideways, and a
+/// soak grew eight parallel mains straight to the surface instead of one
+/// mainline. Reaching a conduit that already exists is worth several times
+/// its distance in fresh rock.
+const PIPE_JOIN_BIAS: i32 = 4;
+
+/// Cheaper to reach the locked straw than to bore to this cell's surface.
 fn should_feed_main(world: &World, boiler: (i32, i32), main: &PipePath) -> bool {
-    dist_to_path(world, boiler, main) < surface_dist(world, boiler)
+    dist_to_path(world, boiler, main) < surface_dist(world, boiler) * PIPE_JOIN_BIAS
 }
 
 fn make_feeder(world: &World, root: (i32, i32), main: &PipePath) -> PipePath {
@@ -2199,6 +2240,74 @@ mod tests {
         );
     }
 
+    /// Soak feedback: "the crawl of the pipes [should respect] the stratas
+    /// and geography of the rock better, less straight up pipe."
+    ///
+    /// A tight bed with one open window offset sideways. The straw should
+    /// track along the bed to the window rather than bore straight through
+    /// the tight rock above its root.
+    #[test]
+    fn the_crawl_follows_a_bed_to_an_easier_crossing() {
+        let mut w = plot();
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..20 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 20..26 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // A tight clay bed across the hill, broken by a loose-rock window
+        // three columns to the right of the root.
+        for x in 0..64 {
+            for y in 8..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Clay));
+            }
+        }
+        for x in 9..=11 {
+            for y in 8..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::LooseRock));
+            }
+        }
+        let path = walk_pipe(&w, (8, 1));
+        // It must still get out.
+        let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
+        assert_eq!(
+            mouth.material,
+            MaterialId::Air,
+            "the straw still has to reach the sky, ended at {:?}",
+            path.mouth
+        );
+        // And it must cross the tight bed through the window, not beside it.
+        let crossing: Vec<(i32, i32)> = path
+            .cells
+            .iter()
+            .copied()
+            .filter(|&(_, y)| (8..12).contains(&y))
+            .collect();
+        assert!(
+            !crossing.is_empty(),
+            "the path should cross the bed: {:?}",
+            path.cells
+        );
+        // It entered the bed through the window rather than boring straight
+        // up from the root at x=8.
+        let entry = crossing[0];
+        assert!(
+            (9..=11).contains(&entry.0),
+            "the straw entered the tight bed at {entry:?} instead of \
+             tracking to the open window at x=9..=11: crossing {crossing:?}"
+        );
+        // And it is not a dead-straight column.
+        let columns: FxHashSet<i32> = path.cells.iter().map(|&(x, _)| x).collect();
+        assert!(
+            columns.len() > 1,
+            "the crawl should follow the rock, not bore one column: {:?}",
+            path.cells
+        );
+    }
+
     #[test]
     fn walker_sidesteps_around_a_capped_column() {
         let mut w = plot();
@@ -2740,7 +2849,8 @@ mod tests {
     #[test]
     fn shallow_springs_stay_two_pipes() {
         let mut w = plot();
-        for x in 0..32 {
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
             for y in 1..8 {
                 w.set_cell(x, y, Cell::solid(MaterialId::Stone));
             }
@@ -2748,11 +2858,13 @@ mod tests {
                 w.set_cell(x, y, Cell::air());
             }
         }
-        for &x in &[4, 24] {
+        // Gap far beyond `PIPE_JOIN_BIAS × climb`: even valuing an existing
+        // conduit at several times fresh rock, these two do not share one.
+        for &x in &[4, 56] {
             w.set_cell(x, 1, wet_gravel(&w));
         }
         let mut hot = temp_at(&w, 20.0);
-        for &x in &[4, 24] {
+        for &x in &[4, 56] {
             let (hx, hy) = hot.tile_of(x, 1);
             hot.set_tile_c(hx, hy, 150.0);
         }
@@ -2761,10 +2873,65 @@ mod tests {
             w.tick = t;
             apply_pipe_motor(&mut w, &mut hot, &cfg, None);
         }
-        let (roots, _) = pipe_path_stats(&w);
+        let stats = pipe_network_stats(&w);
         assert_eq!(
-            roots, 2,
-            "20-cell gap is farther than a 7-cell climb, roots={roots}"
+            (stats.mains, stats.feeders),
+            (2, 0),
+            "a 52-cell gap against a 7-cell climb is its own spring, got \
+             {} mains {} feeders",
+            stats.mains,
+            stats.feeders
+        );
+    }
+
+    /// Soak regression: "we very soon got plenty of main pipes going to the
+    /// surface, wish they would have joined a mainline instead".
+    ///
+    /// Springs spread across one broad hill share a trunk. The bare
+    /// `dist_to_path < surface_dist` rule weighed reaching a straw through
+    /// rock against a plain vertical count, so every spring preferred its
+    /// own bore and the soak grew parallel mains to the cap.
+    #[test]
+    fn springs_across_one_hill_share_a_mainline() {
+        let mut w = plot();
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 8..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // A 20-cell gap against a 7-cell climb: farther than the bare
+        // vertical count, well inside `PIPE_JOIN_BIAS × climb`. This is the
+        // case that decides trunk-vs-needles, and the soak got needles.
+        let springs = [4, 24];
+        for &x in &springs {
+            w.set_cell(x, 1, wet_gravel(&w));
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for &x in &springs {
+            let (hx, hy) = hot.tile_of(x, 1);
+            hot.set_tile_c(hx, hy, 150.0);
+        }
+        let cfg = pipe_cfg();
+        for t in 1..=30u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        let stats = pipe_network_stats(&w);
+        assert_eq!(
+            stats.mains, 1,
+            "both springs should ride one trunk, got {} mains {} feeders",
+            stats.mains, stats.feeders
+        );
+        assert_eq!(
+            stats.feeders, 1,
+            "the second spring should be a feeder onto that trunk, got {} \
+             mains {} feeders",
+            stats.mains,
+            stats.feeders
         );
     }
 
