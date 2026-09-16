@@ -84,7 +84,7 @@ pub const PHASE_EXPANSION_DRIVE_MAX: u16 = 1400;
 /// 1.0 at the boil point; climbs toward ~3× by boil+80 °C. Hot groundwater
 /// therefore pushes harder as it superheats, without minting mass.
 #[inline]
-pub fn phase_heat_drive_scale(temp_c: f32, boil_c: f32) -> f32 {
+fn phase_heat_drive_scale(temp_c: f32, boil_c: f32) -> f32 {
     if !temp_c.is_finite() || temp_c <= boil_c {
         return 1.0;
     }
@@ -94,7 +94,7 @@ pub fn phase_heat_drive_scale(temp_c: f32, boil_c: f32) -> f32 {
 
 /// Reverse-seepage + crack budget for a boiled pore pulse (force, not mass).
 #[inline]
-pub fn expansion_drive_units(boiled: u8, expand: u16, temp_c: f32, boil_c: f32) -> u8 {
+fn expansion_drive_units(boiled: u8, expand: u16, temp_c: f32, boil_c: f32) -> u8 {
     if boiled == 0 {
         return 0;
     }
@@ -226,14 +226,8 @@ pub fn add_steam(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
     placed
 }
 
-/// Alias: pressurized cavity humidity mass at a cell (`World.steam` wire).
-#[inline]
-pub fn cavity_humidity_at(world: &World, gx: i32, gy: i32) -> u8 {
-    steam_at(world, gx, gy)
-}
-
 /// Remove up to `want`, returning what was taken.
-pub fn take_steam(world: &mut World, gx: i32, gy: i32, want: u8) -> u8 {
+fn take_steam(world: &mut World, gx: i32, gy: i32, want: u8) -> u8 {
     if want == 0 {
         return 0;
     }
@@ -582,13 +576,13 @@ fn is_steam_void(cell: Cell) -> bool {
 /// Prefer [`vessel_is_boiler`] for flash-vs-evap. A fat cave with a
 /// 1-wide sky chimney is open to weather probes but still a boiler:
 /// leftover volume cannot leave as fast as it is made.
-pub fn steam_is_pressure_confined(world: &World, gx: i32, gy: i32) -> bool {
+fn steam_is_pressure_confined(world: &World, gx: i32, gy: i32) -> bool {
     void_is_confined(world, gx, gy) && !air_void_open_to_sky(world, gx, gy)
 }
 
 /// Weather film vs choked / sealed pressure vessel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VesselKind {
+enum VesselKind {
     /// Vapour leaves as fast as it is made — evap / sky Humidity.
     Weather,
     /// Surplus volume packs the pocket — marble-tube / gas chimney.
@@ -600,7 +594,7 @@ pub enum VesselKind {
 /// Mass is never multiplied. 14 liquid becomes 1400 volume units above
 /// boil and collapses back to 14 when cool. Do not write this into `sat`.
 #[inline]
-pub fn vapor_volume_units(mass: u32, temp_c: f32, boil_c: f32, expand: u16) -> u32 {
+fn vapor_volume_units(mass: u32, temp_c: f32, boil_c: f32, expand: u16) -> u32 {
     if mass == 0 || !temp_c.is_finite() {
         return 0;
     }
@@ -613,7 +607,7 @@ pub fn vapor_volume_units(mass: u32, temp_c: f32, boil_c: f32, expand: u16) -> u
 
 /// Leftover volume that does not fit equilibrium seats.
 #[inline]
-pub fn overpressure_units(volume: u32, seat: u32) -> u32 {
+fn overpressure_units(volume: u32, seat: u32) -> u32 {
     volume.saturating_sub(seat)
 }
 
@@ -634,17 +628,6 @@ pub fn choke_leak_mass(surplus_volume: u32, expand: u16, throat: u8) -> u8 {
 
 /// Fat roofed pocket vs pinprick sky gate (or sealed).
 ///
-/// Open ground and a wide U are [`VesselKind::Weather`]. A cathedral with
-/// a mousehole — including the 100-wide cave + 1×800 chimney — is a
-/// [`VesselKind::Boiler`] even though a bird can fly out the top.
-pub fn classify_air_vessel(world: &World, gx: i32, gy: i32) -> VesselKind {
-    if vessel_is_boiler(world, gx, gy) {
-        VesselKind::Boiler
-    } else {
-        VesselKind::Weather
-    }
-}
-
 /// True when flashing this Air cell would pack a vessel, not feed weather.
 pub fn vessel_is_boiler(world: &World, gx: i32, gy: i32) -> bool {
     let gx = world.wrap_x(gx);
@@ -3352,7 +3335,7 @@ fn leftover_straw_chain(
 /// die underground; 1400× must be able to punch a deep column to sky.
 /// A single boiling seat at 1400× is tens of thousands of leftover
 /// volume — do not clamp that walk back to 192 cells.
-pub fn leftover_straw_hops(surplus: u32, expand: u16) -> u16 {
+fn leftover_straw_hops(surplus: u32, expand: u16) -> u16 {
     let from_head = surplus / 2_000;
     let from_expand = 32 + (expand as u32 / 6);
     from_head.max(from_expand).clamp(32, 384) as u16
@@ -3443,7 +3426,7 @@ fn leftover_straw_floor(world: &World, gx: i32, gy: i32, cell: Cell) -> u8 {
 /// `1 - seat/volume` so 7/14 rock at expand 100 is nearly as packed as
 /// 14/14. Cool collapse (`volume == mass`) is zero leftover.
 #[inline]
-pub fn leftover_pack_norm(volume: u32, seat: u32) -> f32 {
+fn leftover_pack_norm(volume: u32, seat: u32) -> f32 {
     if seat == 0 || volume <= seat {
         return 0.0;
     }
@@ -3766,7 +3749,7 @@ pub fn apply_steam(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig)
 ///
 /// Only **mass** that already reached free air may enter `humidity`.
 /// Volume never writes the weather store. Sealed surplus stays in the vessel.
-pub fn apply_steam_with_weather(
+fn apply_steam_with_weather(
     world: &mut World,
     temp: &mut Temperature,
     cfg: &SteamConfig,
@@ -4131,18 +4114,6 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
             park_or_restore_vapour(world, seed.0, seed.1, total);
         }
     }
-}
-
-/// Continuous vapour wash for rendering: every void cell in a steam pocket
-/// gets the pocket's mean density (not sparse marker speckles).
-///
-/// Returns `(gx, gy, density_u8)` with a visibility floor so thin steam still
-/// reads as a filled field.
-pub fn steam_vapour_field(world: &World) -> Vec<(i32, i32, u8)> {
-    steam_haze_wash(world, None)
-        .into_iter()
-        .map(|s| (s.gx, s.gy, s.density))
-        .collect()
 }
 
 /// Soft humidity-like steam wash sample (cell resolution, from 4×4 tiles).
@@ -6278,10 +6249,11 @@ mod tests {
             steam_at(&w, 3, 4) + steam_at(&w, 4, 4) + steam_at(&w, 5, 4) > 0,
             "gas must reach the roof of the pocket, not sit on the floor"
         );
-        let field = steam_vapour_field(&w);
-        let painted = field
+        let painted = steam_haze_wash(&w, None)
             .iter()
-            .filter(|&&(x, y, d)| (3..7).contains(&x) && (2..5).contains(&y) && d >= 28)
+            .filter(|s| {
+                (3..7).contains(&s.gx) && (2..5).contains(&s.gy) && s.density >= 28
+            })
             .count();
         assert!(
             painted >= 10,
@@ -6323,11 +6295,10 @@ mod tests {
             chamber > 0,
             "leaky cave must still equalize the chamber, not only plume the vent"
         );
-        let field = steam_vapour_field(&w);
         assert!(
-            field
+            steam_haze_wash(&w, None)
                 .iter()
-                .any(|&(x, y, d)| y <= 4 && (3..7).contains(&x) && d >= 28),
+                .any(|s| s.gy <= 4 && (3..7).contains(&s.gx) && s.density >= 28),
             "vapour wash must cover the chamber"
         );
     }
@@ -7733,14 +7704,12 @@ mod tests {
             w.set_cell(12, y, Cell::air());
         }
         w.set_cell(8, 3, Cell::water());
-        assert_eq!(
-            classify_air_vessel(&w, 8, 4),
-            VesselKind::Boiler,
+        assert!(
+            vessel_is_boiler(&w, 8, 4),
             "fat cave + 1-wide sky straw is a boiler, not weather"
         );
-        assert_eq!(
-            classify_air_vessel(&w, 12, 26),
-            VesselKind::Weather,
+        assert!(
+            !vessel_is_boiler(&w, 12, 26),
             "unroofed chimney lip is the weather mouth"
         );
         let mut hot = temp_fill(&w, 210.0);
@@ -7780,9 +7749,8 @@ mod tests {
             w.set_cell(x, 6, Cell::air());
         }
         w.set_cell(7, 2, Cell::water());
-        assert_eq!(
-            classify_air_vessel(&w, 7, 2),
-            VesselKind::Weather,
+        assert!(
+            !vessel_is_boiler(&w, 7, 2),
             "wide open U stays weather"
         );
         let mut hot = temp_fill(&w, 210.0);
@@ -9790,9 +9758,8 @@ mod tests {
                 w.set_cell(x, y, Cell::air());
             }
         }
-        assert_eq!(
-            classify_air_vessel(&w, 2, 3),
-            VesselKind::Weather,
+        assert!(
+            !vessel_is_boiler(&w, 2, 3),
             "open U lake must survive the boiler test"
         );
         let water0 = sat_totals(&w).cell_total;
@@ -9852,9 +9819,8 @@ mod tests {
             w.set_cell(x, 6, pool);
             w.set_cell(x, 7, Cell::solid(MaterialId::Bedrock));
         }
-        assert_eq!(
-            classify_air_vessel(&w, 6, 6),
-            VesselKind::Boiler,
+        assert!(
+            vessel_is_boiler(&w, 6, 6),
             "flooded closed cavity is a boiler path hop"
         );
         let mut hot = temp_fill(&w, 20.0);
@@ -9914,7 +9880,7 @@ mod tests {
                 w.set_cell(x, y, Cell::air());
             }
         }
-        assert_eq!(classify_air_vessel(&w, 3, 2), VesselKind::Weather);
+        assert!(!vessel_is_boiler(&w, 3, 2));
         let min0 = mineral_total(&w);
         let mouth_mat0 = w.get_cell(4, 2).unwrap().material;
         let mut hot = temp_fill(&w, 20.0);
@@ -10258,9 +10224,8 @@ mod tests {
             }
         }
         add_steam(&mut w, 8, 3, 80);
-        assert_eq!(
-            classify_air_vessel(&w, 8, 3),
-            VesselKind::Weather,
+        assert!(
+            !vessel_is_boiler(&w, 8, 3),
             "wide U is weather, not a pinprick boiler"
         );
         let (p, kind) = cell_pressure_norm_with_boil(&w, 8, 3, 180.0, 60.0, 100);
