@@ -68,17 +68,57 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 9. 4×4 tiles only **ignite** and **pool residuals**. Ignite walks
    hot tiles on the beat, not the wet world.
 
+## Surface
+
+A mouth is Air standing **above the column's rock crest**, taken from
+[`live_surface_at`] — the same surface map humidity uses to keep vapour from
+clipping into the landscape.
+
+A local roof probe cannot do this job. It looks a fixed distance up for a
+ceiling, so any cavern taller than the probe reads as open sky and a straw
+terminates on an underground head; filling the hole with stone made it
+recompute correctly, which is the tell that the test was local. The surface
+map starts from the generated terrain crest instead of climbing from below,
+so no void inside the hill can impersonate the sky.
+
+Two details it needs:
+
+- The continental crest can land **outside the loaded column**, and
+  `live_surface_y` hands an unloaded hint straight back untouched — which
+  would report a crest below bedrock. When that happens, re-anchor from the
+  top of the loaded column and descend. Anchoring at the straw's own altitude
+  instead climbs and stops under the first cavity ceiling, reintroducing the
+  bug.
+- The mouth test uses the **rock** crest, not the waterline. A straw venting
+  into its own spring pool raises the skin above its mouth, and testing the
+  skin disqualified that mouth: the straw lost its discharge and banked every
+  beat after. Air above rock is outdoors whether or not a pond has formed on
+  it. The aiming target still uses the skin, so a straw prefers to clear the
+  pond.
+
 ## Eruption
 
 Every `PIPE_ERUPT_PERIOD` beats a main erupts; in between it simmers at
 `stroke / period` so a charge accumulates.
 
-On an eruption beat a **sky** mouth throws its charge up the open air as
-`World.steam`, which renders — a visible plume, densest at the lip and
-thinning with height, taller for a bigger charge (`erupt_jet`). It stops at
-rock rather than tunnelling, and only what will not fit falls through to the
-sky humidity field, where it stops being visible. The geyser is the visible
-part of this whole machine, so the burst should read as one.
+On an eruption beat a sky mouth throws its charge up the open air, where it
+renders (`erupt_jet`):
+
+- **Water first, vapour second.** `PIPE_JET_LIQUID_EIGHTHS` of the charge
+  goes in as liquid along the lower column, so it has weight and rains back
+  down; the rest is cavity vapour over the whole height. Both are ordinary
+  cell water and `World.steam`, so gravity and the water rules take over.
+- **Tapered, not halved.** Halving put half the charge in the first cell and
+  a quarter in the second, so every burst was one blip above the lip however
+  much was behind it. Linear weights spend the charge over the whole height,
+  densest at the base. Rounding remainder banks at the *base*; at the tip it
+  inverted the taper.
+- **Height buys reach.** A burst of `M` sat can be short and dense or tall
+  and thin, not both. At `PIPE_JET_SAT_PER_CELL` the base stays around four
+  units while height still grows with the charge, so force reads as reach.
+
+It stops at rock rather than tunnelling, and only what will not fit falls
+through to the sky humidity field, where it stops being visible.
 
 ## Book invariants
 

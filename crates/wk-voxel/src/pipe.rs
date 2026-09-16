@@ -17,7 +17,7 @@ use crate::steam::{
     MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
 };
 use crate::temperature::Temperature;
-use crate::worldgen::{live_skin_y, live_surface_y, LIVE_SURFACE_SEARCH};
+use crate::worldgen::{live_skin_y, live_surface_at, live_surface_y, LIVE_SURFACE_SEARCH};
 
 /// Incoming puff sees one side of the cell, not the whole pond.
 pub const PIPE_SIDES: u32 = 4;
@@ -398,8 +398,49 @@ pub fn openness_rank(cell: Cell) -> u8 {
     }
 }
 
-fn is_pipe_mouth(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
-    cell.material == MaterialId::Air && !void_is_confined(world, gx, gy)
+/// Live rock crest for this column, from the same surface map humidity uses
+/// to keep vapour from clipping into the landscape.
+///
+/// The continental crest is a generated altitude and can land outside the
+/// loaded column, where [`live_surface_y`] hands an unloaded hint straight
+/// back untouched — that would report a crest below bedrock. When it does,
+/// re-anchor from *above*: descending from the top of the loaded column
+/// cannot be fooled by a void inside the hill, whereas climbing from the
+/// straw's own altitude stops under the first cavity ceiling, which is the
+/// mistake this rule exists to prevent.
+fn surface_rock_y(world: &World, temp: &Temperature, gx: i32, anchor_y: i32) -> i32 {
+    let hint = live_surface_at(world, temp.seed, gx, temp.sea_level_y, temp.width_cols);
+    let hint = if world.get_cell(gx, hint).is_some() {
+        hint
+    } else {
+        column_top_loaded(world, gx, anchor_y)
+    };
+    live_surface_y(world, gx, hint, LIVE_SURFACE_SEARCH)
+}
+
+/// Rock crest lifted over standing water or ice — what the open air rests on.
+fn surface_skin_y(world: &World, temp: &Temperature, gx: i32, anchor_y: i32) -> i32 {
+    live_skin_y(world, gx, surface_rock_y(world, temp, gx, anchor_y))
+}
+
+/// A mouth is Air standing **above the column's own outdoor surface**.
+///
+/// `void_is_confined` alone probes a fixed distance for a roof, so any
+/// cavern taller than that reads as open sky and the walk terminated on an
+/// underground head. Filling the hole with stone made it recompute and find
+/// the real surface, which is the tell: the test was local, and no local
+/// probe can tell a big cave from the atmosphere. The surface map starts
+/// from the generated terrain crest instead of climbing from below, so no
+/// cavity can impersonate the sky.
+fn is_pipe_mouth(world: &World, temp: &Temperature, gx: i32, gy: i32, cell: Cell) -> bool {
+    // Measured against the **rock** crest, not the waterline. A straw that
+    // vents into its own spring pool raises the skin above its mouth, and
+    // testing the skin then disqualified that mouth: the straw lost its
+    // discharge and banked every beat thereafter. Air above the rock is
+    // outdoors whether or not a pond has formed on it.
+    //
+    // `gy` is loaded by construction here, so it anchors the surface walk.
+    cell.material == MaterialId::Air && gy > surface_rock_y(world, temp, gx, gy)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -468,54 +509,57 @@ const WALK_SCAN_HALFWIDTH: i32 = 16;
 /// bed. Measured against the best reached so far, so drift cannot compound.
 const WALK_DETOUR_SLACK: i32 = 2;
 
-/// How far up a column to hunt for a genuinely sky-open cell.
-const PIPE_VENT_SEARCH: i32 = 512;
+/// How far a column walk may run looking for its top or its vent.
+const PIPE_COLUMN_SEARCH: i32 = 512;
 
-/// Altitude of the first cell in this column that is Air **and open to the
-/// sky** — the true vent, not merely the first non-solid cell.
-///
-/// [`live_surface_y`] stops at the first non-solid cell, and an *enclosed*
-/// cavity is non-solid. Under a mountain that made the walker adopt the
-/// first internal void as its surface: it arrived there, could no longer
-/// reduce its distance to the target, and terminated inside sealed rock.
-/// The straw then had no discharge and every beat's units banked in the
-/// lumen — the "no route to the surface" report.
-///
-/// Cost is one upward pass per column. The `material == Air` test
-/// short-circuits before [`void_is_confined`], so solid rock (the bulk of
-/// a mountain) never pays the roof probe, and the probe itself is memoized
-/// in the sky cache.
-fn sky_open_y(world: &World, gx: i32, from_y: i32) -> Option<i32> {
-    let gx = world.wrap_x(gx);
-    for dy in 0..PIPE_VENT_SEARCH {
-        let y = from_y + dy;
-        let Some(cell) = world.get_cell(gx, y) else {
-            // Ran off the top of the loaded world: the last loaded cell is
-            // as close to sky as this column gets.
-            return (dy > 0).then_some(y - 1);
-        };
-        if cell.material == MaterialId::Air && !void_is_confined(world, gx, y) {
-            return Some(y);
+/// Highest loaded cell in this column at or above `from_y`.
+fn column_top_loaded(world: &World, gx: i32, from_y: i32) -> i32 {
+    let mut y = from_y;
+    for _ in 0..PIPE_COLUMN_SEARCH {
+        if world.get_cell(gx, y + 1).is_none() {
+            break;
         }
+        y += 1;
     }
-    None
+    y
+}
+
+/// The column's vent: the first Air cell above its own outdoor surface.
+///
+/// Derived from the surface map rather than climbed from below. The old
+/// bottom-up scan stopped at the first Air cell that no local roof probe
+/// could see a ceiling above, so a cavern taller than the probe read as open
+/// sky and the straw terminated on an underground head — filling the hole
+/// with stone made it recompute and find the real surface, which is the tell
+/// that the test was local. No local probe can distinguish a large cave from
+/// the atmosphere; the surface map can, because it starts from the generated
+/// terrain crest.
+fn sky_open_y(world: &World, temp: &Temperature, gx: i32, anchor_y: i32) -> Option<i32> {
+    let gx = world.wrap_x(gx);
+    let vent = surface_skin_y(world, temp, gx, anchor_y) + 1;
+    match world.get_cell(gx, vent) {
+        Some(c) if c.material == MaterialId::Air => Some(vent),
+        // Unloaded above the skin still counts as sky for routing.
+        None => Some(vent),
+        _ => None,
+    }
 }
 
 /// Nearest column with the lowest **sky-open** vent in a small window.
 /// Wrap-aware. Ties break toward the root so a symmetric mountain does not
 /// oscillate. Columns with no vent at all are skipped rather than treated
 /// as easy, so the scan cannot bolt off the edge of the loaded world.
-fn easiest_target(world: &World, root: (i32, i32)) -> (i32, i32) {
+fn easiest_target(world: &World, temp: &Temperature, root: (i32, i32)) -> (i32, i32) {
     let (rx, ry) = root;
     let fallback = live_surface_y(world, rx, ry, LIVE_SURFACE_SEARCH);
-    let mut best: Option<(i32, i32)> = sky_open_y(world, rx, ry).map(|y| (rx, y));
+    let mut best: Option<(i32, i32)> = sky_open_y(world, temp, rx, ry).map(|y| (rx, y));
     for d in 1..=WALK_SCAN_HALFWIDTH {
         for sign in [-1, 1] {
             let x = world.wrap_x(rx + sign * d);
             if world.get_cell(x, ry).is_none() {
                 continue;
             }
-            let Some(y) = sky_open_y(world, x, ry) else {
+            let Some(y) = sky_open_y(world, temp, x, ry) else {
                 continue;
             };
             if best.map(|(_, by)| y < by).unwrap_or(true) {
@@ -530,9 +574,9 @@ fn easiest_target(world: &World, root: (i32, i32)) -> (i32, i32) {
 /// column. When the straight-up column is capped by stone but an easier
 /// column sits nearby, the horizontal pull term lets the walker sidestep
 /// toward it instead of plowing through rock.
-pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
+pub fn walk_pipe(world: &World, temp: &Temperature, root: (i32, i32)) -> PipePath {
     let (rx, ry) = (world.wrap_x(root.0), root.1);
-    let (target_x, target_y) = easiest_target(world, (rx, ry));
+    let (target_x, target_y) = easiest_target(world, temp, (rx, ry));
     let mut cells = vec![(rx, ry)];
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
     seen.insert((rx, ry));
@@ -548,7 +592,7 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
         let Some(here) = world.get_cell(cur.0, cur.1) else {
             break;
         };
-        if is_pipe_mouth(world, cur.0, cur.1, here) && cells.len() > 1 {
+        if is_pipe_mouth(world, temp, cur.0, cur.1, here) && cells.len() > 1 {
             break;
         }
         let mut best: Option<(i32, u8, i32, i32, i32)> = None;
@@ -582,7 +626,7 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
             // above it. A small detour budget lets it slide along a bed to
             // reach an easier crossing while still being drawn to the vent.
             if step_manh > best_manh + WALK_DETOUR_SLACK
-                && !is_pipe_mouth(world, nx, ny, n)
+                && !is_pipe_mouth(world, temp, nx, ny, n)
             {
                 continue;
             }
@@ -611,7 +655,7 @@ pub fn walk_pipe(world: &World, root: (i32, i32)) -> PipePath {
         best_manh = best_manh.min(dy_here(ny) + dx_here(nx));
         if world
             .get_cell(nx, ny)
-            .is_some_and(|c| is_pipe_mouth(world, nx, ny, c))
+            .is_some_and(|c| is_pipe_mouth(world, temp, nx, ny, c))
         {
             break;
         }
@@ -1429,11 +1473,11 @@ fn rebuild_claimed(world: &World, temp: &Temperature, boil: f32) {
     });
 }
 
-fn rewalk_network(world: &World) {
+fn rewalk_network(world: &World, temp: &Temperature) {
     PIPE_MEMO.with(|slot| {
         let mut memo = slot.borrow_mut();
         for main in &mut memo.mains {
-            *main = walk_pipe(world, main.root);
+            *main = walk_pipe(world, temp, main.root);
         }
         memo.mains.retain(|p| p.cells.len() >= 2);
         // With no main on the book every feeder is an orphan. Keep trying
@@ -1447,7 +1491,7 @@ fn rewalk_network(world: &World) {
                     rest.push(o);
                     continue;
                 }
-                let p = walk_pipe(world, o.root);
+                let p = walk_pipe(world, temp, o.root);
                 if p.cells.len() >= 2 {
                     memo.mains.push(p);
                 }
@@ -1696,7 +1740,7 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) -> bool {
                 }
             }
             if memo.mains.len() < PIPE_MAX_MAINS {
-                let path = walk_pipe(world, (gx, gy));
+                let path = walk_pipe(world, temp, (gx, gy));
                 if path.cells.len() >= 2 {
                     memo.mains.push(path);
                 }
@@ -1818,12 +1862,12 @@ pub fn apply_pipe_motor(
         return;
     }
     retire_cold_straws(world, temp, boil);
-    rewalk_network(world);
+    rewalk_network(world, temp);
     rebuild_claimed(world, temp, boil);
     // Reclaiming floods the whole body, ~3.7ms on a 31k-cell reservoir, and
     // it only needs redoing when a boiler actually joined the book.
     if attach_new_boilers(world, temp, boil) {
-        rewalk_network(world);
+        rewalk_network(world, temp);
         rebuild_claimed(world, temp, boil);
     }
     let (feeders, mains) = PIPE_MEMO.with(|slot| {
@@ -2087,7 +2131,8 @@ mod tests {
         for y in 10..14 {
             w.set_cell(5, y, Cell::air());
         }
-        let path = walk_pipe(&w, (5, 1));
+        let hot = temp_at(&w, 20.0);
+        let path = walk_pipe(&w, &hot, (5, 1));
         assert!(path.cells.len() >= 3, "path={:?}", path.cells);
         let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
         assert_eq!(
@@ -2452,12 +2497,13 @@ mod tests {
             "setup: live_surface_y should stop at the cavity ({naive})"
         );
         // ...but the vent probe must climb past it to the real sky.
-        let vent = sky_open_y(&w, 32, 1).expect("column should have a vent");
+        let hot = temp_at(&w, 20.0);
+        let vent = sky_open_y(&w, &hot, 32, 1).expect("column should have a vent");
         assert!(
             vent >= 30,
             "vent must be the real sky, not the sealed cavity (got {vent})"
         );
-        let path = walk_pipe(&w, (32, 1));
+        let path = walk_pipe(&w, &hot, (32, 1));
         let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
         assert_eq!(
             mouth.material,
@@ -2508,7 +2554,8 @@ mod tests {
                 w.set_cell(x, y, Cell::solid(MaterialId::LooseRock));
             }
         }
-        let path = walk_pipe(&w, (8, 1));
+        let hot = temp_at(&w, 20.0);
+        let path = walk_pipe(&w, &hot, (8, 1));
         // It must still get out.
         let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
         assert_eq!(
@@ -2563,7 +2610,8 @@ mod tests {
         for y in 3..14 {
             w.set_cell(9, y, Cell::air());
         }
-        let path = walk_pipe(&w, (4, 1));
+        let hot = temp_at(&w, 20.0);
+        let path = walk_pipe(&w, &hot, (4, 1));
         let mouth = w.get_cell(path.mouth.0, path.mouth.1).unwrap();
         assert_eq!(
             mouth.material,
@@ -2797,6 +2845,65 @@ mod tests {
             before,
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
+        );
+    }
+
+    /// Soak report: "sometimes the pipe gets confused and maps an underground
+    /// head location; if i fill the hole it found with stone it will recompute
+    /// and find the surface again."
+    ///
+    /// A cavern taller than the roof probe read as open sky, because no local
+    /// probe can tell a big cave from the atmosphere. The surface map settles
+    /// it: a mouth must stand above the column's rock crest.
+    #[test]
+    fn a_cavern_taller_than_the_roof_probe_is_not_the_surface() {
+        let mut w = plot();
+        // Deep hill, so a cavern can be taller than the 48-cell roof probe
+        // and still sit well under the real sky.
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..124 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 124..134 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // 60 cells of air inside the hill: past the probe, so looking up from
+        // within it finds no ceiling and it reads as sky.
+        for x in 24..=40 {
+            for y in 12..72 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 1..11 {
+            w.set_cell(32, y, wet_gravel(&w));
+        }
+        let hot = temp_at(&w, 20.0);
+
+        // The cavern is not the surface, however open it looks from inside.
+        let crest = surface_rock_y(&w, &hot, 32, 1);
+        assert!(
+            crest >= 123,
+            "the rock crest should be the real hill top, got {crest}"
+        );
+        // The old local test really is fooled here: looking up from inside
+        // the cavern finds no ceiling within the probe.
+        assert!(
+            !void_is_confined(&w, 32, 20),
+            "setup: the cavern must defeat the roof probe, or this proves \
+             nothing"
+        );
+        let cavern = w.get_cell(32, 20).unwrap();
+        assert_eq!(cavern.material, MaterialId::Air, "setup: cavern is air");
+        assert!(
+            !is_pipe_mouth(&w, &hot, 32, 20, cavern),
+            "a cell inside a 20-cell cavern must not read as a mouth"
+        );
+        let vent = sky_open_y(&w, &hot, 32, 1).expect("column should have a vent");
+        assert!(
+            vent >= 124,
+            "the vent must be the real sky, not the cavern (got {vent})"
         );
     }
 
@@ -3403,6 +3510,7 @@ mod tests {
         for y in 1..8 {
             w.set_cell(6, y, wet_gravel(&w));
         }
+        let hot = temp_at(&w, 20.0);
         let main = PipePath {
             root: (6, 1),
             cells: (1..=8).map(|y| (6, y)).collect(),
@@ -3421,7 +3529,7 @@ mod tests {
             memo.reindex();
         });
 
-        rewalk_network(&w);
+        rewalk_network(&w, &hot);
 
         let roots = PIPE_MEMO.with(|slot| {
             let memo = slot.borrow();
@@ -3467,6 +3575,7 @@ mod tests {
             cells: (1..=8).map(|y| (6, y)).collect(),
             mouth: (6, 8),
         };
+        let hot = temp_at(&w, 20.0);
         PIPE_MEMO.with(|slot| {
             let mut memo = slot.borrow_mut();
             memo.world_id = w.chunk_cache_id.get();
@@ -3522,6 +3631,7 @@ mod tests {
             cells: vec![(6, 1), (6, 9), (6, 10), (6, 11)],
             mouth: (6, 11),
         };
+        let hot = temp_at(&w, 20.0);
         PIPE_MEMO.with(|slot| {
             let mut memo = slot.borrow_mut();
             memo.world_id = w.chunk_cache_id.get();
@@ -3531,7 +3641,7 @@ mod tests {
             memo.reindex();
         });
 
-        rewalk_network(&w);
+        rewalk_network(&w, &hot);
 
         let (mains, feeders) = PIPE_MEMO.with(|slot| {
             let memo = slot.borrow();
@@ -3574,8 +3684,9 @@ mod tests {
         }
         // First orphan cannot walk at all (root off the loaded world), so
         // the old code consumed it, left mains empty, and froze the rest.
+        let hot = temp_at(&w, 20.0);
         assert!(
-            walk_pipe(&w, (5000, 5000)).cells.len() < 2,
+            walk_pipe(&w, &hot, (5000, 5000)).cells.len() < 2,
             "setup: the first orphan must fail to promote"
         );
         PIPE_MEMO.with(|slot| {
@@ -3596,7 +3707,7 @@ mod tests {
             memo.reindex();
         });
 
-        rewalk_network(&w);
+        rewalk_network(&w, &hot);
 
         let stats = pipe_network_stats(&w);
         assert!(
