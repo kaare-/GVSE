@@ -742,6 +742,10 @@ fn set_live(world: &mut World, gx: i32, gy: i32, live: u32, t_c: f32) {
     }
 }
 
+fn take_residual(world: &mut World, gx: i32, gy: i32) -> u32 {
+    world.pipe_res.remove(&(world.wrap_x(gx), gy)).unwrap_or(0)
+}
+
 fn add_residual(world: &mut World, gx: i32, gy: i32, add: u32) {
     if add == 0 {
         return;
@@ -1712,9 +1716,14 @@ fn reclaim_orphan_lumen(world: &mut World, expand: u16) {
         }
         memo.path_cells.clone()
     });
-    let orphans: Vec<(i32, i32)> = world
+    // Residual counts too. `pool_residuals` only tries the cell's own 4×4
+    // tile and puts back whatever will not fit, so residual stranded on an
+    // abandoned route sat there as invisible book — the HUD read sat=73k
+    // against u=11, meaning almost all of it was residual, not live.
+    let orphans: FxHashSet<(i32, i32)> = world
         .pipe_steam
         .keys()
+        .chain(world.pipe_res.keys())
         .copied()
         .filter(|c| !on_path.contains(c))
         .collect();
@@ -1723,7 +1732,8 @@ fn reclaim_orphan_lumen(world: &mut World, expand: u16) {
     }
     let exp = u32::from(expand.max(1));
     for (gx, gy) in orphans {
-        let (units, _) = take_live(world, gx, gy, u32::MAX);
+        let (live, _) = take_live(world, gx, gy, u32::MAX);
+        let units = live + take_residual(world, gx, gy);
         if units == 0 {
             continue;
         }
@@ -2273,6 +2283,20 @@ mod tests {
             "{} cells hold live steam off every straw: {:?}",
             stranded.len(),
             &stranded[..stranded.len().min(8)]
+        );
+        // Residual too. A soak read sat=73k against u=11, so nearly all of
+        // the book was residual rather than live.
+        let res_off: Vec<(i32, i32)> = w
+            .pipe_res
+            .keys()
+            .copied()
+            .filter(|c| !on_path.contains(c))
+            .collect();
+        assert!(
+            res_off.is_empty(),
+            "{} cells hold residual off every straw: {:?}",
+            res_off.len(),
+            &res_off[..res_off.len().min(8)]
         );
         // Strict now that `pool_residuals` no longer discards `add_sat`'s
         // shortfall and the carried condensate is no longer truncated to a
