@@ -1444,6 +1444,18 @@ fn reflash_network(
     }
 }
 
+/// How many unclaimed bodies to weigh before picking. Bounded so a hill
+/// full of seeps cannot turn candidate selection into a full-world flood.
+const PIPE_CAND_SCAN: usize = 64;
+
+/// Unclaimed boiling bodies, **largest first**.
+///
+/// Order matters once the book is full. Candidates used to be taken in
+/// bottom-left tile order and whoever arrived first held a slot forever, so
+/// a big reservoir that woke up later never got a straw at all: it sat full
+/// and hot and never triggered. Sorting by the size of the body each
+/// candidate would drain gives the scarce slots to the reservoirs that
+/// actually need venting.
 fn collect_boiler_cands(
     world: &World,
     temp: &Temperature,
@@ -1461,12 +1473,10 @@ fn collect_boiler_cands(
         .filter_map(|(&(hx, hy), &t)| (t >= boil).then_some((hx, hy, t)))
         .collect();
     tiles.sort_by_key(|&(hx, hy, _)| (hy, hx));
-    let mut cands = Vec::new();
+    // (body size, root, tile T)
+    let mut cands: Vec<(usize, (i32, i32), f32)> = Vec::new();
     let mut seen = skip.clone();
-    for (hx, hy, t) in tiles {
-        if cands.len() >= room {
-            break;
-        }
+    'tiles: for (hx, hy, t) in tiles {
         for ly in 0..tc {
             for lx in 0..tc {
                 let gx = world.wrap_x(hx * tc + lx);
@@ -1480,18 +1490,47 @@ fn collect_boiler_cands(
                 if cell.sat.0 == 0 || cell.material == MaterialId::Air {
                     continue;
                 }
-                cands.push((gx, gy, t));
+                let before = seen.len();
                 claim_wet_hot_body(world, temp, gx, gy, boil, &mut seen);
-                if cands.len() >= room {
-                    break;
+                cands.push((seen.len() - before, (gx, gy), t));
+                if cands.len() >= PIPE_CAND_SCAN {
+                    break 'tiles;
                 }
-            }
-            if cands.len() >= room {
-                break;
             }
         }
     }
-    cands
+    cands.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    cands.truncate(room);
+    cands.into_iter().map(|(_, (x, y), t)| (x, y, t)).collect()
+}
+
+/// Drop straws whose spring has stopped boiling.
+///
+/// Nothing retired a path once its root went cold, so dead straws held
+/// slots forever. With `PIPE_MAX_MAINS` mains and `PIPE_MAX_FEEDERS`
+/// feeders on the book, `attach_new_boilers` computes zero room and
+/// `collect_boiler_cands` returns nothing — so a genuinely full, hot
+/// reservoir could never get a straw and simply never triggered.
+///
+/// Temperature is the signal, not wetness: a root is routinely dry for a
+/// beat right after it flashes, and retiring on that would thrash.
+fn retire_cold_straws(world: &World, temp: &Temperature, boil: f32) {
+    let still_boiling = |p: &PipePath| -> bool {
+        let (x, y) = p.root;
+        match world.get_cell(x, y) {
+            None => false,
+            Some(c) => c.material != MaterialId::Air && temp.at_cell(x, y) >= boil,
+        }
+    };
+    PIPE_MEMO.with(|slot| {
+        let mut memo = slot.borrow_mut();
+        let before = (memo.mains.len(), memo.feeders.len());
+        memo.mains.retain(&still_boiling);
+        memo.feeders.retain(&still_boiling);
+        if (memo.mains.len(), memo.feeders.len()) != before {
+            memo.reindex();
+        }
+    });
 }
 
 /// New boilers walk to the main straw when that is closer than the surface.
@@ -1638,6 +1677,7 @@ pub fn apply_pipe_motor(
     if world.tick % beat != 0 {
         return;
     }
+    retire_cold_straws(world, temp, boil);
     rewalk_network(world);
     rebuild_claimed(world, temp, boil);
     // Reclaiming floods the whole body, ~3.7ms on a 31k-cell reservoir, and
@@ -2598,6 +2638,99 @@ mod tests {
             before,
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
+        );
+    }
+
+    /// Soak regression: "one is very full and dont trigger".
+    ///
+    /// A straw whose spring went cold used to hold its slot forever. With
+    /// the book at `PIPE_MAX_MAINS` + `PIPE_MAX_FEEDERS`, `attach_new_boilers`
+    /// computes zero room and gathers no candidates, so a genuinely full,
+    /// hot reservoir could never get a straw and never triggered.
+    #[test]
+    fn a_dead_straw_releases_its_slot_to_a_live_reservoir() {
+        let mut w = plot();
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 10..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // One live, saturated, hot reservoir that deserves a straw.
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for x in 40..48 {
+            for y in 1..9 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(cap);
+                w.set_cell(x, y, c);
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 40..48 {
+            for y in 1..9 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 160.0);
+            }
+        }
+
+        // Fill the book with straws rooted in cold rock — springs that have
+        // stopped boiling but still hold every slot.
+        PIPE_MEMO.with(|slot| {
+            let mut memo = slot.borrow_mut();
+            memo.world_id = w.chunk_cache_id.get();
+            memo.mains.clear();
+            memo.feeders.clear();
+            for i in 0..PIPE_MAX_MAINS {
+                let x = 2 + i as i32;
+                memo.mains.push(PipePath {
+                    root: (x, 1),
+                    cells: (1..=10).map(|y| (x, y)).collect(),
+                    mouth: (x, 10),
+                });
+            }
+            for i in 0..PIPE_MAX_FEEDERS {
+                let x = 10 + i as i32;
+                memo.feeders.push(PipePath {
+                    root: (x, 1),
+                    cells: vec![(x, 1), (x, 2)],
+                    mouth: (x, 2),
+                });
+            }
+            memo.reindex();
+        });
+        let full = pipe_network_stats(&w);
+        assert_eq!(
+            (full.mains, full.feeders),
+            (PIPE_MAX_MAINS, PIPE_MAX_FEEDERS),
+            "setup: the book should start saturated"
+        );
+
+        let cfg = pipe_cfg();
+        for t in 1..=10u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+
+        // The live reservoir must now be on the book and actually flashing.
+        let claimed_live = PIPE_MEMO.with(|slot| {
+            let memo = slot.borrow();
+            memo.mains
+                .iter()
+                .chain(memo.feeders.iter())
+                .any(|p| (40..48).contains(&p.root.0))
+        });
+        assert!(
+            claimed_live,
+            "the full hot reservoir never got a straw; book is {:?} mains {:?} feeders",
+            pipe_network_stats(&w).mains,
+            pipe_network_stats(&w).feeders
+        );
+        assert!(
+            pipe_mass_sat(&w) > 0 || pipe_units_total(&w) > 0,
+            "and it should have triggered"
         );
     }
 
