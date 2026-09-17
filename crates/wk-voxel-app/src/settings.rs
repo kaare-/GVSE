@@ -1170,6 +1170,11 @@ impl SimSettings {
                         "Closed / semi-closed leftover volume (P overlay; wire: steam; not sky H). Saturated stone lights without a cave. Open ground / a wide U is weather and stays dark. Cool collapses mass×expand back to mass.",
                     );
                     ui.checkbox(hash!(), "Cavity humidity enabled", &mut self.steam.enabled);
+                    ui.label(
+                        None,
+                        "Below: legacy cadence / leftover field. Inert while the",
+                    );
+                    ui.label(None, "cell pipe is on.");
                     ui.checkbox(hash!(), "Pore boil (wet rock)", &mut self.steam.enable_pore_boil);
                     ui.checkbox(
                         hash!(),
@@ -1267,7 +1272,15 @@ impl SimSettings {
                     ui.separator();
                     ui.label(
                         None,
-                        "Cell pipe: one crest per hot-wet hill. Face mix before displace. Leftover field is the old 28k zone.",
+                        "Cell pipe: one crest per hot-wet hill. Face mix before displace.",
+                    );
+                    ui.label(
+                        None,
+                        "With the pipe on it owns the boiling loop, so only the",
+                    );
+                    ui.label(
+                        None,
+                        "knobs below plus boil point and expansion drive apply.",
                     );
                     ui.checkbox(hash!(), "Steam pipe", &mut self.steam.enable_pipe);
                     ui.checkbox(
@@ -1278,6 +1291,7 @@ impl SimSettings {
                     let mut pipe_sides = self.steam.pipe_sides as f32;
                     let mut pipe_stroke = self.steam.pipe_stroke as f32;
                     let mut pipe_beat = self.steam.pipe_beat as f32;
+                    let mut pipe_erode = self.steam.pipe_erode_gain as f32;
                     labeled_slider(
                         ui,
                         hash!(),
@@ -1299,6 +1313,19 @@ impl SimSettings {
                         1.0..20.0,
                         &mut pipe_beat,
                     );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pipe erosion gain (0 = off)",
+                        0.0..64.0,
+                        &mut pipe_erode,
+                    );
+                    ui.label(
+                        None,
+                        "Erosion opens pores along the flow; the mineral it frees",
+                    );
+                    ui.label(None, "rides the water out and builds sinter at the vent.");
+                    self.steam.pipe_erode_gain = pipe_erode.round().clamp(0.0, 64.0) as u16;
                     self.steam.pipe_sides = pipe_sides.round().clamp(1.0, 8.0) as u8;
                     self.steam.pipe_stroke = pipe_stroke.round().clamp(200.0, 7000.0) as u32;
                     self.steam.pipe_beat = pipe_beat.round().clamp(1.0, 60.0) as u64;

@@ -1124,7 +1124,7 @@ pub fn pulse_path_erupting(
 fn pump_water_along(
     world: &mut World,
     temp: &Temperature,
-    boil: f32,
+    ero: Erode,
     path: &PipePath,
     max_sat: u8,
 ) {
@@ -1132,7 +1132,7 @@ fn pump_water_along(
         return;
     }
     for w in path.cells.windows(2).rev() {
-        hand_sat(world, temp, boil, w[0], w[1], max_sat);
+        hand_sat(world, temp, ero, w[0], w[1], max_sat);
     }
 }
 
@@ -1142,7 +1142,7 @@ fn pump_water_along(
 fn hand_sat(
     world: &mut World,
     temp: &Temperature,
-    boil: f32,
+    ero: Erode,
     from: (i32, i32),
     dest: (i32, i32),
     max_sat: u8,
@@ -1182,22 +1182,25 @@ fn hand_sat(
     // erosion on the paths that carry flow rather than everywhere the rock
     // happens to be wet.
     if moved > 0 {
-        erode_by_flow(world, temp, boil, from, moved);
-        erode_by_flow(world, temp, boil, dest, moved);
+        erode_by_flow(world, temp, ero, from, moved);
+        erode_by_flow(world, temp, ero, dest, moved);
     }
     moved
 }
 
 /// Widen one cell in proportion to the water that just passed through it.
-fn erode_by_flow(world: &mut World, temp: &Temperature, boil: f32, at: (i32, i32), moved: u8) {
-    let t = temp.at_cell(at.0, at.1);
-    if t < boil {
+fn erode_by_flow(world: &mut World, temp: &Temperature, ero: Erode, at: (i32, i32), moved: u8) {
+    if ero.gain == 0 {
         return;
     }
-    let hot = hot_fraction(t, boil);
+    let t = temp.at_cell(at.0, at.1);
+    if t < ero.boil {
+        return;
+    }
+    let hot = hot_fraction(t, ero.boil);
     let scale = PIPE_ERODE_SCALE_MIN + hot * (PIPE_ERODE_SCALE_MAX - PIPE_ERODE_SCALE_MIN);
     let thr = u32::from(moved)
-        .saturating_mul(PIPE_ERODE_FLOW_GAIN)
+        .saturating_mul(ero.gain)
         .min(u32::from(u8::MAX)) as u8;
     let _ = widen_aperture(world, at.0, at.1, thr, scale, 0x5EE7_u64, false);
 }
@@ -1222,7 +1225,7 @@ fn erode_by_flow(world: &mut World, temp: &Temperature, boil: f32, at: (i32, i32
 fn wick_reservoir<'a>(
     world: &mut World,
     temp: &Temperature,
-    boil: f32,
+    ero: Erode,
     paths: impl Iterator<Item = &'a PipePath>,
     claimed: &FxHashSet<(i32, i32)>,
     max_sat: u8,
@@ -1248,7 +1251,7 @@ fn wick_reservoir<'a>(
                 // moment a cell is reached gives the right cascade without
                 // a parent map: `(cx, cy)` is by construction one hop
                 // closer to a straw than `n`.
-                let _ = hand_sat(world, temp, boil, n, (cx, cy), max_sat);
+                let _ = hand_sat(world, temp, ero, n, (cx, cy), max_sat);
                 next.push(n);
             }
         }
@@ -1447,13 +1450,22 @@ const PIPE_ERODE_SCALE_MAX: f32 = 4.0;
 /// way — `boiled × expand.min(16)`.
 const PIPE_ERODE_EXPAND_BONUS: u32 = 16;
 
-/// Throughput gain on a liquid transfer, so a hot pipe hop clears
+/// Default throughput gain on a liquid transfer, so a hot pipe hop clears
 /// `widen_aperture`'s yield threshold.
 ///
 /// The pipe moves a few sat per hop, and the threshold exists to stop rock
 /// yielding to a trickle. Hot pressurised spring water is not a trickle: it
-/// is the most chemically aggressive water in the world.
+/// is the most chemically aggressive water in the world. Exposed on Tab as
+/// `pipe_erode_gain`, where 0 turns pipe erosion off.
 const PIPE_ERODE_FLOW_GAIN: u32 = 8;
+
+/// Erosion tunables for a pipe liquid transfer. Holds no borrow, so the
+/// pulses can still take `&mut Temperature`.
+#[derive(Clone, Copy)]
+struct Erode {
+    boil: f32,
+    gain: u32,
+}
 
 /// 0..1 for how far over boil this cell sits.
 fn hot_fraction(t_c: f32, boil: f32) -> f32 {
@@ -1554,7 +1566,7 @@ fn deposit_pipe_mouth(world: &mut World, temp: &Temperature, path: &PipePath, bo
     // Warmth was pinned at 0.55, so a scalding vent built the same sinter as
     // a tepid one. It sets the carrying ceiling, so reading the real mouth
     // temperature is what makes a hot spring deposit more than a warm seep.
-    let warmth = hot_fraction(temp.at_cell(mx, my), BOIL_POINT_C);
+    let warmth = hot_fraction(temp.at_cell(mx, my), boil);
     let _ = precipitate_vent_mouth(world, mx, my, warmth);
 }
 
@@ -2185,6 +2197,10 @@ pub fn apply_pipe_motor(
         (memo.feeders.clone(), memo.mains.clone())
     });
     let water = stroke_sat(stroke, expand);
+    let ero = Erode {
+        boil,
+        gain: u32::from(cfg.pipe_erode_gain),
+    };
     // Routes have settled for this beat, so anything still holding lumen off
     // the book was abandoned by a rewalk and nothing else will ever sweep it.
     reclaim_orphan_lumen(world, expand);
@@ -2194,7 +2210,7 @@ pub fn apply_pipe_motor(
     wick_reservoir(
         world,
         temp,
-        boil,
+        ero,
         feeders.iter().chain(mains.iter()),
         &claimed,
         water,
@@ -2216,7 +2232,7 @@ pub fn apply_pipe_motor(
             sides,
             humidity.as_deref_mut(),
         );
-        pump_water_along(world, temp, boil, path, water);
+        pump_water_along(world, temp, ero, path, water);
     }
     let is_erupt = (world.tick / beat) % PIPE_ERUPT_PERIOD == 0;
     for path in mains.iter() {
@@ -2234,7 +2250,7 @@ pub fn apply_pipe_motor(
                 is_erupt,
             );
         }
-        pump_water_along(world, temp, boil, path, water);
+        pump_water_along(world, temp, ero, path, water);
     }
     // Turn the vent over before judging its load: the ceiling scales with the
     // water still standing there, and a full lip also refuses delivery.
@@ -2270,6 +2286,11 @@ fn main_stroke_for_beat(world: &World, root: (i32, i32), stroke: u32, is_erupt: 
 
 pub fn default_pipe_expand() -> u16 {
     PHASE_EXPANSION_DRIVE
+}
+
+/// Enough that a hot pipe hop clears `widen_aperture`'s yield threshold.
+pub fn default_pipe_erode_gain() -> u16 {
+    PIPE_ERODE_FLOW_GAIN as u16
 }
 
 pub fn default_pipe_beat() -> u64 {
@@ -3073,6 +3094,14 @@ mod tests {
         }
     }
 
+    /// Erosion off, for tests about moving water rather than carving rock.
+    fn no_erode() -> Erode {
+        Erode {
+            boil: 100.0,
+            gain: 0,
+        }
+    }
+
     fn wet_gravel(world: &World) -> Cell {
         let mut c = Cell::solid(MaterialId::Gravel);
         let cap = water_capacity_cell(c, &world.hydro);
@@ -3179,7 +3208,7 @@ mod tests {
         };
         let before = sat_totals(&w).cell_total;
         let tail_before = w.get_cell(8, 1).unwrap().sat.0;
-        wick_reservoir(&mut w, &hot, 100.0, std::iter::once(&path), &claimed, 8);
+        wick_reservoir(&mut w, &hot, no_erode(), std::iter::once(&path), &claimed, 8);
         assert!(
             w.get_cell(8, 1).unwrap().sat.0 < tail_before,
             "the far end of the body should hand water inward"
@@ -3347,6 +3376,55 @@ mod tests {
             pore_of(&slack),
             slack_before,
             "heat alone without throughput must not widen anything"
+        );
+    }
+
+    /// The Tab erosion knob has to actually reach the rock, and zero has to
+    /// mean off — a slider that does nothing is worse than no slider.
+    #[test]
+    fn the_erosion_gain_knob_controls_carving() {
+        fn run(gain: u16) -> u32 {
+            let mut w = plot();
+            for x in 0..32 {
+                w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+                for y in 1..10 {
+                    let mut c = Cell::solid(MaterialId::Limestone);
+                    c.pore = 40;
+                    let cap = water_capacity_cell(c, &w.hydro);
+                    c.sat = Sat(cap);
+                    w.set_cell(x, y, c);
+                }
+                for y in 10..18 {
+                    w.set_cell(x, y, Cell::air());
+                }
+            }
+            let mut hot = temp_at(&w, 175.0);
+            let cfg = SteamConfig {
+                phase_expansion_drive: PHASE_EXPANSION_DRIVE,
+                pipe_erode_gain: gain,
+                ..pipe_cfg()
+            };
+            for t in 1..=40u64 {
+                w.tick = t * cfg.pipe_beat;
+                apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+            }
+            (0..32)
+                .flat_map(|x| (1..10).map(move |y| (x, y)))
+                .filter_map(|(x, y)| w.get_cell(x, y).map(|c| u32::from(c.pore)))
+                .sum()
+        }
+        let off = run(0);
+        let on = run(default_pipe_erode_gain());
+        let hard = run(32);
+        assert_eq!(
+            off,
+            32 * 9 * 40,
+            "gain 0 must leave every pore exactly as it was"
+        );
+        assert!(on > off, "the default gain should carve: {off} -> {on}");
+        assert!(
+            hard >= on,
+            "a higher gain should not carve less: {on} vs {hard}"
         );
     }
 
@@ -4531,7 +4609,7 @@ mod tests {
         let before_src = w.get_cell(12, 1).unwrap().sat.0;
         let before_dst = w.get_cell(4, 1).unwrap().sat.0;
         let before_sum = sat_sum(&w);
-        pump_water_along(&mut w, &hot, 100.0, &path, 6);
+        pump_water_along(&mut w, &hot, no_erode(), &path, 6);
         let after_src = w.get_cell(12, 1).unwrap().sat.0;
         let after_dst = w.get_cell(4, 1).unwrap().sat.0;
         assert!(after_src < before_src, "feeder sat {before_src} → {after_src}");
@@ -4673,7 +4751,7 @@ mod tests {
         // Cold: this test is about solute riding the water, not erosion.
         let hot = temp_at(&w, 20.0);
         for _ in 0..8 {
-            pump_water_along(&mut w, &hot, 100.0, &path, 8);
+            pump_water_along(&mut w, &hot, no_erode(), &path, 8);
         }
         let donor_after = dissolved_at(&w, 4, 2);
         let downstream: u32 = (3..=4)

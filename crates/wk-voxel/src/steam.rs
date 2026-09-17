@@ -174,6 +174,14 @@ pub struct SteamConfig {
     pub pipe_stroke: u32,
     /// Ticks between pipe pulses.
     pub pipe_beat: u64,
+    /// Throughput gain on a pipe liquid transfer when it erodes the rock it
+    /// passes through. `0` turns pipe erosion off.
+    ///
+    /// The pipe moves a few sat per hop and `widen_aperture` has a yield
+    /// threshold, so the gain is what decides whether hot spring water counts
+    /// as a conduit or a trickle. Raising it makes springs carve — and
+    /// deposit — faster.
+    pub pipe_erode_gain: u16,
 }
 
 impl Default for SteamConfig {
@@ -199,6 +207,7 @@ impl Default for SteamConfig {
             pipe_sides: 4,
             pipe_stroke: 1400,
             pipe_beat: STEAM_EVERY,
+            pipe_erode_gain: crate::pipe::default_pipe_erode_gain(),
         }
     }
 }

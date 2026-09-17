@@ -129,28 +129,50 @@ The chain from erosion to sinter, and what each species can actually do:
 | **Dissolved mineral** | Rides pore water: `deliver_liquid` carries it on every pump and wick hop. Boiling leaves it behind, which is why it concentrates at the flash front. | `precipitate_vent_mouth` builds sinter and an apron. |
 | **Suspended silt** | Does **not** travel. `sediment::carry_with_water` refuses pore space by design — a grain bed filters fines. | Free water at the vent can hold it; the eruption jet's liquid can move it. |
 
-`erode_pipe_pores` is what drives the loop. Where a straw cell is over boil
-**and** holds lumen pressure, `widen_aperture` opens the aperture, and the
-carbonate it takes goes into the dissolved ledger — which is the load that
-later builds the mouth. Both conditions matter: heat without throughput does
-not erode, and neither does pressure in cold rock. `mint_void` stays false, so
-a conduit stays rock.
+### Erode → carry → deposit
 
-The leftover motor eroded its own route at a dozen call sites; the pipe
-replaced it without carrying that over, so a scalding pressurised straw left
-the rock exactly as it found it.
+**Flow erodes**, so erosion hangs off `hand_sat` — the one place every pipe
+liquid transfer passes through, both the wick draining the reservoir and the
+pump climbing the straw — with the water that actually moved as the
+throughput. That is the signal seepage already uses, and it keeps erosion on
+the paths that carry flow rather than everywhere the rock happens to be wet.
+Keying it off lumen pressure instead only reached the few cells the pulse had
+touched, and never the reservoir at all: a whole hill could drain through the
+rock and leave it untouched. `mint_void` stays false, so a conduit stays rock.
 
-Two units traps found wiring this up, both of which silently did nothing:
+**The load deposits where the water left it.** The flash front migrates up the
+conduit as the cells under it dry, and solute stays behind when water boils
+off, so the load piles up in dry rock near the top of the straw — nine
+thousand units against three at the vent, when only the mouth was checked.
+`deposit_along_straw` uses `precipitate_at`, whose own triggers are "the water
+left" and "over the ceiling"; a dried cell holding a load is the first
+exactly. Sinter lines the conduit and builds around the vent.
+
+**A hot vent boils its puddle off and keeps the mineral** — the travertine
+mechanism. Without it, arriving water pooled at the lip, which both refused
+further delivery *and* held `carrying_capacity` (which scales with saturation)
+far above the load, so there was never an excess to drop. The evaporated water
+goes to the **sky**, not the cavity book: nothing drains cavity humidity at an
+open cell while the pipe owns the loop, so routing it there saturated the cell
+at 255 and stopped the turnover dead.
+
+Erosion and deposition are a closed loop — flow opens the aperture, the
+mineral it carries lines it again — so the pair settles instead of running
+away.
+
+Three units traps found wiring this up, each of which silently did nothing:
 
 - `widen_aperture` reads `throughput` on the **sat** scale against a yield
-  threshold. Converting lumen volume back to sat divides the expansion out
-  and lands under the threshold, so nothing eroded at all. Expansion is
-  precisely what makes steam erosive where the same water as liquid is not,
-  so it carries a capped bonus — the same shape leftover used.
+  threshold. The pipe moves a few sat per hop, so the transfer needs
+  `pipe_erode_gain` to clear it; converting lumen volume back to sat divides
+  the expansion out and lands under the threshold, and nothing eroded at all.
 - `mineral::carry_with_water` rounds its pro-rata share down. A one-sat
   transfer out of a 33-sat cell rounds to zero, and to zero again on every
-  transfer after, so load never left the root at all. It now carries at least
-  one unit, which is still strictly conservative.
+  transfer after, so load never left the root. It now carries at least one
+  unit, still strictly conservative.
+- Deposition in rock **occludes pore** rather than minting Flowstone, so it is
+  real but invisible. Only a full cell's excess in open Air becomes a visible
+  deposit.
 
 ## Book invariants
 
@@ -267,6 +289,7 @@ over 1000 beats: opening sat + recharge == cells + humidity.
 | `pipe_sides` | 4 | Face fraction `1/sides` |
 | `pipe_stroke` | 1400 (Tab max 7000) | Units per beat |
 | `pipe_beat` | `STEAM_EVERY` (5) | Pulse period |
+| `pipe_erode_gain` | 8 (Tab 0…64) | Throughput gain when flow erodes; 0 = off |
 | `phase_expansion_drive` | 96…1400 | Flash volume |
 
 ## Joining
@@ -308,6 +331,12 @@ Shallow springs that are closer to the sky than to the main keep
 their own vent. When the pipe is on, leftover's 28k field / Dijkstra
 and steam cadence (boil / flood / assault) stay off. P paints the
 straw, feeders, live puff, and claimed boilers.
+With the pipe on it owns the boiling loop, so only `boil_point_c`,
+`phase_expansion_drive`, `pipe_sides`, `pipe_stroke`, `pipe_beat` and
+`pipe_erode_gain` do anything — the rest of that submenu drives the legacy
+cadence and leftover field, which are inert. The Tab panel says so, because a
+slider that does nothing is worse than no slider.
+
 Tab → Climate → cavity humidity tunes pipe on/off, leftover field,
 sides, stroke, beat.
 
