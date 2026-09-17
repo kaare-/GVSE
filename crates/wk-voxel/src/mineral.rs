@@ -211,6 +211,15 @@ pub fn carry_with_water(
     }
     // Pro rata, rounding down so transport can never mint load.
     let share = ((load as u32 * moved as u32) / donor_sat_before as u32) as u16;
+    // Rounding down alone strands load outright: a small transfer against a
+    // full donor rounds to nothing, and it rounds to nothing again on every
+    // transfer after, so the load never leaves at all. A boiling straw moving
+    // one sat a beat out of a 33-sat cell kept its whole dissolved load at the
+    // root forever, and none of it ever reached the vent. One unit in that
+    // case restores the property that flow eventually carries load, and stays
+    // strictly conservative — `take_dissolved` cannot hand back more than is
+    // actually there.
+    let share = share.max(1);
     let taken = take_dissolved(world, from.0, from.1, share);
     add_dissolved(world, to.0, to.1, taken);
 }
@@ -1837,5 +1846,40 @@ mod mechanical_karst_tests {
             widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD, true);
         }
         assert_eq!(w.get_cell(4, 4).unwrap().pore, 100, "bedrock must not open");
+    }
+
+    /// A small transfer against a full donor must still move load.
+    ///
+    /// Pro rata rounds down, so `load × moved / donor` was zero for a
+    /// one-sat transfer out of a well-wetted cell — and zero again on every
+    /// transfer after it, so the load never went anywhere. A boiling straw
+    /// pumping a sat a beat kept its whole dissolved load at the root and
+    /// none of it reached the vent.
+    #[test]
+    fn a_small_transfer_does_not_strand_dissolved_load() {
+        let (mut w, _) = slab(MaterialId::Limestone, 40);
+        add_dissolved(&mut w, 4, 4, 25);
+        let before = crate::audit::mineral_total(&w);
+        // One sat out of a 33-sat donor: the pro-rata share is 25/33 -> 0.
+        assert_eq!(25u32 * 1 / 33, 0, "the rounding this guards against");
+
+        let mut moved_any = false;
+        for _ in 0..64 {
+            carry_with_water(&mut w, (4, 4), (4, 5), 1, 33);
+            if dissolved_at(&w, 4, 5) > 0 {
+                moved_any = true;
+                break;
+            }
+        }
+        assert!(
+            moved_any,
+            "load must eventually follow the water, not sit at the source \
+             forever"
+        );
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "and carrying it must not mint or drop any"
+        );
     }
 }
