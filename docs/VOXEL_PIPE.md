@@ -120,6 +120,38 @@ renders (`erupt_jet`):
 It stops at rock rather than tunnelling, and only what will not fit falls
 through to the sky humidity field, where it stops being visible.
 
+## Solute and sediment
+
+The chain from erosion to sinter, and what each species can actually do:
+
+| Species | In the straw | At the mouth |
+|---------|--------------|--------------|
+| **Dissolved mineral** | Rides pore water: `deliver_liquid` carries it on every pump and wick hop. Boiling leaves it behind, which is why it concentrates at the flash front. | `precipitate_vent_mouth` builds sinter and an apron. |
+| **Suspended silt** | Does **not** travel. `sediment::carry_with_water` refuses pore space by design — a grain bed filters fines. | Free water at the vent can hold it; the eruption jet's liquid can move it. |
+
+`erode_pipe_pores` is what drives the loop. Where a straw cell is over boil
+**and** holds lumen pressure, `widen_aperture` opens the aperture, and the
+carbonate it takes goes into the dissolved ledger — which is the load that
+later builds the mouth. Both conditions matter: heat without throughput does
+not erode, and neither does pressure in cold rock. `mint_void` stays false, so
+a conduit stays rock.
+
+The leftover motor eroded its own route at a dozen call sites; the pipe
+replaced it without carrying that over, so a scalding pressurised straw left
+the rock exactly as it found it.
+
+Two units traps found wiring this up, both of which silently did nothing:
+
+- `widen_aperture` reads `throughput` on the **sat** scale against a yield
+  threshold. Converting lumen volume back to sat divides the expansion out
+  and lands under the threshold, so nothing eroded at all. Expansion is
+  precisely what makes steam erosive where the same water as liquid is not,
+  so it carries a capped bonus — the same shape leftover used.
+- `mineral::carry_with_water` rounds its pro-rata share down. A one-sat
+  transfer out of a 33-sat cell rounds to zero, and to zero again on every
+  transfer after, so load never left the root at all. It now carries at least
+  one unit, which is still strictly conservative.
+
 ## Book invariants
 
 Enforced by `rewalk_network` every beat:

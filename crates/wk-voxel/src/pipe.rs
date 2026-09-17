@@ -11,7 +11,7 @@ use crate::displace::park_orphan_water;
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::humidity::Humidity;
-use crate::mineral::{carry_with_water, dissolved_at, precipitate_vent_mouth};
+use crate::mineral::{carry_with_water, dissolved_at, precipitate_vent_mouth, widen_aperture};
 use crate::steam::{
     add_steam, choke_leak_mass, steam_at, void_is_confined, SteamConfig, BOIL_POINT_C,
     MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
@@ -1094,7 +1094,7 @@ pub fn pulse_path_erupting(
             );
         }
     }
-    deposit_pipe_mouth(world, path);
+    deposit_pipe_mouth(world, temp, path);
 }
 
 /// March existing pore water one hop toward the path mouth (main line
@@ -1369,12 +1369,79 @@ fn leak_pipe_mouth(
 }
 
 /// Depressurise at the mouth only. Never sinter cells on the live lumen.
-fn deposit_pipe_mouth(world: &mut World, path: &PipePath) {
+/// Range over boil across which a vent counts as fully hot, for both pore
+/// erosion and mouth deposition.
+const PIPE_HOT_SPAN_C: f32 = 80.0;
+
+/// How aggressively hot pipe water opens the apertures it flows through,
+/// from just-boiling to fully superheated.
+const PIPE_ERODE_SCALE_MIN: f32 = 0.8;
+const PIPE_ERODE_SCALE_MAX: f32 = 4.0;
+
+/// Cap on the expansion bonus that makes steam erosive where the same water
+/// as liquid would not be.
+///
+/// `widen_aperture` reads `throughput` on the sat scale, against a yield
+/// threshold of `mineral::APERTURE_MIN_THROUGHPUT`. Converting lumen volume
+/// back to sat divides the expansion out again and lands under that
+/// threshold, so nothing ever eroded. The leftover motor solved this the same
+/// way — `boiled × expand.min(16)`.
+const PIPE_ERODE_EXPAND_BONUS: u32 = 16;
+
+/// 0..1 for how far over boil this cell sits.
+fn hot_fraction(t_c: f32, boil: f32) -> f32 {
+    ((t_c - boil) / PIPE_HOT_SPAN_C).clamp(0.0, 1.0)
+}
+
+fn deposit_pipe_mouth(world: &mut World, temp: &Temperature, path: &PipePath) {
     let (mx, my) = (world.wrap_x(path.mouth.0), path.mouth.1);
     if dissolved_at(world, mx, my) == 0 {
         return;
     }
-    let _ = precipitate_vent_mouth(world, mx, my, 0.55);
+    // Warmth was pinned at 0.55, so a scalding vent built the same sinter as
+    // a tepid one. It sets the carrying ceiling, so reading the real mouth
+    // temperature is what makes a hot spring deposit more than a warm seep.
+    let warmth = hot_fraction(temp.at_cell(mx, my), BOIL_POINT_C);
+    let _ = precipitate_vent_mouth(world, mx, my, warmth);
+}
+
+/// Heat and pressure open the pore network along a straw.
+///
+/// The leftover motor eroded its own route — `widen_aperture` at a dozen call
+/// sites — and the cell pipe replaced it without carrying that over, so a
+/// scalding pressurised straw left the rock exactly as it found it. Hot water
+/// is aggressive: it widens the apertures it passes through, which is what
+/// turns a seep into a conduit, and carbonate it takes goes into the
+/// dissolved ledger, which is the load that later builds sinter at the mouth.
+///
+/// Throughput is the pressure actually standing in the cell, so only cells
+/// the pulse drives erode and `widen_aperture`'s own threshold keeps
+/// competent rock from yielding to a trickle. `mint_void` stays false: a
+/// conduit stays rock.
+fn erode_pipe_pores(
+    world: &mut World,
+    temp: &Temperature,
+    path: &PipePath,
+    expand: u16,
+    boil: f32,
+) {
+    let exp = u32::from(expand.max(1));
+    for &(gx, gy) in &path.cells {
+        let live = pipe_live_at(world, gx, gy);
+        if live == 0 {
+            continue;
+        }
+        let t = temp.at_cell(gx, gy);
+        if t < boil {
+            continue;
+        }
+        let thr = (live / exp)
+            .saturating_mul(u32::from(expand.max(1)).min(PIPE_ERODE_EXPAND_BONUS))
+            .min(u32::from(u8::MAX)) as u8;
+        let hot = hot_fraction(t, boil);
+        let scale = PIPE_ERODE_SCALE_MIN + hot * (PIPE_ERODE_SCALE_MAX - PIPE_ERODE_SCALE_MIN);
+        let _ = widen_aperture(world, gx, gy, thr, scale, 0x5EED_u64, false);
+    }
 }
 
 /// Pool residuals inside each 4×4 heat tile into sat when ≥ expand.
@@ -1958,6 +2025,11 @@ pub fn apply_pipe_motor(
     let claimed = claimed_cells();
     wick_reservoir(world, feeders.iter().chain(mains.iter()), &claimed, water);
     reflash_network(world, temp, expand, boil, stroke_sat(stroke, expand));
+    // Freshly flashed pressure is what drives the aperture open, so erode
+    // before the pulse carries that pressure away.
+    for path in feeders.iter().chain(mains.iter()) {
+        erode_pipe_pores(world, temp, path, expand, boil);
+    }
     for path in feeders.iter() {
         pulse_path(
             world,
@@ -2025,7 +2097,7 @@ pub fn default_pipe_beat() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::sat_totals;
+    use crate::audit::{mineral_total, sat_totals};
     use crate::chunk::ChunkCoord;
     use crate::steam::PHASE_EXPANSION_DRIVE_MAX;
 
@@ -2934,6 +3006,235 @@ mod tests {
             before,
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
+        );
+    }
+
+    /// Heat and pressure open the pore network along a straw, and the
+    /// carbonate that takes goes into the dissolved ledger rather than
+    /// vanishing. The leftover motor did this; the pipe had dropped it.
+    #[test]
+    fn a_hot_pressurised_straw_erodes_its_pore_network() {
+        fn limestone_hill() -> World {
+            let mut w = plot();
+            for x in 0..32 {
+                w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+                for y in 1..10 {
+                    let mut c = Cell::solid(MaterialId::Limestone);
+                    c.pore = 40;
+                    let cap = water_capacity_cell(c, &w.hydro);
+                    c.sat = Sat(cap);
+                    w.set_cell(x, y, c);
+                }
+                for y in 10..16 {
+                    w.set_cell(x, y, Cell::air());
+                }
+            }
+            w
+        }
+        let straw = PipePath {
+            root: (6, 1),
+            cells: (1..=9).map(|y| (6, y)).collect(),
+            mouth: (6, 10),
+        };
+        let pore_of = |w: &World| -> u32 {
+            (1..=9).map(|y| u32::from(w.get_cell(6, y).unwrap().pore)).sum()
+        };
+
+        // Hot and pressurised: the apertures open.
+        let mut w = limestone_hill();
+        let hot = temp_at(&w, 170.0);
+        for &(gx, gy) in &straw.cells {
+            set_live(&mut w, gx, gy, u32::from(EXP) * 40, 170.0);
+        }
+        let pore_before = pore_of(&w);
+        let mineral_before = mineral_total(&w);
+        erode_pipe_pores(&mut w, &hot, &straw, EXP, 100.0);
+        assert!(
+            pore_of(&w) > pore_before,
+            "a scalding pressurised straw should widen its apertures: {} -> {}",
+            pore_before,
+            pore_of(&w)
+        );
+        assert_eq!(
+            mineral_total(&w),
+            mineral_before,
+            "rock taken into solution must stay in the mineral ledger"
+        );
+        assert!(
+            straw
+                .cells
+                .iter()
+                .any(|&(gx, gy)| crate::mineral::dissolved_at(&w, gx, gy) > 0),
+            "erosion should leave carbonate in solution to ride out"
+        );
+
+        // Cold rock does not yield, however much pressure stands in it.
+        let mut cold_w = limestone_hill();
+        let cold = temp_at(&cold_w, 40.0);
+        for &(gx, gy) in &straw.cells {
+            set_live(&mut cold_w, gx, gy, u32::from(EXP) * 40, 40.0);
+        }
+        let cold_before = pore_of(&cold_w);
+        erode_pipe_pores(&mut cold_w, &cold, &straw, EXP, 100.0);
+        assert_eq!(
+            pore_of(&cold_w),
+            cold_before,
+            "below boil the straw is not an erosive conduit"
+        );
+
+        // No pressure, no erosion — a wetted cell is not a conduit.
+        let mut slack = limestone_hill();
+        let slack_t = temp_at(&slack, 170.0);
+        let slack_before = pore_of(&slack);
+        erode_pipe_pores(&mut slack, &slack_t, &straw, EXP, 100.0);
+        assert_eq!(
+            pore_of(&slack),
+            slack_before,
+            "heat alone without throughput must not widen anything"
+        );
+    }
+
+    /// The whole chain, through the motor: heat and pressure open the pore
+    /// network, the carbonate that releases rides the pore water out, and it
+    /// builds up around the mouth. Mineral-flat throughout.
+    #[test]
+    fn erosion_in_the_pores_feeds_sinter_at_the_mouth() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..10 {
+                let mut c = Cell::solid(MaterialId::Limestone);
+                c.pore = 40;
+                let cap = water_capacity_cell(c, &w.hydro);
+                c.sat = Sat(cap);
+                w.set_cell(x, y, c);
+            }
+            for y in 10..18 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 4..10 {
+            for y in 1..10 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 175.0);
+            }
+        }
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        // The play expansion, not the Tab maximum. At `expand == stroke` a
+        // stroke is worth exactly one sat of liquid, and `carry_with_water`'s
+        // pro-rata share then rounds to zero against a full donor — solute
+        // cannot move at all. That corner is worth knowing about, but it is
+        // not the configuration play runs.
+        let cfg = SteamConfig {
+            phase_expansion_drive: PHASE_EXPANSION_DRIVE,
+            ..pipe_cfg()
+        };
+
+        let pore_before: u32 = (4..10)
+            .flat_map(|x| (1..10).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| u32::from(c.pore)))
+            .sum();
+        let mineral_before = mineral_total(&w);
+
+        for t in 1..=120u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, Some(&mut h));
+        }
+
+        let pore_after: u32 = (4..10)
+            .flat_map(|x| (1..10).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| u32::from(c.pore)))
+            .sum();
+        // A straw climbs diagonally, so it can leave the column it started in.
+        let straw = PIPE_MEMO.with(|sl| {
+            sl.borrow().mains.first().map(|p| p.cells.clone())
+        });
+        assert!(straw.is_some(), "the hill should have grown a straw");
+        assert!(
+            pore_after > pore_before,
+            "the hot pressurised body should have opened its pores: \
+             {pore_before} -> {pore_after}"
+        );
+
+        // Deposition shows as flowstone laid down, or as load standing at the
+        // vent ready to; either way the mineral must be conserved.
+        let flowstone = (0..32)
+            .flat_map(|x| (1..18).map(move |y| (x, y)))
+            .filter(|&(x, y)| {
+                w.get_cell(x, y)
+                    .is_some_and(|c| c.material == crate::mineral::DEPOSIT_MATERIAL)
+            })
+            .count();
+        let load_out: u32 = (0..32)
+            .flat_map(|x| (9..18).map(move |y| (x, y)))
+            .map(|(x, y)| u32::from(crate::mineral::dissolved_at(&w, x, y)))
+            .sum();
+        assert!(
+            flowstone > 0 || load_out > 0,
+            "eroded carbonate should reach the mouth as sinter or as load \
+             standing there, got {flowstone} flowstone cells and {load_out} \
+             units above the rock"
+        );
+        assert_eq!(
+            mineral_total(&w),
+            mineral_before,
+            "the whole erode → carry → deposit loop must be mineral-flat"
+        );
+    }
+
+    /// Hotter vents build more sinter. Warmth sets the carrying ceiling, and
+    /// it used to be pinned at 0.55 regardless of the actual mouth.
+    #[test]
+    fn a_hotter_mouth_deposits_more_sinter() {
+        fn vent(load: u16) -> (World, PipePath) {
+            let mut w = plot();
+            for x in 0..32 {
+                w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+                for y in 1..8 {
+                    w.set_cell(x, y, Cell::solid(MaterialId::Limestone));
+                }
+                for y in 8..16 {
+                    let mut c = Cell::air();
+                    c.sat = Sat(200);
+                    w.set_cell(x, y, c);
+                }
+            }
+            crate::mineral::add_dissolved(&mut w, 6, 8, load);
+            let path = PipePath {
+                root: (6, 1),
+                cells: (1..=8).map(|y| (6, y)).collect(),
+                mouth: (6, 8),
+            };
+            (w, path)
+        }
+
+        let (mut warm_w, warm_path) = vent(900);
+        let warm_t = temp_at(&warm_w, 105.0);
+        let warm_before = mineral_total(&warm_w);
+        let warm_load = crate::mineral::dissolved_at(&warm_w, 6, 8);
+        deposit_pipe_mouth(&mut warm_w, &warm_t, &warm_path);
+        let warm_dropped = warm_load - crate::mineral::dissolved_at(&warm_w, 6, 8);
+
+        let (mut hot_w, hot_path) = vent(900);
+        let hot_t = temp_at(&hot_w, 185.0);
+        let hot_load = crate::mineral::dissolved_at(&hot_w, 6, 8);
+        deposit_pipe_mouth(&mut hot_w, &hot_t, &hot_path);
+        let hot_dropped = hot_load - crate::mineral::dissolved_at(&hot_w, 6, 8);
+
+        assert!(
+            hot_dropped >= warm_dropped,
+            "a scalding vent should not deposit less than a tepid one: hot \
+             {hot_dropped} vs warm {warm_dropped}"
+        );
+        assert!(
+            hot_dropped > 0,
+            "a loaded hot vent should build something"
+        );
+        assert_eq!(
+            mineral_total(&warm_w),
+            warm_before,
+            "depositing at the mouth must be mineral-flat"
         );
     }
 
