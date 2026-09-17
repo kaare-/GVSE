@@ -289,6 +289,17 @@ exists is worth several times its distance in fresh rock.
 `PIPE_MAX_MAINS` is a backstop, not a target: a soak that reaches it is
 drawing needles rather than a network.
 
+`PIPE_JOIN_MAX_REACH` caps the reach absolutely, because the bias is a
+*ratio*: a deep spring under a tall hill has a `surface_dist` in the
+hundreds and would otherwise adopt a main hundreds of cells away. Beyond the
+reach, two hotspots are two springs.
+
+A feeder is a **buried** conduit. `walk_toward` scores openness, and Air is
+the highest rank there is, so a feeder heading sideways toward another straw
+would surface and fly across the sky in a straight line. It now refuses cells
+above the column's rock crest. `walk_pipe` can prefer air because it is aiming
+at the sky and stops at a mouth; a feeder joins two springs underground.
+
 One **main** straw walks to the free surface and is **rewalked every
 beat**, so a carve / collapse / new waterline gets a new route. Feeders
 pulse steam and

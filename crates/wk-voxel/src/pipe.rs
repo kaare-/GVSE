@@ -669,7 +669,12 @@ pub fn walk_pipe(world: &World, temp: &Temperature, root: (i32, i32)) -> PipePat
 }
 
 /// Greedy most-open walk that closes on `targets` (another reservoir / straw).
-fn walk_toward(world: &World, from: (i32, i32), targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
+fn walk_toward(
+    world: &World,
+    temp: &Temperature,
+    from: (i32, i32),
+    targets: &[(i32, i32)],
+) -> Vec<(i32, i32)> {
     let (rx, ry) = (world.wrap_x(from.0), from.1);
     if targets.is_empty() {
         return vec![(rx, ry)];
@@ -685,7 +690,7 @@ fn walk_toward(world: &World, from: (i32, i32), targets: &[(i32, i32)]) -> Vec<(
     let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
     seen.insert((rx, ry));
     let mut cur = (rx, ry);
-    for _ in 0..PIPE_MAX_LEN {
+    for _ in 0..PIPE_JOIN_MAX_REACH {
         if nearest(cur) <= 1 {
             break;
         }
@@ -711,6 +716,14 @@ fn walk_toward(world: &World, from: (i32, i32), targets: &[(i32, i32)]) -> Vec<(
             };
             let rank = openness_rank(n);
             if rank == 0 {
+                continue;
+            }
+            // Stay buried. Air is the highest openness rank there is, so a
+            // feeder heading sideways to another straw would surface and fly
+            // across the sky in a straight line — the pipe through the air.
+            // `walk_pipe` can prefer air because it is aiming at the sky and
+            // stops at a mouth; a feeder is a conduit between two springs.
+            if ny > surface_rock_y(world, temp, nx, ny) {
                 continue;
             }
             let dist = nearest((nx, ny));
@@ -1571,13 +1584,28 @@ fn nearest_main_idx(world: &World, p: (i32, i32), mains: &[PipePath]) -> Option<
 /// its distance in fresh rock.
 const PIPE_JOIN_BIAS: i32 = 4;
 
+/// Hard ceiling on how far a spring will reach for an existing straw.
+///
+/// The bias alone is a *ratio*, so a deep spring under a tall hill —
+/// `surface_dist` in the hundreds — would happily adopt a main hundreds of
+/// cells away, and `walk_toward` then drew a conduit right across the world.
+/// A conduit joining two springs is a local feature; beyond this reach two
+/// hotspots are two springs, and each gets its own straw.
+const PIPE_JOIN_MAX_REACH: i32 = 64;
+
 /// Cheaper to reach the locked straw than to bore to this cell's surface.
 fn should_feed_main(world: &World, boiler: (i32, i32), main: &PipePath) -> bool {
-    dist_to_path(world, boiler, main) < surface_dist(world, boiler) * PIPE_JOIN_BIAS
+    let reach = dist_to_path(world, boiler, main);
+    reach <= PIPE_JOIN_MAX_REACH && reach < surface_dist(world, boiler) * PIPE_JOIN_BIAS
 }
 
-fn make_feeder(world: &World, root: (i32, i32), main: &PipePath) -> PipePath {
-    let cells = walk_toward(world, root, &main.cells);
+fn make_feeder(
+    world: &World,
+    temp: &Temperature,
+    root: (i32, i32),
+    main: &PipePath,
+) -> PipePath {
+    let cells = walk_toward(world, temp, root, &main.cells);
     let mouth = *cells.last().unwrap_or(&root);
     PipePath {
         root: (world.wrap_x(root.0), root.1),
@@ -1645,7 +1673,7 @@ fn rewalk_network(world: &World, temp: &Temperature) {
             let Some(i) = nearest_main_idx(world, feeder.root, &mains) else {
                 return false;
             };
-            *feeder = make_feeder(world, feeder.root, &mains[i]);
+            *feeder = make_feeder(world, temp, feeder.root, &mains[i]);
             feeder.cells.len() >= 2
         });
         // One straw per root. A root on the book twice is the same spring
@@ -1877,7 +1905,7 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) -> bool {
                 if should_feed_main(world, (gx, gy), main)
                     && memo.feeders.len() < PIPE_MAX_FEEDERS
                 {
-                    memo.feeders.push(make_feeder(world, (gx, gy), main));
+                    memo.feeders.push(make_feeder(world, temp, (gx, gy), main));
                     continue;
                 }
             }
@@ -1888,7 +1916,7 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) -> bool {
                 }
             } else if memo.feeders.len() < PIPE_MAX_FEEDERS {
                 if let Some(main) = feed.as_ref() {
-                    memo.feeders.push(make_feeder(world, (gx, gy), main));
+                    memo.feeders.push(make_feeder(world, temp, (gx, gy), main));
                 }
             }
         }
@@ -3007,6 +3035,80 @@ mod tests {
             sat_totals(&w).cell_total,
             "a wick pass only moves water, it never mints or drops it"
         );
+    }
+
+    /// Playtest: "added a second hotspot, tried to connect together, with a
+    /// long strange pipe through air."
+    ///
+    /// Air is the highest openness rank there is, so a feeder walking
+    /// sideways toward another straw surfaced and flew across the sky in a
+    /// straight line. And the join rule was a pure ratio, so a deep spring
+    /// would reach for a main hundreds of cells away in the first place.
+    #[test]
+    fn a_second_hotspot_does_not_join_by_a_pipe_through_the_air() {
+        let mut w = plot();
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..40 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 40..50 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Two springs deep under a tall hill and far apart: the ratio rule
+        // alone would join them, since the climb to the surface is ~39.
+        for &x in &[4, 58] {
+            for y in 1..4 {
+                w.set_cell(x, y, wet_gravel(&w));
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for &x in &[4, 58] {
+            for y in 1..4 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 160.0);
+            }
+        }
+        let cfg = pipe_cfg();
+        for t in 1..=30u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+
+        // Whatever the book decides, no straw may run through open sky.
+        let (mains, feeders) = PIPE_MEMO.with(|slot| {
+            let memo = slot.borrow();
+            (memo.mains.clone(), memo.feeders.clone())
+        });
+        for path in mains.iter().chain(feeders.iter()) {
+            // A main's own mouth is above the crest by definition; the cells
+            // it threads to get there must not be.
+            for &(x, y) in path.cells.iter().filter(|&&c| c != path.mouth) {
+                let crest = surface_rock_y(&w, &hot, x, y);
+                assert!(
+                    y <= crest,
+                    "a straw runs through open sky at ({x},{y}), crest {crest}: \
+                     root {:?} mouth {:?}",
+                    path.root,
+                    path.mouth
+                );
+            }
+        }
+        // And a 54-cell gap is beyond any conduit's reach, so these are two
+        // springs rather than one joined pair.
+        for f in feeders.iter() {
+            let reach = mains
+                .iter()
+                .map(|m| dist_to_path(&w, f.root, m))
+                .min()
+                .unwrap_or(i32::MAX);
+            assert!(
+                reach <= PIPE_JOIN_MAX_REACH,
+                "a feeder reached {reach} cells for its main, cap is {}",
+                PIPE_JOIN_MAX_REACH
+            );
+        }
     }
 
     /// Heat and pressure open the pore network along a straw, and the
