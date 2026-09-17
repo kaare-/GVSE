@@ -11,7 +11,9 @@ use crate::displace::park_orphan_water;
 use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::humidity::Humidity;
-use crate::mineral::{carry_with_water, dissolved_at, precipitate_vent_mouth, widen_aperture};
+use crate::mineral::{
+    carry_with_water, dissolved_at, precipitate_at, precipitate_vent_mouth, widen_aperture,
+};
 use crate::steam::{
     add_steam, choke_leak_mass, steam_at, void_is_confined, SteamConfig, BOIL_POINT_C,
     MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
@@ -1107,7 +1109,7 @@ pub fn pulse_path_erupting(
             );
         }
     }
-    deposit_pipe_mouth(world, temp, path);
+    deposit_pipe_mouth(world, temp, path, boil);
 }
 
 /// March existing pore water one hop toward the path mouth (main line
@@ -1119,19 +1121,32 @@ pub fn pulse_path_erupting(
 /// twitched. Draining the front cell first opens room for the cell behind
 /// it, so one beat advances the whole column by a hop instead of only the
 /// last pair.
-fn pump_water_along(world: &mut World, path: &PipePath, max_sat: u8) {
+fn pump_water_along(
+    world: &mut World,
+    temp: &Temperature,
+    boil: f32,
+    path: &PipePath,
+    max_sat: u8,
+) {
     if max_sat == 0 || path.cells.len() < 2 {
         return;
     }
     for w in path.cells.windows(2).rev() {
-        hand_sat(world, w[0], w[1], max_sat);
+        hand_sat(world, temp, boil, w[0], w[1], max_sat);
     }
 }
 
 /// Move up to `max_sat` of liquid one hop, bounded by what `dest` can hold.
 /// Returns what actually landed. Mass-flat: anything `deliver_liquid`
 /// refuses goes back where it came from.
-fn hand_sat(world: &mut World, from: (i32, i32), dest: (i32, i32), max_sat: u8) -> u8 {
+fn hand_sat(
+    world: &mut World,
+    temp: &Temperature,
+    boil: f32,
+    from: (i32, i32),
+    dest: (i32, i32),
+    max_sat: u8,
+) -> u8 {
     let Some(cell) = world.get_cell(from.0, from.1) else {
         return 0;
     };
@@ -1155,7 +1170,36 @@ fn hand_sat(world: &mut World, from: (i32, i32), dest: (i32, i32), max_sat: u8) 
     if left > 0 {
         let _ = add_sat(world, from.0, from.1, left);
     }
-    took - left
+    let moved = took - left;
+    // Flow is what erodes, and this is the one place every pipe liquid
+    // transfer passes through — the wick draining the reservoir and the pump
+    // marching up the straw. Keying erosion off lumen pressure instead only
+    // ever touched the handful of cells the pulse had reached, so a whole
+    // reservoir could empty through the rock and leave it untouched.
+    //
+    // Using what actually moved as the throughput is also what the rest of
+    // the codebase does (seepage passes its transfer amount), and it keeps
+    // erosion on the paths that carry flow rather than everywhere the rock
+    // happens to be wet.
+    if moved > 0 {
+        erode_by_flow(world, temp, boil, from, moved);
+        erode_by_flow(world, temp, boil, dest, moved);
+    }
+    moved
+}
+
+/// Widen one cell in proportion to the water that just passed through it.
+fn erode_by_flow(world: &mut World, temp: &Temperature, boil: f32, at: (i32, i32), moved: u8) {
+    let t = temp.at_cell(at.0, at.1);
+    if t < boil {
+        return;
+    }
+    let hot = hot_fraction(t, boil);
+    let scale = PIPE_ERODE_SCALE_MIN + hot * (PIPE_ERODE_SCALE_MAX - PIPE_ERODE_SCALE_MIN);
+    let thr = u32::from(moved)
+        .saturating_mul(PIPE_ERODE_FLOW_GAIN)
+        .min(u32::from(u8::MAX)) as u8;
+    let _ = widen_aperture(world, at.0, at.1, thr, scale, 0x5EE7_u64, false);
 }
 
 /// Draw the claimed reservoir toward the straw that drains it.
@@ -1177,6 +1221,8 @@ fn hand_sat(world: &mut World, from: (i32, i32), dest: (i32, i32), max_sat: u8) 
 /// drains toward whichever straw is actually nearest.
 fn wick_reservoir<'a>(
     world: &mut World,
+    temp: &Temperature,
+    boil: f32,
     paths: impl Iterator<Item = &'a PipePath>,
     claimed: &FxHashSet<(i32, i32)>,
     max_sat: u8,
@@ -1202,7 +1248,7 @@ fn wick_reservoir<'a>(
                 // moment a cell is reached gives the right cascade without
                 // a parent map: `(cx, cy)` is by construction one hop
                 // closer to a straw than `n`.
-                let _ = hand_sat(world, n, (cx, cy), max_sat);
+                let _ = hand_sat(world, temp, boil, n, (cx, cy), max_sat);
                 next.push(n);
             }
         }
@@ -1401,12 +1447,106 @@ const PIPE_ERODE_SCALE_MAX: f32 = 4.0;
 /// way — `boiled × expand.min(16)`.
 const PIPE_ERODE_EXPAND_BONUS: u32 = 16;
 
+/// Throughput gain on a liquid transfer, so a hot pipe hop clears
+/// `widen_aperture`'s yield threshold.
+///
+/// The pipe moves a few sat per hop, and the threshold exists to stop rock
+/// yielding to a trickle. Hot pressurised spring water is not a trickle: it
+/// is the most chemically aggressive water in the world.
+const PIPE_ERODE_FLOW_GAIN: u32 = 8;
+
 /// 0..1 for how far over boil this cell sits.
 fn hot_fraction(t_c: f32, boil: f32) -> f32 {
     ((t_c - boil) / PIPE_HOT_SPAN_C).clamp(0.0, 1.0)
 }
 
-fn deposit_pipe_mouth(world: &mut World, temp: &Temperature, path: &PipePath) {
+/// Eighths of the vent puddle a fully superheated mouth boils off per beat,
+/// above the one eighth a just-boiling one does.
+const PIPE_VENT_BOIL_SPAN: u32 = 3;
+
+/// A hot vent boils its own puddle away and keeps the mineral.
+///
+/// This is the travertine mechanism, and without it the mouth never
+/// deposited anything. Water arriving at the lip simply pooled: that blocked
+/// further delivery, so loaded water stalled in the rock one cell below —
+/// nine hundred units of it, against three at the mouth — and the pooled
+/// water also held `carrying_capacity` (which scales with saturation) far
+/// above the load, so `precipitate_vent_mouth` never saw an excess to drop.
+///
+/// Boiling the puddle off fixes both at once: it frees room for the next
+/// loaded delivery, and it drops the ceiling the load is measured against.
+/// The water becomes cavity vapour over the vent, which is what a hot spring
+/// looks like; the mineral it was carrying stays behind, which is what builds
+/// the terrace.
+fn concentrate_hot_mouth(
+    world: &mut World,
+    temp: &Temperature,
+    humidity: Option<&mut Humidity>,
+    mouth: (i32, i32),
+    boil: f32,
+) {
+    let (mx, my) = (world.wrap_x(mouth.0), mouth.1);
+    let t = temp.at_cell(mx, my);
+    if t < boil {
+        return;
+    }
+    let Some(cell) = world.get_cell(mx, my) else {
+        return;
+    };
+    if cell.material != MaterialId::Air || cell.sat.0 == 0 {
+        return;
+    }
+    let hot = hot_fraction(t, boil);
+    let eighths = 1 + (hot * PIPE_VENT_BOIL_SPAN as f32).round() as u32;
+    let want = ((u32::from(cell.sat.0) * eighths) / 8).max(1);
+    let taken = take_sat(world, mx, my, want.min(u32::from(u8::MAX)) as u8);
+    if taken == 0 {
+        return;
+    }
+    // The vent is open, so this goes to the sky. Routing it into the cavity
+    // book instead saturated that cell at 255 and stopped the turnover dead:
+    // nothing drains cavity humidity at an open cell while the pipe owns the
+    // loop, so the vent stayed full of water and no further loaded delivery
+    // could arrive. Mass-flat either way — anything the sky and the cavity
+    // book both refuse goes back as water.
+    let mut left = u32::from(taken);
+    if let Some(h) = humidity {
+        let accepted = h.try_add(mx, my, left as f32).round().max(0.0) as u32;
+        left = left.saturating_sub(accepted);
+    }
+    if left > 0 && can_admit_steam_cell(world, mx, my) {
+        let placed = u32::from(add_steam(world, mx, my, left.min(u32::from(u8::MAX)) as u8));
+        left -= placed;
+    }
+    if left > 0 {
+        let _ = add_sat(world, mx, my, left.min(u32::from(u8::MAX)) as u8);
+    }
+}
+
+/// Drop load the straw's own water can no longer hold.
+///
+/// The flash front migrates up the conduit as the cells under it dry, and
+/// solute stays behind when water boils off — so the load piles up in dry
+/// rock near the top of the straw. Nine thousand units sat one cell under the
+/// vent while the vent itself held ten, because nothing looked anywhere but
+/// the mouth.
+///
+/// That is where a boiling conduit deposits: `precipitate_at`'s own two
+/// triggers are "the water left" and "the load is over the ceiling", and a
+/// dried cell holding a load is the first of them exactly. Sinter lines the
+/// conduit and builds up around the vent, and it closes the loop against
+/// `erode_by_flow` — flow opens the aperture, the mineral it carries lines it
+/// again — so the pair settles instead of running away.
+fn deposit_along_straw(world: &mut World, path: &PipePath) {
+    for &(gx, gy) in &path.cells {
+        if dissolved_at(world, gx, gy) == 0 {
+            continue;
+        }
+        let _ = precipitate_at(world, gx, gy);
+    }
+}
+
+fn deposit_pipe_mouth(world: &mut World, temp: &Temperature, path: &PipePath, boil: f32) {
     let (mx, my) = (world.wrap_x(path.mouth.0), path.mouth.1);
     if dissolved_at(world, mx, my) == 0 {
         return;
@@ -2051,7 +2191,14 @@ pub fn apply_pipe_motor(
     // Charge the straws from their reservoirs before firing, so a beat's
     // flash is fed by the standing body and not only by wall seepage.
     let claimed = claimed_cells();
-    wick_reservoir(world, feeders.iter().chain(mains.iter()), &claimed, water);
+    wick_reservoir(
+        world,
+        temp,
+        boil,
+        feeders.iter().chain(mains.iter()),
+        &claimed,
+        water,
+    );
     reflash_network(world, temp, expand, boil, stroke_sat(stroke, expand));
     // Freshly flashed pressure is what drives the aperture open, so erode
     // before the pulse carries that pressure away.
@@ -2069,7 +2216,7 @@ pub fn apply_pipe_motor(
             sides,
             humidity.as_deref_mut(),
         );
-        pump_water_along(world, path, water);
+        pump_water_along(world, temp, boil, path, water);
     }
     let is_erupt = (world.tick / beat) % PIPE_ERUPT_PERIOD == 0;
     for path in mains.iter() {
@@ -2087,7 +2234,14 @@ pub fn apply_pipe_motor(
                 is_erupt,
             );
         }
-        pump_water_along(world, path, water);
+        pump_water_along(world, temp, boil, path, water);
+    }
+    // Turn the vent over before judging its load: the ceiling scales with the
+    // water still standing there, and a full lip also refuses delivery.
+    for path in feeders.iter().chain(mains.iter()) {
+        concentrate_hot_mouth(world, temp, humidity.as_deref_mut(), path.mouth, boil);
+        deposit_pipe_mouth(world, temp, path, boil);
+        deposit_along_straw(world, path);
     }
     pool_residuals(world, expand);
 }
@@ -3025,7 +3179,7 @@ mod tests {
         };
         let before = sat_totals(&w).cell_total;
         let tail_before = w.get_cell(8, 1).unwrap().sat.0;
-        wick_reservoir(&mut w, std::iter::once(&path), &claimed, 8);
+        wick_reservoir(&mut w, &hot, 100.0, std::iter::once(&path), &claimed, 8);
         assert!(
             w.get_cell(8, 1).unwrap().sat.0 < tail_before,
             "the far end of the body should hand water inward"
@@ -3215,13 +3369,10 @@ mod tests {
                 w.set_cell(x, y, Cell::air());
             }
         }
-        let mut hot = temp_at(&w, 20.0);
-        for x in 4..10 {
-            for y in 1..10 {
-                let (hx, hy) = hot.tile_of(x, y);
-                hot.set_tile_c(hx, hy, 175.0);
-            }
-        }
+        // Hot across the hill, including the ground the vent sits on: a
+        // straw climbs diagonally, so pinning the heat to the root's own
+        // columns leaves the mouth cold and nothing concentrates there.
+        let mut hot = temp_at(&w, 175.0);
         let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
         // The play expansion, not the Tab maximum. At `expand == stroke` a
         // stroke is worth exactly one sat of liquid, and `carry_with_water`'s
@@ -3273,10 +3424,9 @@ mod tests {
             .map(|(x, y)| u32::from(crate::mineral::dissolved_at(&w, x, y)))
             .sum();
         assert!(
-            flowstone > 0 || load_out > 0,
-            "eroded carbonate should reach the mouth as sinter or as load \
-             standing there, got {flowstone} flowstone cells and {load_out} \
-             units above the rock"
+            flowstone > 0,
+            "eroded carbonate should build visible sinter, got {flowstone} \
+             flowstone cells with {load_out} units of load above the rock"
         );
         assert_eq!(
             mineral_total(&w),
@@ -3315,13 +3465,13 @@ mod tests {
         let warm_t = temp_at(&warm_w, 105.0);
         let warm_before = mineral_total(&warm_w);
         let warm_load = crate::mineral::dissolved_at(&warm_w, 6, 8);
-        deposit_pipe_mouth(&mut warm_w, &warm_t, &warm_path);
+        deposit_pipe_mouth(&mut warm_w, &warm_t, &warm_path, 100.0);
         let warm_dropped = warm_load - crate::mineral::dissolved_at(&warm_w, 6, 8);
 
         let (mut hot_w, hot_path) = vent(900);
         let hot_t = temp_at(&hot_w, 185.0);
         let hot_load = crate::mineral::dissolved_at(&hot_w, 6, 8);
-        deposit_pipe_mouth(&mut hot_w, &hot_t, &hot_path);
+        deposit_pipe_mouth(&mut hot_w, &hot_t, &hot_path, 100.0);
         let hot_dropped = hot_load - crate::mineral::dissolved_at(&hot_w, 6, 8);
 
         assert!(
@@ -4376,10 +4526,12 @@ mod tests {
                 .map(|x| w.get_cell(x, 1).map(|c| c.sat.0 as u32).unwrap_or(0))
                 .sum::<u32>()
         };
+        // Cold: this test is about pumping, not erosion.
+        let hot = temp_at(&w, 20.0);
         let before_src = w.get_cell(12, 1).unwrap().sat.0;
         let before_dst = w.get_cell(4, 1).unwrap().sat.0;
         let before_sum = sat_sum(&w);
-        pump_water_along(&mut w, &path, 6);
+        pump_water_along(&mut w, &hot, 100.0, &path, 6);
         let after_src = w.get_cell(12, 1).unwrap().sat.0;
         let after_dst = w.get_cell(4, 1).unwrap().sat.0;
         assert!(after_src < before_src, "feeder sat {before_src} → {after_src}");
@@ -4518,8 +4670,10 @@ mod tests {
             cells: vec![(4, 1), (4, 2), (4, 3), (4, 4)],
             mouth: (4, 4),
         };
+        // Cold: this test is about solute riding the water, not erosion.
+        let hot = temp_at(&w, 20.0);
         for _ in 0..8 {
-            pump_water_along(&mut w, &path, 8);
+            pump_water_along(&mut w, &hot, 100.0, &path, 8);
         }
         let donor_after = dissolved_at(&w, 4, 2);
         let downstream: u32 = (3..=4)
