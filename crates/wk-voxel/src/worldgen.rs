@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Deterministic continental worldgen for the voxel sim.
 //!
 //! Given a [`WorldgenParams`] descriptor and a [`World`], stamp a
@@ -11,10 +7,9 @@
 //! [`wk_material::MaterialId`] for cell materials and a deterministic
 //! hash for per-column / per-cell noise.
 //!
-//! The profile intentionally mirrors column-GVSE's ring layout at a
+//! The profile intentionally mirrors the column-era ring layout at a
 //! high level so gameplay comes out recognisably GVSE-shaped, but
-//! the *implementation* here is independent — this file MUST NOT
-//! reach into `wk_world`.
+//! the *implementation* here is independent.
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -344,7 +339,56 @@ pub const LIVE_SURFACE_DESCENT_MAX: i32 = 320;
 #[inline]
 pub fn live_surface_at(world: &World, seed: u64, gx: i32, sea: i32, width_cols: i32) -> i32 {
     let hint = continental_surface_y(seed, gx, sea, width_cols);
-    live_surface_y(world, gx, hint, LIVE_SURFACE_SEARCH)
+    let y = live_surface_y(world, gx, hint, LIVE_SURFACE_SEARCH);
+    // The hint is *generated*, so it can land anywhere the live world has since
+    // moved to — including inside the hill, or inside a void within it. From
+    // inside a cave the descent finds the cave floor and calls that the
+    // surface: measured at 11 against a true crest of 123, a 112-cell error.
+    // Everything that starts a column walk from this answer then works on the
+    // wrong part of the world; `phase` scanned a band around y≈50 and never
+    // saw the real surface, so snow sat there unmelted at 99 °C.
+    //
+    // Anything solid standing above the answer means the hint was below the
+    // crest. Re-anchor from the top of the loaded column, which nothing inside
+    // the hill can fool. The common case — a hint above the terrain — pays only
+    // the short upward probe.
+    if !solid_above_surface(world, gx, y) {
+        return y;
+    }
+    let top = column_top_loaded(world, gx, y);
+    live_surface_y(world, gx, top, LIVE_SURFACE_SEARCH)
+}
+
+/// How far above a candidate surface to look for rock that outranks it.
+const SURFACE_ROOF_PROBE: i32 = 160;
+
+/// Is there solid rock above this candidate surface? Then it is not the crest.
+fn solid_above_surface(world: &World, gx: i32, y: i32) -> bool {
+    let jx = world.wrap_x(gx);
+    for dy in 1..=SURFACE_ROOF_PROBE {
+        match world.get_cell(jx, y + dy) {
+            None => return false,
+            Some(c) if c.material.is_solid() => return true,
+            Some(_) => {}
+        }
+    }
+    false
+}
+
+/// Highest loaded cell in this column at or above `from_y`.
+///
+/// A starting point for a downward surface walk that cannot be fooled by
+/// anything inside the hill, because it is above all of it.
+pub fn column_top_loaded(world: &World, gx: i32, from_y: i32) -> i32 {
+    let jx = world.wrap_x(gx);
+    let mut y = from_y;
+    for _ in 0..LIVE_SURFACE_DESCENT_MAX {
+        if world.get_cell(jx, y + 1).is_none() {
+            break;
+        }
+        y += 1;
+    }
+    y
 }
 
 /// Skin the air actually sits on: rock bed, then standing water / ice.
@@ -1494,6 +1538,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A generated hint can land inside a cave, and the descent from there
+    /// finds the cave floor and calls it the surface.
+    ///
+    /// Measured at 11 against a true crest of 123 — a 112-cell error. Whatever
+    /// starts a column walk from that answer then works on the wrong part of
+    /// the world: `phase` scanned a band far below the terrain and never saw
+    /// the real surface, so snow sat there unmelted at 99 °C.
+    #[test]
+    fn a_cave_floor_is_not_the_live_surface() {
+        let mut w = World::new(0x51CE);
+        for cy in 0..3 {
+            w.ensure_chunk(crate::chunk::ChunkCoord::new(0, cy));
+        }
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..124 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // A tall cave inside the hill, the sort geothermal activity carves.
+        for x in 20..44 {
+            for y in 12..72 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let seed = w.seed.0;
+        // Columns whose generated hint lands inside that cave are the ones
+        // that used to report its floor.
+        let mut checked = 0;
+        for gx in 20..44 {
+            let hint = continental_surface_y(seed, gx, 20, 64);
+            if !(12..72).contains(&hint) {
+                continue;
+            }
+            checked += 1;
+            let got = live_surface_at(&w, seed, gx, 20, 64);
+            assert_eq!(
+                got, 123,
+                "column {gx} has its hint at {hint}, inside the cave, and \
+                 reported a surface of {got} instead of the crest at 123"
+            );
+        }
+        assert!(
+            checked > 0,
+            "setup: no column's hint landed inside the cave, so this proves \
+             nothing"
+        );
     }
 
     #[test]

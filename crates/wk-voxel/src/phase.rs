@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Temperature-driven freeze / thaw / snow precip / slush.
 //!
 //! Hard per-column budgets mirror the column-stack lessons
@@ -1324,6 +1320,83 @@ mod tests {
         let cell = w.get_cell(1, 1).unwrap();
         assert_eq!(cell.material, MaterialId::Air);
         assert!(cell.sat.is_full(), "thaw must yield a full water cell");
+    }
+
+    /// Playtest, long soak: "snow stopped melting when meeting warm air or
+    /// ground."
+    ///
+    /// `column_may_phase` gates the rate-limited `thaw_column` — the path that
+    /// melts *mildly* warm pack — and it starts its scan from
+    /// `live_surface_at`. A generated hint landing inside a cave used to report
+    /// the cave floor as the surface, so the scan began roughly a hundred cells
+    /// below the terrain and never reached the snow. Geothermal activity
+    /// carving caves near the surface is what started putting hints in voids.
+    ///
+    /// Only the mild path is affected: `thaw_scalding_frozen` runs
+    /// unconditionally over every column, so snow above `freeze_point + 40`
+    /// melts either way.
+    #[test]
+    fn mild_snow_melts_on_a_hill_with_a_cave() {
+        fn hill_with_cave() -> (World, Vec<i32>) {
+            let mut w = World::new(0x51CE);
+            for cy in 0..3 {
+                w.ensure_chunk(ChunkCoord::new(0, cy));
+            }
+            for x in 0..64 {
+                w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+                for y in 1..124 {
+                    w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+                }
+            }
+            for x in 20..44 {
+                for y in 12..72 {
+                    w.set_cell(x, y, Cell::air());
+                }
+            }
+            // Columns whose generated hint lands inside that cave.
+            let affected: Vec<i32> = (20..44)
+                .filter(|&gx| {
+                    let hint =
+                        crate::worldgen::continental_surface_y(w.seed.0, gx, 20, 64);
+                    (12..72).contains(&hint)
+                })
+                .collect();
+            for &gx in &affected {
+                w.set_cell(gx, 124, Cell::solid(MaterialId::Snow));
+            }
+            (w, affected)
+        }
+
+        let (mut w, affected) = hill_with_cave();
+        assert!(
+            !affected.is_empty(),
+            "setup: need a column whose hint lands in the cave"
+        );
+        // Mild warmth: well above freezing, well under the scalding threshold
+        // that melts unconditionally.
+        let mut t =
+            Temperature::with_world_bounds(4, 0, 0, 64, 192, w.seed.0, 64, 20, false);
+        t.config.base_temp_c = 12.0;
+        for v in t.cells.values_mut() {
+            *v = 12.0;
+        }
+        assert!(
+            12.0 < PhaseConfig::default().freeze_point_c + 40.0,
+            "setup: must be below the scalding threshold or this proves nothing"
+        );
+        let cfg = PhaseConfig::default();
+        for tick in 0..64u64 {
+            w.tick = tick;
+            apply_phase(&mut w, &t, &cfg);
+        }
+        for &gx in &affected {
+            assert_ne!(
+                w.get_cell(gx, 124).map(|c| c.material),
+                Some(MaterialId::Snow),
+                "mild snow at column {gx} never melted, because the column's \
+                 surface was reported inside its cave"
+            );
+        }
     }
 
     #[test]
