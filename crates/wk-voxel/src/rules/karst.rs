@@ -56,7 +56,9 @@ pub struct KarstConfig {
     /// granite into carbonate. Stone widens mechanically under throughput
     /// instead (`mineral::widen_aperture`).
     ///
-    /// Kept so existing presets and saves still deserialize. Has no effect.
+    /// Kept so existing presets and saves still deserialize. Has no effect,
+    /// and deliberately has no slider: a knob that does nothing is worse than
+    /// no knob.
     #[serde(default = "default_stone_scale")]
     pub stone_scale: f32,
 }

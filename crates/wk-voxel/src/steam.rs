@@ -118,11 +118,7 @@ pub const REVERSE_SEEP_HOPS: u8 = 16;
 /// the lumen stays a pipe. Below it, only the vent mouth deposits.
 const PIPE_LUMEN_FLOOR: u8 = VENT_PIPE_LUMEN;
 
-/// Legacy rise knob (open vents still use buoyant pour after flood).
-pub const RISE_MAX_PER_CELL: u8 = 64;
 
-/// Mist left on open wet vents only (standing water seats).
-pub const SURFACE_STEAM_RESIDUAL: u8 = 8;
 
 /// Min pocket density before escape fires.
 pub const ESCAPE_PRESSURE_MIN: f32 = 0.08;
@@ -154,8 +150,6 @@ pub struct SteamConfig {
     pub phase_expansion_drive: u16,
     /// Max hops for reverse seepage driven by phase expansion.
     pub reverse_seep_hops: u8,
-    pub rise_max_per_cell: u8,
-    pub surface_residual: u8,
     pub max_steam_cells: u16,
     pub period_ticks: u64,
     pub enable_pore_boil: bool,
@@ -193,8 +187,6 @@ impl Default for SteamConfig {
             pore_boil_max_per_cell: PORE_BOIL_MAX_PER_CELL,
             phase_expansion_drive: PHASE_EXPANSION_DRIVE,
             reverse_seep_hops: REVERSE_SEEP_HOPS,
-            rise_max_per_cell: RISE_MAX_PER_CELL,
-            surface_residual: SURFACE_STEAM_RESIDUAL,
             max_steam_cells: MAX_STEAM_CELLS as u16,
             period_ticks: STEAM_EVERY,
             enable_pore_boil: true,

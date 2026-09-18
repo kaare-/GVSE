@@ -1119,13 +1119,13 @@ impl SimSettings {
                         1.0..8.0,
                         &mut carry,
                     );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Min precip budget to snow",
-                        1.0..255.0,
-                        &mut self.phase.min_budget_to_snow,
+                    // No slider: the read floors this at a whole cell on
+                    // purpose, so the knob could only ever mislead.
+                    ui.label(
+                        None,
+                        "Snow costs a whole cell (255). Thaw yields a full water",
                     );
+                    ui.label(None, "cell, so a cheaper flake would mint water.");
                     labeled_slider(ui, hash!(), "Snow spread radius (cols)", 0.0..24.0, &mut spread);
                     labeled_slider(ui, hash!(), "Snow blanket prefer depth", 0.0..12.0, &mut blanket);
                     labeled_slider(
@@ -1161,8 +1161,10 @@ impl SimSettings {
                     self.phase.frost_coat_depth = frost_depth.round().clamp(1.0, 8.0) as u8;
                     self.phase.frost_spread_radius = frost_spread.round().clamp(0.0, 24.0) as i32;
                     self.phase.period_ticks = period.round().clamp(1.0, 120.0) as u64;
-                    self.phase.min_budget_to_snow =
-                        self.phase.min_budget_to_snow.clamp(1.0, 255.0);
+                    // A flake is a whole cell; `PhaseConfig::min_budget_to_snow`
+                    // is floored at 255 on read to stop a cheaper seat minting
+                    // water when it thaws. Pin it rather than offer a range.
+                    self.phase.min_budget_to_snow = 255.0;
                 });
                 ui.tree_node(hash!(), "Cavity humidity / pressure", |ui| {
                     ui.label(
@@ -1192,8 +1194,6 @@ impl SimSettings {
                     let mut pore_max = self.steam.pore_boil_max_per_cell as f32;
                     let mut phase_drive = self.steam.phase_expansion_drive as f32;
                     let mut reverse_hops = self.steam.reverse_seep_hops as f32;
-                    let mut rise_max = self.steam.rise_max_per_cell as f32;
-                    let mut residual = self.steam.surface_residual as f32;
                     let mut max_cells = self.steam.max_steam_cells as f32;
                     let mut period = self.steam.period_ticks as f32;
                     let mut escapes = self.steam.max_escapes_per_tick as f32;
@@ -1224,20 +1224,6 @@ impl SimSettings {
                         "Reverse seep hops",
                         1.0..48.0,
                         &mut reverse_hops,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Rise rate / cell / cadence",
-                        0.0..96.0,
-                        &mut rise_max,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Open-vent mist residual",
-                        0.0..120.0,
-                        &mut residual,
                     );
                     labeled_slider(
                         ui,
@@ -1334,8 +1320,6 @@ impl SimSettings {
                     self.steam.phase_expansion_drive =
                         phase_drive.round().clamp(1.0, 1400.0) as u16;
                     self.steam.reverse_seep_hops = reverse_hops.round().clamp(1.0, 48.0) as u8;
-                    self.steam.rise_max_per_cell = rise_max.round().clamp(0.0, 255.0) as u8;
-                    self.steam.surface_residual = residual.round().clamp(0.0, 255.0) as u8;
                     self.steam.max_escapes_per_tick = escapes.round().clamp(1.0, 64.0) as u8;
                     self.steam.void_flood_budget = flood.round().clamp(8.0, 512.0) as u16;
                     self.steam.max_steam_cells = max_cells.round().clamp(32.0, 2048.0) as u16;
@@ -1514,7 +1498,7 @@ impl SimSettings {
                     let mut min_sat = self.grain.min_flow_sat as f32;
                     let mut max_ev = self.grain.max_events_per_tick as f32;
                     labeled_slider(ui, hash!(), "Min flow sat", 1.0..255.0, &mut min_sat);
-                    labeled_slider(ui, hash!(), "Max events / tick", 0.0..256.0, &mut max_ev);
+                    labeled_slider(ui, hash!(), "Grain events / tick (0=unlimited)", 0.0..256.0, &mut max_ev);
                     self.grain.min_flow_sat = min_sat.round().clamp(1.0, 255.0) as u8;
                     self.grain.max_events_per_tick = max_ev.round().clamp(0.0, 512.0) as u32;
                     ui.separator();
@@ -2144,7 +2128,6 @@ impl SimSettings {
         self.cond.full_mass = self.cond.full_mass.clamp(8.0, 4_000.0);
         self.karst.period_ticks = karst_period.round().clamp(1.0, 256.0) as u64;
         self.karst.pore_scale = self.karst.pore_scale.clamp(0.0, 1.0);
-        self.karst.stone_scale = self.karst.stone_scale.clamp(0.0, 1.0);
         self.max_atoms = self.max_atoms.round().clamp(1.0, 4096.0);
         self.max_corpses = self.max_corpses.round().clamp(1.0, 4096.0);
         self.max_roots = self.max_roots.round().clamp(1.0, 256.0);
