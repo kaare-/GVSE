@@ -5,14 +5,6 @@ members = [
     # Active voxel stack.
     "crates/wk-voxel",
     "crates/wk-voxel-app",
-    # Legacy column stack (reference only — not the development path).
-    # See docs/VOXEL_MIGRATION.md.
-    "crates/legacy/wk-field",
-    "crates/legacy/wk-world",
-    "crates/legacy/wk-agents",
-    "crates/legacy/wk-sim",
-    "crates/legacy/wk-io",
-    "crates/legacy/wk-app",
 ]
 
 [workspace.package]
