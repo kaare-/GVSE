@@ -19,7 +19,7 @@ use crate::steam::{
     MAX_STEAM_CELLS, PHASE_EXPANSION_DRIVE, STEAM_EVERY,
 };
 use crate::temperature::Temperature;
-use crate::worldgen::{live_skin_y, live_surface_at, live_surface_y, LIVE_SURFACE_SEARCH};
+use crate::worldgen::{live_skin_y, live_surface_y, LIVE_SURFACE_SEARCH};
 
 /// Incoming puff sees one side of the cell, not the whole pond.
 pub const PIPE_SIDES: u32 = 4;
@@ -400,24 +400,35 @@ pub fn openness_rank(cell: Cell) -> u8 {
     }
 }
 
-/// Live rock crest for this column, from the same surface map humidity uses
-/// to keep vapour from clipping into the landscape.
+/// Live rock crest for this column.
 ///
-/// The continental crest is a generated altitude and can land outside the
-/// loaded column, where [`live_surface_y`] hands an unloaded hint straight
-/// back untouched — that would report a crest below bedrock. When it does,
-/// re-anchor from *above*: descending from the top of the loaded column
-/// cannot be fooled by a void inside the hill, whereas climbing from the
-/// straw's own altitude stops under the first cavity ceiling, which is the
-/// mistake this rule exists to prevent.
+/// `live_surface_y` is the same descent humidity's surface map performs; what
+/// changed is where it starts. The continental hint that map passes is only a
+/// guess, and a guess can land anywhere — outside the loaded column, inside
+/// the hill, or inside a void within it. Landing in a cavern was the worst of
+/// those: the descent found the cavern floor and reported it as the surface,
+/// which is the same blind spot as a local roof probe reached by another route.
+/// So the descent is kept and given a starting point above everything.
 fn surface_rock_y(world: &World, temp: &Temperature, gx: i32, anchor_y: i32) -> i32 {
-    let hint = live_surface_at(world, temp.seed, gx, temp.sea_level_y, temp.width_cols);
-    let hint = if world.get_cell(gx, hint).is_some() {
-        hint
-    } else {
-        column_top_loaded(world, gx, anchor_y)
-    };
-    live_surface_y(world, gx, hint, LIVE_SURFACE_SEARCH)
+    // Always anchor from *above* and descend. The continental crest is only a
+    // hint, and a hint can land anywhere — inside the hill, or inside a void
+    // within it. When it landed in a cavern, `live_surface_y` descended to the
+    // cavern floor and reported that as the surface: the same blind spot as a
+    // local roof probe, reached by a different route. Coming down from the top
+    // of the loaded column cannot be fooled by anything inside the hill.
+    //
+    // Not cached. A per-column cache has to be invalidated on every Air/solid
+    // flip, and `sky_topo_gen` does not track them finely enough — a stale
+    // crest is a straw routed against terrain that has changed, which is the
+    // class of bug this function exists to kill. The walk is only reached for
+    // Air candidates, since rock fails on material first.
+    //
+    // `temp` stays in the signature because this is the surface map humidity
+    // uses, and the hint is only worth taking when it is already above the
+    // rock — which is exactly what cannot be known before walking.
+    let _ = temp;
+    let top = column_top_loaded(world, gx, anchor_y);
+    live_surface_y(world, gx, top, LIVE_SURFACE_SEARCH)
 }
 
 /// Rock crest lifted over standing water or ice — what the open air rests on.
@@ -434,7 +445,74 @@ fn surface_skin_y(world: &World, temp: &Temperature, gx: i32, anchor_y: i32) -> 
 /// probe can tell a big cave from the atmosphere. The surface map starts
 /// from the generated terrain crest instead of climbing from below, so no
 /// cavity can impersonate the sky.
+/// Budget on the walk out of a cave looking for daylight.
+const PIPE_CAVE_BFS: usize = 256;
+
+/// Can this void reach open air by way of other void?
+///
+/// Measured against the **rock crest**, not a local roof probe.
+/// `air_void_open_to_sky` cannot answer this: it short-circuits on
+/// `void_is_confined`, which probes a fixed distance up for a ceiling, so a
+/// cavern taller than that probe is declared open before its BFS ever runs.
+/// Walking the void until a cell clears its own column's crest cannot be
+/// fooled that way.
+///
+/// Only reached for Air *below* the crest — a cave — because the crest test
+/// answers everything above it, and rock fails on material before getting
+/// here.
+fn void_reaches_open_air(world: &World, temp: &Temperature, gx: i32, gy: i32) -> bool {
+    let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
+    let start = (world.wrap_x(gx), gy);
+    seen.insert(start);
+    let mut q = vec![start];
+    let mut steps = 0usize;
+    while let Some((cx, cy)) = q.pop() {
+        steps += 1;
+        if steps > PIPE_CAVE_BFS {
+            return false;
+        }
+        if cy > surface_rock_y(world, temp, cx, cy) {
+            return true;
+        }
+        for (dx, dy) in [(0, 1), (1, 0), (-1, 0), (0, -1)] {
+            let n = (world.wrap_x(cx + dx), cy + dy);
+            match world.get_cell(n.0, n.1) {
+                // Unloaded counts as daylight only *above* the crest. At the
+                // edge of a small world it is just the end of the map, and
+                // treating that as sky lets a sealed cavern vent through it.
+                None => {
+                    if n.1 > surface_rock_y(world, temp, n.0, cy) {
+                        return true;
+                    }
+                }
+                Some(c) if c.material == MaterialId::Air => {
+                    if seen.insert(n) {
+                        q.push(n);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// A mouth is Air that the atmosphere can reach.
+///
+/// Two ways to qualify, and both are needed. Above the column's **rock crest**
+/// is the open landscape. Below it, a cave counts if the void it belongs to
+/// reaches out past the crest somewhere, so an open cave mouth in a cliff face
+/// vents while a sealed cavern does not.
+///
+/// The crest test alone rejected every open cave, because a cave is under the
+/// terrain by definition. The straw then walked straight through the cave's air
+/// and kept climbing, which is where the pipes through air came from. And a
+/// local roof probe alone cannot replace the crest test either: a cavern taller
+/// than the probe reads as open sky. Each test covers the other's blind spot.
 fn is_pipe_mouth(world: &World, temp: &Temperature, gx: i32, gy: i32, cell: Cell) -> bool {
+    if cell.material != MaterialId::Air {
+        return false;
+    }
     // Measured against the **rock** crest, not the waterline. A straw that
     // vents into its own spring pool raises the skin above its mouth, and
     // testing the skin then disqualified that mouth: the straw lost its
@@ -442,7 +520,10 @@ fn is_pipe_mouth(world: &World, temp: &Temperature, gx: i32, gy: i32, cell: Cell
     // outdoors whether or not a pond has formed on it.
     //
     // `gy` is loaded by construction here, so it anchors the surface walk.
-    cell.material == MaterialId::Air && gy > surface_rock_y(world, temp, gx, gy)
+    if gy > surface_rock_y(world, temp, gx, gy) {
+        return true;
+    }
+    void_reaches_open_air(world, temp, gx, gy)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1244,13 +1325,22 @@ fn wick_reservoir<'a>(
         return;
     }
     let mut seen: FxHashSet<(i32, i32)> = seeds.iter().copied().collect();
-    let mut frontier: Vec<(i32, i32)> = seeds;
+    // Depth *beyond* the claim, so the sweep can reach past the boiling body
+    // into the water table that recharges it.
+    let mut frontier: Vec<((i32, i32), u8)> = seeds.into_iter().map(|c| (c, 0)).collect();
     while !frontier.is_empty() {
         let mut next = Vec::new();
-        for &(cx, cy) in &frontier {
+        for &((cx, cy), depth) in &frontier {
             for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
                 let n = (world.wrap_x(cx + dx), cy + dy);
-                if !claimed.contains(&n) || !seen.insert(n) {
+                let n_depth = if claimed.contains(&n) {
+                    0
+                } else if depth < PIPE_WICK_REACH && wet_pore_at(world, n.0, n.1) {
+                    depth + 1
+                } else {
+                    continue;
+                };
+                if !seen.insert(n) {
                     continue;
                 }
                 // Discovery order *is* nearest-first, so handing inward the
@@ -1258,11 +1348,30 @@ fn wick_reservoir<'a>(
                 // a parent map: `(cx, cy)` is by construction one hop
                 // closer to a straw than `n`.
                 let _ = hand_sat(world, temp, ero, n, (cx, cy), max_sat);
-                next.push(n);
+                next.push((n, n_depth));
             }
         }
         frontier = next;
     }
+}
+
+/// How far past the claim the wick may reach for recharge.
+///
+/// The claim is the *boiling* body, but a spring's drainage basin is not the
+/// same thing as its hot vessel. Groundwater under the root is cooler than
+/// boil, so it was never claimed and the wick could not touch it — even though
+/// it sits under the most head and is the obvious thing to draw on. Bounded so
+/// a straw recharges from the aquifer around it rather than siphoning the
+/// whole water table.
+const PIPE_WICK_REACH: u8 = 24;
+
+/// Porous rock currently holding water: a recharge cell, hot or not.
+fn wet_pore_at(world: &World, gx: i32, gy: i32) -> bool {
+    world.get_cell(gx, gy).is_some_and(|c| {
+        c.material != MaterialId::Air
+            && c.sat.0 > 0
+            && water_capacity_cell(c, &world.hydro) > 0
+    })
 }
 
 fn stroke_sat(stroke: u32, expand: u16) -> u8 {
@@ -3786,6 +3895,131 @@ mod tests {
         );
     }
 
+    /// Playtest: "our surface logic for pipe/mouths isnt detecting open caves
+    /// as surface, so we get air pipes."
+    ///
+    /// A cave is under the terrain by definition, so a crest test alone reject
+    /// every one of them: the straw walked through the cave's air and kept
+    /// climbing, which is where the pipes through air came from. A cave whose
+    /// void reaches daylight is a perfectly good vent.
+    #[test]
+    fn an_open_cave_is_a_mouth_but_a_sealed_one_is_not() {
+        let mut w = plot();
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..60 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 60..70 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // An open cave: a chamber under the hill with a throat out to the face.
+        for x in 10..=20 {
+            for y in 20..=26 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for y in 26..60 {
+            w.set_cell(20, y, Cell::air());
+        }
+        // A sealed chamber of the same size, with no way out.
+        for x in 40..=50 {
+            for y in 20..=26 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let hot = temp_at(&w, 20.0);
+
+        let open = w.get_cell(14, 23).unwrap();
+        assert_eq!(open.material, MaterialId::Air, "setup: open chamber");
+        assert!(
+            is_pipe_mouth(&w, &hot, 14, 23, open),
+            "a cave that reaches daylight should vent"
+        );
+        let sealed = w.get_cell(45, 23).unwrap();
+        assert_eq!(sealed.material, MaterialId::Air, "setup: sealed chamber");
+        assert!(
+            !is_pipe_mouth(&w, &hot, 45, 23, sealed),
+            "a sealed chamber must not read as surface"
+        );
+    }
+
+    /// Playtest: "groundwater under the steam pipe root isnt feed into the
+    /// pipe, even if its definitely the warmest and under the most pressure."
+    ///
+    /// The wick only walked *claimed* cells, and the claim is the boiling body
+    /// — so water under the root, cooler than boil but under the most head,
+    /// was unreachable. A spring's drainage basin is not the same thing as its
+    /// hot vessel.
+    #[test]
+    fn groundwater_under_the_root_feeds_the_pipe() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 12..18 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Heat tiles are 4 cells tall, so the boiling body and the cool
+        // aquifer have to sit in different tile rows or the "cool" half shares
+        // a heated tile and gets claimed anyway.
+        let cap = water_capacity_cell(Cell::solid(MaterialId::Sand), &w.hydro);
+        for x in 4..12 {
+            for y in 8..12 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(cap / 4);
+                w.set_cell(x, y, c);
+            }
+            for y in 1..8 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(cap);
+                w.set_cell(x, y, c);
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 4..12 {
+            for y in 8..12 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 170.0);
+            }
+        }
+        // Everything below the heated tile row: cool, saturated, unclaimed.
+        for x in 4..12 {
+            for y in 1..8 {
+                assert!(
+                    hot.at_cell(x, y) < 100.0,
+                    "setup: ({x},{y}) must be below boil, got {}",
+                    hot.at_cell(x, y)
+                );
+            }
+        }
+        let deep = |w: &World| -> u32 {
+            (4..12)
+                .flat_map(|x| (1..8).map(move |y| (x, y)))
+                .filter_map(|(x, y)| w.get_cell(x, y).map(|c| u32::from(c.sat.0)))
+                .sum()
+        };
+        let cfg = pipe_cfg();
+        let before = deep(&w);
+        for t in 1..=40u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        assert!(
+            deep(&w) < before,
+            "the cool aquifer under the root should be drawn up into the \
+             spring: {before} -> {}",
+            deep(&w)
+        );
+    }
+
     /// Soak report: "sometimes the pipe gets confused and maps an underground
     /// head location; if i fill the hole it found with stone it will recompute
     /// and find the surface again."
@@ -3796,6 +4030,11 @@ mod tests {
     #[test]
     fn a_cavern_taller_than_the_roof_probe_is_not_the_surface() {
         let mut w = plot();
+        // The hill is 124 deep, so load chunks to hold it — `plot` only
+        // ensures one, and cells written past it silently do not exist.
+        for cy in 0..3 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
         // Deep hill, so a cavern can be taller than the 48-cell roof probe
         // and still sit well under the real sky.
         for x in 0..64 {
@@ -3832,6 +4071,12 @@ mod tests {
             "setup: the cavern must defeat the roof probe, or this proves \
              nothing"
         );
+        eprintln!("DBG crest(32,20)={} crest(32,71)={}",
+            surface_rock_y(&w, &hot, 32, 20), surface_rock_y(&w, &hot, 32, 71));
+        eprintln!("DBG cell(32,20)={:?} cell(32,72)={:?} cell(32,123)={:?} cell(32,125)={:?}",
+            w.get_cell(32,20).map(|c| c.material), w.get_cell(32,72).map(|c| c.material),
+            w.get_cell(32,123).map(|c| c.material), w.get_cell(32,125).map(|c| c.material));
+        eprintln!("DBG reaches_open={}", void_reaches_open_air(&w, &hot, 32, 20));
         let cavern = w.get_cell(32, 20).unwrap();
         assert_eq!(cavern.material, MaterialId::Air, "setup: cavern is air");
         assert!(

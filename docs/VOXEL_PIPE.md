@@ -70,31 +70,42 @@ locks), [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md).
 
 ## Surface
 
-A mouth is Air standing **above the column's rock crest**, taken from
-[`live_surface_at`] — the same surface map humidity uses to keep vapour from
-clipping into the landscape.
+A mouth is Air the atmosphere can reach, and there are **two** ways to qualify
+because each covers the other's blind spot:
 
-A local roof probe cannot do this job. It looks a fixed distance up for a
-ceiling, so any cavern taller than the probe reads as open sky and a straw
-terminates on an underground head; filling the hole with stone made it
-recompute correctly, which is the tell that the test was local. The surface
-map starts from the generated terrain crest instead of climbing from below,
-so no void inside the hill can impersonate the sky.
+- Above the column's **rock crest** — the open landscape.
+- Below it, a cave whose void **reaches out past the crest** somewhere
+  (`void_reaches_open_air`). A cave is under the terrain by definition, so the
+  crest test alone rejected every one of them: the straw walked through the
+  cave's air and kept climbing, which is where pipes through air came from.
 
-Two details it needs:
+Neither a local roof probe nor `air_void_open_to_sky` can stand in for this.
+Both consult `void_is_confined`, which probes a fixed distance up for a ceiling,
+so a cavern taller than the probe is declared open — `air_void_open_to_sky`
+short-circuits on it before its own BFS ever runs. Reachability measured against
+the crest cannot be fooled that way.
 
-- The continental crest can land **outside the loaded column**, and
-  `live_surface_y` hands an unloaded hint straight back untouched — which
-  would report a crest below bedrock. When that happens, re-anchor from the
-  top of the loaded column and descend. Anchoring at the straw's own altitude
-  instead climbs and stops under the first cavity ceiling, reintroducing the
-  bug.
-- The mouth test uses the **rock** crest, not the waterline. A straw venting
-  into its own spring pool raises the skin above its mouth, and testing the
-  skin disqualified that mouth: the straw lost its discharge and banked every
-  beat after. Air above rock is outdoors whether or not a pond has formed on
-  it. The aiming target still uses the skin, so a straw prefers to clear the
+### Finding the crest
+
+`live_surface_y` is the same descent humidity's surface map performs. What
+matters is where it starts:
+
+- The continental hint is only a guess, and a guess can land outside the loaded
+  column (reported a crest of -35, below bedrock), inside the hill, or **inside
+  a void within it**. That last one is the worst: the descent found the cavern
+  floor and called it the surface — the roof-probe blind spot reached by another
+  route. So the crest always comes down from the top of the loaded column.
+- The mouth test reads the **rock** crest, not the waterline. A straw venting
+  into its own spring pool lifts the skin above its own mouth, and testing the
+  skin disqualified it, so the straw lost its discharge and banked every beat
+  after. The aiming target still uses the skin, so a straw prefers to clear the
   pond.
+
+Deliberately **not** cached: a per-column cache has to be invalidated on every
+Air/solid flip and `sky_topo_gen` does not track them finely enough. A stale
+crest is a straw routed against terrain that has changed, which is the class of
+bug this rule exists to kill. The walk is only reached for Air candidates, since
+rock fails on material first.
 
 ## Eruption
 
@@ -249,6 +260,13 @@ sipping rate no matter how much hot water stood behind it.
 
 The body is allowed to be gridlocked: when the straw is at capacity there
 is nowhere for the water to go and nothing moves. Flash is what makes room.
+
+The sweep reaches `PIPE_WICK_REACH` **past** the claim, through any wet porous
+rock. The claim is the *boiling* body, but a spring's drainage basin is not the
+same thing as its hot vessel: groundwater under the root is cooler than boil, so
+it was never claimed and the wick could not touch it — even though it sits under
+the most head and is the obvious thing to draw on. Bounded, so a straw recharges
+from the aquifer around it rather than siphoning the whole water table.
 
 The sweep is seeded from **every** straw at once, and hands water inward at
 BFS discovery rather than through a parent map — discovery order already is
