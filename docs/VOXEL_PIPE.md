@@ -129,6 +129,28 @@ The chain from erosion to sinter, and what each species can actually do:
 | **Dissolved mineral** | Rides pore water: `deliver_liquid` carries it on every pump and wick hop. Boiling leaves it behind, which is why it concentrates at the flash front. | `precipitate_vent_mouth` builds sinter and an apron. |
 | **Suspended silt** | Does **not** travel. `sediment::carry_with_water` refuses pore space by design — a grain bed filters fines. | Free water at the vent can hold it; the eruption jet's liquid can move it. |
 
+### Where the root goes
+
+A spring rises from the middle of its heat, so a root is the **heat-weighted
+centre** of the body it drains (`hot_centre_of`), snapped to the nearest body
+cell that holds water — a dry cell cannot flash. Candidates used to be taken in
+tile-scan order, so the root was whichever wet hot cell the sweep met first: a
+corner of the reservoir, often out where the rock is barely over boil. That is
+the coolest part of the body and the longest way from anywhere, so the walk set
+off across the hill instead of climbing out of it.
+
+### Heat resolution
+
+Heat lives on 4×4 tiles, and where that grid shows depends on what reads it:
+
+- **Erosion** samples `sample_bilinear`. It carves the rock, so its gate is
+  what the player ends up looking at — with tile heat, every cell in a tile
+  yields or refuses together and the temperature grid prints itself into the
+  stone as square zig-zags along the edge of the reservoir.
+- **Claim membership** stays on tile heat. Sampling bilinearly there shrinks a
+  small hot region to its interior and can split one body in two, and one hill
+  wanting to be one spring matters more than a tidy claim edge.
+
 ### Erode → carry → deposit
 
 **Flow erodes**, so erosion hangs off `hand_sat` — the one place every pipe
@@ -147,6 +169,13 @@ thousand units against three at the vent, when only the mouth was checked.
 `deposit_along_straw` uses `precipitate_at`, whose own triggers are "the water
 left" and "over the ceiling"; a dried cell holding a load is the first
 exactly. Sinter lines the conduit and builds around the vent.
+
+**The reservoir deposits too**, not only the straw. The wick erodes the body as
+it drains it, so most of the freed carbonate is out in the reservoir — but
+deposition only ever walked the straw, so a body cell that had dried still held
+its load with nothing that would come for it. Load standing in *wet* rock is
+dissolved in its pore water and belongs there; it comes out where the water
+goes.
 
 **A hot vent boils its puddle off and keeps the mineral** — the travertine
 mechanism. Without it, arriving water pooled at the lip, which both refused

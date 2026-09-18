@@ -1193,7 +1193,13 @@ fn erode_by_flow(world: &mut World, temp: &Temperature, ero: Erode, at: (i32, i3
     if ero.gain == 0 {
         return;
     }
-    let t = temp.at_cell(at.0, at.1);
+    // Bilinear, not per-tile. Erosion is what carves the rock, so its gate is
+    // what the player actually sees: with tile heat every cell in a 4×4 tile
+    // yields or refuses together, and the temperature grid prints itself into
+    // the stone as square zig-zags along the edge of the reservoir.
+    // `sample_bilinear` exists for this — heat still lives on tiles, but the
+    // boundary resolves per block.
+    let t = temp.sample_bilinear(at.0 as f32, at.1 as f32);
     if t < ero.boil {
         return;
     }
@@ -1440,16 +1446,6 @@ const PIPE_HOT_SPAN_C: f32 = 80.0;
 const PIPE_ERODE_SCALE_MIN: f32 = 0.8;
 const PIPE_ERODE_SCALE_MAX: f32 = 4.0;
 
-/// Cap on the expansion bonus that makes steam erosive where the same water
-/// as liquid would not be.
-///
-/// `widen_aperture` reads `throughput` on the sat scale, against a yield
-/// threshold of `mineral::APERTURE_MIN_THROUGHPUT`. Converting lumen volume
-/// back to sat divides the expansion out again and lands under that
-/// threshold, so nothing ever eroded. The leftover motor solved this the same
-/// way — `boiled × expand.min(16)`.
-const PIPE_ERODE_EXPAND_BONUS: u32 = 16;
-
 /// Default throughput gain on a liquid transfer, so a hot pipe hop clears
 /// `widen_aperture`'s yield threshold.
 ///
@@ -1558,6 +1554,26 @@ fn deposit_along_straw(world: &mut World, path: &PipePath) {
     }
 }
 
+/// Drop load the reservoir's own water can no longer hold.
+///
+/// The wick erodes the body as it drains it, so most of the carbonate is
+/// freed out in the reservoir — but deposition only ever visited the straw, so
+/// that load simply accumulated. A soak left ten thousand units of dissolved
+/// mineral standing in rock, doing nothing: books worth of load sitting
+/// unused, rather than anything being destroyed.
+///
+/// The same trigger applies out here as on the straw: a cell whose water has
+/// gone cannot hold what it was carrying, so it cements. That is what turns a
+/// geothermal body into veined, banded rock instead of a uniformly porous one.
+fn deposit_in_reservoir(world: &mut World, claimed: &FxHashSet<(i32, i32)>) {
+    for &(gx, gy) in claimed {
+        if dissolved_at(world, gx, gy) == 0 {
+            continue;
+        }
+        let _ = precipitate_at(world, gx, gy);
+    }
+}
+
 fn deposit_pipe_mouth(world: &mut World, temp: &Temperature, path: &PipePath, boil: f32) {
     let (mx, my) = (world.wrap_x(path.mouth.0), path.mouth.1);
     if dissolved_at(world, mx, my) == 0 {
@@ -1568,45 +1584,6 @@ fn deposit_pipe_mouth(world: &mut World, temp: &Temperature, path: &PipePath, bo
     // temperature is what makes a hot spring deposit more than a warm seep.
     let warmth = hot_fraction(temp.at_cell(mx, my), boil);
     let _ = precipitate_vent_mouth(world, mx, my, warmth);
-}
-
-/// Heat and pressure open the pore network along a straw.
-///
-/// The leftover motor eroded its own route — `widen_aperture` at a dozen call
-/// sites — and the cell pipe replaced it without carrying that over, so a
-/// scalding pressurised straw left the rock exactly as it found it. Hot water
-/// is aggressive: it widens the apertures it passes through, which is what
-/// turns a seep into a conduit, and carbonate it takes goes into the
-/// dissolved ledger, which is the load that later builds sinter at the mouth.
-///
-/// Throughput is the pressure actually standing in the cell, so only cells
-/// the pulse drives erode and `widen_aperture`'s own threshold keeps
-/// competent rock from yielding to a trickle. `mint_void` stays false: a
-/// conduit stays rock.
-fn erode_pipe_pores(
-    world: &mut World,
-    temp: &Temperature,
-    path: &PipePath,
-    expand: u16,
-    boil: f32,
-) {
-    let exp = u32::from(expand.max(1));
-    for &(gx, gy) in &path.cells {
-        let live = pipe_live_at(world, gx, gy);
-        if live == 0 {
-            continue;
-        }
-        let t = temp.at_cell(gx, gy);
-        if t < boil {
-            continue;
-        }
-        let thr = (live / exp)
-            .saturating_mul(u32::from(expand.max(1)).min(PIPE_ERODE_EXPAND_BONUS))
-            .min(u32::from(u8::MAX)) as u8;
-        let hot = hot_fraction(t, boil);
-        let scale = PIPE_ERODE_SCALE_MIN + hot * (PIPE_ERODE_SCALE_MAX - PIPE_ERODE_SCALE_MIN);
-        let _ = widen_aperture(world, gx, gy, thr, scale, 0x5EED_u64, false);
-    }
 }
 
 /// Pool residuals inside each 4×4 heat tile into sat when ≥ expand.
@@ -1928,9 +1905,10 @@ fn collect_boiler_cands(
                 if cell.sat.0 == 0 || cell.material == MaterialId::Air {
                     continue;
                 }
-                let before = seen.len();
-                claim_wet_hot_body(world, temp, gx, gy, boil, &mut seen);
-                cands.push((seen.len() - before, (gx, gy), t));
+                let body = claim_wet_hot_body(world, temp, gx, gy, boil, &mut seen);
+                let size = body.len();
+                let root = hot_centre_of(world, temp, &body).unwrap_or((gx, gy));
+                cands.push((size, root, t));
                 if cands.len() >= PIPE_CAND_SCAN {
                     break 'tiles;
                 }
@@ -1999,6 +1977,75 @@ fn reclaim_orphan_lumen(world: &mut World, expand: u16) {
         }
         back += sat.saturating_mul(exp);
         add_residual(world, gx, gy, back);
+    }
+}
+
+/// Heat-weighted centre of a claimed body, snapped to a cell that can
+/// actually be a root.
+///
+/// Candidates used to be taken in tile-scan order, so the root was whichever
+/// wet hot cell the sweep happened to meet first — an arbitrary corner of the
+/// reservoir, often out at one extreme edge where the rock is barely over
+/// boil. That is a bad place to start a straw from: it is the coolest part of
+/// the body and the longest way from anywhere, so the walk sets off across the
+/// hill instead of climbing out of it.
+///
+/// A spring rises from the middle of its heat. Weighting by how far each cell
+/// is over boil puts the root in the hot core, then it snaps to the nearest
+/// body cell that is actually wet, since a dry cell cannot flash.
+fn hot_centre_of(
+    world: &World,
+    temp: &Temperature,
+    body: &[(i32, i32)],
+) -> Option<(i32, i32)> {
+    if body.is_empty() {
+        return None;
+    }
+    // Wrap-safe mean: average offsets from the first cell rather than raw x.
+    let (ax, ay) = body[0];
+    let mut wsum = 0.0f64;
+    let mut sx = 0.0f64;
+    let mut sy = 0.0f64;
+    for &(x, y) in body {
+        let t = temp.sample_bilinear(x as f32, y as f32);
+        // Over-boil excess, with a floor so a uniformly hot body still has a
+        // geometric centre rather than collapsing to zero weight.
+        let w = ((t - BOIL_POINT_C).max(0.0) + 1.0) as f64;
+        sx += w * f64::from(wrap_signed_dx(world, x, ax));
+        sy += w * f64::from(y - ay);
+        wsum += w;
+    }
+    if wsum <= 0.0 {
+        return None;
+    }
+    let cx = world.wrap_x(ax + (sx / wsum).round() as i32);
+    let cy = ay + (sy / wsum).round() as i32;
+    // Snap to the nearest body cell holding water: the root has to flash.
+    body.iter()
+        .filter(|&&(x, y)| {
+            world
+                .get_cell(x, y)
+                .is_some_and(|c| c.sat.0 > 0 && c.material != MaterialId::Air)
+        })
+        .min_by_key(|&&(x, y)| wrap_chebyshev(world, (x, y), (cx, cy)))
+        .copied()
+        .or_else(|| body.first().copied())
+}
+
+/// Signed wrap-aware x offset from `bx` to `x`, shortest way round.
+fn wrap_signed_dx(world: &World, x: i32, bx: i32) -> i32 {
+    let d = x - bx;
+    match world.wrap_width {
+        Some(w) if w > 0 => {
+            if d > w / 2 {
+                d - w
+            } else if d < -w / 2 {
+                d + w
+            } else {
+                d
+            }
+        }
+        _ => d,
     }
 }
 
@@ -2085,13 +2132,18 @@ fn claim_wet_hot_body(
     gy: i32,
     boil: f32,
     taken: &mut FxHashSet<(i32, i32)>,
-) {
+) -> Vec<(i32, i32)> {
     let gx = world.wrap_x(gx);
+    // Tile heat decides *membership*. Sampling bilinearly here shrinks a
+    // small hot region to its interior and can split one body in two, which
+    // changes the topology rather than just the look of it — and one hill
+    // wanting to be one spring matters more than a tidy claim edge.
+    let heat = |x: i32, y: i32| temp.at_cell(x, y);
     let wet_hot = |world: &World, x: i32, y: i32| -> bool {
         let Some(cell) = world.get_cell(x, y) else {
             return false;
         };
-        cell.sat.0 > 0 && cell.material != MaterialId::Air && temp.at_cell(x, y) >= boil
+        cell.sat.0 > 0 && cell.material != MaterialId::Air && heat(x, y) >= boil
     };
     // Spread through hot **porous** rock, wet or not. Requiring water in
     // every cell meant a draining reservoir tore into fragments as its pores
@@ -2105,16 +2157,18 @@ fn claim_wet_hot_body(
         };
         cell.material != MaterialId::Air
             && water_capacity_cell(cell, &world.hydro) > 0
-            && temp.at_cell(x, y) >= boil
+            && heat(x, y) >= boil
     };
     // Claim on **push**, not on pop. Popping meant a cell discovered by
     // several neighbours paid for a chunk lookup and a temperature lookup
     // once per discovering edge — up to eight times per cell across a 30k
     // cell reservoir.
+    let mut body = Vec::new();
     let mut stack = Vec::new();
     if wet_hot(world, gx, gy) {
         if taken.insert((gx, gy)) {
             stack.push((gx, gy));
+            body.push((gx, gy));
         }
     } else {
         for dy in -1..=1 {
@@ -2126,12 +2180,13 @@ fn claim_wet_hot_body(
                 let ny = gy + dy;
                 if wet_hot(world, nx, ny) && taken.insert((nx, ny)) {
                     stack.push((nx, ny));
+                    body.push((nx, ny));
                 }
             }
         }
     }
     if stack.is_empty() {
-        return;
+        return body;
     }
     let mut n = 0usize;
     while let Some((x, y)) = stack.pop() {
@@ -2154,9 +2209,11 @@ fn claim_wet_hot_body(
                 }
                 taken.insert((nx, ny));
                 stack.push((nx, ny));
+                body.push((nx, ny));
             }
         }
     }
+    body
 }
 
 /// Rewalk, attach feeders, pulse steam + water. Off-beat only binds memo.
@@ -2216,11 +2273,6 @@ pub fn apply_pipe_motor(
         water,
     );
     reflash_network(world, temp, expand, boil, stroke_sat(stroke, expand));
-    // Freshly flashed pressure is what drives the aperture open, so erode
-    // before the pulse carries that pressure away.
-    for path in feeders.iter().chain(mains.iter()) {
-        erode_pipe_pores(world, temp, path, expand, boil);
-    }
     for path in feeders.iter() {
         pulse_path(
             world,
@@ -2259,6 +2311,7 @@ pub fn apply_pipe_motor(
         deposit_pipe_mouth(world, temp, path, boil);
         deposit_along_straw(world, path);
     }
+    deposit_in_reservoir(world, &claimed);
     pool_residuals(world, expand);
 }
 
@@ -3294,9 +3347,9 @@ mod tests {
         }
     }
 
-    /// Heat and pressure open the pore network along a straw, and the
-    /// carbonate that takes goes into the dissolved ledger rather than
-    /// vanishing. The leftover motor did this; the pipe had dropped it.
+    /// Flow erodes, and the carbonate it frees goes into the dissolved ledger
+    /// rather than vanishing. The leftover motor eroded its route; the pipe
+    /// had dropped it entirely.
     #[test]
     fn a_hot_pressurised_straw_erodes_its_pore_network() {
         fn limestone_hill() -> World {
@@ -3325,7 +3378,7 @@ mod tests {
             (1..=9).map(|y| u32::from(w.get_cell(6, y).unwrap().pore)).sum()
         };
 
-        // Hot and pressurised: the apertures open.
+        // Hot with flow through it: the apertures open.
         let mut w = limestone_hill();
         let hot = temp_at(&w, 170.0);
         for &(gx, gy) in &straw.cells {
@@ -3333,7 +3386,13 @@ mod tests {
         }
         let pore_before = pore_of(&w);
         let mineral_before = mineral_total(&w);
-        erode_pipe_pores(&mut w, &hot, &straw, EXP, 100.0);
+        let ero = Erode {
+            boil: 100.0,
+            gain: default_pipe_erode_gain().into(),
+        };
+        for &(gx, gy) in &straw.cells {
+            erode_by_flow(&mut w, &hot, ero, (gx, gy), 8);
+        }
         assert!(
             pore_of(&w) > pore_before,
             "a scalding pressurised straw should widen its apertures: {} -> {}",
@@ -3353,14 +3412,16 @@ mod tests {
             "erosion should leave carbonate in solution to ride out"
         );
 
-        // Cold rock does not yield, however much pressure stands in it.
+        // Cold rock does not yield, however much flow passes through it.
         let mut cold_w = limestone_hill();
         let cold = temp_at(&cold_w, 40.0);
         for &(gx, gy) in &straw.cells {
             set_live(&mut cold_w, gx, gy, u32::from(EXP) * 40, 40.0);
         }
         let cold_before = pore_of(&cold_w);
-        erode_pipe_pores(&mut cold_w, &cold, &straw, EXP, 100.0);
+        for &(gx, gy) in &straw.cells {
+            erode_by_flow(&mut cold_w, &cold, ero, (gx, gy), 8);
+        }
         assert_eq!(
             pore_of(&cold_w),
             cold_before,
@@ -3371,12 +3432,169 @@ mod tests {
         let mut slack = limestone_hill();
         let slack_t = temp_at(&slack, 170.0);
         let slack_before = pore_of(&slack);
-        erode_pipe_pores(&mut slack, &slack_t, &straw, EXP, 100.0);
+        for &(gx, gy) in &straw.cells {
+            erode_by_flow(&mut slack, &slack_t, ero, (gx, gy), 0);
+        }
         assert_eq!(
             pore_of(&slack),
             slack_before,
             "heat alone without throughput must not widen anything"
         );
+    }
+
+    /// Soak note: "choosing strange root positions in low heat extreme left or
+    /// right positions, i think the root should be the averaged hot center of
+    /// the reservoir."
+    ///
+    /// Candidates were taken in tile-scan order, so the root was whichever wet
+    /// hot cell the sweep met first — a corner of the body, out where the rock
+    /// is barely over boil.
+    #[test]
+    fn the_root_sits_in_the_hot_centre_not_at_an_edge() {
+        let mut w = plot();
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..14 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in 14..20 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // A wide wet body, hottest in the middle and barely boiling at the
+        // ends — the shape that used to put the root out on the left edge.
+        for x in 8..56 {
+            for y in 1..8 {
+                w.set_cell(x, y, wet_gravel(&w));
+            }
+        }
+        let mut hot = temp_at(&w, 20.0);
+        for x in 8..56 {
+            for y in 1..8 {
+                let (hx, hy) = hot.tile_of(x, y);
+                // 105 °C at the ends rising to ~190 °C at x=32.
+                let from_mid = (x - 32).abs() as f32 / 24.0;
+                hot.set_tile_c(hx, hy, 190.0 - from_mid * 85.0);
+            }
+        }
+        let cfg = pipe_cfg();
+        for t in 1..=6u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, None);
+        }
+        let roots = PIPE_MEMO.with(|slot| {
+            let memo = slot.borrow();
+            memo.mains
+                .iter()
+                .chain(memo.feeders.iter())
+                .map(|p| p.root)
+                .collect::<Vec<_>>()
+        });
+        assert!(!roots.is_empty(), "the hill should have grown a straw");
+        for (x, _) in roots.iter().copied() {
+            assert!(
+                (20..=44).contains(&x),
+                "a root sits at x={x}, out toward the cool end; the body \
+                 spans 8..56 with its heat centred on 32, roots {roots:?}"
+            );
+        }
+    }
+
+    /// Soak note: "a sneaking suspicion that either erosion on thermal is
+    /// destroying blocks or that we have books worth of dissolved sitting
+    /// unused."
+    ///
+    /// Nothing is destroyed — the mineral ledger is flat across erosion,
+    /// transport and deposition. The load standing in the reservoir is
+    /// dissolved *in its pore water*, which is where it belongs; it comes out
+    /// where the water leaves. What was missing is that deposition only ever
+    /// visited the straw, so a body cell that had dried still held its load
+    /// with nothing that would ever come for it.
+    #[test]
+    fn a_dried_reservoir_cell_lays_its_load_down() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..10 {
+                let mut c = Cell::solid(MaterialId::Limestone);
+                c.pore = 40;
+                w.set_cell(x, y, c);
+            }
+        }
+        // Two body cells carrying load: one still wet, one boiled dry.
+        let cap = water_capacity_cell(
+            {
+                let mut c = Cell::solid(MaterialId::Limestone);
+                c.pore = 40;
+                c
+            },
+            &w.hydro,
+        );
+        let wet = (5, 3);
+        let dry = (9, 3);
+        if let Some(mut c) = w.get_cell(wet.0, wet.1) {
+            c.sat = Sat(cap);
+            w.set_cell(wet.0, wet.1, c);
+        }
+        crate::mineral::add_dissolved(&mut w, wet.0, wet.1, 20);
+        crate::mineral::add_dissolved(&mut w, dry.0, dry.1, 20);
+        let claimed: FxHashSet<(i32, i32)> = [wet, dry].into_iter().collect();
+
+        let before = mineral_total(&w);
+        deposit_in_reservoir(&mut w, &claimed);
+
+        assert!(
+            dissolved_at(&w, dry.0, dry.1) < 20,
+            "a dried body cell cannot hold what it was carrying, so it must \
+             cement — still holding {}",
+            dissolved_at(&w, dry.0, dry.1)
+        );
+        assert_eq!(
+            dissolved_at(&w, wet.0, wet.1),
+            20,
+            "a cell whose water is still there keeps its load in solution"
+        );
+        assert_eq!(
+            mineral_total(&w),
+            before,
+            "depositing is a transfer, not a loss"
+        );
+    }
+
+    /// Erosion, transport and deposition together never mint or destroy
+    /// mineral, over a long run on a body that drains.
+    #[test]
+    fn the_thermal_loop_is_mineral_flat_over_a_long_run() {
+        let mut w = plot();
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..10 {
+                let mut c = Cell::solid(MaterialId::Limestone);
+                c.pore = 40;
+                let cap = water_capacity_cell(c, &w.hydro);
+                c.sat = Sat(cap);
+                w.set_cell(x, y, c);
+            }
+            for y in 10..18 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut hot = temp_at(&w, 175.0);
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let cfg = SteamConfig {
+            phase_expansion_drive: PHASE_EXPANSION_DRIVE,
+            ..pipe_cfg()
+        };
+        let mineral_before = mineral_total(&w);
+        for t in 1..=200u64 {
+            w.tick = t * cfg.pipe_beat;
+            apply_pipe_motor(&mut w, &mut hot, &cfg, Some(&mut h));
+            assert_eq!(
+                mineral_total(&w),
+                mineral_before,
+                "mineral drifted on beat {t}"
+            );
+        }
     }
 
     /// The Tab erosion knob has to actually reach the rock, and zero has to
