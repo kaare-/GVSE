@@ -15,6 +15,19 @@ leftover field off. Leftover tests keep the field (`SteamConfig` defaults).
 pure move, verified line by line against the commit before it.
 **Crate:** `wk-voxel` (`pipe.rs`).
 
+## Player surface
+
+- **P** paints the pipe: dim claimed boiler, mid straw, bright mouth,
+  brightest live puff. The leftover field owns P only when the pipe is off.
+- HUD `steam=` is `Nc P=mains+feeders/cells sat=<mass> u=<live>` when the
+  pipe is on; leftover field prints `L=zone/pin` instead.
+- HUD `cave_h=` is sealed ambient cave cells, not the `steam=` field.
+- F6 glossary pages 2 / 4 / 6 cover straw / feeder / mouth / sinter / HUD.
+- Tab → Climate → Cavity humidity: pipe on/off, leftover field, sides,
+  stroke, beat, erosion gain. Cadence sliders are inert while the pipe is on.
+- Inspector prints `pipe=` (P band) on a pipe cell; `leftover=` only when
+  the leftover field owns P.
+
 Temperature only **ignites**. Steam, pressure, and the overlay live on the
 **water / seepage grid**. Seepage still moves liquid. The leftover zone
 flood is not this motor.

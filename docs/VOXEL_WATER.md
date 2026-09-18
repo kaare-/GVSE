@@ -111,7 +111,8 @@ Per wet Air cell (compute-then-apply, mass-conserving):
    (weather + open caves), sparse `World.cave_humidity` (ambient sealed-cave
    air), and sparse `World.steam` (pressurized cavity humidity wire; closed/semi-closed voids). Unroofed
    hot free water is accelerated evaporization into Humidity; sealed films
-   feed `cave_humidity`. See [`VOXEL_GEYSER.md`](VOXEL_GEYSER.md) § P3.
+   feed `cave_humidity`. Play boiling / geysers are the cell pipe
+   ([`VOXEL_PIPE.md`](VOXEL_PIPE.md)). See [`VOXEL_GEYSER.md`](VOXEL_GEYSER.md) § P3 / P4.
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 

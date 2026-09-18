@@ -14,9 +14,10 @@ far / near ridge fills           XY parallax; sky-washed; soft crest feather
 terrain + standing water         night: deep cool darken + weak moon ambient
 day canopy shade                 humidity column dim + sun cast
 humidity vapour wash             H overlay (default on; sky H + sealed cave humidity, same soft white wash)
+steam / cavity haze               separate wash when Tab cavity humidity is on
 wind lattice arrows               V overlay (off by default; coarse, short)
                                   underwater → teal ΔT current arrows instead
-debug overlays → organisms
+debug overlays → organisms        P paints the steam pipe, not leftover volume
 night moon cast                  after organisms
 HUD
 ```
@@ -27,9 +28,10 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 
 | Key | What |
 |-----|------|
-| **H** | Humidity **tile raster** — the vapour look. Tab → Climate → Wind + humidity: resample button (bilinear vs 4×4 tiles) and min-mass slider. |
+| **H** | Humidity **tile raster** — the vapour look (sky H + sealed cave humidity). Tab → Climate → Wind + humidity: resample button (bilinear vs 4×4 tiles) and min-mass slider. |
 | **V** | Wind lattice above water + teal water-current arrows in free water (default off) |
-| **F6** | Glossary — keys, water/sky words, HUD tags |
+| **P** | Steam pipe — claimed boiler / straw / mouth / live. Leftover-field volume only if the pipe is off. |
+| **F6** | Glossary — keys, water / sky / ground / HUD words, including the pipe |
 
 Humidity **is** the weather store, now with temperature/wind:
 evap(T, wind) → thermal rise → drizzle when vapor meets colder air /

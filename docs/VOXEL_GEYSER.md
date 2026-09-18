@@ -1,10 +1,9 @@
 # Geyser landscape motor
 
-**Status:** P0–P3 + three-store humidity model (sky H / sealed
+**Status:** P0–P4 + three-store humidity model (sky H / sealed
 `cave_humidity` / pressurized cavity humidity (`steam` wire)). Play leftover
-pressure is the cell-resolution **steam pipe** ([`VOXEL_PIPE.md`](VOXEL_PIPE.md)).
-Open hot water is accelerated evap into sky H. **P4** episodic jet still
-waits on the FPS gate below.
+pressure is the cell-resolution **steam pipe** ([`VOXEL_PIPE.md`](VOXEL_PIPE.md)),
+including the P4 episodic jet. Open hot water is accelerated evap into sky H.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** native **upward** landscape builder (hot springs → geysers →
 sinter pipes/hills) that balances existing **downhill** erosion, without a
@@ -41,7 +40,7 @@ karst opens conduits that feed confined rise
 | Weather vs boiler | Not “can I see the sky.” **Weather** = vapour leaves as fast as it is made (open hot rock, wide U). **Boiler** = leftover volume packs the vessel (sealed, or fat pocket + pinprick throat — including a 100-wide cave and a 1-wide chimney). Ambiguous cuts bias weather. |
 | Pore pressure transport | **Marble tube:** surplus at the hot end displaces groundwater (one in, one out). Often a cold spring; heat is a dye on that column; gas at the mouth only when the throat cannot refill. Winner-take-most. Dry open pores may take **distilled** gas (no solute). Drive is leftover volume, not minted mass; conduits stay rock (`mint_void = false`). |
 | Mouth leak | Choke rate emits **mass** (never volume). Mouth T ≥ live boil → sky H like evap. Cooler → distilled liquid at the lip. **No mineral rain.** Rejected H parks as water. |
-| Pressure HUD | Inspector shows `pressure=` on hot saturated rock (pore flash) and on cavity vapour seats. Overlay **P** paints the pore/cavity pressure gradient (indigo → magenta → amber). Cavity fill is the connected-pocket mean (follows the cave / wet walls); not a 3×16 candle and not a continuum PDE. |
+| Pressure HUD | Inspector shows `pipe=` (P overlay band: boiler / straw / mouth / live) when the pipe owns P, else `leftover=` leftover-field volume. Overlay **P** paints the pipe network, not a continuum PDE. |
 | Pore phase motor | Liquid→gas expansion is a **force budget** (`phase_expansion_drive`, default ~96×, Tab up to 192×), not minted mass. Heat above 100 °C further scales the pulse (~×3 by +80 °C). Expand is the primary knob (not `boiled×expand`, which saturated a u8 at tiny factors); still deliberately far below Clausius 1700×. Reverse seep **advects tile heat** with the water and follows **highest permeability** (path of least resistance); vents drop Flowstone. Existing cavity humidity keeps driving pore push + heat deposit beyond the hot zone. |
 | Pressure | **No continuum PDE.** Sparse underground vapour density + episodic escape (widen / burst / reverse push). Reuse confined communicating-vessel head. |
 | Pressure sinter | Buried hot saturated grains (`LooseRock` / `Gravel` / `Sand`) weld under pore-flash drive so the motor is not stuck on talus: carbonate cement when load ≥ threshold, otherwise Stone weld (no carbonate invent). Hydrothermal solute inject is **grain-only** and capped. |
@@ -178,10 +177,13 @@ Save schema **v18** (`cave_humidity`). Cadence `STEAM_EVERY` (= 5).
 sealed cool film feeds `cave_humidity` not sky H; roofed ≥100 °C water mints
 steam and pressurizes; cool steam recondenses.
 
-### P4 — Episodic geyser jet — **next** (still FPS-aware)
+### P4 — Episodic geyser jet — **done** (pipe eruption)
 
-Per-vent charge bag + surface jet + cooldown; rate-cap; timings bucket.
-Escape tubes from P3 feed this.
+The play motor is the cell pipe. A main simmers `PIPE_ERUPT_PERIOD − 1`
+beats at `stroke / period`, then erupts the banked live charge as a
+visible jet (water first, vapour second). See [`VOXEL_PIPE.md`](VOXEL_PIPE.md)
+§ Eruption. The leftover-field cadence jet stays behind
+`enable_leftover_field` (off in play).
 
 ### P5 — Frost heave — optional, later
 

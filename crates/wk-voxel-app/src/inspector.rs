@@ -5,9 +5,10 @@ use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     cave_humidity_at, cell_pressure_norm_with_boil, is_fungus, is_land_plant, permeability_cell,
-    prepare_leftover_pressure, soft_litter_at, steam_at, steam_pressure_norm, vessel_is_boiler,
-    void_is_confined, water_capacity_cell, Atom, Cell, CellPressureKind, Corpse, GeotechMap,
-    Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
+    pipe_overlay_band, pipe_painting, prepare_leftover_pressure, soft_litter_at, steam_at,
+    steam_pressure_norm, vessel_is_boiler, void_is_confined, water_capacity_cell, Atom, Cell,
+    CellPressureKind, Corpse, GeotechMap, Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS,
 };
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -259,7 +260,12 @@ pub fn draw_block_inspector(
             }
             lines.push(format!("flags=0x{:02X}", c.flags.0));
             let steam = steam_at(world, gx, gy);
-            prepare_leftover_pressure(world, temperature, boil_c, expand);
+            let pipe_on = pipe_painting(world);
+            // The leftover field is unused while the pipe owns P — skip the
+            // rebuild so a click on the straw does not walk a 28k zone.
+            if !pipe_on {
+                prepare_leftover_pressure(world, temperature, boil_c, expand);
+            }
             let (press, press_kind) =
                 cell_pressure_norm_with_boil(world, gx, gy, temp_c, boil_c, expand);
             // Hot saturated rock used to hide pressure entirely — cavity_h only
@@ -272,20 +278,26 @@ pub fn draw_block_inspector(
                 };
                 let boiler = c.material == MaterialId::Air && vessel_is_boiler(world, gx, gy);
                 let cavity = steam_pressure_norm(world, gx, gy);
-                let kind = match press_kind {
-                    CellPressureKind::Cavity => "vessel leftover",
-                    CellPressureKind::PoreFlash => "leftover",
-                    CellPressureKind::None => "leftover",
+                let pipe_band = pipe_on && press > 0.0;
+                let kind = if pipe_band {
+                    pipe_overlay_band(press)
+                } else {
+                    match press_kind {
+                        CellPressureKind::Cavity => "vessel leftover",
+                        CellPressureKind::PoreFlash => "leftover",
+                        CellPressureKind::None => "leftover",
+                    }
                 };
+                let press_label = if pipe_band { "pipe" } else { "leftover" };
                 if steam > 0 || c.material == MaterialId::Air {
                     lines.push(format!(
-                        "cavity_h={steam}/255  roofed={}  boiler={}  leftover={press:.2} ({kind}; tile T={temp_c:.0}C expand={expand})",
+                        "cavity_h={steam}/255  roofed={}  boiler={}  {press_label}={press:.2} ({kind}; tile T={temp_c:.0}C expand={expand})",
                         if confined { "yes" } else { "no" },
                         if boiler { "yes" } else { "no" },
                     ));
                 } else {
                     lines.push(format!(
-                        "leftover={press:.2} ({kind}; wet={pct:.0}% tile T={temp_c:.0}C expand={expand} cavity_P={cavity:.2})"
+                        "{press_label}={press:.2} ({kind}; wet={pct:.0}% tile T={temp_c:.0}C expand={expand} cavity_P={cavity:.2})"
                     ));
                 }
             }

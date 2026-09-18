@@ -1169,7 +1169,7 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Cavity humidity / pressure", |ui| {
                     ui.label(
                         None,
-                        "Closed / semi-closed leftover volume (P overlay; wire: steam; not sky H). Saturated stone lights without a cave. Open ground / a wide U is weather and stays dark. Cool collapses mass×expand back to mass.",
+                        "Play default: the cell pipe (P overlay) owns the boiling loop. Closed pockets still hold cavity humidity (wire: steam; not sky H). Cool recondenses mass×expand back to mass.",
                     );
                     ui.checkbox(hash!(), "Cavity humidity enabled", &mut self.steam.enabled);
                     ui.label(

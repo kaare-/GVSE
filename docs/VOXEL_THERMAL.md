@@ -2,7 +2,8 @@
 
 **Status:** T0–T5 + T2b landed. **Humidity model:** sky H (incl. open caves) /
 sparse sealed `cave_humidity` / pressurized cavity humidity (`steam` wire). Open hot water is
-accelerated evap into sky H. T6b/P4 geyser jet still FPS-gated.
+accelerated evap into sky H. T6b/P4 geyser jet lives on the cell pipe
+([`VOXEL_PIPE.md`](VOXEL_PIPE.md)).
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** coarse **thermal loops** that move heat with water (and later
 pore water), so gradients can drive currents — not a detailed CFD heat

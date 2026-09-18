@@ -224,6 +224,20 @@ const PACK_MOUTH: f32 = 1.0;
 const PACK_LIVE_LO: f32 = 0.62;
 const PACK_LIVE_HI: f32 = 0.95;
 
+/// Name the P overlay band a packed value belongs to. Live steam sits
+/// between straw and mouth; anything dimmer is the claimed boiler.
+pub fn pipe_overlay_band(pack: f32) -> &'static str {
+    if pack >= PACK_MOUTH - 0.02 {
+        "mouth"
+    } else if pack >= PACK_LIVE_LO {
+        "live"
+    } else if pack >= PACK_STRAW - 0.02 {
+        "straw"
+    } else {
+        "boiler"
+    }
+}
+
 /// P overlay: claimed boiling body (dim), locked straw (mid), mouth (top),
 /// live puff (bright ramp).
 pub fn pipe_overlay_pack(world: &World, gx: i32, gy: i32) -> Option<f32> {
@@ -2934,6 +2948,10 @@ mod tests {
             );
         }
         assert!(PACK_LIVE_HI <= PACK_MOUTH, "live ramp must not exceed mouth");
+        assert_eq!(pipe_overlay_band(PACK_BOILER), "boiler");
+        assert_eq!(pipe_overlay_band(PACK_STRAW), "straw");
+        assert_eq!(pipe_overlay_band(PACK_LIVE_LO), "live");
+        assert_eq!(pipe_overlay_band(PACK_MOUTH), "mouth");
     }
 
     #[test]
