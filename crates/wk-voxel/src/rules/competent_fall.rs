@@ -4627,6 +4627,135 @@ mod tests {
     );
   }
 
+  /// Playtest, long soak: "two floaters, rock hanging in thin air."
+  ///
+  /// The shape from the screenshots — a thin horizontal raft, high up, with
+  /// nothing under it. Tried three ways, because the readouts differed: one
+  /// floater carried no flags and read as `buried`, the other carried
+  /// MOBILE_ROCK. A settled raft is the case the cadence comments already warn
+  /// about, since a slept sky island "hangs forever" if nothing wakes it.
+  #[test]
+  fn a_thin_settled_raft_does_not_hang_in_the_sky() {
+    fn raft(settled: bool, mobile: bool) -> usize {
+      let mut w = World::new(64);
+      for cx in 0..4 {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+        w.ensure_chunk(ChunkCoord::new(cx, 1));
+      }
+      for x in 0..64 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=3 {
+          w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+      }
+      // Thin raft, 20 wide and 2 deep, well clear of the ground.
+      for x in 20..40 {
+        for y in 50..52 {
+          let mut c = Cell::solid(MaterialId::Stone);
+          if mobile {
+            c.flags.set(CellFlags::MOBILE_ROCK);
+          }
+          w.set_cell(x, y, c);
+        }
+      }
+      if settled {
+        for x in 20..40 {
+          for y in 50..52 {
+            w.competent_set_settled(x, y);
+          }
+        }
+      }
+      let cfg = CompetentFallConfig {
+        min_impact_fall_cells: 99,
+        max_passes: 48,
+        ..CompetentFallConfig::default()
+      };
+      for _ in 0..64 {
+        wake_floating_competent(&mut w);
+        apply_competent_fall_regions(&mut w, &[], &cfg, false);
+      }
+      (0..64)
+        .flat_map(|x| (40..64).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+        .count()
+    }
+    assert_eq!(raft(false, false), 0, "an awake raft must fall");
+    assert_eq!(raft(true, false), 0, "a settled raft must wake and fall");
+    assert_eq!(
+      raft(true, true),
+      0,
+      "a settled raft already tagged MOBILE_ROCK must fall too"
+    );
+  }
+
+  /// A floater of *mixed* competent rock must still fall.
+  ///
+  /// `flood_compatible` requires the same material and body tag, so a raft of
+  /// mixed rock is walked as one cluster per material — and the seat test
+  /// counts an incompatible solid below as support. Two materials resting on
+  /// each other can therefore each nominate the other as its seat, and both
+  /// hang. Long soaks are exactly where mixed competent rock comes from:
+  /// karst dissolves limestone, springs deposit flowstone, falls re-tag stone.
+  #[test]
+  fn a_mixed_material_floater_does_not_hold_itself_up() {
+    fn remaining(layout: &[(i32, i32, MaterialId)]) -> usize {
+      let mut w = World::new(64);
+      for cx in 0..4 {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+        w.ensure_chunk(ChunkCoord::new(cx, 1));
+      }
+      for x in 0..64 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=3 {
+          w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+      }
+      for &(x, y, m) in layout {
+        w.set_cell(x, y, Cell::solid(m));
+      }
+      let cfg = CompetentFallConfig {
+        min_impact_fall_cells: 99,
+        max_passes: 48,
+        ..CompetentFallConfig::default()
+      };
+      for _ in 0..96 {
+        wake_floating_competent(&mut w);
+        apply_competent_fall_regions(&mut w, &[], &cfg, false);
+      }
+      (0..64)
+        .flat_map(|x| (30..64).map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+          w.get_cell(x, y)
+            .is_some_and(|c| is_competent_rock(c.material))
+        })
+        .count()
+    }
+
+    // Stacked: flowstone sitting on stone, the pair in open sky.
+    let mut stacked = Vec::new();
+    for x in 24..40 {
+      stacked.push((x, 50, MaterialId::Stone));
+      stacked.push((x, 51, MaterialId::Flowstone));
+    }
+    assert_eq!(remaining(&stacked), 0, "a stacked mixed raft must fall");
+
+    // Interlocked: stepped columns of two materials, each stepping past the
+    // other, so every cluster has an incompatible solid somewhere beneath it.
+    let mut interlocked = Vec::new();
+    for i in 0..8 {
+      let x = 24 + i * 2;
+      interlocked.push((x, 50, MaterialId::Stone));
+      interlocked.push((x, 51, MaterialId::Stone));
+      interlocked.push((x + 1, 51, MaterialId::Limestone));
+      interlocked.push((x + 1, 52, MaterialId::Limestone));
+    }
+    assert_eq!(
+      remaining(&interlocked),
+      0,
+      "interlocked materials must not nominate each other as seats"
+    );
+  }
+
   #[test]
   fn cliff_overhang_is_not_judged_a_floating_island() {
     // HashSet-order `cell_set_floating` used to return true as soon as it
