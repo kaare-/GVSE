@@ -1,9 +1,5 @@
 //! Named Tab-menu presets (JSON under `presets/`).
 //!
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Presets capture live-tunable sim knobs so a soak / experiment setup
 //! can be saved, shared, and reloaded without regenerating the world.
 //! Worldgen size / seed are intentionally excluded (those need Regenerate).

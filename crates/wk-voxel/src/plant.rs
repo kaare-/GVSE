@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Minimal Set D land plant (docs/organism/PLANTS.md § C + D1–D4):
 //! Root + Stem + Photosystem on a fixed crown. Roots drink pore `sat`;
 //! Photosystems in standing water drink free-column sat (shore leaves do

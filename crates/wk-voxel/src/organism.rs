@@ -1,13 +1,8 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Set A plankton + minimal Set D land plants — module pixel blobs.
 //!
-//! Mirrors the column-GVSE organism kernel (see `docs/organism/` and
-//! `wk-agents`), but lives entirely inside `wk-voxel` so the isolation
-//! contract holds. Life is the drawing: 1×1 modules, not a green
-//! biomass wash over the terrain.
+//! Mirrors the column-era organism kernel (see `docs/organism/`). Life
+//! is the drawing: 1×1 modules, not a green biomass wash over the
+//! terrain.
 //!
 //! **Set A (Atom):** Nucleus + Photosystem in wet Air; buoyancy,
 //! circadian day-float / night-sink, fission.
@@ -140,7 +135,7 @@ const EQ_SPRING: f32 = 0.12;
 /// Soft contact impulse when two Atoms share a cell.
 const CONTACT_BOUNCE: f32 = 0.12;
 
-/// Module IDs — values match `wk_agents::ModuleId` / PALETTE.md.
+/// Module IDs — values match the column-era module IDs / PALETTE.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ModuleId {

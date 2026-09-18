@@ -121,10 +121,12 @@ So this document takes as fixed:
   chunks or would raise per-column cost past ~1 µs is rejected on
   budget grounds.
 
-## The current state, and what has to change
+## The column-era starting point, and what has to change
 
-The current `continental_surface_y` in `crates/legacy/wk-world/src/terrain.rs`
-defines a fixed profile:
+*The stack described in this section has been deleted. It is kept
+because the requirements it motivates still stand.*
+
+Column-era `continental_surface_y` defined a fixed profile:
 
 ```
 if macro_x < 100.0 { abyss }
@@ -135,25 +137,25 @@ else if macro_x < 420.0 { plains }
 else { mountain cordillera with 8 named peaks }
 ```
 
-with absolute world-x cutoffs. Walking right past x=420+555 m hits the
-last "mountain" branch forever; walking left of x=0 hits abyss
-forever. This is not a bug for a demo but it is a hard block for an
-infinite world.
+with absolute world-x cutoffs. Walking right past x=420+555 m hit the
+last "mountain" branch forever; walking left of x=0 hit abyss forever.
+That was not a bug for a demo but it is a hard block for an infinite
+world.
 
-The current `AppState::new` also pre-generates 88 chunks eagerly at
-startup (`MAP_CHUNK_MIN = -8`, `MAP_CHUNK_MAX = 80`) and relies on all
-of them being resident. There is no streaming code path.
+That app also pre-generated 88 chunks eagerly at startup
+(`MAP_CHUNK_MIN = -8`, `MAP_CHUNK_MAX = 80`) and relied on all of them
+being resident. There was no streaming code path.
 
-However, the substrate is already halfway there:
+The substrate was already halfway there, and the same shapes are worth
+keeping on any successor:
 
-- `World.chunks: BTreeMap<i32, Chunk>` is keyed by coord, so the map
-  data model is already "infinite by coord."
-- `generate_chunk_continental(coord, seed, ...)` is a pure function of
-  `(seed, coord)`. Deterministic regeneration works today.
-- `MAX_LOADED_CHUNKS = 96` and `World::insert_chunk` already evict the
-  farthest chunk on overflow.
-- `hash_u64(seed, x, y, salt)` gives us a deterministic content-
-  addressed noise primitive at any coordinate, with no state.
+- A chunk map keyed by coord, so the data model is already "infinite
+  by coord."
+- Chunk generation as a pure function of `(seed, coord)`, so
+  deterministic regeneration works.
+- A resident-chunk cap that evicts the farthest chunk on overflow.
+- `hash_u64(seed, x, y, salt)` as a deterministic content-addressed
+  noise primitive at any coordinate, with no state.
 
 What has to be built:
 
@@ -349,10 +351,9 @@ region has stabilised).
 
 At runtime, `humidity(coord)` relaxes toward `humidity_target(coord)`
 with time constant ~1 in-game day. Local evaporation raises it,
-precipitation lowers it. This replaces the hardcoded
-`const HUMIDITY: f32 = 0.4` in `crates/legacy/wk-sim/src/subsystems.rs` with a
-lookup, and the existing `run_evaporation` picks up regional variation
-essentially for free.
+precipitation lowers it. This replaces a hardcoded humidity constant
+(the column stack pinned it at `0.4`) with a lookup, and evaporation
+picks up regional variation essentially for free.
 
 ### Springs and wetlands where the table meets the surface
 
@@ -500,12 +501,11 @@ to. Only physically meaningful excess crosses.
 ## Persistence
 
 **Phase 1**: in-memory chunk-store. When a chunk is evicted, its
-serialised bytes (via the existing `postcard` path in
-`crates/legacy/wk-io`, or voxel `wk-voxel` save) go into
-a `HashMap<i32, Vec<u8>>` on the world. When re-loaded, deserialised
-back into a `Chunk`. This is cheap and preserves state without disk
-I/O; the trade-off is that quitting the app loses everything not in
-the explicit save.
+serialised bytes (via the `postcard` path the `wk-voxel` save already
+uses) go into a `HashMap<i32, Vec<u8>>` on the world. When re-loaded,
+deserialised back into a `Chunk`. This is cheap and preserves state
+without disk I/O; the trade-off is that quitting the app loses
+everything not in the explicit save.
 
 **Phase 2**: disk-backed chunk-store. Same interface, but the map is a
 memory-mapped file or a directory of per-chunk files keyed by coord.

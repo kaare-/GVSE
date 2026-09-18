@@ -4,13 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# ISOLATION GUARDRAIL
-# ------------------------------------------------------------------
-# wk-voxel shares ONLY `wk-material` with column-based GVSE. It MUST NOT
-# depend on wk-world, wk-field, wk-agents, wk-sim, wk-io, or wk-app.
-# Enforced by: scripts/check-voxel-isolation.sh (CI).
-# See docs/VOXEL_MIGRATION.md § Isolation Guardrails.
-
 [dependencies]
 wk-material = { path = "../wk-material" }
 serde = { workspace = true }

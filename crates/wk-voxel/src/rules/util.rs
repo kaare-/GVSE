@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Tiny shared helpers for rule modules.
 
 /// Cheap deterministic 32-bit hash → f32 in `[0, 1)` — same mixer

@@ -9,12 +9,13 @@ in the Organism Kernel plan.*
 For every field below, the freeze names either:
 
 - **REUSE** — the existing GVSE hook that already carries this data.
-- **NEW** — a new field slot that follows the same pattern as
-  existing ones in
-  [`crates/legacy/wk-field/`](../../crates/legacy/wk-field/).
+- **NEW** — a new field slot that follows the same pattern as the
+  other per-chunk field slots.
 
 Preference is always REUSE — the petri and the GVSE world are the
-same substrate.
+same substrate. The slots were mapped against the column stack, which
+has since been deleted, so a REUSE row names the shape to look for on
+the voxel side rather than a hook that is already wired.
 
 ## Field list
 
@@ -55,8 +56,8 @@ same substrate.
 ### Moisture (shallow)
 
 - **Kind:** per-column scalar.
-- **Slot:** REUSE. `column.moisture`, `column.moisture_cap` in
-  [`crates/legacy/wk-world/src/column.rs`](../../crates/legacy/wk-world/src/column.rs).
+- **Slot:** REUSE. `column.moisture`, `column.moisture_cap` on the
+  column-era `Column`.
 - **Feeds:** `Root` elongation tropism, `Digest` (litter dries out),
   `Photosystem` term in Set A/D (moisture gates growth).
 - **Producer:** existing `run_infiltration`, `run_evaporation`,

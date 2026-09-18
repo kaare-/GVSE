@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Atmosphere step helper and save-compat parcel dump.
 //!
 //! Atmospheric water lives on [`Humidity`] tiles. Rain is condensation /

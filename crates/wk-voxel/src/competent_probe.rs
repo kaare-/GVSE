@@ -1,6 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app.
-//!
 //! Counters for diagnosing competent-fall cost. Debug tooling only — all
 //! increments are `Relaxed` atomics behind `#[inline]` helpers so release
 //! builds pay a single add per event.

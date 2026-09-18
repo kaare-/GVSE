@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Fungi split (Set E):
 //! - **Mycelium infection** — editor / spore "plant" drops cream
 //!   ([`infect_mycelium_at`]) and stamps a [`MyceliumLineage`] so later

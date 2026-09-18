@@ -23,9 +23,9 @@ descent, so "dialect A ignores dialect B" emerges from mutation.
 
 ## Where the field lives
 
-`ChemField` slots on the chunk in the same shape as
-[`ThermalField`](../../crates/legacy/wk-field/) and the other existing
-fields, but with a per-cell array of `CHEM_TYPE_COUNT` concentrations:
+`ChemField` slots on the chunk in the same shape as a thermal field
+and the other per-chunk fields, but with a per-cell array of
+`CHEM_TYPE_COUNT` concentrations:
 
 ```rust
 pub struct ChemField {
@@ -71,8 +71,7 @@ module slot:
 | `threshold` | `f32` | Deadzone / activation level. Sensor fires only above threshold; emitter releases only above threshold. |
 
 Mutation may retune `tuned_type` (deterministic per-trait, same
-mechanic as `Genome::mutate` in
-[`crates/legacy/wk-agents/src/lib.rs`](../../crates/legacy/wk-agents/src/lib.rs))
+mechanic as `Genome::mutate`)
 with a small probability, and jitter `gain` / `threshold` by a
 relative sigma the same way existing traits are jittered. Retuning
 across all four channels is what produces the "dialect split"
@@ -99,8 +98,7 @@ cost(t)    = release(t) * EMIT_ENERGY_COST_PER_KG
 ```
 
 Emitter cost is **energy**, not biomass — the module's presence has an
-upkeep drawn from `Energy.current` in
-[`crates/legacy/wk-agents/src/lib.rs`](../../crates/legacy/wk-agents/src/lib.rs).
+upkeep drawn from the organism's `Energy.current`.
 Biomass cost is deferred to a later stage; too many stacked costs at
 Set B kills the "you can watch it work" story.
 

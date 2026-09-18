@@ -1,8 +1,5 @@
 //! wk-voxel-app palette adapter.
 //!
-//! Isolation: this file depends only on `wk_material` and `wk_voxel`.
-//! No imports from wk-world / wk-sim / wk-app.
-//!
 //! Maps a [`wk_voxel::Cell`] to an RGB triple using
 //! [`wk_material::MaterialRegistry::colour_rgb`] as the ground truth.
 //! Water is `Air + sat` in the voxel model. Dry Air keeps the sky colour;

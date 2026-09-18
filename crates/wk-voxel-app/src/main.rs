@@ -1,10 +1,5 @@
 //! wk-voxel-app: renderer / demo binary for wk-voxel.
 //!
-//! Isolation contract: wk-voxel-app is part of the greenfield voxel
-//! stack. It depends on wk-voxel + wk-material only. It MUST NOT
-//! import from wk-world / wk-field / wk-agents / wk-sim / wk-io /
-//! wk-app. See docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Draws each `Cell` as a filled rectangle. Palette comes straight
 //! from [`wk_material::MaterialRegistry::colour_rgb`] so worlds line
 //! up visually with column-based GVSE. Water is `Air + sat = FULL`;

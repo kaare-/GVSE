@@ -1,13 +1,14 @@
 # Voxel migration — design notes for `wk-voxel`
 
 Working design document for the 2D cellular-automata sim in
-`crates/wk-voxel/`. **Status (2026-07):** the voxel stack has
-**superseded** the column stack as the active product path; `main`
-tracks `wk-voxel` / `wk-voxel-app`. Column crates remain in-tree as
-legacy reference only.
+`crates/wk-voxel/`. **Status:** the migration is finished. The voxel
+stack is the product, and the column stack has been deleted from the
+tree — there is no column code left to read, build, or port from.
 
-This document is still the **intent map**: what each column subsystem
-was trying to model, transcribed into voxel-cellular terms.
+What survives here is the **intent map**: what each column subsystem
+was trying to model, transcribed into voxel-cellular terms, plus the
+coordinate / cell-layout / scheduling decisions that came out of that
+transcription and the reading they were based on.
 
 ## 1. Purpose and context
 
@@ -23,74 +24,34 @@ The voxel model — 2D block map for everything, with overlaid scalar
 heatmaps — fits a 2D side-view sim. `wk-voxel` was the greenfield
 attempt; it is now the default.
 
-## 2. Isolation Guardrails
+## 2. Isolation guardrails (historical)
 
-This is the *contract* between the two sims. Enforced by tooling
-(not only comments):
+While both sims shared the tree, the voxel crates were held to a hard
+contract: no dependency on any column crate, no shared runtime state,
+no shared config. It was enforced by a dependency-tree check in CI on
+top of header comments in the voxel manifests and sources.
 
-- `scripts/check-voxel-isolation.sh` — asserts `wk-voxel` /
-  `wk-voxel-app` trees contain no column-stack crates (CI).
-- File-header comments remain as a human reminder.
-- `deny.toml` is reserved for third-party bans; path workspace
-  members cannot be scoped with `bans.deny` wrappers (roots would
-  always match).
+The contract has outlived its purpose — the other side of it no longer
+exists. Two things it left behind are still worth holding to:
 
-### Structural rules
+- `crates/wk-voxel/Cargo.toml` depends on **exactly one** other
+  workspace crate: `wk-material`. Material IDs and property tables are
+  pure data and were the single sanctioned sharing point; they remain
+  the only one.
+- `wk-voxel` has its own test folder, `crates/wk-voxel/tests/`.
 
-- `crates/wk-voxel/Cargo.toml` depends on **exactly one** existing
-  crate: `wk-material`. Material IDs and property tables are pure
-  data and safe to share. No other GVSE crate is a dependency.
-- Column-stack crates live under `crates/legacy/` (`wk-world`,
-  `wk-sim`, `wk-agents`, `wk-io`, `wk-app`, `wk-field`). No file
-  there gains a `wk-voxel` dependency.
-- Every `.rs` file in `crates/wk-voxel/src/` begins with the block:
+The isolation header comments on the voxel crates are still there, as
+is the CI script that walked the dependency tree; neither has anything
+left to catch.
 
-  ```rust
-  //! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-  //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-  //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-  ```
+### Why it mattered
 
-- Every column-crate `lib.rs` (`wk-world`, `wk-sim`, `wk-agents`,
-  `wk-io`, `wk-field`) and `wk-app`'s `main.rs` carries the reverse
-  guardrail:
-
-  ```
-  //! Column-based GVSE. MUST NOT import from wk-voxel. See
-  //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-  ```
-
-- `wk-voxel` has its own test folder `crates/wk-voxel/tests/`.
-  It never touches `tests/scenarios/`.
-
-### Behavioural rules
-
-- No shared runtime state. Two sims running in one process would
-  need to serialise/deserialise through a well-defined format;
-  today they don't communicate at all.
-- Reused **inputs** are allowed: material IDs (`MaterialId`),
-  property tables, biome enums, colour palette values. Reused
-  **runtime state** is not.
-- Config files and JSON assets may be duplicated if their shape
-  differs. Prefer duplication over shared config where the two sims
-  would need different fields.
-
-### Why the guardrails
-
-The plan describes this as "we don't intermix or an agent
-misunderstands and starts mixing things up." Concrete failure modes
-these rules prevent:
-
-- A subsequent agent imports `Column::flowable_water` into a voxel
-  rule and now the two representations have to stay in sync.
-- Someone extends `MassAudit` (a wk-world type) with voxel-side
-  counters. The audit becomes bimodal and every reader has to know
-  which mode.
-- `wk-app`'s renderer gains an optional voxel path. State ownership
-  becomes ambiguous.
-
-The guardrails make each of these show up as a Cargo dependency
-change during review.
+The failure mode the guardrails were written against was an agent
+quietly re-coupling the two representations: pulling a column water
+accessor into a voxel rule, extending the column mass audit with
+voxel-side counters, or growing an optional voxel path inside the
+column renderer. Each would have shown up as a Cargo dependency change
+during review.
 
 ## 3. Intent map — column GVSE → voxel model
 
@@ -114,11 +75,11 @@ Voxel intent:
   thick bedrock floor barrier, stratified stone / limestone / clay /
   gravel / loose-rock body, sand cap, water above submerged beds,
   extra sky headroom.
-- **Chunk generation.** Analogous to `generate_chunk_continental` in
-  `crates/legacy/wk-world/src/terrain.rs`. One cellular chunk = 64×64
+- **Chunk generation.** Analogous to the column stack's
+  `generate_chunk_continental`. One cellular chunk = 64×64
   cells. Generation is deterministic on `(seed, cx, cy)`.
 - **Deferred.** Streaming chunk load/unload — start with the whole
-  ring in memory (the column build already fits at CHUNK_W=64).
+  ring in memory (the column build fit at CHUNK_W=64).
 
 ### 3.2 [STRATA.md](STRATA.md)
 
@@ -204,13 +165,12 @@ nerves / scenarios docs.
 Voxel intent:
 
 - Editor / studio and palette are UI in `wk-voxel-app`. Pixel-to-cell
-  mapping is already 1:1 in intent. Column UI host was
-  `crates/legacy/wk-app`.
+  mapping is already 1:1 in intent.
 - Chem / gases: heatmaps.
 - Lanes / fore-back drawing: retained. Voxel cells are 2D but the
   render can still paint back / body / fore in three passes.
-- Spec docs under [`docs/organism/`](organism/) point historical
-  hooks at `crates/legacy/`; the live petri is `wk-voxel` /
+- Spec docs under [`docs/organism/`](organism/) still name column-era
+  hooks as history; the live petri is `wk-voxel` /
   `wk-voxel-app` (see that directory's README). Atom-bloom / E30+
   falsification is studio follow-up, not a physics-wave gate.
 
@@ -349,7 +309,7 @@ The CA rule pass inside `tick_with_life` looks like this:
   ambiguity; the four-pass sub-tick eliminates it by design.
 
 Save format for `wk-voxel` will be one flat serialise of the world +
-seed + tick — same shape as `wk-io` for column GVSE. Not in scope
+seed + tick — the same shape the column save used. Not in scope
 for the foundation PR.
 
 ## 9. What we deliberately DO NOT port
@@ -521,8 +481,8 @@ Follow-ups, each its own PR:
 Items 1–8 (through karst + seepage/head-spill), dirty-rect
 active-chunk planning, four-pass checkerboard, **rayon
 parallelism within each colour**, **chunk occupancy skips** for
-evap / karst, and **Set A Atoms** (`OrganismStore` — isolated, no
-`wk-agents` import) are landed in `wk-voxel`, plus **Set D plants**
+evap / karst, and **Set A Atoms** (`OrganismStore` — written fresh,
+not ported) are landed in `wk-voxel`, plus **Set D plants**
 (D1–D4 plants + E1 litter/fungi + lingering corpses → Organic — see
 `plant.rs`, `fungi.rs`, `symbiosis.rs`, `organism.rs`, and
 `docs/organism/VOXEL_PLANTS.md`). E1 also covers mycelium network sugar,
@@ -542,7 +502,7 @@ time:
   ~1M cells. At 60 Hz and a naive full scan, that's 60 M cell
   visits/sec. Feasible in Rust, but the dirty-rectangle + chunk
   quiescence tricks aren't optional; they're load-bearing.
-- **1D → 2D memory step.** Column-GVSE keeps ~192 chunks × 64
+- **1D → 2D memory step.** Column-GVSE kept ~192 chunks × 64
   columns × ~8 layers = ~100 K cells of geology state. Voxel is
   10× larger by cell count. Still ~8 MB, but every field / heatmap
   overlay adds another slab. We'll audit total memory at each PR.

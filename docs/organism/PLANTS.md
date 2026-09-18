@@ -136,8 +136,9 @@ target = argmax over neighbours n of:
   root:shoot budget so storage and deeper boring can pay when the
   surface dries.
 
-Groundwater head field (already implemented in
-[`crates/legacy/wk-field`](../../crates/legacy/wk-field)) provides the deeper
+A groundwater head field (column-era; not carried over to the voxel
+stack — see the [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) non-goals)
+provides the deeper
 moisture gradient. Sienna reads `moisture` for the shallow layer and
 `gw_head` for the deep, blending by depth.
 

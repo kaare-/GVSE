@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Dissolved mineral load — the other half of karst.
 //!
 //! Dissolution used to delete rock outright, which made karst the one process

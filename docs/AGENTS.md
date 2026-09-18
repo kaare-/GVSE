@@ -1,7 +1,7 @@
 # Agents: ECS creature layer
 
 *Column-stack archive. Stages 10–11 design record for the scripted
-grazer in [`crates/legacy/wk-agents`](../crates/legacy/wk-agents).
+grazer that ran on the column stack, since deleted.
 Active life is module-pixel `OrganismStore` in `wk-voxel` / studio in
 `wk-voxel-app` — see [`organism/`](organism/). Do not extend this
 path.*

@@ -1,7 +1,7 @@
 # Ecology: per-column plant bucket
 
-*Column-stack archive. Stage 8 design record for
-`Ecology` on columns in [`crates/legacy/wk-world`](../crates/legacy/wk-world).
+*Column-stack archive. Stage 8 design record for `Ecology` on the
+columns of the deleted column world.
 Voxel plants use living `ModuleId::Root` / Set D modules instead (see
 [`organism/VOXEL_PLANTS.md`](organism/VOXEL_PLANTS.md)). Do not extend
 this path.*

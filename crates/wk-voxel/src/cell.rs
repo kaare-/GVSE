@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Per-cell data: material tag + water saturation + a few flag bits.
 //! Deliberately byte-packed; the stored pore coordinate makes this 5
 //! bytes so a 64×64 chunk's cell slab is 20 KiB.

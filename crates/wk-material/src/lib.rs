@@ -7,8 +7,8 @@ pub const MATERIAL_COUNT: usize = 18;
 /// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 
-// Column-stack layout constants live in `wk_world` / `wk_sim`
-// (`crates/legacy/`). Voxel uses its own `CHUNK_CELLS_*` in `wk_voxel`.
+// Layout constants are not here: voxel uses its own `CHUNK_CELLS_*`
+// in `wk_voxel`.
 
 /// Every substance in the simulation is one of these — including water,
 /// ice, and snow. Materials differ only in their property table (density,

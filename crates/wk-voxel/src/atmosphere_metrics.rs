@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Shared atmosphere metrics for sky draw and organism light.
 //! Spec: `docs/organism/LIGHT.md` (`sky_transmit`) and `docs/SKY.md`.
 

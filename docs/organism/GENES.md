@@ -1,7 +1,7 @@
 # Genes
 
 *Frozen gene table with tradeoffs and merge notes against the
-**archived** column [`wk_agents::Genome`](../../crates/legacy/wk-agents/src/lib.rs).
+column-era grazer `Genome`, whose code has been deleted.
 Live voxel genomes live on `wk-voxel` organisms / blueprints.
 `gene-table` in the Organism Kernel plan.*
 
@@ -12,17 +12,16 @@ Live voxel genomes live on `wk-voxel` organisms / blueprints.
 - Genes are stored on `Genome` (per organism) or on a specific
   module blueprint entry (per-module tuning like emitter
   `tuned_type`).
-- Mutation is deterministic per trait. See `Genome::mutate` in
-  [`crates/legacy/wk-agents/src/lib.rs`](../../crates/legacy/wk-agents/src/lib.rs)
-  for the hash-and-jitter template that all new genes follow.
+- Mutation is deterministic per trait. `Genome::mutate` in
+  [`crates/wk-voxel/src/blueprint.rs`](../../crates/wk-voxel/src/blueprint.rs)
+  carries the hash-and-jitter template that all new genes follow.
 - Every new gene gets `#[serde(default)]` so old blueprints load.
 - No gene is silently free — a high value must **cost** something on
   screen (upkeep, waste, wrong-niche death).
 
-## Archived `wk_agents::Genome` fields
+## Archived column `Genome` fields
 
-For reference, the column-stack fields (stage 10 / 11) in
-`crates/legacy/wk-agents`:
+For reference, the column-stack grazer fields (stage 10 / 11) were:
 
 ```rust
 pub struct Genome {
@@ -133,9 +132,8 @@ mechanical plan is:
 2. Add the Set A / B / C / D / E kernel genes above as new fields
    with `#[serde(default)]` sensible defaults and a `Genome::default()`
    that produces a viable Atom.
-3. Column `Genome` graze/dig/repro fields stay on the **archived**
-   `crates/legacy/wk-agents` type so column scenarios (E16/E17) keep
-   compiling. Voxel organisms do not grow those fields.
+3. Column `Genome` graze/dig/repro fields went away with the column
+   stack. Voxel organisms do not grow those fields.
 4. `Genome::mutate` extends to include the new fields; the salt list
    keeps growing but each gene has its own `trait_i` so mutation is
    stable across additions.

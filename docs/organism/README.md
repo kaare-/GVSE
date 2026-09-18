@@ -29,22 +29,18 @@ Creature studio / editor UX lives in `wk-voxel-app` (see
 scenes (E30+) are studio / follow-up work, not a physics-wave
 prerequisite.
 
-### Column stack = archive only
+### Column stack = deleted
 
 The original design anchors (column ecology ledger, field slots,
-scripted grazer ECS) live under **[`crates/legacy/`](../../crates/legacy/)**.
-They remain for reference and for the column scenario suite in
-`tests/scenarios/`. They are **not** the active runtime. Do not add
-features there; do not import them from `wk-voxel` / `wk-voxel-app`.
+multirate scheduler, scripted grazer ECS, column UI host) belonged to
+the column stack, which has been deleted. The specs here still
+describe what those anchors did, because that is where the kernel
+vocabulary came from — but there is no code left behind them to read
+or extend.
 
-| Archived column hook | Path |
-|----------------------|------|
-| Columns, layers, chunks | [`crates/legacy/wk-world`](../../crates/legacy/wk-world) |
-| Multirate scheduler | [`crates/legacy/wk-sim`](../../crates/legacy/wk-sim) |
-| Field slots (thermal / humidity / …) | [`crates/legacy/wk-field`](../../crates/legacy/wk-field) |
-| Scripted grazer ECS | [`crates/legacy/wk-agents`](../../crates/legacy/wk-agents) |
-| Column UI host | [`crates/legacy/wk-app`](../../crates/legacy/wk-app) |
-| Shared material vocabulary | [`crates/wk-material`](../../crates/wk-material) (still shared) |
+The one crate that carried over is
+[`crates/wk-material`](../../crates/wk-material), the shared material
+vocabulary; the voxel stack uses it directly.
 
 Live Set A / Set D organisms are implemented in `wk-voxel`
 (`organism.rs`, `plant.rs`, `fungi.rs`) and drawn/edited in
@@ -63,26 +59,27 @@ Live Set A / Set D organisms are implemented in `wk-voxel`
 | [`FUNGI.md`](FUNGI.md) | Litter fungi, mycelium field, Symbiont trade, spore bank |
 | [`LANES.md`](LANES.md) | Fore / Mid / Back depth-lane occupancy for future animals |
 | [`CORE_FEATURES.md`](CORE_FEATURES.md) | Feature Sets A–E lock and explicit non-goals |
-| [`GENES.md`](GENES.md) | Gene table with tradeoffs; merge notes vs archived `wk_agents::Genome` |
+| [`GENES.md`](GENES.md) | Gene table with tradeoffs; merge notes vs the column-era grazer `Genome` |
 | [`FIELDS.md`](FIELDS.md) | Petri fields (light, temp, chem, moisture, organic, substrate, stem wetness) |
 | [`SCENARIOS.md`](SCENARIOS.md) | Falsification scenes (E30–E45 skeletons; column E1–E17 archived) |
 | [`EDITOR.md`](EDITOR.md) | MS-Paint editor / studio UX, `Blueprint` save format, spawn flow |
 
 ## Archive hook table (column stack)
 
-Historical anchors the kernel specs grew against. **Reference only** —
-paths are under `crates/legacy/`. New work binds to `wk-voxel` instead.
+Historical anchors the kernel specs grew against. The column code is
+deleted, so these are names to recognise while reading the specs, not
+places to go and look. New work binds to `wk-voxel` instead.
 
-| Concept | Archived column hook |
-|---------|----------------------|
-| Coarse column biomass | `Ecology { … }` in [`crates/legacy/wk-world/src/column.rs`](../../crates/legacy/wk-world/src/column.rs) |
-| Dead plant / root mass ledger | `MassAudit` biomass buckets in [`crates/legacy/wk-world/src/world.rs`](../../crates/legacy/wk-world/src/world.rs) |
+| Concept | Column-era hook |
+|---------|-----------------|
+| Coarse column biomass | `Ecology { … }` on each `Column` |
+| Dead plant / root mass ledger | `MassAudit` biomass buckets on the world |
 | Organic material slot | `MaterialId::Organic` in [`crates/wk-material`](../../crates/wk-material) (shared; used by voxel too) |
-| Per-chunk fields | Slot pattern in [`crates/legacy/wk-field`](../../crates/legacy/wk-field) |
-| Genome / scripted grazer | [`crates/legacy/wk-agents`](../../crates/legacy/wk-agents) — superseded by module-pixel `Blueprint` + `OrganismStore` in `wk-voxel` |
-| Post-barrier subsystem slot | `Simulation::step` in [`crates/legacy/wk-sim/src/sim.rs`](../../crates/legacy/wk-sim/src/sim.rs) |
-| Column moisture / water table | `column.moisture` + groundwater head in the legacy stack |
-| App UI host | Studio in [`crates/wk-voxel-app`](../../crates/wk-voxel-app); column-era host was [`crates/legacy/wk-app`](../../crates/legacy/wk-app) |
+| Per-chunk fields | Per-chunk field-slot pattern (thermal / humidity / …) |
+| Genome / scripted grazer | Scripted grazer ECS — superseded by module-pixel `Blueprint` + `OrganismStore` in `wk-voxel` |
+| Post-barrier subsystem slot | `Simulation::step` in the column scheduler |
+| Column moisture / water table | `column.moisture` + groundwater head |
+| App UI host | Studio in [`crates/wk-voxel-app`](../../crates/wk-voxel-app); the column-era host is gone |
 
 ## Cross-cutting invariants (unchanged)
 

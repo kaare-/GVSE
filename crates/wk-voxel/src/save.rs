@@ -1,12 +1,7 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Full-sim snapshot save / load (postcard bytes on disk).
 //!
-//! Lives in wk-voxel (not wk-io) so the greenfield stack stays
-//! isolated. Format is intentionally independent of column-GVSE
-//! `.gvse` / scenario files.
+//! Format is intentionally independent of the column-era `.gvse` /
+//! scenario files.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

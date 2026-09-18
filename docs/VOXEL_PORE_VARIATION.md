@@ -28,7 +28,7 @@ somewhere natural to start dissolving.
 | World-level overrides | `HydroOverrides` | Tab sets min/max per material. `0..0` seals it. |
 | Coherent generation | `worldgen.rs::pore_coordinate` | Independent broad/fine noise plus mild depth compaction. |
 | Capacity | `cell.rs::water_capacity_cell` | Authoritative cell-aware lookup for movement, clamps and audit. |
-| Rates | `head.rs::*_cell` | Seepage samples cell permeability; material-only wrappers remain midpoint helpers for tests/legacy. |
+| Rates | `head.rs::*_cell` | Seepage samples cell permeability; material-only wrappers remain midpoint helpers. |
 
 The one stored coordinate intentionally correlates porosity and
 permeability: open fabric both holds and conducts more water. Material
@@ -45,7 +45,7 @@ pub struct MaterialHydrology {
 }
 ```
 
-The legacy scalar remains the midpoint for the archived column stack.
+The scalar remains the midpoint of the range.
 
 ### 2. Per-cell value
 

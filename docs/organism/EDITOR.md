@@ -2,8 +2,7 @@
 
 *Frozen UX for the MS-Paint style creature studio / editor.
 Active host: [`wk-voxel-app`](../../crates/wk-voxel-app). The column-era
-host was [`crates/legacy/wk-app`](../../crates/legacy/wk-app) — archive
-only.*
+host has been deleted.*
 
 ## Purpose
 
@@ -31,8 +30,7 @@ paint the creature, click a cell, and it lives.
 ## Layout
 
 Three-panel modal, macroquad UI (same pattern as the voxel settings /
-editor panels in `wk-voxel-app`; column-era reference was
-[`state.rs::draw_settings_ui`](../../crates/legacy/wk-app/src/state.rs)):
+editor panels in `wk-voxel-app`):
 
 ```
 +---------------------------+---------------------+---------------+
@@ -179,10 +177,8 @@ If the user tries to spawn a plant with no solid seat, or a water
 Atom with no wet Air, the info bar warns and refuses to spawn
 (voxel seating rules in `wk-voxel` plant / organism modules).
 
-Column-era note (archive): the old host used
-`agent_keep_awake` in
-[`crates/legacy/wk-world`](../../crates/legacy/wk-world) so hydrology
-stayed active under a grazer — not used on the voxel path.
+Column-era note: the old host used an `agent_keep_awake` flag so
+hydrology stayed active under a grazer — not used on the voxel path.
 
 ## Determinism
 
@@ -203,8 +199,7 @@ stayed active under a grazer — not used on the voxel path.
 - Hyphae render the same but with the cream palette entry.
 
 Voxel draw already paints module pixels from `OrganismStore::draw_list`
-in `wk-voxel-app`. Column-era reference pass lived in
-[`crates/legacy/wk-app/src/render.rs`](../../crates/legacy/wk-app/src/render.rs).
+in `wk-voxel-app`.
 
 ## Debug overlays
 

@@ -1,8 +1,4 @@
 //! Headless wk-voxel scenario ports of legacy E-series product intents.
-//!
-//! Column-stack oracles live in `tests/scenarios/` (via wk-sim). This
-//! harness never imports those crates — isolation guardrails in
-//! `docs/VOXEL_MIGRATION.md`.
 
 mod e1_rain_hill;
 mod e2_basin;

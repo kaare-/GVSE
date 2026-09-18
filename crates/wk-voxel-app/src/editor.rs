@@ -1,6 +1,6 @@
 //! MS-Paint creature editor for wk-voxel-app.
-//! Mirrors the column `wk-app` editor (docs/organism/EDITOR.md):
-//! Set A Atom + Set D plant + Set E fungus — no wk-agents / wk-app imports.
+//! Mirrors the column-era editor (docs/organism/EDITOR.md):
+//! Set A Atom + Set D plant + Set E fungus.
 
 use macroquad::prelude::*;
 use wk_voxel::{Blueprint, LaneId, ModuleId, PlacedModule};

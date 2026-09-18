@@ -72,9 +72,8 @@ Simulation::step:
 - Reads: current column state (which cells are `Photosystem` / `Stem`
   / other modules), plus each cell's owning entity's `LeafAbsorb`.
 - Writes: per-column `light_remaining: Vec<f32>` cached on the
-  `Simulation` scratch (same shape and lifecycle as
-  `per_column_flux` in
-  [`OverlayData`](../../crates/legacy/wk-world/src/world.rs)). No new mass
+  `Simulation` scratch (same shape and lifecycle as the column-era
+  `per_column_flux` overlay array). No new mass
   bucket — light is not tracked in the mass audit.
 
 ## Sky transmit
@@ -96,8 +95,7 @@ growth rate, so Phase 5 reuses that helper.
 Cycle-`O` overlay adds a new mode `OverlayMode::LightRemaining`. Per
 column, colour the top of the column by `light_remaining[top] / L0` —
 dim red for shaded floor, bright white for exposed top. This is the
-same shape as `TemperatureField` and `HumidityField` overlays already
-in the archived column [`state.rs`](../../crates/legacy/wk-app/src/state.rs);
+same shape as the column-era temperature and humidity overlays;
 voxel overlays live in `wk-voxel-app`. It fits the
 existing key.
 

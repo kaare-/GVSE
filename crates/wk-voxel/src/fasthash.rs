@@ -1,6 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app.
-//!
 //! Small non-cryptographic hasher for hot `(i32, i32)` cell-coordinate sets.
 //!
 //! The standard library defaults to SipHash-1-3, which is DoS-resistant but

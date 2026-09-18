@@ -6,15 +6,12 @@
 ## Numbering
 
 - **E1–E17 (column archive)** — hydrology / karst / ecology / burrow /
-  grazer / reproduction tests on the **legacy column** stack. Code:
-  [`tests/scenarios/`](../../tests/scenarios/) via
-  [`crates/legacy/`](../../crates/legacy/). Not ports of work — frozen
-  reference. Scripted grazer scenes (E16/E17) stay here; they are not
-  targets for the voxel stack.
+  grazer / reproduction scenes written against the **column** stack,
+  which has been deleted. Frozen reference, not a port list. Scripted
+  grazer scenes (E16/E17) are not targets for the voxel stack.
 - **Voxel product-intent ports** — rain/basin/seam/save, sinkhole,
   roof collapse, roots/repose (E15), … live under
-  [`crates/wk-voxel/tests/scenarios/`](../../crates/wk-voxel/tests/scenarios/)
-  and never import column crates.
+  [`crates/wk-voxel/tests/scenarios/`](../../crates/wk-voxel/tests/scenarios/).
 - **E30–E45** — organism kernel skeletons below (studio / follow-up;
   not a physics-wave prerequisite). Atom bloom and friends belong with
   the creature studio in `wk-voxel-app`.
@@ -29,7 +26,7 @@ test, it fills in the same four things:
 
 - **World setup** — chunks, sea level, temperature, humidity, rain
   toggles, weather toggles. Match the minimal shape from
-  `tests/scenarios/helpers.rs` where possible.
+  `crates/wk-voxel/tests/scenarios/helpers.rs` where possible.
 - **Blueprint** — modules + genome (see
   [`EDITOR.md`](EDITOR.md) for the on-disk shape).
 - **Assertion** — what must be true after `run_ticks(...)`.

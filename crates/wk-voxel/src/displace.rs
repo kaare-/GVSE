@@ -1,6 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app.
-//!
 //! Displacement bookkeeping for solids that move into occupied cells.
 //!
 //! A moving body must **shift** what is in its way, never consume it:

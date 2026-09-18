@@ -8,6 +8,6 @@ product behaviour.
 |-----|----------------|
 | [`VOXEL_WEATHER_SOAK.md`](VOXEL_WEATHER_SOAK.md) | Cut-by-cut leftover soak from the climate-budget track. Current leftover is summarised in [`VOXEL_WEATHER.md`](../VOXEL_WEATHER.md). |
 
-Column-stack crates stay under [`crates/legacy/`](../../crates/legacy/);
-those archive docs (`AGENTS.md`, `ECOLOGY.md`, …) remain in `docs/`
-with an **Archive** mark so old links keep working.
+The column-stack crates have been deleted; those archive docs
+(`AGENTS.md`, `ECOLOGY.md`, …) remain in `docs/` with an **Archive**
+mark so old links keep working.

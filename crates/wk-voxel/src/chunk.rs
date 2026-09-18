@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Fixed-size chunk of cells, keyed by an `(i32, i32)` chunk
 //! coordinate. Chunk size follows Noita's Falling Everything engine
 //! (Purho GDC 2019): 64×64 keeps each chunk small enough for a single

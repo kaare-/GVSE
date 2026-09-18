@@ -1,7 +1,3 @@
-//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
-//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
-//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
-//!
 //! Creature blueprints (MS-Paint drawings) for `wk-voxel-app`.
 //! Set A Atom + minimal Set D plant. Same `.gvsecrt` postcard shape as
 //! column-GVSE so files can be shared later.

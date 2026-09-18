@@ -1,7 +1,7 @@
 # Voxel fields / heatmaps for material physics — future plan
 
 *Tentative. How coarse overlays could drive richer material behaviour
-without abandoning the cell CA or importing `wk-field`. Companion to
+without abandoning the cell CA. Companion to
 [`VOXEL_MIGRATION.md`](VOXEL_MIGRATION.md) §6 / §9, [`VOXEL_WATER.md`](VOXEL_WATER.md),
 and column ideas in [`organism/FIELDS.md`](organism/FIELDS.md).*
 
@@ -12,9 +12,9 @@ grain motion remain cell `material` + `sat`. Fields / heatmaps are
 **derived or slow overlays** that *modulate* rates (evap, dissolve,
 growth, failure) — they must not become a second water store.
 
-Isolation stands: reimplement solvers inside `wk-voxel` (or grow the
-existing `Humidity` / `Temperature` / `Heatmap` types). Do **not**
-depend on `wk-field` / `wk-world`.
+Solvers stay inside `wk-voxel` — grow the existing `Humidity` /
+`Temperature` / `Heatmap` types rather than bolting a separate field
+stack onto the side.
 
 ## What we already have
 
@@ -265,6 +265,5 @@ cells (material, sat) ──derive──► wetness / head overlays
 
 ## Non-goals
 
-- Importing `wk-field` into `wk-voxel`
 - Replacing pore `sat` with a moisture field
 - Running field writes inside checkerboard gravity colours

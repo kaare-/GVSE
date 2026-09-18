@@ -23,8 +23,8 @@ notes intended to survive re-reads of the codebase.
 | [`WORLDGEN.md`](WORLDGEN.md) | World topology (ring vs infinite), elevation, streaming, hydro init, wrap rules. |
 | [`STRATA.md`](STRATA.md) | Artistic stratigraphic model: facies belts, 8-layer recipes, pinch-outs. |
 | [`organism/`](organism/) | Organism Kernel freeze docs (petri = `wk-voxel-app`). |
-| [`AGENTS.md`](AGENTS.md) | **Archive** — column scripted grazer (`crates/legacy/wk-agents`). |
-| [`ECOLOGY.md`](ECOLOGY.md) | **Archive** — column `Ecology` bucket (`crates/legacy/wk-world`). |
+| [`AGENTS.md`](AGENTS.md) | **Archive** — column scripted grazer. |
+| [`ECOLOGY.md`](ECOLOGY.md) | **Archive** — column `Ecology` bucket. |
 | [`BURROWS.md`](BURROWS.md) | **Archive** — column dig / void API. |
 | [`EVOLUTION.md`](EVOLUTION.md) | **Archive** — column grazer fission / mutation. |
 
@@ -38,5 +38,5 @@ World shape: `WORLDGEN.md` → `STRATA.md`. Presentation / atmosphere:
 (games + science ceilings): `COMPARISON.md` — useful after
 water/migration, before expanding scope.
 
-Column-stack crates and the archive docs above live under
-[`crates/legacy/`](../crates/legacy/); product work is on `wk-voxel`.
+The column-stack crates are gone; the archive docs above stay for the
+design history behind them. Product work is on `wk-voxel`.

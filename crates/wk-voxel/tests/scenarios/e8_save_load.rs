@@ -1,6 +1,5 @@
 //! E8 — snapshot round-trip then continue ticking (voxel port).
 //!
-//! Legacy oracle: `tests/scenarios/e8_save_load.rs` (column stack via wk-io).
 //! Product intent: save → load preserves state; sim can continue.
 
 use wk_voxel::{
