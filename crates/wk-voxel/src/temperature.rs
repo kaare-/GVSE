@@ -389,6 +389,60 @@ pub struct Temperature {
     /// Live skin y indexed by `hx - bounds.hx_min` when the box is dense.
     #[serde(skip)]
     surf_col: Vec<i32>,
+    /// Distinguishes this field in the thread-local saturation cache.
+    /// Workers share `&Temperature` (the type stays `Sync`); condensation
+    /// is the only caller and it runs on the step thread.
+    #[serde(skip)]
+    sat_owner: u64,
+}
+
+/// Per-tile saturation mass, valid only while `temp[i]` still equals °C.
+#[derive(Debug, Clone, Default)]
+struct SatCache {
+    owner: u64,
+    bounds: Option<TileBounds>,
+    temp: Vec<f32>,
+    sat: Vec<f32>,
+}
+
+thread_local! {
+    static SAT_CACHE: std::cell::RefCell<SatCache> = std::cell::RefCell::new(SatCache::default());
+}
+
+fn fresh_sat_owner() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+impl SatCache {
+    fn mass_at(&mut self, bounds: Option<TileBounds>, hx: i32, hy: i32, t_c: f32) -> f32 {
+        let Some(b) = bounds else {
+            return Humidity::saturation_mass_at_temp(t_c);
+        };
+        if !b.contains(hx, hy) {
+            return Humidity::saturation_mass_at_temp(t_c);
+        }
+        let (w, _) = b.dims();
+        let n = b.tile_capacity();
+        if w == 0 || n == 0 {
+            return Humidity::saturation_mass_at_temp(t_c);
+        }
+        if self.bounds != Some(b) || self.sat.len() != n {
+            self.bounds = Some(b);
+            self.temp = vec![f32::NAN; n];
+            self.sat = vec![0.0; n];
+        }
+        let i = b.index(w, hx, hy);
+        // NaN never matches, so a poisoned slot recomputes.
+        if self.temp[i] == t_c {
+            return self.sat[i];
+        }
+        let sat = Humidity::saturation_mass_at_temp(t_c);
+        self.temp[i] = t_c;
+        self.sat[i] = sat;
+        sat
+    }
 }
 
 impl Temperature {
@@ -421,6 +475,7 @@ impl Temperature {
             slab: Vec::new(),
             slab_deltas: Vec::new(),
             surf_col: Vec::new(),
+            sat_owner: fresh_sat_owner(),
         };
         t.fill_initial(0);
         t
@@ -567,6 +622,28 @@ impl Temperature {
     pub fn at_cell(&self, gx: i32, gy: i32) -> f32 {
         let (hx, hy) = self.tile_of(gx, gy);
         self.at_tile(hx, hy)
+    }
+
+    /// Vapour hold (humidity mass) at the tile covering `(hx, hy)`.
+    ///
+    /// Same number as [`Humidity::saturation_mass_at_temp`] of the packed
+    /// °C. Repeated reads while that °C is unchanged skip the `exp`.
+    /// An empty slab falls back to the sparse map, so tests that only
+    /// fill `cells` stay exact.
+    pub fn saturation_mass_at_tile(&self, hx: i32, hy: i32) -> f32 {
+        let t_c = self.at_tile_packed(hx, hy);
+        let owner = self.sat_owner;
+        let bounds = self.bounds;
+        SAT_CACHE.with(|slot| {
+            let mut cache = slot.borrow_mut();
+            if cache.owner != owner {
+                cache.owner = owner;
+                cache.bounds = None;
+                cache.temp.clear();
+                cache.sat.clear();
+            }
+            cache.mass_at(bounds, hx, hy, t_c)
+        })
     }
 
     /// Bilinear °C in world-cell space (no 4×4 facets).
@@ -2571,6 +2648,22 @@ mod tests {
         assert!(temperature_step_due(0));
         assert!(!temperature_step_due(3));
         assert!(temperature_step_due(20));
+    }
+
+    #[test]
+    fn saturation_cache_matches_clausius_and_follows_writes() {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 32, 1, 32, 8, false);
+        t.set_tile_c(1, 2, 18.0);
+        let warm = Humidity::saturation_mass_at_temp(t.at_tile_packed(1, 2));
+        assert_eq!(t.saturation_mass_at_tile(1, 2), warm);
+        assert_eq!(t.saturation_mass_at_tile(1, 2), warm, "second read is the cached hold");
+        t.set_tile_c(1, 2, -8.0);
+        let cold = Humidity::saturation_mass_at_temp(t.at_tile_packed(1, 2));
+        assert_eq!(t.saturation_mass_at_tile(1, 2), cold);
+        assert!(
+            (warm - cold).abs() > 1.0,
+            "colder air must hold less vapour ({warm} vs {cold})"
+        );
     }
 
     fn fill_tile_surface(
