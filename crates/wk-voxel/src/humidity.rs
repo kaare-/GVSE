@@ -1090,6 +1090,9 @@ impl Humidity {
         if n == 0 {
             return;
         }
+        // Column index, not a hash per seat. The map stays for the
+        // sparse path and for a column the pack missed.
+        let air_cols = pack_free_air_cols(b, &free_air);
         let snap = self.packed_mass(b);
         let mut work = snap.clone();
         let surface = Some((wind, world, &free_air));
@@ -1126,9 +1129,14 @@ impl Humidity {
                 vectors[i] = wind.vector_at(Some(world), hx, hy);
             }
         }
-        self.flux_axis_into(&snap, &mut work, vx, vy, surface, true, b, w, &vectors);
-        self.flux_axis_into(&snap, &mut work, vx, vy, surface, false, b, w, &vectors);
-        self.lift_buried_into(&mut work, wind, world, &free_air, b, w, h);
+        // Both axes donate from `snap`. One walk, then horizontal
+        // deltas before vertical — same result as two passes.
+        self.flux_both_into(
+            &snap, &mut work, vx, vy, surface, b, w, &vectors, &air_cols,
+        );
+        self.lift_buried_into(
+            &mut work, wind, world, &free_air, b, w, h, &air_cols,
+        );
         self.wind_mix_into(
             &mut work,
             wind.mix_strength(vx, vy),
@@ -1136,9 +1144,92 @@ impl Humidity {
             b,
             w,
             h,
+            &air_cols,
         );
         self.oro_into(&mut work, wind, Some(world), b, w, h);
         self.adopt_work(b, work);
+    }
+
+    /// Both axes donate from `snap`. Horizontal deltas land before
+    /// vertical ones, matching two [`Self::flux_axis_into`] calls.
+    fn flux_both_into(
+        &self,
+        snap: &[f32],
+        work: &mut [f32],
+        climate_vx: f32,
+        climate_vy: f32,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &FxHashMap<i32, i32>,
+        )>,
+        b: TileBounds,
+        w: usize,
+        vectors: &[(f32, f32)],
+        air_cols: &[i32],
+    ) {
+        let n = snap.len().min(work.len());
+        if n == 0 || w == 0 {
+            return;
+        }
+        let h = n / w;
+        let hx_min = b.hx_min;
+        let mut horiz = vec![0.0f32; n];
+        let mut vert = vec![0.0f32; n];
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                let mass = snap[i];
+                if mass.abs() < 1e-9 {
+                    continue;
+                }
+                let hx = hx_min + ix as i32;
+                let hy = b.hy_min + iy as i32;
+                let (vx, vy) = match surface {
+                    Some(_) => vectors
+                        .get(i)
+                        .copied()
+                        .unwrap_or((climate_vx, climate_vy)),
+                    None => (climate_vx, climate_vy),
+                };
+                for horizontal in [true, false] {
+                    let Some((step, leave)) = Self::flux_step_leave(mass, vx, vy, horizontal)
+                    else {
+                        continue;
+                    };
+                    let Some((tx, ty)) =
+                        self.flux_dest(hx, hy, step, horizontal, surface, air_cols, hx_min)
+                    else {
+                        continue;
+                    };
+                    let deltas = if horizontal { &mut horiz } else { &mut vert };
+                    deltas[i] -= leave;
+                    if b.contains(tx, ty) {
+                        deltas[b.index(w, tx, ty)] += leave;
+                    }
+                }
+            }
+        }
+        self.apply_packed_deltas(work, &horiz, b, w);
+        self.apply_packed_deltas(work, &vert, b, w);
+    }
+
+    fn apply_packed_deltas(&self, work: &mut [f32], deltas: &[f32], b: TileBounds, w: usize) {
+        let n = work.len().min(deltas.len());
+        for i in 0..n {
+            let d = deltas[i];
+            if d.abs() < 1e-12 {
+                continue;
+            }
+            if d < 0.0 {
+                work[i] = (work[i] + d).max(0.0);
+            } else {
+                let (hx, hy) = b.coords(w, i);
+                if self.accepts(hx, hy) {
+                    work[i] += d;
+                }
+            }
+        }
     }
 
     /// Donor-cell flux into `work`. Masses come from the pre-advect
@@ -1184,7 +1275,7 @@ impl Humidity {
                 let Some((step, leave)) = Self::flux_step_leave(mass, vx, vy, horizontal) else {
                     continue;
                 };
-                let Some((tx, ty)) = self.flux_dest(hx, hy, step, horizontal, surface) else {
+                let Some((tx, ty)) = self.flux_dest(hx, hy, step, horizontal, surface, &[], 0) else {
                     continue;
                 };
                 deltas[i] -= leave;
@@ -1220,11 +1311,13 @@ impl Humidity {
         b: TileBounds,
         w: usize,
         h: usize,
+        air_cols: &[i32],
     ) {
         let n = work.len();
         if n == 0 || w == 0 {
             return;
         }
+        let hx_min = b.hx_min;
         let mut moves: Vec<(usize, usize, f32)> = Vec::new();
         for iy in 0..h {
             for ix in 0..w {
@@ -1235,16 +1328,16 @@ impl Humidity {
                 }
                 let hx = b.hx_min + ix as i32;
                 let hy = b.hy_min + iy as i32;
-                let air = self.free_air_cached(wind, world, hx, cache);
+                let air = self.air_row(wind, world, hx, cache, air_cols, hx_min);
                 if hy >= air {
                     continue;
                 }
                 let mut valley = air;
                 if let Some(l) = self.wrap_hx(hx - 1) {
-                    valley = valley.min(self.free_air_cached(wind, world, l, cache));
+                    valley = valley.min(self.air_row(wind, world, l, cache, air_cols, hx_min));
                 }
                 if let Some(r) = self.wrap_hx(hx + 1) {
-                    valley = valley.min(self.free_air_cached(wind, world, r, cache));
+                    valley = valley.min(self.air_row(wind, world, r, cache, air_cols, hx_min));
                 }
                 if hy >= valley {
                     continue;
@@ -1283,6 +1376,7 @@ impl Humidity {
         b: TileBounds,
         w: usize,
         h: usize,
+        air_cols: &[i32],
     ) {
         let mix = mix.clamp(0.0, 1.0);
         let n = work.len();
@@ -1290,84 +1384,64 @@ impl Humidity {
             return;
         }
         let alpha = (0.04 + 0.14 * mix).clamp(0.0, 0.20);
+        let sink = 0.03 * mix;
+        let do_sink = sink > 1e-5;
+        let hx_min = b.hx_min;
         let mut deltas = vec![0.0f32; n];
         for iy in 0..h {
             for ix in 0..w {
                 let i = iy * w + ix;
                 let val = work[i];
-                // Sparse mix runs after retain(|v| > 1e-6).
-                if val.abs() <= 1e-6 {
-                    continue;
-                }
                 let hx = b.hx_min + ix as i32;
                 let hy = b.hy_min + iy as i32;
-                let above_hy = hy + 1;
-                if !self.accepts(hx, above_hy) {
-                    continue;
-                }
-                if let Some((wnd, wrld, cache)) = surface {
-                    let air = self.free_air_cached(wnd, wrld, hx, cache);
-                    if hy < air || above_hy < air {
-                        continue;
-                    }
-                }
-                let n_val = if b.contains(hx, above_hy) {
-                    work[b.index(w, hx, above_hy)]
-                } else {
-                    0.0
-                };
-                let flow = (val - n_val) * alpha;
-                if flow.abs() < 1e-9 {
-                    continue;
-                }
-                deltas[i] -= flow;
-                if b.contains(hx, above_hy) {
-                    deltas[b.index(w, hx, above_hy)] += flow;
-                }
-            }
-        }
-        let sink = 0.03 * mix;
-        if sink > 1e-5 {
-            for iy in 0..h {
-                for ix in 0..w {
-                    let i = iy * w + ix;
-                    let val = work[i];
-                    if val <= 1e-9 {
-                        continue;
-                    }
-                    let hx = b.hx_min + ix as i32;
-                    let hy = b.hy_min + iy as i32;
-                    let below = hy - 1;
-                    if !self.accepts(hx, below) {
-                        continue;
-                    }
-                    if let Some((wnd, wrld, cache)) = surface {
-                        if below < self.free_air_cached(wnd, wrld, hx, cache) {
-                            continue;
+                // Sparse mix runs after retain(|v| > 1e-6). Sink uses a
+                // looser floor. One scan, mix then sink, same add order
+                // as the old two passes when rows run bottom to top.
+                if val.abs() > 1e-6 {
+                    let above_hy = hy + 1;
+                    if self.accepts(hx, above_hy) {
+                        let blocked = if let Some((wnd, wrld, cache)) = surface {
+                            let air = self.air_row(wnd, wrld, hx, cache, air_cols, hx_min);
+                            hy < air || above_hy < air
+                        } else {
+                            false
+                        };
+                        if !blocked {
+                            let n_val = if b.contains(hx, above_hy) {
+                                work[b.index(w, hx, above_hy)]
+                            } else {
+                                0.0
+                            };
+                            let flow = (val - n_val) * alpha;
+                            if flow.abs() >= 1e-9 {
+                                deltas[i] -= flow;
+                                if b.contains(hx, above_hy) {
+                                    deltas[b.index(w, hx, above_hy)] += flow;
+                                }
+                            }
                         }
                     }
-                    let take = val * sink;
-                    deltas[i] -= take;
-                    if b.contains(hx, below) {
-                        deltas[b.index(w, hx, below)] += take;
+                }
+                if do_sink && val > 1e-9 {
+                    let below = hy - 1;
+                    if self.accepts(hx, below) {
+                        let blocked = if let Some((wnd, wrld, cache)) = surface {
+                            below < self.air_row(wnd, wrld, hx, cache, air_cols, hx_min)
+                        } else {
+                            false
+                        };
+                        if !blocked {
+                            let take = val * sink;
+                            deltas[i] -= take;
+                            if b.contains(hx, below) {
+                                deltas[b.index(w, hx, below)] += take;
+                            }
+                        }
                     }
                 }
             }
         }
-        for i in 0..n {
-            let d = deltas[i];
-            if d.abs() < 1e-12 {
-                continue;
-            }
-            if d < 0.0 {
-                work[i] = (work[i] + d).max(0.0);
-            } else {
-                let (hx, hy) = b.coords(w, i);
-                if self.accepts(hx, hy) {
-                    work[i] += d;
-                }
-            }
-        }
+        self.apply_packed_deltas(work, &deltas, b, w);
     }
 
     /// Per-column orographic lift on the slab. Negative apply is `+=`
@@ -1630,6 +1704,8 @@ impl Humidity {
             &crate::grid::World,
             &FxHashMap<i32, i32>,
         )>,
+        air_cols: &[i32],
+        air_hx_min: i32,
     ) -> Option<(i32, i32)> {
         if horizontal {
             let dir = if step > 0.0 { 1 } else { -1 };
@@ -1643,8 +1719,8 @@ impl Humidity {
             let nhy = hy + dir;
             let mut dest_hy = nhy;
             if let Some((wind, world, cache)) = surface {
-                let air = self.free_air_cached(wind, world, hx, cache);
-                // Sealedsnap-lift to crest; open shafts climb one tile at a time.
+                let air = self.air_row(wind, world, hx, cache, air_cols, air_hx_min);
+                // Sealed snap-lift to crest; open shafts climb one tile at a time.
                 if nhy < air && !self.tile_open_to_sky(world, hx, hy) {
                     dest_hy = air.max(nhy);
                 }
@@ -1654,6 +1730,21 @@ impl Humidity {
             }
             Some((hx, dest_hy))
         }
+    }
+
+    fn air_row(
+        &self,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+        hx: i32,
+        cache: &FxHashMap<i32, i32>,
+        cols: &[i32],
+        hx_min: i32,
+    ) -> i32 {
+        if let Some(y) = packed_free_air(cols, hx_min, hx) {
+            return y;
+        }
+        self.free_air_cached(wind, world, hx, cache)
     }
 
     /// Donor-cell flux along one axis. `|v|` is the fraction of mass that
@@ -1686,7 +1777,7 @@ impl Humidity {
             let Some((step, leave)) = Self::flux_step_leave(mass, vx, vy, horizontal) else {
                 continue;
             };
-            let Some((tx, ty)) = self.flux_dest(hx, hy, step, horizontal, surface) else {
+            let Some((tx, ty)) = self.flux_dest(hx, hy, step, horizontal, surface, &[], 0) else {
                 continue;
             };
             *deltas.entry((hx, hy)).or_insert(0.0) -= leave;
@@ -1897,6 +1988,33 @@ impl Humidity {
             self.apply_tile_delta(k.0, k.1, d);
         }
         self.prune_near_zero();
+    }
+}
+
+/// `i32::MIN` means the column was not in the cache.
+fn pack_free_air_cols(b: TileBounds, cache: &FxHashMap<i32, i32>) -> Vec<i32> {
+    let (w, _) = b.dims();
+    let mut cols = Vec::with_capacity(w);
+    for ix in 0..w {
+        let hx = b.hx_min + ix as i32;
+        cols.push(cache.get(&hx).copied().unwrap_or(i32::MIN));
+    }
+    cols
+}
+
+fn packed_free_air(cols: &[i32], hx_min: i32, hx: i32) -> Option<i32> {
+    if cols.is_empty() {
+        return None;
+    }
+    let ix = hx as i64 - hx_min as i64;
+    if ix < 0 || ix as usize >= cols.len() {
+        return None;
+    }
+    let v = cols[ix as usize];
+    if v == i32::MIN {
+        None
+    } else {
+        Some(v)
     }
 }
 
@@ -2788,6 +2906,61 @@ mod tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn both_axis_flux_matches_two_passes() {
+        let h = Humidity::with_world_bounds(1, 0, 0, 8, 8);
+        let b = h.bounds.unwrap();
+        let (w, _) = b.dims();
+        let mut snap = h.pack_slab(b);
+        for (i, v) in snap.iter_mut().enumerate() {
+            *v = 4.0 + (i % 7) as f32;
+        }
+        let n = snap.len();
+        let mut vectors = Vec::with_capacity(n);
+        for i in 0..n {
+            vectors.push((
+                ((i % 5) as f32 - 2.0) * 0.15,
+                ((i % 3) as f32 - 1.0) * 0.04,
+            ));
+        }
+        let mut seq = snap.clone();
+        let mut both = snap.clone();
+        h.flux_axis_into(&snap, &mut seq, 0.1, 0.0, None, true, b, w, &vectors);
+        h.flux_axis_into(&snap, &mut seq, 0.1, 0.0, None, false, b, w, &vectors);
+        h.flux_both_into(&snap, &mut both, 0.1, 0.0, None, b, w, &vectors, &[]);
+        for i in 0..n {
+            assert_eq!(
+                seq[i].to_bits(),
+                both[i].to_bits(),
+                "i={i} two-pass={} one-pass={}",
+                seq[i],
+                both[i]
+            );
+        }
+    }
+
+    #[test]
+    fn packed_free_air_matches_the_column_map() {
+        let b = TileBounds {
+            hx_min: -1,
+            hx_max: 3,
+            hy_min: 0,
+            hy_max: 1,
+        };
+        let mut cache = FxHashMap::default();
+        cache.insert(-1, 4);
+        cache.insert(0, 5);
+        cache.insert(2, 9);
+        let cols = pack_free_air_cols(b, &cache);
+        assert_eq!(packed_free_air(&cols, b.hx_min, -1), Some(4));
+        assert_eq!(packed_free_air(&cols, b.hx_min, 0), Some(5));
+        assert_eq!(packed_free_air(&cols, b.hx_min, 1), None);
+        assert_eq!(packed_free_air(&cols, b.hx_min, 2), Some(9));
+        assert_eq!(packed_free_air(&cols, b.hx_min, 3), None);
+        assert_eq!(packed_free_air(&cols, b.hx_min, 8), None);
+        assert_eq!(packed_free_air(&[], 0, 0), None);
     }
 
     #[test]
