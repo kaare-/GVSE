@@ -1880,6 +1880,9 @@ const PIPE_JOIN_MAX_REACH: i32 = 64;
 /// Cheaper to reach the locked straw than to bore to this cell's surface.
 fn should_feed_main(world: &World, boiler: (i32, i32), main: &PipePath) -> bool {
     let reach = dist_to_path(world, boiler, main);
+    if reach == 0 {
+        return true;
+    }
     reach <= PIPE_JOIN_MAX_REACH && reach < surface_dist(world, boiler) * PIPE_JOIN_BIAS
 }
 
@@ -2314,7 +2317,13 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) -> bool {
         + (PIPE_MAX_FEEDERS - feeders.len().min(PIPE_MAX_FEEDERS));
     let cands = PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
-        collect_boiler_cands(world, temp, boil, &memo.claimed, room)
+        // Path cells are already a straw — including a feeder mouth at the
+        // crest, which is often not in `claimed` (the vessel is the hot
+        // body, the mouth is air). Skipping only `claimed` let that mouth
+        // mint a second main the first beat the claim flood was skipped.
+        let mut skip = memo.claimed.clone();
+        skip.extend(memo.path_cells.iter().copied());
+        collect_boiler_cands(world, temp, boil, &skip, room)
     });
     if cands.is_empty() {
         return false;
