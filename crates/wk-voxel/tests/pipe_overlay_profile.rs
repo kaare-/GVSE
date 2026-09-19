@@ -13,12 +13,10 @@ use std::time::{Duration, Instant};
 
 use wk_material::MaterialId;
 use wk_voxel::{
-    apply_pipe_motor, cell_pressure_norm_with_boil, ensure_leftover_hill_view, pipe_network_stats,
-    leftover_soak_stats, pipe_overlay_cells, pipe_painting, stamp_world, water_capacity_cell,
-    CellPressureKind, Sat,
-    SteamConfig,
-    Temperature, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, PHASE_EXPANSION_DRIVE_MAX,
-    STEAM_EVERY,
+    apply_pipe_motor, cell_pressure_norm_with_boil, ensure_leftover_hill_view, last_pipe_beat_timings,
+    leftover_soak_stats, pipe_network_stats, pipe_overlay_cells, pipe_painting, stamp_world,
+    water_capacity_cell, CellPressureKind, PipeBeatTimings, Sat, SteamConfig, Temperature, World,
+    WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, PHASE_EXPANSION_DRIVE_MAX, STEAM_EVERY,
 };
 
 fn ms(d: Duration) -> f32 {
@@ -147,17 +145,42 @@ fn pipe_motor_beat_cost() {
     cfg.enable_pipe = true;
     cfg.phase_expansion_drive = PHASE_EXPANSION_DRIVE_MAX;
     let mut total = Duration::ZERO;
+    let mut phases = PipeBeatTimings::default();
     const BEATS: u32 = 20;
     for _ in 0..BEATS {
         world.tick += STEAM_EVERY;
         let start = Instant::now();
         apply_pipe_motor(&mut world, &mut temp, &cfg, None);
         total += start.elapsed();
+        let t = last_pipe_beat_timings();
+        phases.retire_us += t.retire_us;
+        phases.rewalk_us += t.rewalk_us;
+        phases.rebuild_us += t.rebuild_us;
+        phases.attach_us += t.attach_us;
+        phases.reclaim_us += t.reclaim_us;
+        phases.wick_us += t.wick_us;
+        phases.reflash_us += t.reflash_us;
+        phases.pulse_us += t.pulse_us;
+        phases.deposit_us += t.deposit_us;
+        phases.total_us += t.total_us;
     }
     let avg = total / BEATS;
+    let n = BEATS as f32;
     eprintln!(
-        "apply_pipe_motor: {:.2}ms per beat (every {STEAM_EVERY} ticks)",
-        ms(avg)
+        "apply_pipe_motor: {:.2}ms per beat (every {STEAM_EVERY} ticks)\n  \
+         retire={:.2} rewalk={:.2} rebuild={:.2} attach={:.2} reclaim={:.2}\n  \
+         wick={:.2} reflash={:.2} pulse={:.2} deposit={:.2} (inner {:.2})",
+        ms(avg),
+        phases.retire_us as f32 / n / 1000.0,
+        phases.rewalk_us as f32 / n / 1000.0,
+        phases.rebuild_us as f32 / n / 1000.0,
+        phases.attach_us as f32 / n / 1000.0,
+        phases.reclaim_us as f32 / n / 1000.0,
+        phases.wick_us as f32 / n / 1000.0,
+        phases.reflash_us as f32 / n / 1000.0,
+        phases.pulse_us as f32 / n / 1000.0,
+        phases.deposit_us as f32 / n / 1000.0,
+        phases.total_us as f32 / n / 1000.0,
     );
 }
 

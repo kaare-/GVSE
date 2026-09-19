@@ -86,6 +86,10 @@ struct PipeMemo {
     /// `path_cells ∪ claimed` size, cached so the HUD never clones a
     /// 32k-entry set per frame.
     cells_total: usize,
+    /// Fingerprint of mains + feeders after the last rewalk. Claim flood
+    /// is skipped while this matches — the vessel does not move just
+    /// because a beat passed.
+    path_fp: u64,
 }
 
 impl PipeMemo {
@@ -99,13 +103,44 @@ impl PipeMemo {
             self.path_cells.extend(path.cells.iter().copied());
             self.mouths.insert(path.mouth);
         }
-        self.cells_total = self
+        // Unique count without allocating a third 32k set. The overlay used
+        // to rebuild that set every reindex — and a beat reindexes after
+        // rewalk *and* rebuild.
+        let extra = self
             .path_cells
             .iter()
-            .chain(self.claimed.iter())
-            .collect::<FxHashSet<_>>()
-            .len();
+            .filter(|c| !self.claimed.contains(c))
+            .count();
+        self.cells_total = self.claimed.len() + extra;
     }
+}
+
+/// Last `apply_pipe_motor` beat, split by phase. Zero on an off-beat.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PipeBeatTimings {
+    pub retire_us: u32,
+    pub rewalk_us: u32,
+    pub rebuild_us: u32,
+    pub attach_us: u32,
+    pub reclaim_us: u32,
+    pub wick_us: u32,
+    pub reflash_us: u32,
+    pub pulse_us: u32,
+    pub deposit_us: u32,
+    pub total_us: u32,
+}
+
+thread_local! {
+    static LAST_BEAT: std::cell::Cell<PipeBeatTimings> =
+        std::cell::Cell::new(PipeBeatTimings::default());
+}
+
+pub fn last_pipe_beat_timings() -> PipeBeatTimings {
+    LAST_BEAT.with(|c| c.get())
+}
+
+fn us(start: std::time::Instant) -> u32 {
+    start.elapsed().as_micros().min(u128::from(u32::MAX)) as u32
 }
 
 thread_local! {
@@ -1777,6 +1812,7 @@ fn bind_memo(world: &World) {
             memo.mains.clear();
             memo.feeders.clear();
             memo.claimed.clear();
+            memo.path_fp = 0;
             memo.reindex();
         }
         memo.active = true;
@@ -1802,10 +1838,6 @@ fn free_surface_y(world: &World, gx: i32, gy: i32) -> i32 {
 
 fn surface_dist(world: &World, p: (i32, i32)) -> i32 {
     (free_surface_y(world, p.0, p.1) - p.1).max(0)
-}
-
-fn claimed_cells() -> FxHashSet<(i32, i32)> {
-    PIPE_MEMO.with(|slot| slot.borrow().claimed.clone())
 }
 
 fn dist_to_path(world: &World, p: (i32, i32), path: &PipePath) -> i32 {
@@ -1866,6 +1898,70 @@ fn make_feeder(
     }
 }
 
+/// Full claim flood at least this often, even if the straw did not move.
+/// A heating isotherm at the edge of the vessel would otherwise wait
+/// forever for a route change. Eight beats is one eruption cycle.
+const PIPE_CLAIM_REFRESH: u64 = 8;
+
+fn path_fingerprint() -> u64 {
+    PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        let mut s = 0xcbf2_9ce4_8422_2325_u64;
+        for p in memo.mains.iter().chain(memo.feeders.iter()) {
+            s = s.wrapping_mul(0x1000_0000_01b3) ^ (p.root.0 as u64);
+            s = s.wrapping_mul(0x1000_0000_01b3) ^ (p.root.1 as u64);
+            s = s.wrapping_mul(0x1000_0000_01b3) ^ (p.mouth.0 as u64);
+            s = s.wrapping_mul(0x1000_0000_01b3) ^ (p.mouth.1 as u64);
+            s = s.wrapping_mul(0x1000_0000_01b3) ^ (p.cells.len() as u64);
+            for &(x, y) in &p.cells {
+                s = s.wrapping_mul(0x1000_0000_01b3) ^ (x as u64);
+                s = s.wrapping_mul(0x1000_0000_01b3) ^ (y as u64);
+            }
+        }
+        s
+    })
+}
+
+fn note_path_fp() {
+    let fp = path_fingerprint();
+    PIPE_MEMO.with(|slot| slot.borrow_mut().path_fp = fp);
+}
+
+fn refresh_claimed(world: &World, temp: &Temperature, boil: f32, beat: u64) {
+    let fp = path_fingerprint();
+    let (empty, same, due) = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        (
+            memo.claimed.is_empty(),
+            memo.path_fp == fp && memo.path_fp != 0,
+            (world.tick / beat.max(1)) % PIPE_CLAIM_REFRESH == 0,
+        )
+    });
+    if empty || due || !same {
+        rebuild_claimed(world, temp, boil);
+    } else {
+        prune_claimed(world, temp, boil);
+    }
+    PIPE_MEMO.with(|slot| slot.borrow_mut().path_fp = fp);
+}
+
+fn prune_claimed(world: &World, temp: &Temperature, boil: f32) {
+    PIPE_MEMO.with(|slot| {
+        let mut memo = slot.borrow_mut();
+        let before = memo.claimed.len();
+        memo.claimed.retain(|&(x, y)| {
+            world.get_cell(x, y).is_some_and(|c| {
+                c.material != MaterialId::Air
+                    && water_capacity_cell(c, &world.hydro) > 0
+                    && temp.at_cell(x, y) >= boil
+            })
+        });
+        if memo.claimed.len() != before {
+            memo.reindex();
+        }
+    });
+}
+
 fn rebuild_claimed(world: &World, temp: &Temperature, boil: f32) {
     let paths = PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
@@ -1877,9 +1973,9 @@ fn rebuild_claimed(world: &World, temp: &Temperature, boil: f32) {
     });
     let mut taken = FxHashSet::default();
     for path in &paths {
-        claim_wet_hot_body(world, temp, path.root.0, path.root.1, boil, &mut taken);
+        mark_wet_hot_body(world, temp, path.root.0, path.root.1, boil, &mut taken);
         for &(x, y) in &path.cells {
-            claim_wet_hot_body(world, temp, x, y, boil, &mut taken);
+            mark_wet_hot_body(world, temp, x, y, boil, &mut taken);
         }
     }
     PIPE_MEMO.with(|slot| {
@@ -2057,24 +2153,28 @@ fn collect_boiler_cands(
 /// into the cell if it has room, else parked as standing water, and only a
 /// sub-sat remainder stays as residual for `pool_residuals`.
 fn reclaim_orphan_lumen(world: &mut World, expand: u16) {
-    let on_path = PIPE_MEMO.with(|slot| {
-        let memo = slot.borrow();
-        if memo.world_id != world.chunk_cache_id.get() {
-            return FxHashSet::default();
-        }
-        memo.path_cells.clone()
-    });
     // Residual counts too. `pool_residuals` only tries the cell's own 4×4
     // tile and puts back whatever will not fit, so residual stranded on an
     // abandoned route sat there as invisible book — the HUD read sat=73k
     // against u=11, meaning almost all of it was residual, not live.
-    let orphans: FxHashSet<(i32, i32)> = world
-        .pipe_steam
-        .keys()
-        .chain(world.pipe_res.keys())
-        .copied()
-        .filter(|c| !on_path.contains(c))
-        .collect();
+    let orphans: Vec<(i32, i32)> = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        if memo.world_id != world.chunk_cache_id.get() {
+            return world
+                .pipe_steam
+                .keys()
+                .chain(world.pipe_res.keys())
+                .copied()
+                .collect();
+        }
+        world
+            .pipe_steam
+            .keys()
+            .chain(world.pipe_res.keys())
+            .copied()
+            .filter(|c| !memo.path_cells.contains(c))
+            .collect()
+    });
     if orphans.is_empty() {
         return;
     }
@@ -2212,8 +2312,10 @@ fn attach_new_boilers(world: &World, temp: &Temperature, boil: f32) -> bool {
     });
     let room = (PIPE_MAX_MAINS - mains.len().min(PIPE_MAX_MAINS))
         + (PIPE_MAX_FEEDERS - feeders.len().min(PIPE_MAX_FEEDERS));
-    let skip = claimed_cells();
-    let cands = collect_boiler_cands(world, temp, boil, &skip, room);
+    let cands = PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        collect_boiler_cands(world, temp, boil, &memo.claimed, room)
+    });
     if cands.is_empty() {
         return false;
     }
@@ -2256,6 +2358,35 @@ fn claim_wet_hot_body(
     boil: f32,
     taken: &mut FxHashSet<(i32, i32)>,
 ) -> Vec<(i32, i32)> {
+    let mut body = Vec::new();
+    flood_hot_body(world, temp, gx, gy, boil, taken, Some(&mut body));
+    body
+}
+
+/// Same flood as [`claim_wet_hot_body`], but only fills `taken`.
+///
+/// `rebuild_claimed` used to allocate a 31k-cell Vec per beat and throw it
+/// away. The claim set is the only thing that walk needs.
+fn mark_wet_hot_body(
+    world: &World,
+    temp: &Temperature,
+    gx: i32,
+    gy: i32,
+    boil: f32,
+    taken: &mut FxHashSet<(i32, i32)>,
+) {
+    flood_hot_body(world, temp, gx, gy, boil, taken, None);
+}
+
+fn flood_hot_body(
+    world: &World,
+    temp: &Temperature,
+    gx: i32,
+    gy: i32,
+    boil: f32,
+    taken: &mut FxHashSet<(i32, i32)>,
+    mut body: Option<&mut Vec<(i32, i32)>>,
+) {
     let gx = world.wrap_x(gx);
     // Tile heat decides *membership*. Sampling bilinearly here shrinks a
     // small hot region to its interior and can split one body in two, which
@@ -2282,16 +2413,20 @@ fn claim_wet_hot_body(
             && water_capacity_cell(cell, &world.hydro) > 0
             && heat(x, y) >= boil
     };
+    let push = |p: (i32, i32), body: &mut Option<&mut Vec<(i32, i32)>>| {
+        if let Some(v) = body.as_mut() {
+            v.push(p);
+        }
+    };
     // Claim on **push**, not on pop. Popping meant a cell discovered by
     // several neighbours paid for a chunk lookup and a temperature lookup
     // once per discovering edge — up to eight times per cell across a 30k
     // cell reservoir.
-    let mut body = Vec::new();
     let mut stack = Vec::new();
     if wet_hot(world, gx, gy) {
         if taken.insert((gx, gy)) {
             stack.push((gx, gy));
-            body.push((gx, gy));
+            push((gx, gy), &mut body);
         }
     } else {
         for dy in -1..=1 {
@@ -2303,13 +2438,13 @@ fn claim_wet_hot_body(
                 let ny = gy + dy;
                 if wet_hot(world, nx, ny) && taken.insert((nx, ny)) {
                     stack.push((nx, ny));
-                    body.push((nx, ny));
+                    push((nx, ny), &mut body);
                 }
             }
         }
     }
     if stack.is_empty() {
-        return body;
+        return;
     }
     let mut n = 0usize;
     while let Some((x, y)) = stack.pop() {
@@ -2332,11 +2467,10 @@ fn claim_wet_hot_body(
                 }
                 taken.insert((nx, ny));
                 stack.push((nx, ny));
-                body.push((nx, ny));
+                push((nx, ny), &mut body);
             }
         }
     }
-    body
 }
 
 /// Rewalk, attach feeders, pulse steam + water. Off-beat only binds memo.
@@ -2361,17 +2495,34 @@ pub fn apply_pipe_motor(
     world.pipe_expand = expand;
     bind_memo(world);
     if world.tick % beat != 0 {
+        LAST_BEAT.with(|c| c.set(PipeBeatTimings::default()));
         return;
     }
+    let beat_t0 = std::time::Instant::now();
+    let mut times = PipeBeatTimings::default();
+
+    let t0 = std::time::Instant::now();
     retire_cold_straws(world, temp, boil);
+    times.retire_us = us(t0);
+
+    let t0 = std::time::Instant::now();
     rewalk_network(world, temp);
-    rebuild_claimed(world, temp, boil);
+    times.rewalk_us = us(t0);
+
+    let t0 = std::time::Instant::now();
+    refresh_claimed(world, temp, boil, beat);
+    times.rebuild_us = us(t0);
+
     // Reclaiming floods the whole body, ~3.7ms on a 31k-cell reservoir, and
     // it only needs redoing when a boiler actually joined the book.
+    let t0 = std::time::Instant::now();
     if attach_new_boilers(world, temp, boil) {
         rewalk_network(world, temp);
         rebuild_claimed(world, temp, boil);
+        note_path_fp();
     }
+    times.attach_us = us(t0);
+
     let (feeders, mains) = PIPE_MEMO.with(|slot| {
         let memo = slot.borrow();
         (memo.feeders.clone(), memo.mains.clone())
@@ -2383,19 +2534,31 @@ pub fn apply_pipe_motor(
     };
     // Routes have settled for this beat, so anything still holding lumen off
     // the book was abandoned by a rewalk and nothing else will ever sweep it.
+    let t0 = std::time::Instant::now();
     reclaim_orphan_lumen(world, expand);
+    times.reclaim_us = us(t0);
+
     // Charge the straws from their reservoirs before firing, so a beat's
     // flash is fed by the standing body and not only by wall seepage.
-    let claimed = claimed_cells();
-    wick_reservoir(
-        world,
-        temp,
-        ero,
-        feeders.iter().chain(mains.iter()),
-        &claimed,
-        water,
-    );
+    let t0 = std::time::Instant::now();
+    PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        wick_reservoir(
+            world,
+            temp,
+            ero,
+            feeders.iter().chain(mains.iter()),
+            &memo.claimed,
+            water,
+        );
+    });
+    times.wick_us = us(t0);
+
+    let t0 = std::time::Instant::now();
     reflash_network(world, temp, expand, boil, stroke_sat(stroke, expand));
+    times.reflash_us = us(t0);
+
+    let t0 = std::time::Instant::now();
     for path in feeders.iter() {
         pulse_path(
             world,
@@ -2427,15 +2590,24 @@ pub fn apply_pipe_motor(
         }
         pump_water_along(world, temp, ero, path, water);
     }
+    times.pulse_us = us(t0);
+
     // Turn the vent over before judging its load: the ceiling scales with the
     // water still standing there, and a full lip also refuses delivery.
+    let t0 = std::time::Instant::now();
     for path in feeders.iter().chain(mains.iter()) {
         concentrate_hot_mouth(world, temp, humidity.as_deref_mut(), path.mouth, boil);
         deposit_pipe_mouth(world, temp, path, boil);
         deposit_along_straw(world, path);
     }
-    deposit_in_reservoir(world, &claimed);
+    PIPE_MEMO.with(|slot| {
+        let memo = slot.borrow();
+        deposit_in_reservoir(world, &memo.claimed);
+    });
     pool_residuals(world, expand);
+    times.deposit_us = us(t0);
+    times.total_us = us(beat_t0);
+    LAST_BEAT.with(|c| c.set(times));
 }
 
 /// Every `PIPE_ERUPT_PERIOD` beats a main erupts: it unleashes everything
