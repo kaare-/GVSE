@@ -523,7 +523,7 @@ impl Wind {
         // up, the lee sucks. Then slip so the solve cannot re-introduce
         // an into-rock residual. Step 3 (water-head → near-surface wind)
         // is not wired yet.
-        self.project_incompressible(world, bounds, &mut blended);
+        self.project_incompressible(world, bounds, &mut blended, &col_oro);
         for (&(hx, hy), v) in blended.iter_mut() {
             *v = self.deflect_along_surface_cached(world, &col_oro, hx, hy, v.0, v.1);
         }
@@ -689,7 +689,7 @@ impl Wind {
                 }
             }
         }
-        self.project_incompressible_slab(world, bounds, w, &mut vel, &live, &solid);
+        self.project_incompressible_slab(world, bounds, w, &mut vel, &live, &solid, col_oro);
         // Slip from packed ColOro skin — same math as vector_at misses,
         // without re-walking the live surface per live seat.
         for iy in 0..h {
@@ -790,6 +790,7 @@ impl Wind {
         vel_slab: &mut [(f32, f32)],
         live: &[bool],
         solid: &[bool],
+        cols: &ColOroTable,
     ) {
         let mut keys: Vec<usize> = Vec::new();
         for (i, &on) in live.iter().enumerate() {
@@ -816,7 +817,7 @@ impl Wind {
             let hy = bounds.hy_min + (i / w) as i32;
             let hx = bounds.hx_min + (i % w) as i32;
             for (d, &(dx, dy)) in DIRS.iter().enumerate() {
-                if self.face_blocked_slab(world, bounds, hx, hy, dx, dy, w, solid) {
+                if self.face_blocked_slab(world, bounds, hx, hy, dx, dy, w, solid, cols) {
                     blocked[pi] |= 1 << d;
                     continue;
                 }
@@ -901,6 +902,7 @@ impl Wind {
         dy: i32,
         w: usize,
         solid: &[bool],
+        cols: &ColOroTable,
     ) -> bool {
         if dy != 0 {
             let nhy = hy + dy;
@@ -924,7 +926,7 @@ impl Wind {
             return true;
         }
         if dx != 0 {
-            let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+            let (wall_l, wall_r, _) = self.packed_skin(world, cols, hx, hy);
             if dx > 0 && wall_r {
                 return true;
             }
@@ -933,7 +935,7 @@ impl Wind {
             }
         }
         if dy < 0 {
-            let surf = self.surface_tile_hy(world, hx);
+            let (_, _, surf) = self.packed_skin(world, cols, hx, hy);
             if hy <= surf {
                 return true;
             }
@@ -950,6 +952,7 @@ impl Wind {
         hy: i32,
         dx: i32,
         dy: i32,
+        cols: &ColOroTable,
     ) -> bool {
         if dy != 0 {
             let nhy = hy + dy;
@@ -970,7 +973,7 @@ impl Wind {
             return true;
         }
         if dx != 0 {
-            let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+            let (wall_l, wall_r, _) = self.packed_skin(world, cols, hx, hy);
             if dx > 0 && wall_r {
                 return true;
             }
@@ -979,7 +982,7 @@ impl Wind {
             }
         }
         if dy < 0 {
-            let surf = self.surface_tile_hy(world, hx);
+            let (_, _, surf) = self.packed_skin(world, cols, hx, hy);
             if hy <= surf {
                 return true;
             }
@@ -1000,6 +1003,7 @@ impl Wind {
         world: Option<&World>,
         bounds: TileBounds,
         field: &mut FxHashMap<(i32, i32), (f32, f32)>,
+        cols: &ColOroTable,
     ) {
         if field.len() < 4 {
             return;
@@ -1022,7 +1026,7 @@ impl Wind {
         let mut neigh = vec![[usize::MAX; 4]; n];
         for (i, &(hx, hy)) in keys.iter().enumerate() {
             for (d, &(dx, dy)) in DIRS.iter().enumerate() {
-                if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+                if self.face_blocked(world, bounds, hx, hy, dx, dy, cols) {
                     blocked[i] |= 1 << d;
                     continue;
                 }
@@ -1144,7 +1148,7 @@ impl Wind {
         let th = cfg.thermal_drive.clamp(0.0, 2.0);
         if th > 1e-4 {
             if let Some(t) = temp {
-                let (dvx, dvy) = self.thermal_delta(t, hx, hy);
+                let (dvx, dvy) = self.thermal_delta(t, hx, hy, here.surf_hy);
                 vx += dvx * th;
                 vy += dvy * th * 0.35;
             }
@@ -1229,6 +1233,30 @@ impl Wind {
         let s0 = self.surface_at(world, gx - tc);
         let s1 = self.surface_at(world, gx + tc);
         ((s1 - s0) as f32 / (2.0 * tc as f32)).clamp(-8.0, 8.0)
+    }
+
+    /// Cliff faces and the skin tile from the column table already packed
+    /// for this rebuild. Same tests as [`Self::neighbour_walls`] and
+    /// [`Self::surface_tile_hy`], without hashing the surface cache once
+    /// per face of every sky seat.
+    fn packed_skin(
+        &self,
+        world: Option<&World>,
+        cols: &ColOroTable,
+        hx: i32,
+        hy: i32,
+    ) -> (bool, bool, i32) {
+        let tc = self.tile_cols.max(1);
+        let y_mid = hy * tc + tc / 2;
+        let rise = tc.max(1);
+        let here = self.col_oro_at(world, cols, hx);
+        let left = self.col_oro_at(world, cols, hx - 1);
+        let right = self.col_oro_at(world, cols, hx + 1);
+        (
+            left.surf_y > y_mid + rise,
+            right.surf_y > y_mid + rise,
+            here.surf_hy,
+        )
     }
 
     /// Neighbour land that sticks up past this sample — a cliff / hill
@@ -1384,7 +1412,7 @@ impl Wind {
         (speed / w, lift / w, sink / w)
     }
 
-    fn thermal_delta(&self, temp: &Temperature, hx: i32, hy: i32) -> (f32, f32) {
+    fn thermal_delta(&self, temp: &Temperature, hx: i32, hy: i32, surf_hy: i32) -> (f32, f32) {
         let t0 = temp.at_tile_packed(hx, hy);
         let tx = (temp.at_tile_packed(hx + 1, hy) - temp.at_tile_packed(hx - 1, hy)) * 0.5;
         let ty = (temp.at_tile_packed(hx, hy + 1) - temp.at_tile_packed(hx, hy - 1)) * 0.5;
@@ -1392,12 +1420,11 @@ impl Wind {
         let mut vy = ty * 0.012;
         let flank = (temp.at_tile_packed(hx - 1, hy) + temp.at_tile_packed(hx + 1, hy)) * 0.5;
         vy += ((t0 - flank) / 18.0).clamp(-0.10, 0.10);
-        let surf = self.surface_tile_hy(None, hx);
-        let above = (hy - surf).max(0) as f32;
+        let above = (hy - surf_hy).max(0) as f32;
         let near = (1.0 - above / 6.0).clamp(0.25, 1.0);
         vx *= near;
         vy *= near * 0.6;
-        if hy + 1 < surf {
+        if hy + 1 < surf_hy {
             vx *= 0.15;
             vy *= 0.15;
         }
@@ -1564,10 +1591,61 @@ impl Wind {
     }
 
     /// Mean |vx| on near-surface field tiles (evap / thermal mix).
+    ///
+    /// The field becomes a full-sky slab once humidity fills in, but this
+    /// mean only uses the three tiles sitting on the skin. Walking every
+    /// aloft seat to throw it away was a filled-sky cost on every tick,
+    /// inside evaporation. Columns the last rebuild did not cache have no
+    /// seats, so a cache miss does not walk the live surface.
     pub fn near_surface_abs(&self, world: Option<&World>) -> f32 {
         if self.field_is_empty() {
             return self.climate_vx.abs().max(self.climate_vy.abs());
         }
+        let Some(bounds) = self.bounds else {
+            return self.near_surface_abs_walk(world);
+        };
+        if self.surf_cache.is_empty() {
+            return self.near_surface_abs_walk(world);
+        }
+        let tc = self.tile_cols.max(1);
+        let mut sum = 0.0f32;
+        let mut n = 0u32;
+        let mut hx = bounds.hx_min;
+        while hx <= bounds.hx_max {
+            let gx = hx * tc + tc / 2;
+            let Some(&surf_y) = self.surf_cache.get(&gx) else {
+                hx += 1;
+                continue;
+            };
+            let surf = surf_y.div_euclid(tc);
+            let mut hy = surf.max(bounds.hy_min);
+            let hy1 = (surf + 2).min(bounds.hy_max);
+            while hy <= hy1 {
+                if let Some((vx, _)) = self.field_seat(hx, hy) {
+                    sum += vx.abs();
+                    n += 1;
+                }
+                hy += 1;
+            }
+            hx += 1;
+        }
+        if n == 0 {
+            self.climate_vx.abs()
+        } else {
+            sum / n as f32
+        }
+    }
+
+    /// A seated vector, not the climate fallback [`Self::vector_at`] invents
+    /// for a miss. Evap must not treat unseated sky as wind.
+    fn field_seat(&self, hx: i32, hy: i32) -> Option<(f32, f32)> {
+        if let Some(&v) = self.field.get(&(hx, hy)) {
+            return Some(v);
+        }
+        self.field_slab.as_ref().and_then(|s| s.get(hx, hy))
+    }
+
+    fn near_surface_abs_walk(&self, world: Option<&World>) -> f32 {
         let mut sum = 0.0f32;
         let mut n = 0u32;
         self.for_each_field(|(hx, hy), (vx, _)| {
@@ -2255,5 +2333,56 @@ mod tests {
             wind.dense_slab_vectors(mismatch).is_none(),
             "mismatched humidity bounds must not claim the wind slab"
         );
+    }
+
+    /// Evap's breeze is the skin band only. A gale aloft must not move it.
+    #[test]
+    fn near_surface_mean_ignores_wind_aloft() {
+        let mut wind = Wind::climate(4, 0.5, 1, 64, 16, 0, 64, false);
+        let hx = 2i32;
+        let gx = hx * 4 + 2;
+        wind.field.clear();
+        wind.field_slab = None;
+        wind.surf_cache.clear();
+        // Skin at cell 20 → tile 5. Band is hy 5..=7.
+        wind.surf_cache.insert(gx, 20);
+        wind.field.insert((hx, 5), (0.4, 0.0));
+        wind.field.insert((hx, 6), (0.2, 0.0));
+        wind.field.insert((hx, 12), (1.0, 0.0));
+        let mean = wind.near_surface_abs(None);
+        assert!(
+            (mean - 0.3).abs() < 1e-5,
+            "aloft 1.0 must not enter the skin mean, got {mean}"
+        );
+    }
+
+    /// The band scan has to agree with walking every seat. A filled sky
+    /// used to do that walk every tick; this is the result it must keep.
+    #[test]
+    fn near_surface_mean_matches_a_full_field_walk() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let sea: i32 = 16;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 32, 128);
+        for x in 0..32 {
+            for y in 0..=sea {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.2, 9, 32, sea, 0, 96, false);
+        wind.variance = 0.35;
+        let occupied: Vec<(i32, i32)> = (0..8)
+            .flat_map(|hx| (4..18).map(move |hy| (hx, hy)))
+            .collect();
+        wind.rebuild_field(Some(&w), None, 40, &occupied, None);
+        let fast = wind.near_surface_abs(Some(&w));
+        let slow = wind.near_surface_abs_walk(Some(&w));
+        assert!(
+            (fast - slow).abs() < 1e-5,
+            "skin scan {fast} disagreed with the full field walk {slow}"
+        );
+        assert!(fast > 0.0, "a rebuilt field should have some skin breeze");
     }
 }
