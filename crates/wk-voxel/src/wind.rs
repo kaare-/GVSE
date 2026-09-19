@@ -492,7 +492,7 @@ impl Wind {
                 continue;
             }
             let (mut vx, mut vy) =
-                self.compose_drivers(world, temp, hx, hy, tick, evx, evy, &cfg, &col_oro);
+                self.compose_drivers(world, temp, hx, hy, tick, evx, evy, &cfg, &col_oro, None);
             vx = vx.clamp(-1.0, 1.0);
             vy = vy.clamp(-1.0, 1.0);
             if smooth > 1e-4 {
@@ -646,6 +646,14 @@ impl Wind {
         }
         let mut vel = vec![(0.0f32, 0.0f32); n];
         let mut live = vec![false; n];
+        // sin(hx·k + φ) does not depend on hy, and the other way around.
+        // One sine per column and per row, then the same products as
+        // [`Self::swirl_at`]. A filled sky was eight trig calls per seat.
+        let swirl = if cfg.swirl.clamp(0.0, 2.0) > 1e-4 {
+            Some(SwirlLut::build(self.seed, tick, bounds))
+        } else {
+            None
+        };
         for iy in 0..h {
             for ix in 0..w {
                 let i = iy * w + ix;
@@ -654,8 +662,18 @@ impl Wind {
                 }
                 let hx = bounds.hx_min + ix as i32;
                 let hy = bounds.hy_min + iy as i32;
-                let (mut vx, mut vy) =
-                    self.compose_drivers(world, temp, hx, hy, tick, evx, evy, cfg, col_oro);
+                let (mut vx, mut vy) = self.compose_drivers(
+                    world,
+                    temp,
+                    hx,
+                    hy,
+                    tick,
+                    evx,
+                    evy,
+                    cfg,
+                    col_oro,
+                    swirl.as_ref(),
+                );
                 vx = vx.clamp(-1.0, 1.0);
                 vy = vy.clamp(-1.0, 1.0);
                 if smooth > 1e-4 {
@@ -1127,6 +1145,7 @@ impl Wind {
         evy: f32,
         cfg: &WindConfig,
         cols: &ColOroTable,
+        swirl: Option<&SwirlLut>,
     ) -> (f32, f32) {
         let here = self.col_oro_at(world, cols, hx);
         let shear = here.height_shear(hy);
@@ -1151,7 +1170,10 @@ impl Wind {
         }
         let sw = cfg.swirl.clamp(0.0, 2.0);
         if sw > 1e-4 {
-            let (sx, sy) = self.swirl_at(hx, hy, tick);
+            let (sx, sy) = match swirl {
+                Some(lut) => lut.at(hx, hy),
+                None => self.swirl_at(hx, hy, tick),
+            };
             vx += sx * sw;
             vy += sy * sw * 0.4;
         }
@@ -1405,17 +1427,7 @@ impl Wind {
     }
 
     fn swirl_at(&self, hx: i32, hy: i32, tick: u64) -> (f32, f32) {
-        let t = tick as f32;
-        let phase = (self.seed as f32) * 1.0e-9;
-        let ax = hx as f32 * 0.31 + t * 0.017 + phase;
-        let ay = hy as f32 * 0.27 + t * 0.013 + phase * 1.7;
-        let mut sx = ax.sin() * (-ay.sin()) * 0.27 * 0.055;
-        let mut sy = -(ax.cos() * ay.cos() * 0.31 * 0.055);
-        let bx = hx as f32 * 0.71 + t * 0.041 + phase * 2.1;
-        let by = hy as f32 * 0.63 - t * 0.029 + phase * 0.4;
-        sx += bx.sin() * (-by.sin()) * 0.63 * 0.028;
-        sy += -(bx.cos() * by.cos() * 0.71 * 0.028);
-        (sx, sy)
+        swirl_from_seat(self.seed, tick, hx, hy)
     }
 
     /// True when neither the sparse map nor the last dense slab has a seat.
@@ -1583,6 +1595,118 @@ impl Wind {
             sum / n as f32
         }
     }
+}
+
+/// Column/row sines for one rebuild. `sin(hx·k + φ(tick))` does not
+/// depend on `hy`, so a filled sky reuses one sine per column and per
+/// row. Products match [`swirl_from_seat`] exactly.
+struct SwirlLut {
+    hx_min: i32,
+    hy_min: i32,
+    w: usize,
+    h: usize,
+    seed: u64,
+    tick: u64,
+    /// `sin_ax, cos_ax, sin_bx, cos_bx` per column.
+    col: Vec<f32>,
+    /// `sin_ay, cos_ay, sin_by, cos_by` per row.
+    row: Vec<f32>,
+}
+
+impl SwirlLut {
+    fn build(seed: u64, tick: u64, bounds: TileBounds) -> Self {
+        let (w, h) = bounds.dims();
+        let t = tick as f32;
+        let phase = (seed as f32) * 1.0e-9;
+        let mut col = Vec::with_capacity(w.saturating_mul(4));
+        for ix in 0..w {
+            let hx = bounds.hx_min + ix as i32;
+            // Same expression as [`swirl_from_seat`] — do not regroup
+            // the adds, or f32 sin inputs drift by an ulp.
+            let ax = hx as f32 * 0.31 + t * 0.017 + phase;
+            let bx = hx as f32 * 0.71 + t * 0.041 + phase * 2.1;
+            col.push(ax.sin());
+            col.push(ax.cos());
+            col.push(bx.sin());
+            col.push(bx.cos());
+        }
+        let mut row = Vec::with_capacity(h.saturating_mul(4));
+        for iy in 0..h {
+            let hy = bounds.hy_min + iy as i32;
+            let ay = hy as f32 * 0.27 + t * 0.013 + phase * 1.7;
+            let by = hy as f32 * 0.63 - t * 0.029 + phase * 0.4;
+            row.push(ay.sin());
+            row.push(ay.cos());
+            row.push(by.sin());
+            row.push(by.cos());
+        }
+        Self {
+            hx_min: bounds.hx_min,
+            hy_min: bounds.hy_min,
+            w,
+            h,
+            seed,
+            tick,
+            col,
+            row,
+        }
+    }
+
+    fn at(&self, hx: i32, hy: i32) -> (f32, f32) {
+        let ix = (hx - self.hx_min) as isize;
+        let iy = (hy - self.hy_min) as isize;
+        if ix < 0 || iy < 0 || ix as usize >= self.w || iy as usize >= self.h {
+            return swirl_from_seat(self.seed, self.tick, hx, hy);
+        }
+        let c = ix as usize * 4;
+        let r = iy as usize * 4;
+        swirl_from_sincos(
+            self.col[c],
+            self.col[c + 1],
+            self.row[r],
+            self.row[r + 1],
+            self.col[c + 2],
+            self.col[c + 3],
+            self.row[r + 2],
+            self.row[r + 3],
+        )
+    }
+}
+
+fn swirl_from_seat(seed: u64, tick: u64, hx: i32, hy: i32) -> (f32, f32) {
+    let t = tick as f32;
+    let phase = (seed as f32) * 1.0e-9;
+    let ax = hx as f32 * 0.31 + t * 0.017 + phase;
+    let ay = hy as f32 * 0.27 + t * 0.013 + phase * 1.7;
+    let bx = hx as f32 * 0.71 + t * 0.041 + phase * 2.1;
+    let by = hy as f32 * 0.63 - t * 0.029 + phase * 0.4;
+    swirl_from_sincos(
+        ax.sin(),
+        ax.cos(),
+        ay.sin(),
+        ay.cos(),
+        bx.sin(),
+        bx.cos(),
+        by.sin(),
+        by.cos(),
+    )
+}
+
+fn swirl_from_sincos(
+    sin_ax: f32,
+    cos_ax: f32,
+    sin_ay: f32,
+    cos_ay: f32,
+    sin_bx: f32,
+    cos_bx: f32,
+    sin_by: f32,
+    cos_by: f32,
+) -> (f32, f32) {
+    let mut sx = sin_ax * (-sin_ay) * 0.27 * 0.055;
+    let mut sy = -(cos_ax * cos_ay * 0.31 * 0.055);
+    sx += sin_bx * (-sin_by) * 0.63 * 0.028;
+    sy += -(cos_bx * cos_by * 0.71 * 0.028);
+    (sx, sy)
 }
 
 fn tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
@@ -1855,6 +1979,34 @@ mod tests {
             "swirl should vary local vx (range={})",
             hi - lo
         );
+    }
+
+    #[test]
+    fn swirl_lut_matches_the_per_seat_formula() {
+        let seed = 0x00C0_FFEEu64;
+        let ticks = [0u64, 4, 40, 28_550];
+        let b = TileBounds {
+            hx_min: -3,
+            hx_max: 17,
+            hy_min: 0,
+            hy_max: 40,
+        };
+        for tick in ticks {
+            let lut = SwirlLut::build(seed, tick, b);
+            for hx in b.hx_min..=b.hx_max {
+                for hy in [b.hy_min, 1, 8, b.hy_max] {
+                    let (sx, sy) = lut.at(hx, hy);
+                    let (rx, ry) = swirl_from_seat(seed, tick, hx, hy);
+                    assert_eq!(sx.to_bits(), rx.to_bits(), "sx hx={hx} hy={hy} tick={tick}");
+                    assert_eq!(sy.to_bits(), ry.to_bits(), "sy hx={hx} hy={hy} tick={tick}");
+                }
+            }
+            // A column outside the box still matches, via the direct formula.
+            let (sx, sy) = lut.at(b.hx_max + 4, 3);
+            let (rx, ry) = swirl_from_seat(seed, tick, b.hx_max + 4, 3);
+            assert_eq!(sx.to_bits(), rx.to_bits());
+            assert_eq!(sy.to_bits(), ry.to_bits());
+        }
     }
 
     #[test]
