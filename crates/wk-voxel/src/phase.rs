@@ -147,10 +147,6 @@ pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
     if !cfg.enabled {
         return;
     }
-    // Airborne flakes used to wait for [`column_may_phase`] (surface
-    // band only) and `period_ticks`. A cold-lid shower then rode the
-    // whole warm column as snow. Melt those here every tick; landed
-    // pack still uses the rate-limited thaw below.
     if cfg.enable_thaw {
         thaw_airborne_snow(world, temp, cfg);
         thaw_scalding_frozen(world, temp, cfg);
@@ -972,7 +968,12 @@ fn thaw_airborne_snow(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) 
                 if !snow_is_airborne(world, gx, gy) {
                     continue;
                 }
-                if temp.at_cell(gx, gy) <= freeze {
+                // Own tile, or the air cell the flake is about to enter.
+                // A cold tile sitting on a warmer one used to ride through
+                // the boundary until the period-gated column thaw.
+                let own = temp.at_cell_packed(gx, gy);
+                let below = temp.at_cell_packed(gx, gy - 1);
+                if own <= freeze && below <= freeze {
                     continue;
                 }
                 melt.push((gx, gy));
@@ -1034,7 +1035,7 @@ fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig
         if !top_of_stack {
             continue;
         }
-        let t_c = temp.at_cell(gx, y);
+        let t_c = temp.at_cell_packed(gx, y);
         let contact_warm = frozen_contact_is_warm(world, gx, y, temp, freeze);
         if t_c <= freeze && !contact_warm {
             continue;
@@ -1045,37 +1046,124 @@ fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig
     }
 }
 
-/// Melt landed Ice/Snow that is already obviously warm (every tick).
+/// Melt landed Ice/Snow that is already hot, and the one cell that
+/// is touching warmth, every tick.
 ///
 /// Period-gated [`thaw_column`] plus steam-after-phase left 130 °C ice
-/// on lake vents and snow sitting in 12 °C water between cadence ticks.
+/// on lake vents and snow sitting in warm water between cadence ticks.
 /// A cold alpine cap used to hide buried snow in a 160 °C geothermal
 /// tile: only the pack top was visited, then the column stopped.
+///
+/// The walk is occupancy-gated. A tropical demo has no Ice or Snow, and
+/// scanning every column from bedrock to the tropopause was several
+/// milliseconds per tick for a thaw that could not fire. Chunks that
+/// once held ice stay flagged until a scan finds none left.
+///
+/// Scalding (`freeze + 40`) still clears the whole hot stack at once.
+/// Mild contact — warm air above, warm land, or warm water — peels one
+/// cell per column on the ticks the period pass does not run, so a snap
+/// cannot dump a hillside and water-on-ice does not see a fresh film.
 fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
-    let Some((y0, y1)) = y_bounds(world) else {
+    if !world.chunks.values().any(|c| c.has_snow || c.has_ice) {
         return;
-    };
-    let hot = cfg.freeze_point_c + 40.0;
-    for gx in column_xs(world) {
-        for y in (y0..=y1).rev() {
-            let Some(cell) = world.get_cell(gx, y) else {
-                continue;
-            };
-            if !is_frozen_solid(cell.material) {
-                continue;
+    }
+    let freeze = cfg.freeze_point_c;
+    let hot = freeze + 40.0;
+    // On a period tick [`thaw_column`] and water-on-ice already peel one
+    // cell. Doing it here first turns the exposed cell into water, and
+    // the slush pass then melts the ice under that new film — two cells.
+    let mild_tick = world.tick % cfg.period_ticks.max(1) != 0;
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_snow || c.has_ice)
+        .map(|(&coord, _)| coord)
+        .collect();
+    let mut melt: Vec<(i32, i32)> = Vec::new();
+    let mut clear_ice: Vec<ChunkCoord> = Vec::new();
+    // Highest mild-contact cell in each column. The exposed top peels
+    // before a buried seat when both are warm, so a pack shrinks from
+    // the sky instead of losing its footing and the cells above it.
+    let mut mild: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        let mut saw_ice = false;
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if !is_frozen_solid(cell.material) {
+                    continue;
+                }
+                if cell.material == MaterialId::Ice {
+                    saw_ice = true;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                // Absurd heat (vent ice / pipe-heated snow). A colder lid
+                // must not protect 160 °C snow underneath, so this is not
+                // rate-limited and not top-of-stack only.
+                if temp.at_cell_packed(gx, gy) > hot {
+                    melt.push((gx, gy));
+                    continue;
+                }
+                if mild_tick && frozen_contact_is_warm(world, gx, gy, temp, freeze) {
+                    mild.entry(gx)
+                        .and_modify(|y| {
+                            if gy > *y {
+                                *y = gy;
+                            }
+                        })
+                        .or_insert(gy);
+                }
             }
-            // Absurd heat only (vent ice / pipe-heated snow at 100 °C+).
-            // Mild warm pack still uses period-gated [`thaw_column`] so
-            // hillside snaps stay rate-limited. Visit the whole stack:
-            // a colder lid must not protect 160 °C snow underneath.
-            if temp.at_cell(gx, y) > hot {
-                world.set_cell(gx, y, Cell::water());
-            }
+        }
+        if !saw_ice {
+            clear_ice.push(coord);
+        }
+    }
+    for (gx, gy) in melt {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if !is_frozen_solid(cell.material) {
+            continue;
+        }
+        if temp.at_cell_packed(gx, gy) > hot {
+            world.set_cell(gx, gy, Cell::water());
+        }
+    }
+    for (gx, gy) in mild {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if !is_frozen_solid(cell.material) {
+            continue;
+        }
+        if temp.at_cell_packed(gx, gy) > hot {
+            continue;
+        }
+        if !frozen_contact_is_warm(world, gx, gy, temp, freeze) {
+            continue;
+        }
+        world.set_cell(gx, gy, Cell::water());
+    }
+    for coord in clear_ice {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_ice = false;
         }
     }
 }
 
-/// Air above or free water above/below the pack is warmer than freeze.
+/// Air, land, or free water touching the pack is warmer than freeze.
+///
+/// Empty air *below* a flake is not contact — that cell is still falling,
+/// and [`thaw_airborne_snow`] owns it. Warm sand or stone under a seat
+/// is contact: the snow tile can stay cold (albedo) while the ground
+/// tile it just hit is above freeze.
 fn frozen_contact_is_warm(
     world: &World,
     gx: i32,
@@ -1085,13 +1173,16 @@ fn frozen_contact_is_warm(
 ) -> bool {
     if let Some(above) = world.get_cell(gx, gy + 1) {
         if !is_frozen_solid(above.material)
-            && (above.material == MaterialId::Air || above.material == MaterialId::Water)
-            && temp.at_cell(gx, gy + 1) > freeze
+            && temp.at_cell_packed(gx, gy + 1) > freeze
+            && (above.material == MaterialId::Air
+                || above.material == MaterialId::Water
+                || above.material.is_solid())
         {
             return true;
         }
     }
-    // Walk a thin lid so snow-on-ice-on-warm-lake still sees the water.
+    // Walk a thin lid so snow-on-ice-on-warm-lake still sees the water,
+    // and snow seated on warm rock sees that rock.
     let mut y = gy - 1;
     for _ in 0..2 {
         let Some(below) = world.get_cell(gx, y) else {
@@ -1101,13 +1192,16 @@ fn frozen_contact_is_warm(
             y -= 1;
             continue;
         }
-        if below.material == MaterialId::Air
-            && is_standing_water(world, gx, y)
-            && temp.at_cell(gx, y) > freeze
-        {
+        if temp.at_cell_packed(gx, y) <= freeze {
+            break;
+        }
+        if below.material == MaterialId::Air && is_standing_water(world, gx, y) {
             return true;
         }
-        if below.material == MaterialId::Water && temp.at_cell(gx, y) > freeze {
+        if below.material == MaterialId::Water {
+            return true;
+        }
+        if below.material.is_solid() {
             return true;
         }
         break;
@@ -1287,14 +1381,16 @@ mod tests {
     }
 
     #[test]
-    fn landed_snowpack_does_not_use_the_airborne_melt() {
-        // Period skip: only the airborne path runs. A pack on bedrock
-        // must wait for the rate-limited thaw, or a warm snap dumps
-        // every hillside at once.
+    fn landed_snowpack_does_not_dump_on_a_warm_snap() {
+        // Warm air peels the exposed cell every tick. A pack on bedrock
+        // must not lose every layer at once, or a warm snap dumps the
+        // hillside. The buried seat waits.
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
         w.set_cell(2, 1, snow_cell());
+        w.set_cell(2, 2, snow_cell());
+        w.set_cell(2, 3, snow_cell());
         let temp = cold_temp(16, 64, 8.0);
         let cfg = PhaseConfig {
             period_ticks: 4,
@@ -1303,9 +1399,20 @@ mod tests {
         w.tick = 1;
         apply_phase(&mut w, &temp, &cfg);
         assert_eq!(
+            w.get_cell(2, 3).unwrap().material,
+            MaterialId::Air,
+            "warm air must peel the exposed flake"
+        );
+        assert!(w.get_cell(2, 3).unwrap().sat.is_full());
+        assert_eq!(
+            w.get_cell(2, 2).unwrap().material,
+            MaterialId::Snow,
+            "a warm snap must not dump the pack under the exposed cell"
+        );
+        assert_eq!(
             w.get_cell(2, 1).unwrap().material,
             MaterialId::Snow,
-            "landed pack must not melt on the airborne pass"
+            "buried pack must wait for later ticks"
         );
     }
 
@@ -1332,9 +1439,9 @@ mod tests {
     /// below the terrain and never reached the snow. Geothermal activity
     /// carving caves near the surface is what started putting hints in voids.
     ///
-    /// Only the mild path is affected: `thaw_scalding_frozen` runs
-    /// unconditionally over every column, so snow above `freeze_point + 40`
-    /// melts either way.
+    /// Only the mild path is affected: `thaw_scalding_frozen` only visits
+    /// chunks that already hold Ice or Snow, and 12 °C is under its
+    /// threshold, so snow above `freeze_point + 40` is not this test.
     #[test]
     fn mild_snow_melts_on_a_hill_with_a_cave() {
         fn hill_with_cave() -> (World, Vec<i32>) {
@@ -2409,6 +2516,108 @@ mod tests {
             w.get_cell(3, 5).map(|c| c.material),
             Some(MaterialId::Snow),
             "cold alpine cap stays frozen"
+        );
+    }
+
+    #[test]
+    fn cold_snow_melts_on_warmer_sand() {
+        // Albedo keeps the snow tile cold. The sand it sits on is a
+        // warmer tile. Period skip: only the every-tick contact peel runs.
+        let mut w = World::new(71);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 3, Cell::solid(MaterialId::Sand));
+        w.set_cell(2, 4, snow_cell());
+        let mut temp = cold_temp(16, 32, -8.0);
+        set_cell_temp(&mut temp, 2, 3, 9.0);
+        set_cell_temp(&mut temp, 2, 4, -6.0);
+        assert!(
+            temp.at_cell_packed(2, 4) <= PhaseConfig::default().freeze_point_c,
+            "setup: snow tile must be at or below freeze"
+        );
+        assert!(temp.at_cell_packed(2, 3) > PhaseConfig::default().freeze_point_c);
+        let cfg = PhaseConfig {
+            period_ticks: 64,
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(2, 4).unwrap().material,
+            MaterialId::Air,
+            "snow seated on warm sand must melt"
+        );
+        assert!(w.get_cell(2, 4).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn cold_snow_melts_on_warmer_water() {
+        let mut w = World::new(72);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 2, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 3, Cell::water());
+        w.set_cell(2, 4, snow_cell());
+        let mut temp = cold_temp(16, 32, -8.0);
+        set_cell_temp(&mut temp, 2, 3, 11.0);
+        set_cell_temp(&mut temp, 2, 4, -5.0);
+        let cfg = PhaseConfig {
+            period_ticks: 64,
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(2, 4).unwrap().material,
+            MaterialId::Air,
+            "snow on warm water must melt even when its own tile is cold"
+        );
+        assert!(w.get_cell(2, 4).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn airborne_snow_melts_when_the_air_below_is_warm() {
+        // Flake still sits in a freezing tile. The cell under it is the
+        // warm air it is falling into. Waiting for the flake's own tile
+        // to cross freeze let snow cross a warm layer.
+        let mut w = World::new(73);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 8, snow_cell());
+        let mut temp = cold_temp(16, 32, -8.0);
+        set_cell_temp(&mut temp, 2, 7, 7.0);
+        set_cell_temp(&mut temp, 2, 8, -4.0);
+        assert!(temp.at_cell_packed(2, 8) <= 0.0);
+        assert!(temp.at_cell_packed(2, 7) > 0.0);
+        let cfg = PhaseConfig {
+            period_ticks: 64,
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        let cell = w.get_cell(2, 8).unwrap();
+        assert_eq!(cell.material, MaterialId::Air);
+        assert!(cell.sat.is_full(), "flake entering warm air must become rain");
+    }
+
+    #[test]
+    fn scalding_snow_in_a_higher_chunk_thaws_every_tick() {
+        // Occupancy scan uses chunk-local coordinates. A flake above
+        // the first chunk (y >= 64) used to be invisible to that walk
+        // if the origin math drifted, and the old full-column scan was
+        // the only path that still saw it.
+        let mut w = World::new(74);
+        w.set_cell(4, 70, snow_cell());
+        let temp = cold_temp(16, 128, 99.0);
+        let cfg = PhaseConfig {
+            period_ticks: 64,
+            ..PhaseConfig::default()
+        };
+        w.tick = 1;
+        apply_phase(&mut w, &temp, &cfg);
+        assert_ne!(
+            w.get_cell(4, 70).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "99 °C snow above the first chunk must still melt"
         );
     }
 
