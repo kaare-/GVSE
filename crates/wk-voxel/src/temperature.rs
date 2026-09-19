@@ -1200,16 +1200,19 @@ impl Temperature {
         let mut snap: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         snap.reserve(wind.field_len().saturating_mul(3));
         wind.for_each_field(|(hx, hy), _| {
-            snap.entry((hx, hy)).or_insert_with(|| self.at_tile(hx, hy));
+            snap.entry((hx, hy))
+                .or_insert_with(|| self.at_tile_packed(hx, hy));
             snap.entry((hx, hy + 1))
-                .or_insert_with(|| self.at_tile(hx, hy + 1));
+                .or_insert_with(|| self.at_tile_packed(hx, hy + 1));
             snap.entry((hx, hy - 1))
-                .or_insert_with(|| self.at_tile(hx, hy - 1));
+                .or_insert_with(|| self.at_tile_packed(hx, hy - 1));
             if let Some(sx) = self.wrap_hx(hx + 1) {
-                snap.entry((sx, hy)).or_insert_with(|| self.at_tile(sx, hy));
+                snap.entry((sx, hy))
+                    .or_insert_with(|| self.at_tile_packed(sx, hy));
             }
             if let Some(sx) = self.wrap_hx(hx - 1) {
-                snap.entry((sx, hy)).or_insert_with(|| self.at_tile(sx, hy));
+                snap.entry((sx, hy))
+                    .or_insert_with(|| self.at_tile_packed(sx, hy));
             }
         });
         let mut seats: Vec<(i32, i32)> = Vec::with_capacity(wind.field_len());
@@ -1245,7 +1248,9 @@ impl Temperature {
                     n = n * (1.0 - ay) + up * ay;
                 }
             }
-            self.cells.insert((hx, hy), n);
+            // Slab too — the next dense step and convection read it,
+            // and row means are rebuilt from it before the next pack.
+            self.set_tile_c(hx, hy, n);
         }
     }
 
@@ -1276,15 +1281,18 @@ impl Temperature {
             ) {
                 continue;
             }
-            moves.push((hx, dest_hy, self.at_tile(hx, hy), frac));
+            moves.push((hx, dest_hy, self.at_tile_packed(hx, hy), frac));
         }
         for (hx, dest_hy, src, frac) in moves {
-            let dest = self.at_tile(hx, dest_hy);
+            let dest = self.at_tile_packed(hx, dest_hy);
             let mix = (frac * (0.55 + 0.45 * carry)).clamp(0.0, 0.40);
             if mix < 1e-5 {
                 continue;
             }
-            self.cells.insert((hx, dest_hy), dest + (src - dest) * mix);
+            // `cells.insert` left the slab cold, so the next rise (every
+            // other tick, long before the period-20 pack) still saw the
+            // pre-loft °C.
+            self.set_tile_c(hx, dest_hy, dest + (src - dest) * mix);
         }
     }
 
@@ -2867,6 +2875,59 @@ mod tests {
             "humid_heat_scale=0 must not mix heat on rise ({dry_after:.2})"
         );
         assert!(h.at_tile(2, 5) > 0.0, "vapour still has to actually lift");
+    }
+
+    #[test]
+    fn buoyant_rise_follows_the_packed_slab_when_the_map_is_stale() {
+        // The sparse map says every tile is cold. The packed slab — what
+        // the dense step actually steps — has one warm-under-cold column.
+        // Convection must follow the slab, and the lofted heat must land
+        // in the slab so the next rise (before the period-20 pack) sees it.
+        let mut warm = Temperature::with_world_bounds(4, 0, 0, 16, 32, 1, 16, 4, false);
+        warm.config.humid_heat_scale = 1.0;
+        for v in warm.cells.values_mut() {
+            *v = 8.0;
+        }
+        warm.rebuild_row_means();
+        let b = warm.bounds.expect("bounds");
+        warm.pack_slab(b);
+        let mut cold = warm.clone();
+        let (w, _) = b.dims();
+        let hx = b.hx_min;
+        let hy = b.hy_min;
+        warm.slab[b.index(w, hx, hy)] = 30.0;
+        warm.slab[b.index(w, hx, hy + 1)] = 4.0;
+        assert!(
+            (warm.at_tile(hx, hy) - 8.0).abs() < 1e-3,
+            "the map stays the stale cold value"
+        );
+        assert!(
+            (warm.at_tile_packed(hx, hy) - 30.0).abs() < 1e-3,
+            "the slab is the warm source"
+        );
+        let mut h_warm = Humidity::with_world_bounds(4, 0, 0, 16, 32);
+        let tc = 4;
+        h_warm.add(hx * tc, hy * tc, 200.0);
+        let mut h_cold = h_warm.clone();
+        let packed_before = warm.at_tile_packed(hx, hy + 1);
+        h_warm.buoyant_rise_thermal(0.35, hy + 8, Some(&mut warm));
+        h_cold.buoyant_rise_thermal(0.35, hy + 8, Some(&mut cold));
+        let lifted_warm = h_warm.at_tile(hx, hy + 1);
+        let lifted_cold = h_cold.at_tile(hx, hy + 1);
+        assert!(
+            lifted_warm > lifted_cold + 5.0,
+            "a warm slab column must loft more than a cold one ({lifted_warm:.1} vs {lifted_cold:.1})"
+        );
+        let packed_after = warm.at_tile_packed(hx, hy + 1);
+        assert!(
+            packed_after > packed_before + 2.0,
+            "lofted heat must land in the slab ({packed_before:.1} → {packed_after:.1})"
+        );
+        let map_after = warm.at_tile(hx, hy + 1);
+        assert!(
+            (map_after - packed_after).abs() < 1e-3,
+            "map and slab stay together after the loft ({map_after:.2} vs {packed_after:.2})"
+        );
     }
 
     #[test]

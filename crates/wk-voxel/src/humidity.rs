@@ -979,8 +979,11 @@ impl Humidity {
                 continue;
             }
             let lift_f = if let Some(t) = temp.as_deref() {
-                let here = t.at_tile(hx, hy);
-                let above = t.at_tile(hx, dest);
+                // Packed slab, not the sparse map. A filled sky is tens of
+                // thousands of tiles, and lake °C can live in the slab
+                // after the map was cleared or lagged a dense step.
+                let here = t.at_tile_packed(hx, hy);
+                let above = t.at_tile_packed(hx, dest);
                 let lapse = (here - above).clamp(-5.0, 10.0);
                 let base = (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45);
                 // Horizontal anomaly: how much warmer this column is than the
