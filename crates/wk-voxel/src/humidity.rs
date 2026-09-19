@@ -338,6 +338,11 @@ impl Humidity {
     }
 
     /// Occupied tiles, slab first. `cells` may lag a dense tick.
+    ///
+    /// When the slab covers [`Self::bounds`], the map is not walked.
+    /// In-bounds keys there are stale leftovers; [`Self::occupied_len`]
+    /// already ignores them. A slab that does not cover the box still
+    /// yields map keys outside that slab.
     pub fn for_each_occupied(&self, mut f: impl FnMut((i32, i32), f32)) {
         if let Some(s) = &self.slab {
             let (w, _) = s.bounds.dims();
@@ -348,9 +353,15 @@ impl Humidity {
                     }
                 }
             }
-            for (&(hx, hy), &v) in &self.cells {
-                if v > 1e-6 && !s.bounds.contains(hx, hy) {
-                    f((hx, hy), v);
+            // Filled sky: `cells` is a historical map of every tile that
+            // ever held mass. Those keys sit inside the box, so the old
+            // walk hashed the whole map to yield nothing. Condensation
+            // and the wind rebuild call this every tick.
+            if self.bounds != Some(s.bounds) {
+                for (&(hx, hy), &v) in &self.cells {
+                    if v > 1e-6 && !s.bounds.contains(hx, hy) {
+                        f((hx, hy), v);
+                    }
                 }
             }
             return;
@@ -2962,6 +2973,58 @@ mod convection_tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn dense_occupied_walk_skips_the_stale_map() {
+        let mut h = Humidity::with_world_bounds(1, 0, 0, 8, 8);
+        h.add(1, 1, 10.0);
+        h.add(2, 2, 20.0);
+        let b = h.bounds.expect("bounds");
+        h.adopt_work(b, h.pack_slab(b));
+        // Stale in-box mass, plus a key outside the world box.
+        h.cells.insert((1, 1), 999.0);
+        h.cells.insert((50, 50), 40.0);
+        let mut seen = Vec::new();
+        h.for_each_occupied(|k, v| seen.push((k, v)));
+        seen.sort_by_key(|&(k, _)| k);
+        assert!(
+            !seen.iter().any(|&(k, _)| k == (50, 50)),
+            "mass outside the covered box is not a second sky"
+        );
+        let here = seen.iter().find(|&&(k, _)| k == (1, 1)).expect("slab seat");
+        assert!(
+            (here.1 - 10.0).abs() < 1e-4,
+            "stale map must not override the slab ({})",
+            here.1
+        );
+        assert_eq!(seen.len(), h.occupied_len());
+        assert!((h.total_mass() - 30.0).abs() < 1e-3);
+
+        // A slab that does not cover the humidity box still yields the
+        // map keys it does not own.
+        let mut wide = Humidity::with_world_bounds(1, 0, 0, 16, 8);
+        let narrow = TileBounds {
+            hx_min: 0,
+            hx_max: 3,
+            hy_min: 0,
+            hy_max: 3,
+        };
+        let (w, _) = narrow.dims();
+        let mut mass = vec![0.0f32; narrow.tile_capacity()];
+        mass[narrow.index(w, 1, 1)] = 5.0;
+        wide.adopt_work(narrow, mass);
+        wide.cells.insert((6, 1), 7.0);
+        let mut extra = Vec::new();
+        wide.for_each_occupied(|k, v| extra.push((k, v)));
+        assert!(
+            extra.iter().any(|&(k, v)| k == (6, 1) && (v - 7.0).abs() < 1e-4),
+            "a partial slab must still see map mass beside it"
+        );
+        assert!(
+            extra.iter().any(|&(k, v)| k == (1, 1) && (v - 5.0).abs() < 1e-4),
+            "the partial slab's own mass still counts"
+        );
     }
 
     #[test]
