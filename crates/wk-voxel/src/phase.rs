@@ -1051,26 +1051,69 @@ fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig
 /// on lake vents and snow sitting in 12 °C water between cadence ticks.
 /// A cold alpine cap used to hide buried snow in a 160 °C geothermal
 /// tile: only the pack top was visited, then the column stopped.
+///
+/// The walk is occupancy-gated. A tropical demo has no Ice or Snow, and
+/// scanning every column from bedrock to the tropopause was several
+/// milliseconds per tick for a thaw that could not fire. Chunks that
+/// once held ice stay flagged until a scan finds none left.
 fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
-    let Some((y0, y1)) = y_bounds(world) else {
+    if !world.chunks.values().any(|c| c.has_snow || c.has_ice) {
         return;
-    };
+    }
     let hot = cfg.freeze_point_c + 40.0;
-    for gx in column_xs(world) {
-        for y in (y0..=y1).rev() {
-            let Some(cell) = world.get_cell(gx, y) else {
-                continue;
-            };
-            if !is_frozen_solid(cell.material) {
-                continue;
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_snow || c.has_ice)
+        .map(|(&coord, _)| coord)
+        .collect();
+    let mut melt: Vec<(i32, i32)> = Vec::new();
+    let mut clear_ice: Vec<ChunkCoord> = Vec::new();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        let mut saw_ice = false;
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if !is_frozen_solid(cell.material) {
+                    continue;
+                }
+                if cell.material == MaterialId::Ice {
+                    saw_ice = true;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                // Absurd heat only (vent ice / pipe-heated snow at 100 °C+).
+                // Mild warm pack still uses period-gated [`thaw_column`] so
+                // hillside snaps stay rate-limited. Visit the whole chunk:
+                // a colder lid must not protect 160 °C snow underneath.
+                if temp.at_cell(gx, gy) > hot {
+                    melt.push((gx, gy));
+                }
             }
-            // Absurd heat only (vent ice / pipe-heated snow at 100 °C+).
-            // Mild warm pack still uses period-gated [`thaw_column`] so
-            // hillside snaps stay rate-limited. Visit the whole stack:
-            // a colder lid must not protect 160 °C snow underneath.
-            if temp.at_cell(gx, y) > hot {
-                world.set_cell(gx, y, Cell::water());
-            }
+        }
+        if !saw_ice {
+            clear_ice.push(coord);
+        }
+    }
+    for (gx, gy) in melt {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if !is_frozen_solid(cell.material) {
+            continue;
+        }
+        if temp.at_cell(gx, gy) > hot {
+            world.set_cell(gx, gy, Cell::water());
+        }
+    }
+    for coord in clear_ice {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_ice = false;
         }
     }
 }
@@ -1332,9 +1375,9 @@ mod tests {
     /// below the terrain and never reached the snow. Geothermal activity
     /// carving caves near the surface is what started putting hints in voids.
     ///
-    /// Only the mild path is affected: `thaw_scalding_frozen` runs
-    /// unconditionally over every column, so snow above `freeze_point + 40`
-    /// melts either way.
+    /// Only the mild path is affected: `thaw_scalding_frozen` only visits
+    /// chunks that already hold Ice or Snow, and 12 °C is under its
+    /// threshold, so snow above `freeze_point + 40` is not this test.
     #[test]
     fn mild_snow_melts_on_a_hill_with_a_cave() {
         fn hill_with_cave() -> (World, Vec<i32>) {
