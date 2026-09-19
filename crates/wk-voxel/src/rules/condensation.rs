@@ -192,7 +192,7 @@ pub fn precipitate_thermal_surplus(
     let tile_cols = humidity.tile_cols.max(1);
     let mut hits: Vec<(f32, i32, i32)> = Vec::new();
     humidity.for_each_occupied(|(hx, hy), mass| {
-        let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp.at_tile(hx, hy));
+        let sat = temp.saturation_mass_at_tile(hx, hy);
         let surplus = mass - sat;
         if surplus >= 1.0 {
             hits.push((surplus, hx, hy));
@@ -205,14 +205,14 @@ pub fn precipitate_thermal_surplus(
     let mut flakes = 0u32;
     for &(_, hx, hy) in hits.iter().take(THERMAL_SURPLUS_MAX_HITS) {
         let mass = humidity.at_tile(hx, hy);
-        let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp.at_tile(hx, hy));
+        let sat = temp.saturation_mass_at_tile(hx, hy);
         let take = (mass - sat).max(0.0);
         if take < 1.0 {
             continue;
         }
         let gx = hx * tile_cols + tile_cols / 2;
         let gy = hy * tile_cols + tile_cols / 2;
-        let air_t = temp.at_tile(hx, hy);
+        let air_t = temp.at_tile_packed(hx, hy);
         if air_is_freezing(air_t, phase) {
             // Below freeze: snow from the parcel, or hold. Never liquid.
             let snow_ok = phase.map(|ph| ph.enable_snow_precip).unwrap_or(true);
@@ -315,8 +315,8 @@ pub fn apply_condensation_rain_phased(
         let mut full_mass = cfg.full_mass;
         let mut leftover = 0.0f32;
         if let Some(th) = temp {
-            let air = th.at_tile(hx, hy);
-            let sat = crate::humidity::Humidity::saturation_mass_at_temp(air).max(1.0);
+            let air = th.at_tile_packed(hx, hy);
+            let sat = th.saturation_mass_at_tile(hx, hy).max(1.0);
             if mass < sat {
                 continue;
             }
@@ -381,7 +381,7 @@ pub fn apply_condensation_rain_phased(
         // Leftover sat used to shave a 140-mass tile down to ~23. Terrain
         // and the H shaft hide Air sat ≤ 32, so that event was invisible.
         let mut take_mass = raw.min(surplus);
-        let air_t = temp.map(|t| t.at_tile(hx, hy));
+        let air_t = temp.map(|t| t.at_tile_packed(hx, hy));
         let freezing = air_t.is_some_and(|t| air_is_freezing(t, phase));
         // Play droplets are 255. Leftover sat must not shave them under
         // the haze band (invisible rain, no shaft). Snow is a whole cell
@@ -439,7 +439,7 @@ pub fn apply_condensation_rain_phased(
         // drawn over an event that had already finished. A droplet now appears in
         // the air cell that held the vapour and descends like any other water.
         let centre_gy = hy * tile_cols + tile_cols / 2;
-        let air_t = temp.map(|t| t.at_tile(hx, hy));
+        let air_t = temp.map(|t| t.at_tile_packed(hx, hy));
         let freezing = air_t.is_some_and(|t| air_is_freezing(t, phase));
         if freezing {
             // Below freeze: snow from the parcel, or hold. Never liquid.
@@ -557,7 +557,7 @@ fn thermal_rain_factors_from_air(
     temp: &crate::temperature::Temperature,
     hx: i32,
     hy: i32,
-    tile_cols: i32,
+    _tile_cols: i32,
     air: f32,
     sat: f32,
 ) -> (f32, f32, f32, f32) {
@@ -567,9 +567,8 @@ fn thermal_rain_factors_from_air(
     // freeze we only lottery when the tile is actually over sat.
     // `air` / `sat` are the lottery gate reads — do not `at_tile` again.
     let min_mass = sat;
-    let gx = hx * tile_cols + tile_cols / 2;
-    let gy_below = hy * tile_cols - tile_cols;
-    let below = temp.at_cell(gx, gy_below);
+    // Tile under this one. Dew when that seat is colder than the air.
+    let below = temp.at_tile_packed(hx, hy - 1);
     let mut prob_mult = 1.0;
     let mut mass_mult = 1.0;
     if below < air - 1.5 {

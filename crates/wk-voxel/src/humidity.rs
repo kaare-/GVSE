@@ -490,6 +490,13 @@ impl Humidity {
         }
     }
 
+    /// Vapour pressure at [`Self::SAT_FULL_TEMP_C`]. Constant; the
+    /// per-tile `exp` is the one that has to stay live.
+    fn sat_anchor_hpa() -> f32 {
+        static FULL: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+        *FULL.get_or_init(|| Self::sat_vapor_pressure_hpa(Self::SAT_FULL_TEMP_C))
+    }
+
     /// How much vapor a humidity tile can hold at `temp_c`.
     ///
     /// Full at [`Self::SAT_FULL_TEMP_C`]. Same mass in colder air is
@@ -498,7 +505,7 @@ impl Humidity {
     /// −20 °C → ~4, −100 °C → ~0. Inspector `humidity=` is this tile
     /// mass (40 °C → 2500, 0 °C → ~207, −0.1 °C → ~206, −3 °C → ~162).
     pub fn saturation_mass_at_temp(temp_c: f32) -> f32 {
-        let full = Self::sat_vapor_pressure_hpa(Self::SAT_FULL_TEMP_C);
+        let full = Self::sat_anchor_hpa();
         let here = Self::sat_vapor_pressure_hpa(temp_c);
         let ratio = (here / full.max(1e-6)).clamp(0.0, 1.0);
         (Self::MAX_MASS_PER_TILE * ratio).max(0.5)
@@ -506,7 +513,7 @@ impl Humidity {
 
     /// [`Self::saturation_mass_at_temp`] scaled onto a 0..255 air cell.
     pub fn saturation_cell_sat_at_temp(temp_c: f32) -> f32 {
-        let full = Self::sat_vapor_pressure_hpa(Self::SAT_FULL_TEMP_C);
+        let full = Self::sat_anchor_hpa();
         let here = Self::sat_vapor_pressure_hpa(temp_c);
         let ratio = (here / full.max(1e-6)).clamp(0.0, 1.0);
         (u8::MAX as f32 * ratio).max(0.05)
