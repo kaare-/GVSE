@@ -960,6 +960,25 @@ impl Humidity {
         if fraction == 0.0 || !self.has_mass() {
             return;
         }
+        // Filled sky: deltas on the packed box, not a hash of every wet
+        // tile. Mass outside the slab (tests, a shrunk box) keeps the
+        // map path so nothing is dropped.
+        if let Some(b) = self.bounds {
+            let spill = self
+                .cells
+                .iter()
+                .any(|(&(hx, hy), &v)| v > 1e-6 && !b.contains(hx, hy));
+            if !spill
+                && self.use_dense_slab(b)
+                && self
+                    .slab
+                    .as_ref()
+                    .is_some_and(|s| s.bounds == b && !s.mass.is_empty())
+            {
+                self.buoyant_rise_on_slab(fraction, max_hy, temp, b);
+                return;
+            }
+        }
         // Walk the runtime slab when one is live — `cells` may lag a
         // dense advect. Deltas apply after.
         //
@@ -1017,6 +1036,78 @@ impl Humidity {
         }
         for (k, d) in deltas {
             self.apply_tile_delta(k.0, k.1, d);
+        }
+        self.prune_near_zero();
+        if let Some(t) = temp.as_deref_mut() {
+            t.lift_heat_with_vapor(&heat_lifts);
+        }
+    }
+
+    /// Same lift as the hash path. Reads a mass snapshot so a hoist
+    /// cannot feed the next tile in this pass.
+    fn buoyant_rise_on_slab(
+        &mut self,
+        fraction: f32,
+        max_hy: i32,
+        mut temp: Option<&mut crate::temperature::Temperature>,
+        b: TileBounds,
+    ) {
+        let (w, h) = b.dims();
+        let mass = match &self.slab {
+            Some(s) if s.bounds == b && w > 0 && s.mass.len() == w.saturating_mul(h) => {
+                s.mass.clone()
+            }
+            _ => return,
+        };
+        let n = mass.len();
+        let mut deltas = vec![0.0f32; n];
+        let mut heat_lifts: Vec<(i32, i32, f32)> = Vec::new();
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                let m = mass[i];
+                if m <= 1e-6 {
+                    continue;
+                }
+                let hx = b.hx_min + ix as i32;
+                let hy = b.hy_min + iy as i32;
+                if hy >= max_hy {
+                    continue;
+                }
+                let dest = hy + 1;
+                if !b.contains(hx, dest) {
+                    continue;
+                }
+                let lift_f = if let Some(t) = temp.as_deref() {
+                    let here = t.at_tile_packed(hx, hy);
+                    let above = t.at_tile_packed(hx, dest);
+                    let lapse = (here - above).clamp(-5.0, 10.0);
+                    let base = (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45);
+                    let reference = t.row_mean_at(hy);
+                    let anomaly = (here - reference)
+                        .clamp(-Self::CONVECTION_CLAMP_C, Self::CONVECTION_CLAMP_C);
+                    let gain = (1.0 + anomaly * Self::CONVECTION_GAIN_PER_C)
+                        .clamp(Self::CONVECTION_MIN_GAIN, Self::CONVECTION_MAX_GAIN);
+                    (base * gain).clamp(0.0, 0.45)
+                } else {
+                    fraction
+                };
+                let lift = m * lift_f;
+                if lift < 1e-6 {
+                    continue;
+                }
+                deltas[i] -= lift;
+                deltas[b.index(w, hx, dest)] += lift;
+                heat_lifts.push((hx, hy, lift / m));
+            }
+        }
+        for i in 0..n {
+            let d = deltas[i];
+            if d.abs() < 1e-12 {
+                continue;
+            }
+            let (hx, hy) = b.coords(w, i);
+            self.apply_tile_delta(hx, hy, d);
         }
         self.prune_near_zero();
         if let Some(t) = temp.as_deref_mut() {
@@ -2691,6 +2782,60 @@ mod tests {
             "warm-under-cold should lift more ({} vs {})",
             unstable.at_tile(0, 1),
             stable.at_tile(0, 1)
+        );
+    }
+
+    #[test]
+    fn dense_rise_matches_the_hash_path() {
+        let mut sparse = Humidity::with_world_bounds(4, 0, 0, 16, 32);
+        sparse.add(0, 4, 120.0);
+        sparse.add(8, 8, 90.0);
+        sparse.add(4, 24, 30.0);
+        let mut dense = sparse.clone();
+        let b = dense.bounds.expect("bounds");
+        assert!(
+            dense.use_dense_slab(b),
+            "a small box takes the packed rise"
+        );
+        dense.adopt_work(b, dense.pack_slab(b));
+        let mut t_sparse = crate::temperature::Temperature::with_world_bounds(
+            4, 0, 0, 16, 32, 1, 16, 4, false,
+        );
+        for ((_, hy), v) in t_sparse.cells.iter_mut() {
+            *v = if *hy <= 1 { 24.0 } else { 8.0 };
+        }
+        t_sparse.rebuild_row_means();
+        let mut t_dense = t_sparse.clone();
+        let before = sparse.total_mass();
+        sparse.buoyant_rise_thermal(0.20, 20, Some(&mut t_sparse));
+        dense.buoyant_rise_thermal(0.20, 20, Some(&mut t_dense));
+        assert!(
+            (sparse.total_mass() - before).abs() < 1e-3,
+            "rise must conserve"
+        );
+        assert!(
+            (dense.total_mass() - sparse.total_mass()).abs() < 1e-3,
+            "slab rise must conserve like the map"
+        );
+        for hy in b.hy_min..=b.hy_max {
+            for hx in b.hx_min..=b.hx_max {
+                let a = sparse.at_tile(hx, hy);
+                let c = dense.at_tile(hx, hy);
+                assert!(
+                    (a - c).abs() < 1e-4,
+                    "humidity ({hx},{hy}) map={a} slab={c}"
+                );
+                let ta = t_sparse.at_tile(hx, hy);
+                let tc = t_dense.at_tile(hx, hy);
+                assert!(
+                    (ta - tc).abs() < 1e-4,
+                    "heat ({hx},{hy}) map={ta} slab={tc}"
+                );
+            }
+        }
+        assert!(
+            dense.at_tile(0, 2) > 1.0,
+            "the warm column still has to loft"
         );
     }
 
