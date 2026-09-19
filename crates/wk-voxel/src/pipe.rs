@@ -1375,11 +1375,15 @@ fn wick_reservoir<'a>(
     }
     let mut seen: FxHashSet<(i32, i32)> = seeds.iter().copied().collect();
     // Depth *beyond* the claim, so the sweep can reach past the boiling body
-    // into the water table that recharges it.
+    // into the water table that recharges it. A full cell is still walked:
+    // stopping there would hide the aquifer behind a saturated vessel. What
+    // we skip is `hand_sat` into a full seat — it returns 0 after two cell
+    // lookups, and on a soaked hill that is almost every edge.
     let mut frontier: Vec<((i32, i32), u8)> = seeds.into_iter().map(|c| (c, 0)).collect();
     while !frontier.is_empty() {
         let mut next = Vec::new();
         for &((cx, cy), depth) in &frontier {
+            let dest_room = pore_room(world, cx, cy);
             for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
                 let n = (world.wrap_x(cx + dx), cy + dy);
                 let n_depth = if claimed.contains(&n) {
@@ -1396,8 +1400,19 @@ fn wick_reservoir<'a>(
                 // moment a cell is reached gives the right cascade without
                 // a parent map: `(cx, cy)` is by construction one hop
                 // closer to a straw than `n`.
-                let _ = hand_sat(world, temp, ero, n, (cx, cy), max_sat);
-                next.push((n, n_depth));
+                if dest_room > 0 {
+                    let _ = hand_sat(world, temp, ero, n, (cx, cy), max_sat);
+                }
+                // A saturated claimed cell cannot take another hop this
+                // beat, so the cells behind it cannot either. Stop there.
+                // Unclaimed recharge keeps going (the aquifer under the
+                // root is a neighbour of the straw, not of the far wall).
+                // A cell we just drained has room again and the wave
+                // continues — still one hop per beat.
+                let blocked = claimed.contains(&n) && pore_room(world, n.0, n.1) == 0;
+                if !blocked {
+                    next.push((n, n_depth));
+                }
             }
         }
         frontier = next;
@@ -1413,6 +1428,16 @@ fn wick_reservoir<'a>(
 /// a straw recharges from the aquifer around it rather than siphoning the
 /// whole water table.
 const PIPE_WICK_REACH: u8 = 24;
+
+/// Spare pore sat a neighbour could hand into this cell. Zero when the
+/// seat is missing, non-porous, or already full — `hand_sat` would no-op.
+fn pore_room(world: &World, gx: i32, gy: i32) -> u8 {
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return 0;
+    };
+    let cap = water_capacity_cell(cell, &world.hydro);
+    cap.saturating_sub(cell.sat.0)
+}
 
 /// Porous rock currently holding water: a recharge cell, hot or not.
 fn wet_pore_at(world: &World, gx: i32, gy: i32) -> bool {
