@@ -1122,6 +1122,27 @@ fn airborne_snow_does_not_count_as_unsupported_freefall() {
 }
 
 #[test]
+fn airborne_organic_does_not_count_as_unsupported_freefall() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 10, Cell::solid(MaterialId::Organic));
+    let active = plan_active(&w);
+    assert!(
+        !active_has_unsupported_grain(&w, &active),
+        "falling leaves must not force the ×64 deep settle"
+    );
+    // Shallow settle / grain fall must still seat the leaf.
+    for _ in 0..32 {
+        apply_grain_fall(&mut w);
+        w.tick += 1;
+    }
+    let y = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(2, y).map(|c| c.material) == Some(MaterialId::Organic));
+    let y = y.expect("leaf still present");
+    assert!(y < 10, "shallow fall must descend the leaf (still at {y})");
+}
+
+#[test]
 fn airborne_snow_fall_steps_without_a_deep_settle() {
     let mut w = setup_column_world();
     w.set_cell(2, 16, Cell::solid(MaterialId::Snow));
