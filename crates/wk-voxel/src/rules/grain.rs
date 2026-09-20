@@ -717,6 +717,28 @@ pub fn wake_grains_for_settle(world: &mut World) -> GrainWake {
     wake_grains_for_settle_coords(world, &coords)
 }
 
+/// Dead-root Organic packed under Sand/Soil/rock. Stamps `has_loose` on
+/// write but can never freefall or repose — wake used to dirty every root
+/// cell and keep compost-only chunks in the sticky-loose scan forever.
+fn organic_is_buried_compost(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    if cell.material != MaterialId::Organic || cell.is_waterlogged_organic() {
+        return false;
+    }
+    let Some(below) = world.get_cell(gx, gy - 1) else {
+        return false;
+    };
+    if below.material == MaterialId::Air {
+        return false;
+    }
+    match world.get_cell(gx, gy + 1) {
+        None => false,
+        Some(above) if above.material == MaterialId::Air => false,
+        // Mid-stack litter / raft cells stay wakeable (Organic above).
+        Some(above) if above.material == MaterialId::Organic => false,
+        Some(_) => true,
+    }
+}
+
 /// [`wake_grains_for_settle`] restricted to an explicit chunk list.
 pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -> GrainWake {
     let mut dirty: Vec<(i32, i32)> = Vec::new();
@@ -739,6 +761,9 @@ pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -
                     || falls_through_empty_air(cell.material)
                     || is_repose_grain(cell.material);
                 if !loose {
+                    continue;
+                }
+                if organic_is_buried_compost(world, gx, gy, cell) {
                     continue;
                 }
                 saw_loose = true;
