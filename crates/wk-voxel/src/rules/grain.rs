@@ -743,7 +743,14 @@ pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -
                 }
                 saw_loose = true;
                 // --- unsupported / freefall ---
-                let Some(below) = world.get_cell(gx, gy - 1) else {
+                // Interior rows: the cell below is in this slab. The
+                // chunk-map hop was once per grain on every wake.
+                let below = if ly > 0 {
+                    Some(chunk.get(lx, ly - 1))
+                } else {
+                    world.get_cell(gx, gy - 1)
+                };
+                let Some(below) = below else {
                     dirty.push((gx, gy));
                     freefall += 1;
                     continue;
@@ -3461,4 +3468,44 @@ fn diag_drop_exceeds(
         }
     }
     drop > max_step
+}
+
+#[cfg(test)]
+mod wake_read_tests {
+    use super::wake_grains_for_settle;
+    use crate::cell::Cell;
+    use crate::chunk::ChunkCoord;
+    use crate::grid::World;
+    use wk_material::MaterialId;
+
+    #[test]
+    fn grain_wake_reads_the_in_chunk_cell_below() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        // Interior: air under the sand, and sand seated on stone.
+        w.set_cell(4, 10, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 19, Cell::solid(MaterialId::Stone));
+        w.set_cell(4, 20, Cell::solid(MaterialId::Sand));
+        // Chunk seam at y=64: air under one grain, stone under the other.
+        w.set_cell(6, 63, Cell::solid(MaterialId::Stone));
+        w.set_cell(4, 64, Cell::solid(MaterialId::Sand));
+        w.set_cell(6, 64, Cell::solid(MaterialId::Sand));
+        for chunk in w.chunks.values_mut() {
+            chunk.clear_dirty();
+        }
+        let wake = wake_grains_for_settle(&mut w);
+        assert_eq!(
+            wake.freefall, 2,
+            "only air-below grains count, interior and seam"
+        );
+        assert!(
+            w.chunks[&ChunkCoord::new(0, 0)].dirty_bits.get(4, 10),
+            "interior air-below sand wakes"
+        );
+        assert!(
+            w.chunks[&ChunkCoord::new(0, 1)].dirty_bits.get(4, 0),
+            "seam air-below sand wakes"
+        );
+    }
 }
