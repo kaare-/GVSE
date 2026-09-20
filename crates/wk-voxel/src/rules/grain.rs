@@ -1206,6 +1206,41 @@ const FLOAT_SOAK_RATE: u8 = 16;
 /// Max cells a submerged litter grain may rise in one tick (column teleport).
 const BUOYANT_RISE_MAX: i32 = 48;
 
+/// True when Snow / Ice / Organic still needs rise or soak this tick.
+///
+/// Dead plant roots paint lasting Organic inside Sand/Soil. Those cells
+/// used to enter the buoyant litter list and keep sticky `has_buoyant`
+/// forever, so every physics tick rescanned land chunks that can never
+/// float. Only freefall / float seats (Air below) and submerged bed
+/// litter (full-water Air above) belong here.
+fn buoyant_litter_needs_pass(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    if !falls_through_empty_air(cell.material) {
+        return false;
+    }
+    // Waterlogged Organic sinks via grain fall, not rise/soak.
+    if cell.is_waterlogged_organic() {
+        return false;
+    }
+    match world.get_cell(gx, gy - 1) {
+        None => return true,
+        Some(below) if below.material == MaterialId::Air => return true,
+        _ => {}
+    }
+    // Lake-bed litter: rise through a full-water column above.
+    for step in 1..=BUOYANT_RISE_MAX {
+        let Some(above) = world.get_cell(gx, gy + step) else {
+            break;
+        };
+        if above.material != MaterialId::Air {
+            break;
+        }
+        if above.sat.is_full() {
+            return true;
+        }
+    }
+    false
+}
+
 fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
     let mut litter = Vec::new();
     // Prefer buoyant sticky flag — sand-only shores used to scan every
@@ -1236,27 +1271,35 @@ fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
-        let mut saw = false;
         let mut saw_organic = false;
+        let mut candidates: Vec<(i32, i32, Cell)> = Vec::new();
+        let had_organic = chunk.has_organic;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
                 if cell.material == MaterialId::Organic {
                     saw_organic = true;
                 }
-                if falls_through_empty_air(cell.material) {
-                    saw = true;
-                    litter.push((x0 + lx as i32, y0 + ly as i32));
+                if falls_through_empty_air(cell.material) && !cell.is_waterlogged_organic() {
+                    candidates.push((x0 + lx as i32, y0 + ly as i32, cell));
                 }
+            }
+        }
+        if !saw_organic && had_organic {
+            clear_organic.push(coord);
+        }
+        // Neighbour lookups need `&World` — drop the chunk borrow first.
+        let mut saw = false;
+        for (gx, gy, cell) in candidates {
+            if buoyant_litter_needs_pass(world, gx, gy, cell) {
+                saw = true;
+                litter.push((gx, gy));
             }
         }
         if saw && !any_buoyant {
             stamp.push(coord);
         } else if !saw && any_buoyant {
             clear.push(coord);
-        }
-        if !saw_organic && chunk.has_organic {
-            clear_organic.push(coord);
         }
     }
     for coord in stamp {

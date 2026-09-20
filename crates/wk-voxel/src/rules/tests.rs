@@ -1351,6 +1351,33 @@ fn buoyant_collect_clears_empty_organic_flag() {
 }
 
 #[test]
+fn buried_root_organic_clears_buoyant_not_organic_flag() {
+    // Plant deaths paint Organic inside Sand/Soil. That compost must keep
+    // `has_organic` (raft / oxidize walks) but must not keep sticky
+    // `has_buoyant` — buried roots can never rise or soak.
+    let mut w = setup_column_world();
+    w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+    w.set_cell(2, 2, Cell::solid(MaterialId::Organic));
+    w.set_cell(2, 3, Cell::solid(MaterialId::Sand));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_buoyant);
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_organic);
+    rise_and_soak_buoyant_litter(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_buoyant,
+        "buried root Organic must leave the rise/soak walk"
+    );
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_organic,
+        "compost still marks has_organic for raft / oxidize"
+    );
+    assert_eq!(
+        w.get_cell(2, 2).map(|c| c.material),
+        Some(MaterialId::Organic),
+        "buried root must stay put"
+    );
+}
+
+#[test]
 fn falling_leaf_does_not_leave_sky_chunks_in_the_raft_scan() {
     // Same leak as falling snow: a leaf marks every chunk it falls
     // through. After it lands, vacated sky must drop `has_organic`.
