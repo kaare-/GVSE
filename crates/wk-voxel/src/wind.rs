@@ -1805,26 +1805,29 @@ fn swirl_from_sincos(
     (sx, sy)
 }
 
-fn tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
-    let Some(w) = world else {
-        return false;
-    };
-    let gx = w.wrap_x(hx * tc + tc / 2);
-    let gy = hy * tc + tc / 2;
-    matches!(w.get_cell(gx, gy), Some(c) if c.material.is_solid())
-}
 
-/// Rock or standing free water — neither is a wind seat.
+/// Rock, free water, or waterlogged air — none of these is a wind seat.
+///
+/// Dry-air chunks (`!has_solid && !has_standing_air`) cannot block.
+/// One `get_cell` after that gate: the solid pack walks the whole sky
+/// box every rebuild, and the old solid-then-water split looked twice.
 fn tile_center_blocks_wind(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
-    if tile_center_is_solid(world, tc, hx, hy) {
-        return true;
-    }
     let Some(w) = world else {
         return false;
     };
     let gx = w.wrap_x(hx * tc + tc / 2);
     let gy = hy * tc + tc / 2;
+    let coord = crate::chunk::ChunkCoord::new(
+        gx.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+        gy.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+    );
+    match w.chunks.get(&coord) {
+        None => return false,
+        Some(ch) if !ch.has_solid && !ch.has_standing_air => return false,
+        Some(_) => {}
+    }
     match w.get_cell(gx, gy) {
+        Some(c) if c.material.is_solid() => true,
         Some(c) if c.material == wk_material::MaterialId::Water => true,
         Some(c) if c.material == wk_material::MaterialId::Air && c.sat.0 >= 200 => true,
         _ => false,
@@ -2240,6 +2243,41 @@ mod tests {
             wind.field_has(0, hy_of(3)),
             "sat 180 wakes standing-air scans but is still a wind seat"
         );
+    }
+
+    #[test]
+    fn tile_center_blocks_rock_water_and_wet_air() {
+        use crate::cell::{Cell, Sat};
+        use crate::chunk::ChunkCoord;
+        use wk_material::MaterialId;
+
+        assert!(!tile_center_blocks_wind(None, 4, 0, 0));
+
+        let mut w = crate::grid::World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Empty air at the tile centre (2, 2) does not block.
+        assert!(!tile_center_blocks_wind(Some(&w), 4, 0, 0));
+
+        w.set_cell(2, 2, Cell::solid(MaterialId::Stone));
+        assert!(tile_center_blocks_wind(Some(&w), 4, 0, 0));
+
+        // Water is not `is_solid`, but it still is not a wind seat.
+        w.set_cell(2, 2, Cell::solid(MaterialId::Water));
+        assert!(tile_center_blocks_wind(Some(&w), 4, 0, 0));
+
+        let mut damp = Cell::air();
+        damp.sat = Sat(199);
+        w.set_cell(2, 2, damp);
+        assert!(
+            !tile_center_blocks_wind(Some(&w), 4, 0, 0),
+            "air below the standing-water sat cut stays open"
+        );
+        damp.sat = Sat(200);
+        w.set_cell(2, 2, damp);
+        assert!(tile_center_blocks_wind(Some(&w), 4, 0, 0));
+
+        w.set_cell(2, 2, Cell::water());
+        assert!(tile_center_blocks_wind(Some(&w), 4, 0, 0));
     }
 
     fn load_sky_so_live_surface_can_walk(w: &mut crate::grid::World, x1: i32, y_hi: i32) {
