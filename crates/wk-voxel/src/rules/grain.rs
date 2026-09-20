@@ -3089,9 +3089,38 @@ pub fn apply_flow_erosion_bound(
 
     let per_chunk = map_chunk_coords_parallel(&coords, |coord| {
         let mut local: Vec<ErosionEvent> = Vec::new();
+        // Open water has no grain in this slab (`has_loose` covers sand,
+        // soil, and organic). Bed scour can only see the chunk below,
+        // and a bank only the chunks to either side. A deep column
+        // with loose-free neighbours drops out; a stale true flag
+        // still walks the whole slab.
+        let self_loose = world.chunks.get(&coord).is_some_and(|c| c.has_loose);
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let loose_at = |gx: i32, gy: i32| {
+            let (c, _, _) = World::split(world.wrap_x(gx), gy);
+            world.chunks.get(&c).is_some_and(|ch| ch.has_loose)
+        };
+        let scan_bottom = !self_loose && loose_at(x0, y0 - 1);
+        let scan_left = !self_loose && loose_at(x0 - 1, y0);
+        let scan_right = !self_loose && loose_at(x0 + CHUNK_CELLS_W as i32, y0);
+        if !self_loose && !scan_bottom && !scan_left && !scan_right {
+            return local;
+        }
         for y in 0..CHUNK_CELLS_H {
+            if !self_loose && y != 0 && !scan_left && !scan_right {
+                continue;
+            }
             let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in 0..CHUNK_CELLS_W {
+                if !self_loose {
+                    let face = (scan_bottom && y == 0)
+                        || (scan_left && x == 0)
+                        || (scan_right && x + 1 == CHUNK_CELLS_W);
+                    if !face {
+                        continue;
+                    }
+                }
                 let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
                 let Some(water) = world.get_cell(gx, gy) else {
                     continue;

@@ -2780,6 +2780,87 @@ fn flowing_water_scours_sand_bed_downhill() {
 }
 
 #[test]
+fn open_water_column_still_scours_bed_across_chunk_seam() {
+    // Upper chunk is standing water only. The sand bed sits on the
+    // last row of the chunk below, so the skip must still walk that
+    // bottom face.
+    let mut w = World::new(4);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    let seam = CHUNK_CELLS_H as i32;
+    for y in seam..(seam + CHUNK_CELLS_H as i32) {
+        for x in 0..(CHUNK_CELLS_W as i32) {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 3..=8 {
+        w.set_cell(x, seam - 2, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=6 {
+        w.set_cell(x, seam - 1, Cell::solid(MaterialId::Sand));
+    }
+    w.set_cell(7, seam - 1, Cell::air());
+    w.set_cell(7, seam, Cell::air());
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 1)].has_standing_air
+            && !w.chunks[&ChunkCoord::new(0, 1)].has_loose
+    );
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_loose);
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 32,
+        ..GrainConfig::default()
+    };
+    for t in 0..30 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+    }
+    let bed_hole = (3..=6).any(|x| {
+        w.get_cell(x, seam - 1).map(|c| c.material) != Some(MaterialId::Sand)
+    });
+    let sand_at_lip = w.get_cell(7, seam - 1).map(|c| c.material) == Some(MaterialId::Sand)
+        || w.get_cell(8, seam - 1).map(|c| c.material) == Some(MaterialId::Sand);
+    assert!(
+        sand_at_lip || bed_hole,
+        "open water must still scour the sand under the chunk seam"
+    );
+}
+
+#[test]
+fn open_water_column_still_undercuts_bank_in_next_chunk() {
+    // Water lives in a loose-free chunk. The sand bank is the first
+    // column of the chunk to the right.
+    let mut w = World::new(5);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(1, 0));
+    for y in 1..=12 {
+        w.set_cell(63, y, Cell::water());
+    }
+    w.set_cell(62, 9, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(62, 10, Cell::air());
+    w.set_cell(64, 9, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(64, 10, Cell::solid(MaterialId::Sand));
+    assert!(!w.chunks[&ChunkCoord::new(0, 0)].has_loose);
+    assert!(w.chunks[&ChunkCoord::new(1, 0)].has_loose);
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 32,
+        ..GrainConfig::default()
+    };
+    for t in 0..40 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+    }
+    let bank_hole = w.get_cell(64, 10).map(|c| c.material) != Some(MaterialId::Sand);
+    let sand_moved = w.get_cell(62, 10).map(|c| c.material) == Some(MaterialId::Sand)
+        || w.get_cell(65, 10).map(|c| c.material) == Some(MaterialId::Sand);
+    assert!(
+        bank_hole || sand_moved,
+        "open water must still undercut a sand bank across the chunk edge"
+    );
+}
+
+#[test]
 fn flowing_water_scours_soil_bed_downhill() {
     let mut w = cascade_shelf_world(MaterialId::Soil);
     let cfg = GrainConfig {
