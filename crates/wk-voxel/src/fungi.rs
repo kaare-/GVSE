@@ -162,6 +162,11 @@ pub const MYCELIUM_MINERAL_TAPER_ODDS: u64 = 6;
 /// Soft cap on stamped lineage cells (editor / spores).
 pub const MYCELIUM_LINEAGE_MAX: usize = 512;
 /// Soft cap on per-cell strain ownership entries (overlay map).
+///
+/// [`add_mycelium_shares`], [`ensure_mycelium_strain`], and orphan heal all
+/// soft-cap through [`reserve_mycelium_strain_slot`] — cream seeking across
+/// mineral hosts used to bypass the cap via ensure/heal and grow the ledger
+/// until field collect (sort-all-keys) crushed FPS.
 pub const MYCELIUM_STRAIN_MAP_MAX: usize = 8_192;
 /// Soft cap on sparse network-energy map entries.
 pub const MYCELIUM_ENERGY_MAP_MAX: usize = 8_192;
@@ -660,6 +665,21 @@ fn clear_mycelium_shares(world: &mut World, gx: i32, gy: i32) {
     clear_mycelium_energy(world, gx, gy);
 }
 
+/// Soft-cap eviction before inserting a *new* strain-map key.
+///
+/// [`add_mycelium_shares`] already capped, but [`ensure_mycelium_strain`] /
+/// [`heal_orphan_mycelium_pads`] used to insert freely — cream seeking across
+/// Sand/Soil/rock could grow the ledger past [`MYCELIUM_STRAIN_MAP_MAX`] and
+/// the field collect (sort-all-keys each pulse) then ground FPS toward ~2.
+fn reserve_mycelium_strain_slot(world: &mut World, gx: i32, gy: i32) {
+    let map = &mut world.mycelium_strains;
+    if map.len() >= MYCELIUM_STRAIN_MAP_MAX && !map.contains_key(&(gx, gy)) {
+        if let Some(&key) = map.keys().next() {
+            map.remove(&key);
+        }
+    }
+}
+
 /// Cream `_pad` with no strain shares: inherit a neighbour strain, or clear.
 ///
 /// Never mints a new strain for ghosts — minting turned oxidation scraps and
@@ -710,6 +730,7 @@ fn heal_orphan_mycelium_pads(world: &mut World) {
             continue;
         }
         if let Some(s) = neighbour_mycelium_strain(world, gx, gy) {
+            reserve_mycelium_strain_slot(world, gx, gy);
             world.mycelium_strains.insert((gx, gy), vec![(s, myc)]);
             continue;
         }
@@ -797,12 +818,8 @@ pub fn add_mycelium_with_strain(
         }
     };
 
+    reserve_mycelium_strain_slot(world, gx, gy);
     let map = &mut world.mycelium_strains;
-    if map.len() >= MYCELIUM_STRAIN_MAP_MAX && !map.contains_key(&(gx, gy)) {
-        if let Some(&key) = map.keys().next() {
-            map.remove(&key);
-        }
-    }
     let shares = map.entry((gx, gy)).or_default();
     // Absorb legacy / test cream that lives only in `_pad`.
     let share_sum: u32 = shares.iter().map(|(_, a)| *a as u32).sum();
@@ -953,6 +970,7 @@ pub fn ensure_mycelium_strain(world: &mut World, gx: i32, gy: i32) -> u32 {
         let ny = gy + dy;
         if let Some(s) = mycelium_strain_at(world, nx, ny) {
             if total > 0 {
+                reserve_mycelium_strain_slot(world, gx, gy);
                 world.mycelium_strains.insert((gx, gy), vec![(s, total)]);
             }
             return s;
@@ -960,6 +978,7 @@ pub fn ensure_mycelium_strain(world: &mut World, gx: i32, gy: i32) -> u32 {
     }
     let s = alloc_mycelium_strain(world);
     if total > 0 {
+        reserve_mycelium_strain_slot(world, gx, gy);
         world.mycelium_strains.insert((gx, gy), vec![(s, total)]);
     }
     s
@@ -2829,6 +2848,59 @@ mod tests {
 
     fn fungus_body() -> Vec<BodyModule> {
         crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus()
+    }
+
+    #[test]
+    fn ensure_and_heal_soft_cap_strain_map() {
+        let mut w = litter_plot();
+        // Fill the soft-cap with phantom keys (no cell cream required).
+        for i in 0..MYCELIUM_STRAIN_MAP_MAX {
+            w.mycelium_strains
+                .insert((i as i32, -1), vec![(1, 10)]);
+        }
+        assert_eq!(w.mycelium_strains.len(), MYCELIUM_STRAIN_MAP_MAX);
+
+        // Cream on a virgin sand seat — ensure must reserve a slot, not grow.
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(200);
+        sand.set_mycelium(40);
+        w.set_cell(4, 2, sand);
+        let _ = ensure_mycelium_strain(&mut w, 4, 2);
+        assert!(
+            w.mycelium_strains.len() <= MYCELIUM_STRAIN_MAP_MAX,
+            "ensure must soft-cap (len={})",
+            w.mycelium_strains.len()
+        );
+        assert!(
+            w.mycelium_strains.contains_key(&(4, 2)),
+            "new cream should own a share after eviction"
+        );
+
+        // Orphan heal: cream pad with no shares, neighbour strain present,
+        // map already at the soft-cap.
+        w.mycelium_strains.clear();
+        for i in 0..(MYCELIUM_STRAIN_MAP_MAX - 1) {
+            w.mycelium_strains
+                .insert((i as i32, -2), vec![(7, 10)]);
+        }
+        // Neighbour already in the map (fills the last soft-cap slot).
+        w.mycelium_strains.insert((5, 2), vec![(7, 20)]);
+        let mut nbr = Cell::solid(MaterialId::Sand);
+        nbr.sat = Sat(200);
+        nbr.set_mycelium(20);
+        w.set_cell(5, 2, nbr);
+        assert!(!w.mycelium_strains.contains_key(&(4, 2)));
+        assert_eq!(w.mycelium_strains.len(), MYCELIUM_STRAIN_MAP_MAX);
+        heal_orphan_mycelium_pads(&mut w);
+        assert!(
+            w.mycelium_strains.len() <= MYCELIUM_STRAIN_MAP_MAX,
+            "heal must soft-cap (len={})",
+            w.mycelium_strains.len()
+        );
+        assert!(
+            w.mycelium_strains.contains_key(&(4, 2)),
+            "orphan cream should inherit a neighbour strain under the cap"
+        );
     }
 
     #[test]

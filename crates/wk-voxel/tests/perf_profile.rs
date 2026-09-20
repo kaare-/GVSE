@@ -761,6 +761,83 @@ fn organism_cost_versus_soak_age() {
     );
 }
 
+/// Biology ledger sizes next to organism cost. Without plants these maps
+/// stay empty / tiny; with a full plant cap they can only grow. Rising
+/// `strains` / `sugar` / `sym` with a flat atom count is the soak FPS
+/// suspect when physics alone stays at 15–20 — especially if `strains`
+/// climbs past [`crate::fungi::MYCELIUM_STRAIN_MAP_MAX`] (ensure/heal used
+/// to insert without the soft-cap).
+///
+/// Also prints the weather / physics columns that actually move the wall
+/// while `org` stays flat — plant deaths paint Organic and can inflate
+/// buoy / loose scans without showing up in the organism timer.
+///
+/// ```text
+/// cargo test -p wk-voxel --release --test perf_profile -- --ignored --nocapture bio_ledger_versus_soak_age
+/// ```
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn bio_ledger_versus_soak_age() {
+    const SEG: u64 = 400;
+    const SEGS: usize = 10;
+
+    for &(label, plants) in &[("0 plants", 0usize), ("256 plants", 256usize)] {
+        let mut scene = stamp_scene(demo_params());
+        scene.climatic_rain = false;
+        seed_plants(&mut scene, plants);
+        for _ in 0..WARMUP_TICKS {
+            one_stack_tick(&mut scene, None, None);
+        }
+
+        println!(
+            "\n=== {label} ===\n{:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6} {:>5} {:>5} {:>5} {:>5} {:>6}",
+            "tick", "wall", "phys", "org", "cond", "hadv", "wind", "phase", "rise", "myc",
+            "strains", "sugar", "lit", "buoy", "orgc", "atoms", "mods"
+        );
+        for _ in 0..SEGS {
+            let mut accum = PassAccum::zero();
+            let mut phys = PhysicsTimings::default();
+            let wall = Instant::now();
+            for _ in 0..SEG {
+                one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+            }
+            let wall = wall.elapsed();
+            let n = SEG;
+            let mut buoy_ch = 0usize;
+            let mut org_ch = 0usize;
+            for c in scene.world.chunks.values() {
+                if c.has_buoyant {
+                    buoy_ch += 1;
+                }
+                if c.has_organic {
+                    org_ch += 1;
+                }
+            }
+            let mods: usize = scene.organisms.atoms.iter().map(|a| a.body.len()).sum();
+            println!(
+                "{:>7} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>7} {:>6} {:>5} {:>5} {:>5} {:>5} {:>6}",
+                scene.world.tick,
+                wall.as_secs_f32() * 1000.0 / n as f32,
+                accum.physics_tick.as_secs_f32() * 1000.0 / n as f32,
+                accum.organisms.as_secs_f32() * 1000.0 / n as f32,
+                accum.condensation.as_secs_f32() * 1000.0 / n as f32,
+                accum.humidity_advect.as_secs_f32() * 1000.0 / n as f32,
+                accum.wind_rebuild.as_secs_f32() * 1000.0 / n as f32,
+                accum.phase.as_secs_f32() * 1000.0 / n as f32,
+                phys.rise_soak.as_secs_f32() * 1000.0 / n as f32,
+                phys.mycelium.as_secs_f32() * 1000.0 / n as f32,
+                scene.world.mycelium_strains.len(),
+                scene.world.mycelium_energy.len(),
+                scene.world.soft_litter.len(),
+                buoy_ch,
+                org_ch,
+                scene.organisms.len(),
+                mods,
+            );
+        }
+    }
+}
+
 /// Nightly soak shape: climatic rain off, drizzle + evap on, a full plant
 /// cap. Prints pass cost next to the maps and sticky flags that can only
 /// grow. A rising `snow` / `buoy` chunk count with a quiet scene is the
