@@ -65,10 +65,9 @@ use wk_voxel::{
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
     draw_celestials, draw_haze_and_wind, draw_wind_streaks, draw_water_current_streaks,
-    draw_ridge_silhouettes, draw_sky, estimate_snow_bias, gx_in_ranges,
-    is_organism_aboveground, organism_celestial_rim, sky_weather_for_scene,
-    terrain_celestial_key_strength, toward_light_celestial, view_cell_x_ranges,
-    view_tile_box, RidgeSilhouette,
+    draw_ridge_silhouettes, draw_sky, gx_in_ranges, is_organism_aboveground,
+    organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
+    toward_light_celestial, view_cell_x_ranges, view_tile_box, RidgeSilhouette,
 };
 use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
@@ -825,12 +824,6 @@ async fn main() {
 
         // Atmosphere: sky → far clouds → ridges → mid clouds → active clouds → terrain.
         let phase = &settings.phase;
-        let temp = &scene.temperature;
-        let snow_bias = estimate_snow_bias(
-            &scene.humidity,
-            temp,
-            phase.freeze_point_c,
-        );
         let sky_weather = sky_weather_for_scene(
             scene.world.tick,
             &settings.climate,
@@ -838,7 +831,7 @@ async fn main() {
             &scene.temperature,
             &scene.carbon,
             scene.params.width_cols,
-            snow_bias,
+            phase.freeze_point_c,
         );
         draw_sky(
             scene.world.tick,
