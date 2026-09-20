@@ -88,6 +88,12 @@ pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bo
         let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
         for y in ac.rect.y0..=ac.rect.y1 {
             for x in ac.rect.x0..=ac.rect.x1 {
+                // Scattered rain's bbox covers the shore. Only planned
+                // cells can force a deep settle; a dense wake (empty
+                // bits) still walks the whole rect.
+                if !ac.visits(x, y) {
+                    continue;
+                }
                 let cell = chunk.get(x as usize, y as usize);
                 // Airborne snow has its own once-per-tick step. Counting
                 // it here forced the ×64 deep settle every flake and
@@ -1088,6 +1094,9 @@ pub fn apply_grain_fall_regions_ex(
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
+                if !ac.visits(x, y) {
+                    continue;
+                }
                 let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
                 // SAFETY: see [`crate::parallel`].
                 let Some(cur) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
@@ -2330,6 +2339,9 @@ fn apply_repose_pass(
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
+                if !ac.visits(x, y) {
+                    continue;
+                }
                 let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
                 // SAFETY: see [`crate::parallel`].
                 let Some(dest) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
