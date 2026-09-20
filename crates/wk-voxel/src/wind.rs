@@ -632,15 +632,33 @@ impl Wind {
         }
         // This rebuild only. Do not keep this across rebuilds — a
         // cave-in must see the new walls on the next compose / Jacobi.
+        // Open sky (!solid and no standing air) cannot block, so those
+        // chunks skip the per-tile cell read. A stale true flag still scans.
         let mut solid = vec![false; n];
-        if world.is_some() {
+        if let Some(wld) = world {
+            let mut seen: Option<crate::chunk::ChunkCoord> = None;
+            let mut open = false;
             for iy in 0..h {
                 for ix in 0..w {
                     let hx = bounds.hx_min + ix as i32;
                     let hy = bounds.hy_min + iy as i32;
+                    let gx = wld.wrap_x(hx * tc + tc / 2);
+                    let gy = hy * tc + tc / 2;
+                    let (coord, _, _) = World::split(gx, gy);
+                    if seen != Some(coord) {
+                        seen = Some(coord);
+                        open = match wld.chunks.get(&coord) {
+                            None => true,
+                            Some(c) => !c.has_solid && !c.has_standing_air,
+                        };
+                    }
                     // Treat free water like solid for wind seating / projection:
                     // air does not blow through the lake.
-                    solid[iy * w + ix] = tile_center_blocks_wind(world, tc, hx, hy);
+                    solid[iy * w + ix] = if open {
+                        false
+                    } else {
+                        tile_center_blocks_wind(world, tc, hx, hy)
+                    };
                 }
             }
         }
@@ -1947,6 +1965,50 @@ mod tests {
         assert!(
             wind.field_has(0, skin_hy + 1) || wind.field_has(0, skin_hy + 2),
             "breeze should seat in Air above the lake skin"
+        );
+    }
+
+    #[test]
+    fn open_sky_chunk_seats_wind_but_standing_water_does_not() {
+        use crate::cell::{Cell, Sat};
+        use crate::chunk::CHUNK_CELLS_H;
+        use wk_material::MaterialId;
+
+        // tile_cols 16 keeps the box under the dense-walk cap so the
+        // solid pack (not the sparse key loop) decides these seats.
+        let tc = 16i32;
+        let ch = CHUNK_CELLS_H as i32;
+        let hy_of = |cy: i32| (cy * ch + tc / 2).div_euclid(tc);
+        let center = |cy: i32| hy_of(cy) * tc + tc / 2;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 16, 4 * ch);
+        w.set_cell(tc / 2, center(0), Cell::solid(MaterialId::Stone));
+        let mut pool = Cell::air();
+        pool.sat = Sat(200);
+        w.set_cell(tc / 2, center(2), pool);
+        let mut film = Cell::air();
+        film.sat = Sat(180);
+        w.set_cell(tc / 2, center(3), film);
+
+        let mut wind = Wind::climate(tc, 0.12, 3, 64, 8, 0, 4 * ch, false);
+        wind.config.field_smooth = 0.0;
+        let seats = [
+            (0, hy_of(0)),
+            (0, hy_of(1)),
+            (0, hy_of(2)),
+            (0, hy_of(3)),
+        ];
+        wind.rebuild_field(Some(&w), None, 40, &seats, None);
+        assert!(
+            wind.field_slab.is_some(),
+            "this box must pack solids on the slab path"
+        );
+        assert!(!wind.field_has(0, hy_of(0)), "rock is not a seat");
+        assert!(wind.field_has(0, hy_of(1)), "dry air chunk is a seat");
+        assert!(!wind.field_has(0, hy_of(2)), "sat 200 air is not a seat");
+        assert!(
+            wind.field_has(0, hy_of(3)),
+            "sat 180 wakes standing-air scans but is still a wind seat"
         );
     }
 
