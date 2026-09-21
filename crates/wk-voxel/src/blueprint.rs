@@ -170,6 +170,10 @@ impl Genome {
         g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
         g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
         g.digest_rate = jitter(g.digest_rate, 0.05, 2.0);
+        g.temp_optimum = jitter(g.temp_optimum, 0.0, 40.0);
+        g.temp_width = jitter(g.temp_width, 2.0, 40.0);
+        // Drop the f32 closure before the u8 one — both touch `trait_i`.
+        drop(jitter);
         let mut jitter_u8 = |value: u8| -> u8 {
             trait_i += 1;
             let h = hash_u64(world_seed, salt_base, trait_i, 0xE11);
@@ -179,8 +183,6 @@ impl Genome {
         };
         g.sym_water = jitter_u8(g.sym_water);
         g.sym_energy = jitter_u8(g.sym_energy);
-        g.temp_optimum = jitter(g.temp_optimum, 0.0, 40.0);
-        g.temp_width = jitter(g.temp_width, 2.0, 40.0);
         g
     }
 }
