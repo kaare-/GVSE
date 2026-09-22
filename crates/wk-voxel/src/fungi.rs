@@ -22,10 +22,10 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::{ensure_symbiont_inherited, mutate_body, Genome};
-use crate::fasthash::{FxHashMap, FxHashSet};
-use crate::cell::{hosts_mycelium, water_capacity_cell, Cell, CellFlags};
 #[cfg(test)]
 use crate::cell::water_capacity;
+use crate::cell::{hosts_mycelium, water_capacity_cell, Cell, CellFlags};
+use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
 use crate::plant::{apply_genome, find_fungus_slot_biased, pin_plant_pose};
