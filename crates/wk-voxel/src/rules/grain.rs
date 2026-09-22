@@ -1244,16 +1244,20 @@ fn buoyant_litter_needs_pass(world: &World, gx: i32, gy: i32, cell: Cell) -> boo
 fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
     let mut litter = Vec::new();
     // Prefer buoyant sticky flag — sand-only shores used to scan every
-    // `has_loose` chunk for litter that was never there. Also visit
-    // leftover `has_organic` (a falling leaf marks every sky chunk; after
-    // buoyant-clear those sit `has_organic && !has_buoyant`).
+    // `has_loose` chunk for litter that was never there.
+    //
+    // Do **not** select on `has_organic` alone. Plant compost keeps that
+    // flag forever, and after [`buoyant_litter_needs_pass`] clears
+    // `has_buoyant` the old `has_organic` walk still rescanned every land
+    // chunk each tick. Falling leaves stamp `has_buoyant` on write; the
+    // sticky flag stays until the next scan clears vacated sky (and
+    // `has_organic` with it when no Organic remains).
     let any_buoyant = world.chunks.values().any(|c| c.has_buoyant);
-    let any_organic = world.chunks.values().any(|c| c.has_organic);
-    let coords = if any_buoyant || any_organic {
+    let coords = if any_buoyant {
         world
             .chunks
             .iter()
-            .filter(|(_, c)| c.has_buoyant || c.has_organic)
+            .filter(|(_, c)| c.has_buoyant)
             .map(|(&coord, _)| coord)
             .collect()
     } else if !world.buoyant_flags_ready {
