@@ -238,7 +238,7 @@ fn column_may_phase(world: &World, gx: i32, temp: &Temperature, cfg: &PhaseConfi
         if !has_freezable {
             return false;
         }
-        let t_c = temp.at_cell(gx, y);
+        let t_c = temp.at_cell_packed(gx, y);
         return t_c <= cfg.freeze_point_c + 1.5;
     }
     false
@@ -376,13 +376,15 @@ pub fn deposit_precip_on_surface(
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
     // Form phase from air at the precip origin (cloud / sky), not ground.
-    let air_t = temp.at_cell(gx, start_y);
+    // Packed slab matches the overlay / lake couple; sparse alone can
+    // still read cold while the skin the flake hits is warm.
+    let air_t = temp.at_cell_packed(gx, start_y);
     if air_t > phase.freeze_point_c {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
     // Snow aloft — melt on warm ground contact.
     let ground_y = ground_sample_y(world, gx);
-    let ground_t = temp.at_cell(gx, ground_y);
+    let ground_t = temp.at_cell_packed(gx, ground_y);
     if ground_t > phase.freeze_point_c {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
@@ -414,9 +416,9 @@ pub fn deposit_condensate_on_surface(
     if budget <= 0.0 {
         return 0.0;
     }
-    let air_t = temp.at_cell(gx, start_y);
+    let air_t = temp.at_cell_packed(gx, start_y);
     let ground_y = ground_sample_y(world, gx);
-    let ground_t = temp.at_cell(gx, ground_y);
+    let ground_t = temp.at_cell_packed(gx, ground_y);
     // Warm air or warm ground → liquid (phase may freeze ponds later).
     if air_t > phase.freeze_point_c || ground_t > phase.freeze_point_c {
         return deposit_water_on_surface(world, gx, start_y, budget);
@@ -447,7 +449,7 @@ fn deposit_frost_coat(
     for dx in -radius..=radius {
         let cx = world.wrap_x(gx + dx);
         let sample_y = ground_sample_y(world, cx);
-        if temp.at_cell(cx, sample_y) > phase.freeze_point_c {
+        if temp.at_cell_packed(cx, sample_y) > phase.freeze_point_c {
             continue;
         }
         let pack = frozen_count_in_column(world, cx);
@@ -477,7 +479,7 @@ pub fn precip_forms_snow_at_air(
     air_y: i32,
     phase: &PhaseConfig,
 ) -> bool {
-    phase.enable_snow_precip && temp.at_cell(gx, air_y) <= phase.freeze_point_c
+    phase.enable_snow_precip && temp.at_cell_packed(gx, air_y) <= phase.freeze_point_c
 }
 
 /// Seat snow on the aim column or a colder neighbour with a thinner pack
@@ -496,7 +498,7 @@ fn deposit_snow_spread(
     for dx in -radius..=radius {
         let cx = world.wrap_x(gx + dx);
         let sample_y = ground_sample_y(world, cx);
-        if temp.at_cell(cx, sample_y) > phase.freeze_point_c {
+        if temp.at_cell_packed(cx, sample_y) > phase.freeze_point_c {
             continue;
         }
         let pack = frozen_count_in_column(world, cx);
@@ -650,7 +652,7 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
     };
     let mut left = cfg.max_slush_cells_per_column_per_tick.max(1) as i32;
     let sample_y = ground_sample_y(world, gx);
-    let t_c = temp.at_cell(gx, sample_y);
+    let t_c = temp.at_cell_packed(gx, sample_y);
     let warm = t_c > cfg.freeze_point_c;
 
     for y in (y0..=y1).rev() {
@@ -888,7 +890,7 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         if !under_lid && !open_surface {
             continue;
         }
-        let t_c = temp.at_cell(gx, y);
+        let t_c = temp.at_cell_packed(gx, y);
         if t_c > cfg.freeze_point_c {
             continue;
         }
