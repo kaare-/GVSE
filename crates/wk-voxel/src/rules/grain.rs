@@ -1598,22 +1598,26 @@ fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx:
     }
 }
 
-/// One floating Organic column at `gx`, if present: `(bottom_y, height)`.
-pub fn floating_organic_column_at(world: &World, gx: i32) -> Option<(i32, i32)> {
+/// True when float-raft walks should prefer sticky `has_buoyant` over
+/// `has_organic`. Floating seats stamp buoyant; buried compost keeps
+/// `has_organic` after buoyant clears and must not be scanned as a raft.
+fn prefer_buoyant_float_chunks(world: &World) -> bool {
+    world.buoyant_flags_ready && world.chunks.values().any(|c| c.has_buoyant)
+}
+
+/// Scan `coords` (same world-x strip) for a floating Organic column at `gx`.
+fn floating_organic_column_at_in(
+    world: &World,
+    gx: i32,
+    coords: &[ChunkCoord],
+) -> Option<(i32, i32)> {
     let gx = world.wrap_x(gx);
-    let cx = gx.div_euclid(CHUNK_CELLS_W as i32);
     let lx = gx.rem_euclid(CHUNK_CELLS_W as i32) as usize;
     let mut best: Option<(i32, i32)> = None;
-    for &coord in world.chunks.keys() {
-        if coord.cx != cx {
-            continue;
-        }
+    for &coord in coords {
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
-        if !chunk.has_organic {
-            continue;
-        }
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         for ly in 0..CHUNK_CELLS_H {
             let cell = chunk.get(lx, ly);
@@ -1646,6 +1650,27 @@ pub fn floating_organic_column_at(world: &World, gx: i32) -> Option<(i32, i32)> 
         }
     }
     best
+}
+
+/// One floating Organic column at `gx`, if present: `(bottom_y, height)`.
+pub fn floating_organic_column_at(world: &World, gx: i32) -> Option<(i32, i32)> {
+    let gx = world.wrap_x(gx);
+    let cx = gx.div_euclid(CHUNK_CELLS_W as i32);
+    let prefer = prefer_buoyant_float_chunks(world);
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(&coord, chunk)| {
+            coord.cx == cx
+                && if prefer {
+                    chunk.has_buoyant
+                } else {
+                    chunk.has_organic
+                }
+        })
+        .map(|(&coord, _)| coord)
+        .collect();
+    floating_organic_column_at_in(world, gx, &coords)
 }
 
 /// Floating Organic columns: `gx → (waterline_y, stack_height)`.
@@ -1705,6 +1730,9 @@ pub fn collect_floating_organic_columns(
 }
 
 /// Float columns near plant crowns (`xs` ± `pad`) — organism tick path.
+///
+/// Builds a `cx → chunks` index once so each crown column does not walk
+/// every loaded chunk key (256 plants × ±6 used to be O(queries×chunks)).
 pub fn collect_floating_organic_columns_near(
     world: &World,
     xs: &[i32],
@@ -1715,19 +1743,39 @@ pub fn collect_floating_organic_columns_near(
     if xs.is_empty() {
         return columns;
     }
-    // No Organic anywhere → free.
-    if !world.chunks.values().any(|c| c.has_organic) {
+    let prefer = prefer_buoyant_float_chunks(world);
+    let any = if prefer {
+        world.chunks.values().any(|c| c.has_buoyant)
+    } else {
+        world.chunks.values().any(|c| c.has_organic)
+    };
+    if !any {
         return columns;
     }
+    let mut by_cx: HashMap<i32, Vec<ChunkCoord>> = HashMap::new();
+    for (&coord, chunk) in &world.chunks {
+        let ok = if prefer {
+            chunk.has_buoyant
+        } else {
+            chunk.has_organic
+        };
+        if ok {
+            by_cx.entry(coord.cx).or_default().push(coord);
+        }
+    }
     let pad = pad.max(0);
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for &x in xs {
         for dx in -pad..=pad {
             let gx = world.wrap_x(x + dx);
             if !seen.insert(gx) {
                 continue;
             }
-            if let Some(col) = floating_organic_column_at(world, gx) {
+            let cx = gx.div_euclid(CHUNK_CELLS_W as i32);
+            let Some(coords) = by_cx.get(&cx) else {
+                continue;
+            };
+            if let Some(col) = floating_organic_column_at_in(world, gx, coords) {
                 columns.insert(gx, col);
             }
         }

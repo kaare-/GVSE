@@ -7251,6 +7251,62 @@ fn floating_organic_drifts_with_wind() {
 }
 
 #[test]
+fn float_column_at_skips_buried_compost_when_buoyant_cleared() {
+    // Organism crown probes used to walk every has_organic chunk. Once
+    // buoyant flags are live, buried compost (!has_buoyant) is not a raft.
+    let mut w = setup_column_world();
+    // Buried root compost first.
+    w.set_cell(3, 1, Cell::solid(MaterialId::Sand));
+    w.set_cell(3, 2, Cell::solid(MaterialId::Organic));
+    w.set_cell(3, 3, Cell::solid(MaterialId::Sand));
+    // Simulate post-#318 compost: has_organic stays, has_buoyant clears.
+    for chunk in w.chunks.values_mut() {
+        chunk.has_buoyant = false;
+    }
+    w.buoyant_flags_ready = true;
+    // Lake + floating raft (write after clear so only the raft stamps buoyant).
+    for y in 1..=4 {
+        w.set_cell(8, y, Cell::water());
+    }
+    w.set_cell(8, 5, Cell::solid(MaterialId::Organic));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_buoyant);
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_organic);
+
+    assert!(
+        floating_organic_column_at(&w, 8).is_some(),
+        "lake raft must still be found"
+    );
+    assert!(
+        floating_organic_column_at(&w, 3).is_none(),
+        "buried compost must not look like a float column"
+    );
+    let near = collect_floating_organic_columns_near(&w, &[3, 8], 0);
+    assert!(near.contains_key(&8), "near collect must keep the raft");
+    assert!(
+        !near.contains_key(&3),
+        "near collect must skip buried compost"
+    );
+}
+
+#[test]
+fn float_column_near_indexes_by_chunk_x() {
+    // Many crown probes must share one chunk-index build, not re-walk
+    // every loaded key per column.
+    let mut w = setup_column_world();
+    for y in 1..=4 {
+        w.set_cell(10, y, Cell::water());
+    }
+    w.set_cell(10, 5, Cell::solid(MaterialId::Organic));
+    let crowns: Vec<i32> = (0..32).collect();
+    let near = collect_floating_organic_columns_near(&w, &crowns, 2);
+    assert_eq!(
+        near.get(&10).map(|c| c.1),
+        Some(1),
+        "raft under the crown pad must be found (got {near:?})"
+    );
+}
+
+#[test]
 fn floating_organic_drifts_with_stream_without_wind() {
     // Flat freeboard with a sat gradient toward +x (wind calm).
     let mut w = setup_column_world();
