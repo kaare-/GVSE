@@ -1792,6 +1792,55 @@ fn grain_falls_through_empty_air() {
 }
 
 #[test]
+fn sparse_grain_plan_skips_the_aabb_hole() {
+    use crate::active::ActiveChunk;
+    use crate::chunk::{DirtyBits, Rect};
+    let mut w = setup_column_world();
+    // Unsupported sand in the middle of the chunk.
+    w.set_cell(20, 20, Cell::solid(MaterialId::Sand));
+    clear_all_dirty(&mut w);
+    let coord = ChunkCoord::new(0, 0);
+    let rect = Rect::full();
+    let mut hole = DirtyBits::empty();
+    hole.set(0, 0);
+    let sparse = [ActiveChunk::with_bits(coord, rect, hole)];
+    assert!(
+        !active_has_unsupported_grain(&w, &sparse),
+        "a grain in an AABB hole is not a deep-settle reason"
+    );
+    apply_grain_fall_regions(&mut w, &sparse);
+    apply_grain_repose_regions(&mut w, &sparse, None);
+    assert_eq!(
+        w.get_cell(20, 20).map(|c| c.material),
+        Some(MaterialId::Sand),
+        "fall and repose must not visit the hole"
+    );
+    let mut on_sand = DirtyBits::empty();
+    // Fall pulls into the air seat. Planning dilates the grain by two
+    // rows, so the seat is a planned cell, not only the grain.
+    on_sand.set(20, 20);
+    on_sand.set(20, 19);
+    let planned = [ActiveChunk::with_bits(coord, rect, on_sand)];
+    assert!(active_has_unsupported_grain(&w, &planned));
+    apply_grain_fall_regions(&mut w, &planned);
+    assert_eq!(
+        w.get_cell(20, 19).map(|c| c.material),
+        Some(MaterialId::Sand),
+        "the planned cell still falls"
+    );
+    // Empty bits mean dense: a full-rect wake still walks the sand.
+    w.set_cell(30, 20, Cell::solid(MaterialId::Sand));
+    clear_all_dirty(&mut w);
+    let dense = [ActiveChunk::new(coord, rect)];
+    assert!(active_has_unsupported_grain(&w, &dense));
+    apply_grain_fall_regions(&mut w, &dense);
+    assert_eq!(
+        w.get_cell(30, 19).map(|c| c.material),
+        Some(MaterialId::Sand)
+    );
+}
+
+#[test]
 fn grain_stops_on_competent_rock() {
     let mut w = setup_column_world();
     w.set_cell(4, 2, Cell::solid(MaterialId::Stone));
