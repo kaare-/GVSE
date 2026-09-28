@@ -66,6 +66,13 @@ pub struct Genome {
     /// Symbiont treaty: glucose/energy the fungus asks of the plant (0..=255).
     #[serde(default = "default_sym_energy")]
     pub sym_energy: u8,
+    /// Comfort-centre temperature (°C). Heat past `optimum + width` drains energy.
+    #[serde(default = "default_temp_optimum")]
+    pub temp_optimum: f32,
+    /// Degrees above `temp_optimum` before heat stress starts. Narrow
+    /// specialists die in hot pockets. Cold does not use this width.
+    #[serde(default = "default_temp_width")]
+    pub temp_width: f32,
 }
 
 fn default_root_depth_bias() -> f32 {
@@ -95,6 +102,12 @@ fn default_sym_water() -> u8 {
 fn default_sym_energy() -> u8 {
     128
 }
+fn default_temp_optimum() -> f32 {
+    22.0
+}
+fn default_temp_width() -> f32 {
+    18.0
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -112,6 +125,8 @@ impl Default for Genome {
             digest_rate: default_digest_rate(),
             sym_water: default_sym_water(),
             sym_energy: default_sym_energy(),
+            temp_optimum: default_temp_optimum(),
+            temp_width: default_temp_width(),
         }
     }
 }
@@ -155,6 +170,10 @@ impl Genome {
         g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
         g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
         g.digest_rate = jitter(g.digest_rate, 0.05, 2.0);
+        g.temp_optimum = jitter(g.temp_optimum, 0.0, 40.0);
+        g.temp_width = jitter(g.temp_width, 2.0, 40.0);
+        // Drop the f32 closure before the u8 one — both touch `trait_i`.
+        drop(jitter);
         let mut jitter_u8 = |value: u8| -> u8 {
             trait_i += 1;
             let h = hash_u64(world_seed, salt_base, trait_i, 0xE11);

@@ -93,6 +93,16 @@ const REPRO_PERIOD: u64 = 40;
 const PLANKTON_LIFE_CYCLES: u64 = 4;
 /// Land plants / fungi live longer — senescence is softer than plankton blooms.
 const PLANT_LIFE_CYCLES: u64 = 16;
+/// Extra energy drain per body module at noon when heat stress is 1
+/// (one `temp_width` past the hot edge of the comfort band).
+/// Scaled by the day factor so a mild overshoot is a metabolic tax,
+/// not an overnight empty of the tank.
+const HEAT_STRESS_DRAIN: f32 = 0.35;
+/// Stress above this blocks elongation and local vegetative sprout.
+/// A geyser / sinter seat must not keep adding modules while the tank
+/// drains — play used to show analogs "growing fine" in the hot zone
+/// because growth ran before the heat pass and photo could refill.
+const HEAT_BLOCKS_GROWTH: f32 = 0.2;
 /// Default-climate plankton life (tests / docs). Live ticks use [`life_ticks`].
 #[allow(dead_code)]
 const LIFE_TICKS: u64 = DEMO_DAY_TICKS * PLANKTON_LIFE_CYCLES;
@@ -1630,7 +1640,7 @@ impl OrganismStore {
     }
 
     /// [`Self::step_with_climate_wind`] plus optional temperature for the
-    /// hibernating spore-bank cold gate.
+    /// hibernating spore-bank cold gate and hot-side heat stress (E34).
     pub fn step_with_climate_wind_temp(
         &mut self,
         world: &mut World,
@@ -1849,6 +1859,7 @@ impl OrganismStore {
                     downpour_mass,
                     sun_local,
                     is_day,
+                    temperature,
                     &mut pass,
                 ) {
                     PlantStep::Dead => deaths.push(i),
@@ -2007,6 +2018,22 @@ impl OrganismStore {
                 }
             }
             other_ns += t_other.elapsed();
+        }
+        // Heat past the genome comfort band drains energy (E34). Cold stays
+        // a spore-bank gate — this pass only kills on the hot side, and only
+        // when a live temperature field was passed in.
+        if let Some(temp) = temperature {
+            let n = self.atoms.len();
+            for i in 0..n {
+                if deaths.contains(&i) {
+                    continue;
+                }
+                let atom = &mut self.atoms[i];
+                let celsius = organism_heat_celsius(temp, atom);
+                if apply_heat_stress(atom, celsius, day) {
+                    deaths.push(i);
+                }
+            }
         }
         pass.land_plants = land_ns;
         pass.other_creatures = other_ns;
@@ -2588,6 +2615,7 @@ fn step_land_plant(
     downpour_mass: f32,
     sun_local: f32,
     is_day: bool,
+    temperature: Option<&Temperature>,
     pass: &mut OrganismPassTimings,
 ) -> PlantStep {
     // Pose / seat:
@@ -2933,7 +2961,13 @@ fn step_land_plant(
     // Night: no submerged stem-urge and no elongation — dim light used to
     // force trunk growth all night and empty the tank in a river.
     let grow_day = day >= PLANT_GROW_MIN_DAY;
-    if grow_day && !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT {
+    // Hottest body cell (roots on sinter, crown in cooler air still counts).
+    let heat_blocks = temperature
+        .map(|t| heat_stress(organism_heat_celsius(t, atom), &atom.genome))
+        .unwrap_or(0.0)
+        > HEAT_BLOCKS_GROWTH;
+    if grow_day && !heat_blocks && !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT
+    {
         if !stemless {
             atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
             atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
@@ -2944,7 +2978,7 @@ fn step_land_plant(
             atom.genome.alloc_stem = 0.0;
         }
     }
-    if grow_day {
+    if grow_day && !heat_blocks {
         let _ = try_grow_plant(
             world,
             atom,
@@ -2963,6 +2997,8 @@ fn step_land_plant(
 
     let t_disp = Instant::now();
     // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
+    // Hot seats may still loft a wind spore toward cooler ground; local
+    // vegetative sprout must not plant a child in the same sinter pocket.
     match try_plant_wind_spore(
         world,
         atom,
@@ -2984,11 +3020,13 @@ fn step_land_plant(
         DispersalResult::Inoculated { .. } => {}
         DispersalResult::None => {}
     }
-    if let Some(child) =
-        try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
-    {
-        pass.land_disperse += t_disp.elapsed();
-        return PlantStep::Sprout(child);
+    if !heat_blocks {
+        if let Some(child) =
+            try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
+        {
+            pass.land_disperse += t_disp.elapsed();
+            return PlantStep::Sprout(child);
+        }
     }
     pass.land_disperse += t_disp.elapsed();
     PlantStep::Alive {
@@ -4690,6 +4728,56 @@ fn is_wet_air(world: &World, gx: i32, gy: i32) -> bool {
         Some(c) => c.material == MaterialId::Air && !c.sat.is_empty(),
         None => false,
     }
+}
+
+/// Hot-side stress. `0` at or below `optimum + width`; `1` one width hotter.
+/// Cold never stresses — reproduction in the cold is a separate gate (E46d).
+pub(crate) fn heat_stress(temp_c: f32, genome: &Genome) -> f32 {
+    let width = genome.temp_width.max(1.0);
+    let hot = temp_c - (genome.temp_optimum + width);
+    if hot <= 0.0 {
+        0.0
+    } else {
+        hot / width
+    }
+}
+
+/// Hottest °C on the nucleus or any body cell.
+///
+/// Roots on a sinter pad / vent rim must feel the pocket even when the
+/// crown samples cooler air one tile up. Uses the packed slab when a
+/// dense step has filled it (same path as the heat-death pass).
+fn organism_heat_celsius(temp: &Temperature, atom: &Atom) -> f32 {
+    let sample = |gx: i32, gy: i32| {
+        let (hx, hy) = temp.tile_of(gx, gy);
+        temp.at_tile_packed(hx, hy)
+    };
+    let mut best = sample(atom.gx, atom.gy);
+    for &(dx, dy, _) in &atom.body {
+        let t = sample(atom.gx + dx as i32, atom.gy + dy as i32);
+        if t > best {
+            best = t;
+        }
+    }
+    best
+}
+
+/// Drain energy for heat past the comfort edge. Returns true when the
+/// tank hits zero (caller records the death).
+fn apply_heat_stress(atom: &mut Atom, temp_c: f32, day: f32) -> bool {
+    let stress = heat_stress(temp_c, &atom.genome);
+    if stress <= 0.0 {
+        return false;
+    }
+    // Throttle fission on the next tick. Plants already past the edge
+    // should not spend the last of the tank on a child.
+    if stress > 0.2 {
+        atom.cooldown = atom.cooldown.max(1);
+    }
+    let n = atom.body.len().max(1) as f32;
+    let drain = stress * HEAT_STRESS_DRAIN * n * day.clamp(0.08, 1.0);
+    atom.energy = (atom.energy - drain).max(0.0);
+    atom.energy <= 0.0
 }
 
 fn find_wet_slot(world: &World, gx: i32, y0: i32, y1: i32) -> Option<i32> {
@@ -6626,6 +6714,143 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert_eq!(store.atoms[0].gx, gx);
         assert_eq!(store.atoms[0].gy, gy, "plant crown must stay pinned");
+    }
+
+    #[test]
+    fn heat_stress_is_hot_side_only() {
+        let g = Genome::default();
+        assert_eq!(heat_stress(0.0, &g), 0.0, "cold must not stress");
+        assert_eq!(heat_stress(30.0, &g), 0.0, "inside the default band");
+        assert_eq!(heat_stress(40.0, &g), 0.0, "edge is optimum + width");
+        let one = heat_stress(58.0, &g);
+        assert!(
+            (one - 1.0).abs() < 1e-4,
+            "one width past the hot edge should be stress 1 (got {one})"
+        );
+    }
+
+    /// Geyser / sinter seat: heat drain alone used to leave room for
+    /// elongation because growth ran first and photo refilled the tank.
+    /// Past the comfort edge, modules must not keep adding.
+    #[test]
+    fn heat_blocks_plant_growth_in_geyser_pocket() {
+        fn grown_modules(temp_c: f32, ticks: u64) -> (usize, usize) {
+            let mut w = moist_sand_plot();
+            let mut store = OrganismStore::new();
+            let mut genome = Genome::default();
+            // Wide enough to survive the pocket; we only care about growth.
+            genome.temp_width = 36.0;
+            genome.alloc_stem = 0.55;
+            genome.alloc_leaf = 0.30;
+            genome.alloc_root = 0.15;
+            assert!(
+                store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 40.0, genome),
+                "plant should seat on moist sand"
+            );
+            let start = store.atoms[0].body.len();
+            let mut temp = Temperature::with_world_bounds(8, 0, 0, 64, 32, 1, 16, 8, false);
+            let (hx, hy) = {
+                let a = &store.atoms[0];
+                temp.tile_of(a.gx, a.gy)
+            };
+            temp.set_tile_c(hx, hy, temp_c);
+            let climate = ClimateConfig::default();
+            for t in 0..ticks {
+                // Refill so heat drain cannot empty the tank mid-test —
+                // growth must be blocked by the stress gate, not by death.
+                store.atoms[0].energy = store.atoms[0].energy_max;
+                let _ = store.step_with_climate_wind_temp(
+                    &mut w, t, &climate, None, 0.0, Some(&temp),
+                );
+                if store.is_empty() {
+                    break;
+                }
+            }
+            let end = store.atoms.first().map(|a| a.body.len()).unwrap_or(start);
+            (start, end)
+        }
+
+        let ticks = crate::plant::LAND_GROW_PERIOD * 5;
+        let (start_hot, end_hot) = grown_modules(70.0, ticks);
+        assert_eq!(
+            end_hot, start_hot,
+            "70 °C sinter must not elongate (start={start_hot} end={end_hot})"
+        );
+        let (start_ok, end_ok) = grown_modules(30.0, ticks);
+        assert!(
+            end_ok > start_ok,
+            "comfort band must still grow (start={start_ok} end={end_ok})"
+        );
+    }
+
+    /// E34: a narrow TempWidth dies in a hot pocket; a wide one pays
+    /// extra upkeep and stays alive. Default comfort climate does not kill.
+    #[test]
+    fn scalding_pocket_kills_narrow_plant_not_wide() {
+        fn run(temp_c: f32, genome: Genome, ticks: u64) -> (OrganismStore, World) {
+            let mut w = moist_sand_plot();
+            let mut store = OrganismStore::new();
+            assert!(
+                store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 40.0, genome),
+                "plant should seat on moist sand"
+            );
+            store.atoms[0].energy = 12.0;
+            let mut temp = Temperature::with_world_bounds(8, 0, 0, 64, 32, 1, 16, 8, false);
+            let (hx, hy) = {
+                let a = &store.atoms[0];
+                temp.tile_of(a.gx, a.gy)
+            };
+            temp.set_tile_c(hx, hy, temp_c);
+            let climate = ClimateConfig::default();
+            for t in 0..ticks {
+                let _ = store.step_with_climate_wind_temp(
+                    &mut w, t, &climate, None, 0.0, Some(&temp),
+                );
+            }
+            (store, w)
+        }
+
+        let mut narrow = Genome::default();
+        narrow.temp_width = 4.0;
+        let (dead, dead_world) = run(70.0, narrow, 12);
+        assert!(
+            dead.is_empty(),
+            "narrow specialist should die in the 70 °C pocket"
+        );
+        assert!(
+            dead.corpse_count() >= 1,
+            "heat death should leave a plant corpse"
+        );
+        let root_organic = (0..6).any(|y| {
+            matches!(
+                dead_world.get_cell(4, y).map(|c| c.material),
+                Some(MaterialId::Organic)
+            )
+        });
+        assert!(root_organic, "dead roots should stay as Organic in the sand");
+
+        let mut wide = Genome::default();
+        wide.temp_width = 36.0;
+        let (hot, _) = run(70.0, wide, 12);
+        assert_eq!(hot.len(), 1, "wide lineage should survive the same pocket");
+        let wide_energy = hot.atoms[0].energy;
+
+        let (comfort, _) = run(30.0, Genome::default(), 12);
+        assert_eq!(comfort.len(), 1, "default band must not die at 30 °C");
+        assert!(
+            wide_energy + 1.0 < comfort.atoms[0].energy,
+            "wide survivor pays a metabolic cost (wide={wide_energy}, comfort={})",
+            comfort.atoms[0].energy
+        );
+
+        let mut cold_narrow = Genome::default();
+        cold_narrow.temp_width = 4.0;
+        let (cold, _) = run(0.0, cold_narrow, 12);
+        assert_eq!(
+            cold.len(),
+            1,
+            "cold must not heat-kill (E46d founder survives)"
+        );
     }
 
     #[test]
