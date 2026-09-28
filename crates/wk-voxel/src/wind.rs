@@ -453,6 +453,118 @@ impl Wind {
     /// rebuild was a multi-ms FPS cliff). When the seated set is at
     /// least half the box, compose / blend / project walk a packed
     /// slab. Solids are packed for this rebuild only.
+    /// Same seats as [`Self::rebuild_field`] once humidity fills at least
+    /// half the box, without a key HashMap. Returns false when the map
+    /// is still sparse (caller keeps the HashMap path). Tiny test boxes
+    /// stay sparse too — `prefer_dense_walk` treats `cap <= 256` as
+    /// dense, and that would change which path the unit tests hit.
+    pub fn try_rebuild_dense_from_humidity(
+        &mut self,
+        world: Option<&World>,
+        temp: Option<&Temperature>,
+        tick: u64,
+        humidity: &crate::humidity::Humidity,
+        drag: Option<&FxHashMap<(i32, i32), f32>>,
+    ) -> bool {
+        let Some(bounds) = self.bounds else {
+            return false;
+        };
+        let cap = bounds.tile_capacity();
+        if cap <= 256 || humidity.occupied_len().saturating_mul(2) < cap {
+            return false;
+        }
+        self.surf_cache.clear();
+        let evx = self.effective_vx(tick);
+        let evy = self.effective_vy(tick);
+        let cfg = self.config;
+        let smooth = cfg.field_smooth.clamp(0.0, 0.95);
+        let prev = std::mem::take(&mut self.field);
+        let prev_slab = self.field_slab.take();
+
+        let (w, h) = bounds.dims();
+        let n = w.saturating_mul(h);
+        if n == 0 || w == 0 {
+            self.field = prev;
+            self.field_slab = prev_slab;
+            return false;
+        }
+        let mut humid = vec![false; n];
+        humidity.for_each_occupied(|(hx, hy), _| {
+            let hx = self.wrap_tile_hx(hx, bounds);
+            if bounds.contains(hx, hy) {
+                humid[bounds.index(w, hx, hy)] = true;
+            }
+        });
+        // Halo only around humidity seats. The near-surface band is
+        // added after, without its own halo — same as the HashMap path.
+        let mut seated = humid.clone();
+        for iy in 0..h {
+            for ix in 0..w {
+                let i = iy * w + ix;
+                if !humid[i] {
+                    continue;
+                }
+                let hx = bounds.hx_min + ix as i32;
+                let hy = bounds.hy_min + iy as i32;
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let nhx = self.wrap_tile_hx(hx + dx, bounds);
+                        let nhy = hy + dy;
+                        if bounds.contains(nhx, nhy) {
+                            seated[bounds.index(w, nhx, nhy)] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let tc = self.tile_cols.max(1);
+        let mut hx = bounds.hx_min;
+        while hx <= bounds.hx_max {
+            let gx = hx * tc + tc / 2;
+            let sy = self.cache_surface(world, gx);
+            let shy = sy.div_euclid(tc);
+            for hy in (shy - 1)..=(shy + 2) {
+                if bounds.contains(hx, hy) {
+                    seated[bounds.index(w, hx, hy)] = true;
+                }
+            }
+            hx += 2;
+        }
+        let mut unique_hx: FxHashSet<i32> = FxHashSet::default();
+        for iy in 0..h {
+            for ix in 0..w {
+                if seated[iy * w + ix] {
+                    unique_hx.insert(bounds.hx_min + ix as i32);
+                }
+            }
+        }
+        for &hx in &unique_hx {
+            let gx = hx * tc + tc / 2;
+            self.cache_surface(world, gx);
+            for step in 1..=3 {
+                self.cache_surface(world, gx + step * tc);
+                self.cache_surface(world, gx - step * tc);
+            }
+        }
+        let col_oro = ColOroTable::build(self, world, &unique_hx);
+        self.rebuild_field_slab(
+            world,
+            temp,
+            tick,
+            evx,
+            evy,
+            &cfg,
+            smooth,
+            &prev,
+            prev_slab.as_ref(),
+            bounds,
+            &seated,
+            &col_oro,
+            drag,
+        );
+        true
+    }
+
     pub fn rebuild_field(
         &mut self,
         world: Option<&World>,
@@ -2761,5 +2873,45 @@ mod tests {
         assert!(!wind.field_is_empty(), "slab must still hold the breeze");
         let (vx, _) = wind.vector_at(None, 3, 8);
         assert!(vx.abs() > 1e-4, "vector_at must read the slab (vx={vx:.3})");
+    }
+
+    #[test]
+    fn dense_humidity_rebuild_matches_key_rebuild() {
+        use crate::humidity::Humidity;
+        let tile = 4;
+        let mut humidity = Humidity::with_world_bounds(tile, 0, 0, 128, 128);
+        let bounds = humidity.bounds.expect("bounds");
+        let mut occupied = Vec::new();
+        for hy in bounds.hy_min..=bounds.hy_max {
+            for hx in bounds.hx_min..=bounds.hx_max {
+                if (hx + hy).rem_euclid(5) == 0 {
+                    continue;
+                }
+                humidity.cells.insert((hx, hy), 12.0);
+                occupied.push((hx, hy));
+            }
+        }
+        let cap = bounds.tile_capacity();
+        assert!(
+            occupied.len().saturating_mul(2) >= cap && cap > 256,
+            "fixture must take the dense seat path (n={} cap={cap})",
+            occupied.len()
+        );
+        let mut from_keys = Wind::climate(tile, 0.2, 7, 128, 40, 0, 128, false);
+        let mut from_slab = from_keys.clone();
+        from_keys.rebuild_field(None, None, 40, &occupied, None);
+        assert!(from_slab.try_rebuild_dense_from_humidity(
+            None, None, 40, &humidity, None
+        ));
+        for hy in bounds.hy_min..=bounds.hy_max {
+            for hx in bounds.hx_min..=bounds.hx_max {
+                let a = from_keys.vector_at(None, hx, hy);
+                let b = from_slab.vector_at(None, hx, hy);
+                assert!(
+                    (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4,
+                    "wind seat {hx},{hy} keys={a:?} slab={b:?}"
+                );
+            }
+        }
     }
 }
