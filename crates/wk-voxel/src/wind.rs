@@ -386,6 +386,68 @@ impl Wind {
         y
     }
 
+    /// Occupied halo + every-other-column skin band, as a row-major mask.
+    ///
+    /// A filled sky used to insert each of those seats into an
+    /// `FxHashMap` nine times (the halo) and then throw the map away
+    /// on the slab path. The mask is that same set. `n_seats` is the
+    /// map's length, so the dense/sparse choice does not move.
+    fn rebuild_seat_mask(
+        &mut self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        occupied: &[(i32, i32)],
+    ) -> (Vec<bool>, FxHashSet<i32>, usize) {
+        let (w, _) = bounds.dims();
+        let n = bounds.tile_capacity();
+        let mut seated = vec![false; n];
+        let mut unique_hx: FxHashSet<i32> = FxHashSet::default();
+        let mut n_seats = 0usize;
+        let mut mark = |hx: i32, hy: i32| {
+            unique_hx.insert(hx);
+            if w == 0 || !bounds.contains(hx, hy) {
+                return;
+            }
+            let i = bounds.index(w, hx, hy);
+            if i < seated.len() && !seated[i] {
+                seated[i] = true;
+                n_seats += 1;
+            }
+        };
+        for &(hx, hy) in occupied {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let nhx = if self.wrap_x {
+                        let span = (bounds.hx_max - bounds.hx_min + 1).max(1);
+                        bounds.hx_min + (hx + dx - bounds.hx_min).rem_euclid(span)
+                    } else {
+                        hx + dx
+                    };
+                    let nhy = hy + dy;
+                    if bounds.contains(nhx, nhy) {
+                        mark(nhx, nhy);
+                    }
+                }
+            }
+        }
+        // Near-surface band so evap / T coupling have a breeze even
+        // where humidity has not arrived yet. Sample every 2nd column.
+        let tc = self.tile_cols.max(1);
+        let mut hx = bounds.hx_min;
+        while hx <= bounds.hx_max {
+            let gx = hx * tc + tc / 2;
+            let sy = self.cache_surface(world, gx);
+            let shy = sy.div_euclid(tc);
+            for hy in (shy - 1)..=(shy + 2) {
+                if bounds.contains(hx, hy) {
+                    mark(hx, hy);
+                }
+            }
+            hx += 2;
+        }
+        (seated, unique_hx, n_seats)
+    }
+
     /// Rebuild local vectors for `occupied` humidity seats + a 1-tile halo
     /// and a thin near-surface band. Skips empty sky (the old full-grid
     /// rebuild was a multi-ms FPS cliff). When the seated set is at
@@ -412,46 +474,14 @@ impl Wind {
         let prev = std::mem::take(&mut self.field);
         let prev_slab = self.field_slab.take();
 
-        let mut keys: FxHashMap<(i32, i32), ()> = FxHashMap::default();
-        let mut unique_hx: FxHashSet<i32> = FxHashSet::default();
-        for &(hx, hy) in occupied {
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    let nhx = if self.wrap_x {
-                        let w = (bounds.hx_max - bounds.hx_min + 1).max(1);
-                        bounds.hx_min + (hx + dx - bounds.hx_min).rem_euclid(w)
-                    } else {
-                        hx + dx
-                    };
-                    if !bounds.contains(nhx, hy + dy) {
-                        continue;
-                    }
-                    keys.insert((nhx, hy + dy), ());
-                    unique_hx.insert(nhx);
-                }
-            }
-        }
-        // Near-surface band so evap / T coupling have a breeze even
-        // where humidity has not arrived yet. Sample every 2nd column.
-        let tc = self.tile_cols.max(1);
-        let mut hx = bounds.hx_min;
-        while hx <= bounds.hx_max {
-            let gx = hx * tc + tc / 2;
-            let sy = self.cache_surface(world, gx);
-            let shy = sy.div_euclid(tc);
-            for hy in (shy - 1)..=(shy + 2) {
-                if bounds.contains(hx, hy) {
-                    keys.insert((hx, hy), ());
-                    unique_hx.insert(hx);
-                }
-            }
-            hx += 2;
-        }
+        let (seated, unique_hx, n_seats) = self.rebuild_seat_mask(world, bounds, occupied);
+        let (w_tiles, _) = bounds.dims();
 
         // Fill surf_cache for every column the compose pass will touch
         // (tile centre ± one tile) so later `vector_at` / evap reads
-        // never walk the world. Collected while inserting keys —
+        // never walk the world. Collected while marking seats —
         // sort+dedup of the key list was leftover.
+        let tc = self.tile_cols.max(1);
         for &hx in &unique_hx {
             let gx = hx * tc + tc / 2;
             self.cache_surface(world, gx);
@@ -464,7 +494,7 @@ impl Wind {
         // 1–3 tiles ahead; slip needs ±1. One pack per column, no HashMap.
         let col_oro = ColOroTable::build(self, world, &unique_hx);
 
-        if bounds.prefer_dense_walk(keys.len()) {
+        if bounds.prefer_dense_walk(n_seats) {
             self.rebuild_field_slab(
                 world,
                 temp,
@@ -476,11 +506,23 @@ impl Wind {
                 &prev,
                 prev_slab.as_ref(),
                 bounds,
-                &keys,
+                &seated,
                 &col_oro,
                 drag,
             );
             return;
+        }
+
+        // Sparse maps stay a HashMap. Built once from the mask so the
+        // halo does not hash the same seat nine times on the way in.
+        let mut keys: FxHashMap<(i32, i32), ()> = FxHashMap::default();
+        if w_tiles > 0 {
+            keys.reserve(n_seats);
+            for (i, &on) in seated.iter().enumerate() {
+                if on {
+                    keys.insert(bounds.coords(w_tiles, i), ());
+                }
+            }
         }
 
         let mut next = FxHashMap::default();
@@ -612,7 +654,7 @@ impl Wind {
         prev: &FxHashMap<(i32, i32), (f32, f32)>,
         prev_slab: Option<&FieldSlab>,
         bounds: TileBounds,
-        keys: &FxHashMap<(i32, i32), ()>,
+        seated: &[bool],
         col_oro: &ColOroTable,
         drag: Option<&FxHashMap<(i32, i32), f32>>,
     ) {
@@ -624,12 +666,6 @@ impl Wind {
             return;
         }
         let tc = self.tile_cols.max(1);
-        let mut seated = vec![false; n];
-        for &(hx, hy) in keys.keys() {
-            if bounds.contains(hx, hy) {
-                seated[bounds.index(w, hx, hy)] = true;
-            }
-        }
         // This rebuild only. Do not keep this across rebuilds — a
         // cave-in must see the new walls on the next compose / Jacobi.
         // Open sky (!solid and no standing air) cannot block, so those
@@ -1834,6 +1870,7 @@ fn tile_center_blocks_wind(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::humidity::TileBounds;
     use crate::worldgen::WorldgenParams;
 
     #[test]
@@ -2598,5 +2635,93 @@ mod tests {
             "skin scan {fast} disagreed with the full field walk {slow}"
         );
         assert!(fast > 0.0, "a rebuilt field should have some skin breeze");
+    }
+
+    /// The mask must mark the same seats the old halo HashMap inserted,
+    /// including the every-other-column skin band and ring wrap.
+    #[test]
+    fn seat_mask_matches_the_halo_map() {
+        let mut wind = Wind::climate(4, 0.20, 9, 128, 20, 0, 96, true);
+        wind.bounds = Some(TileBounds {
+            hx_min: 0,
+            hx_max: 31,
+            hy_min: 0,
+            hy_max: 15,
+        });
+        let bounds = wind.bounds.expect("bounds");
+        assert!(bounds.tile_capacity() > 256);
+        let occupied = vec![(2, 4), (2, 5), (30, 8), (0, 0)];
+        let (mask, unique, n_seats) = wind.rebuild_seat_mask(None, bounds, &occupied);
+
+        let mut keys: FxHashSet<(i32, i32)> = FxHashSet::default();
+        let mut cols: FxHashSet<i32> = FxHashSet::default();
+        for &(hx, hy) in &occupied {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let span = (bounds.hx_max - bounds.hx_min + 1).max(1);
+                    let nhx = bounds.hx_min + (hx + dx - bounds.hx_min).rem_euclid(span);
+                    let nhy = hy + dy;
+                    if bounds.contains(nhx, nhy) {
+                        keys.insert((nhx, nhy));
+                        cols.insert(nhx);
+                    }
+                }
+            }
+        }
+        let tc = wind.tile_cols.max(1);
+        let mut hx = bounds.hx_min;
+        while hx <= bounds.hx_max {
+            let gx = hx * tc + tc / 2;
+            let sy = wind.surface_at(None, gx);
+            let shy = sy.div_euclid(tc);
+            for hy in (shy - 1)..=(shy + 2) {
+                if bounds.contains(hx, hy) {
+                    keys.insert((hx, hy));
+                    cols.insert(hx);
+                }
+            }
+            hx += 2;
+        }
+        assert_eq!(n_seats, keys.len());
+        assert_eq!(unique, cols);
+        let (w, _) = bounds.dims();
+        for &(hx, hy) in &keys {
+            let i = bounds.index(w, hx, hy);
+            assert!(mask[i], "mask missed ({hx},{hy})");
+        }
+        let marked = mask.iter().filter(|&&on| on).count();
+        assert_eq!(marked, keys.len());
+    }
+
+    #[test]
+    fn filled_box_rebuild_keeps_the_slab() {
+        let mut wind = Wind::climate(4, 0.12, 3, 64, 16, 0, 80, true);
+        wind.variance = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        wind.bounds = Some(TileBounds {
+            hx_min: 0,
+            hx_max: 39,
+            hy_min: 0,
+            hy_max: 19,
+        });
+        let b = wind.bounds.expect("bounds");
+        assert!(b.tile_capacity() > 256);
+        let mut occupied = Vec::new();
+        for hy in b.hy_min..=b.hy_max {
+            for hx in b.hx_min..=b.hx_max {
+                occupied.push((hx, hy));
+            }
+        }
+        wind.rebuild_field(None, None, 4, &occupied, None);
+        assert!(
+            wind.field.is_empty(),
+            "a filled box must not dump seats into the HashMap"
+        );
+        assert!(!wind.field_is_empty(), "slab must still hold the breeze");
+        let (vx, _) = wind.vector_at(None, 3, 8);
+        assert!(vx.abs() > 1e-4, "vector_at must read the slab (vx={vx:.3})");
     }
 }
