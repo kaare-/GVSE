@@ -449,35 +449,118 @@ pub fn openness_rank(cell: Cell) -> u8 {
     }
 }
 
+/// How far a crest walk may climb or descend.
+///
+/// The demo sky is troposphere plus a stratospheric lid, about 1064 cells.
+/// A walk that stops at 512 reports the air it landed in as the hill, and
+/// the straw keeps climbing until it clears that fake crest.
+const PIPE_SKY_SPAN: i32 = 4096;
+
+struct CrestColCache {
+    world_id: u64,
+    tick: u64,
+    topo: u64,
+    cols: FxHashMap<i32, i32>,
+}
+
+thread_local! {
+    static CREST_COLS: std::cell::RefCell<CrestColCache> =
+        std::cell::RefCell::new(CrestColCache {
+            world_id: 0,
+            tick: 0,
+            topo: 0,
+            cols: FxHashMap::default(),
+        });
+}
+
+fn crest_cached(world: &World, gx: i32) -> Option<i32> {
+    CREST_COLS.with(|slot| {
+        let mut c = slot.borrow_mut();
+        let id = world.chunk_cache_id.get();
+        if c.world_id != id || c.tick != world.tick || c.topo != world.sky_topo_gen {
+            c.world_id = id;
+            c.tick = world.tick;
+            c.topo = world.sky_topo_gen;
+            c.cols.clear();
+            return None;
+        }
+        c.cols.get(&gx).copied()
+    })
+}
+
+fn crest_store(world: &World, gx: i32, y: i32) {
+    CREST_COLS.with(|slot| {
+        let mut c = slot.borrow_mut();
+        let id = world.chunk_cache_id.get();
+        if c.world_id != id || c.tick != world.tick || c.topo != world.sky_topo_gen {
+            c.world_id = id;
+            c.tick = world.tick;
+            c.topo = world.sky_topo_gen;
+            c.cols.clear();
+        }
+        c.cols.insert(gx, y);
+    });
+}
+
 /// Live rock crest for this column.
 ///
-/// `live_surface_y` is the same descent humidity's surface map performs; what
-/// changed is where it starts. The continental hint that map passes is only a
-/// guess, and a guess can land anywhere — outside the loaded column, inside
-/// the hill, or inside a void within it. Landing in a cavern was the worst of
-/// those: the descent found the cavern floor and reported it as the surface,
-/// which is the same blind spot as a local roof probe reached by another route.
-/// So the descent is kept and given a starting point above everything.
+/// Always descend from the loaded ceiling. A short climb from the boiler
+/// stops in open sky on a tall world and, when the descent then misses the
+/// rock, `live_surface_y` hands that air cell back as the crest. Every air
+/// cell under the fake crest then fails the mouth test, so the straw walks
+/// the sky.
+///
+/// Cached per wrapped column for this tick. `void_reaches_open_air` and the
+/// walk ask once per neighbour; repeating a thousand-cell column each time
+/// is the cost this exists to avoid. The key drops on the next tick, on a
+/// different world, and on an Air/solid flip (`sky_topo_gen`), so erosion
+/// between beats is visible. Not stored on `Temperature` — that made the
+/// field `!Sync` and broke the parallel region passes.
+///
+/// `temp` stays in the signature so callers that also carry the thermal
+/// field do not grow a second surface entry point.
 fn surface_rock_y(world: &World, temp: &Temperature, gx: i32, anchor_y: i32) -> i32 {
-    // Always anchor from *above* and descend. The continental crest is only a
-    // hint, and a hint can land anywhere — inside the hill, or inside a void
-    // within it. When it landed in a cavern, `live_surface_y` descended to the
-    // cavern floor and reported that as the surface: the same blind spot as a
-    // local roof probe, reached by a different route. Coming down from the top
-    // of the loaded column cannot be fooled by anything inside the hill.
-    //
-    // Not cached. A per-column cache has to be invalidated on every Air/solid
-    // flip, and `sky_topo_gen` does not track them finely enough — a stale
-    // crest is a straw routed against terrain that has changed, which is the
-    // class of bug this function exists to kill. The walk is only reached for
-    // Air candidates, since rock fails on material first.
-    //
-    // `temp` stays in the signature because this is the surface map humidity
-    // uses, and the hint is only worth taking when it is already above the
-    // rock — which is exactly what cannot be known before walking.
     let _ = temp;
+    let gx = world.wrap_x(gx);
+    if let Some(y) = crest_cached(world, gx) {
+        return y;
+    }
+    let y = crest_from_loaded_sky(world, gx, anchor_y);
+    crest_store(world, gx, y);
+    y
+}
+
+/// Rock under the loaded ceiling. An air cell is never the answer: if the
+/// column has no solid, `-1` makes every air cell read as sky so the straw
+/// stops on the first open cell instead of climbing the map.
+fn crest_from_loaded_sky(world: &World, gx: i32, anchor_y: i32) -> i32 {
     let top = column_top_loaded(world, gx, anchor_y);
-    live_surface_y(world, gx, top, LIVE_SURFACE_SEARCH)
+    let mut y = top;
+    for _ in 0..PIPE_SKY_SPAN {
+        match world.get_cell(gx, y) {
+            Some(c) if c.material.is_solid() => {
+                // Peel falling snow / ice / organic. A flake with air under
+                // it is not the hill; a seated pack is, and the peel keeps it.
+                let peeled = live_surface_y(world, gx, y, PIPE_SKY_SPAN);
+                return if matches!(
+                    world.get_cell(gx, peeled),
+                    Some(c) if c.material.is_solid()
+                ) {
+                    peeled
+                } else {
+                    -1
+                };
+            }
+            // A gap in the chunk map is not a surface. Keep going.
+            None => {}
+            Some(_) => {}
+        }
+        if y <= 0 {
+            return -1;
+        }
+        y -= 1;
+    }
+    -1
 }
 
 /// Rock crest lifted over standing water or ice — what the open air rests on.
@@ -641,13 +724,14 @@ const WALK_SCAN_HALFWIDTH: i32 = 16;
 /// bed. Measured against the best reached so far, so drift cannot compound.
 const WALK_DETOUR_SLACK: i32 = 2;
 
-/// How far a column walk may run looking for its top or its vent.
-const PIPE_COLUMN_SEARCH: i32 = 512;
-
 /// Highest loaded cell in this column at or above `from_y`.
+///
+/// Stops on an unloaded cell, not on a fixed 512-cell budget. That budget
+/// landed in mid-sky on the demo and the descent then called the air there
+/// the crest.
 fn column_top_loaded(world: &World, gx: i32, from_y: i32) -> i32 {
     let mut y = from_y;
-    for _ in 0..PIPE_COLUMN_SEARCH {
+    for _ in 0..PIPE_SKY_SPAN {
         if world.get_cell(gx, y + 1).is_none() {
             break;
         }
@@ -4311,6 +4395,75 @@ mod tests {
         assert!(
             vent >= 124,
             "the vent must be the real sky, not the cavern (got {vent})"
+        );
+    }
+
+    /// Playtest: steam pipes stretch as thin vertical lines far into the sky.
+    ///
+    /// `a_cavern_taller_than_the_roof_probe_is_not_the_surface` only loads a
+    /// 134-cell hill. The crest walk used to stop 512 cells above the boiler,
+    /// which on that hill is already above the rock, so the test passed. The
+    /// demo sky is ~1064 cells. The same walk stops in open air, reports that
+    /// air as the crest, and the straw climbs until it clears the fake one.
+    #[test]
+    fn a_tall_sky_vents_at_the_rock_not_in_the_air() {
+        let mut w = plot();
+        // y=700 is chunk row 10. Load past it the way the demo keeps the
+        // troposphere resident — `plot` only ensures one 64-cell chunk, and
+        // an unloaded sky hides this bug.
+        for cy in 0..=16 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 0..64 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=40 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // A flake high in the column is not the hill.
+        w.set_cell(32, 700, Cell::solid(MaterialId::Snow));
+        for y in 1..6 {
+            w.set_cell(32, y, wet_gravel(&w));
+        }
+        let hot = temp_at(&w, 20.0);
+
+        // Ask from mid-sky first. The old walk returned the air it stopped in
+        // (~anchor + 512) and then cached nothing, so every later query agreed
+        // with the lie.
+        let from_sky = surface_rock_y(&w, &hot, 32, 557);
+        assert!(
+            (39..=41).contains(&from_sky),
+            "a high anchor must still find the rock at y=40, got {from_sky}"
+        );
+        let crest = surface_rock_y(&w, &hot, 33, 2);
+        assert!(
+            (39..=41).contains(&crest),
+            "crest should be the rock at y=40, got {crest}"
+        );
+
+        let sky = w.get_cell(32, 200).expect("sky cell should be loaded");
+        assert_eq!(sky.material, MaterialId::Air);
+        assert!(
+            is_pipe_mouth(&w, &hot, 32, 200, sky),
+            "open air a hundred cells above the rock is a mouth, not a straw"
+        );
+
+        let path = walk_pipe(&w, &hot, (32, 1));
+        assert!(
+            (40..=42).contains(&path.mouth.1),
+            "mouth should sit on the rock, got {:?}",
+            path.mouth
+        );
+        assert!(
+            path.cells.iter().all(|&(_, y)| y < 80),
+            "straw climbed into the sky: mouth {:?} len {}",
+            path.mouth,
+            path.cells.len()
+        );
+        assert!(
+            path.cells.iter().all(|&(_, y)| y != 200),
+            "path includes open sky at y=200: {:?}",
+            path.mouth
         );
     }
 
