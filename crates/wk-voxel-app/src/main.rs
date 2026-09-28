@@ -55,11 +55,12 @@ use std::time::Instant;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_competent_fall_regions, apply_landscape_fall, apply_weather_rgb, celestial_local_cfg,
-    celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg, day_night_factor_cfg,
-    is_daytime_cfg, plan_active, pore_wetness_with, step_world, wake_competent_bodies_all,
-    wake_unsupported_grains, wake_unstable_slopes, GeotechOverlayMode, SimClock, SimSnapshot,
-    WorldStep, WorldStepConfig, WorldgenParams,
+    apply_competent_fall_regions, apply_landscape_fall, apply_weather_rgb, build_canopy_index_posed,
+    celestial_local_cfg, celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg,
+    day_night_factor_cfg, is_daytime_cfg, plan_active, pore_wetness_with, resolve_organism_draw_cells,
+    step_world, wake_competent_bodies_all, wake_unsupported_grains, wake_unstable_slopes,
+    CanopyIndex, GeotechOverlayMode, SimClock, SimSnapshot, WorldStep, WorldStepConfig,
+    WorldgenParams,
 };
 
 use crate::atmosphere::{
@@ -933,6 +934,22 @@ async fn main() {
             (y.floor() as i32).max(scene.params.bedrock_floor_y)
         };
 
+        // One flop+pile resolve + canopy index per frame — shared by sun/moon
+        // cast and organism draw. A second resolve was free cost on every
+        // meadow frame; minimized windows skip it entirely (sw ≈ 0).
+        let (org_posed, org_canopy) = if organisms_on && sw > 0.0 {
+            let posed = resolve_organism_draw_cells(
+                &scene.world,
+                &scene.organisms.atoms,
+                scene.world.tick,
+                draw_wind_vx,
+            );
+            let canopy = build_canopy_index_posed(&scene.organisms.atoms, &posed);
+            (posed, canopy)
+        } else {
+            (Vec::new(), CanopyIndex::default())
+        };
+
         // Heatmap blend: 0 = landscape only, 1 = heatmap only (Tab slider).
         let heatmap_on = sat_overlay
             || temp_overlay
@@ -1084,10 +1101,9 @@ async fn main() {
         if organisms_on && sun_day {
             draw_canopy_air_dim(
                 &scene.world,
-                &scene.organisms,
+                &org_posed,
+                &org_canopy,
                 &scene.humidity,
-                scene.world.tick,
-                draw_wind_vx,
                 sun_local,
                 celestial_sx,
                 celestial_sy,
@@ -1669,20 +1685,25 @@ async fn main() {
         let editor_covers_world = editor.open && !editor.spawn_picker;
         // Body dimness at night; sun/moon key only on the lit rim (not whole body).
         let body_lit = ((dn_fg + 1.0) * 0.5).clamp(0.20, 1.0);
-        if !editor_covers_world && !settings.open {
-            let draw_cells = scene.organisms.draw_list(
-                &scene.world,
-                scene.world.tick,
-                draw_wind_vx,
-            );
+        if !editor_covers_world && !settings.open && organisms_on && sw > 0.0 {
+            let draw_cells =
+                scene
+                    .organisms
+                    .draw_list_posed(&scene.world, &org_posed, &org_canopy);
             let occupied: std::collections::HashSet<(i32, i32)> =
                 draw_cells.iter().map(|&(x, y, _)| (x, y)).collect();
+            // Final lit RGB, then vertical same-colour runs (stems are long
+            // columns — one rect per cell was a dense-meadow FPS floor).
+            let mut lit: Vec<(i32, i32, [u8; 3])> = Vec::with_capacity(draw_cells.len());
             for &(gx, gy, (r, g, b)) in &draw_cells {
+                if gy < y_min_vis || gy >= y_max_vis {
+                    continue;
+                }
                 let r = (r as f32 * body_lit) as u8;
                 let g = (g as f32 * body_lit) as u8;
                 let b = (b as f32 * body_lit) as u8;
                 // Roots / buried modules stay dark — no sun/moon key underground.
-                let [r, g, b] = if is_organism_aboveground(&scene.world, gx, gy) {
+                let rgb = if is_organism_aboveground(&scene.world, gx, gy) {
                     let toward = toward_light_celestial(sun_local);
                     let rim = organism_celestial_rim(
                         &occupied,
@@ -1700,20 +1721,40 @@ async fn main() {
                 } else {
                     [r, g, b]
                 };
+                lit.push((gx, gy, rgb));
+            }
+            lit.sort_unstable_by_key(|&(x, y, _)| (x, y));
+            let bedrock_y = scene.params.bedrock_floor_y;
+            let mut run: Option<(i32, i32, i32, [u8; 3])> = None;
+            let flush_run = |gx: i32, y0: i32, y1: i32, rgb: [u8; 3]| {
+                let [r, g, b] = rgb;
                 for &x_copy in x_copies {
                     let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
-                    let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
-                    if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
+                    if sx + cell_px < 0.0 || sx > sw {
                         continue;
                     }
-                    draw_rectangle(
-                        sx,
-                        sy - cell_px,
-                        cell_px,
-                        cell_px,
-                        Color::from_rgba(r, g, b, 255),
-                    );
+                    let top = origin_y - (y1 - bedrock_y) as f32 * cell_px - cell_px;
+                    let h = (y1 - y0 + 1) as f32 * cell_px;
+                    if top + h < 0.0 || top > sh {
+                        continue;
+                    }
+                    draw_rectangle(sx, top, cell_px, h, Color::from_rgba(r, g, b, 255));
                 }
+            };
+            for &(gx, gy, rgb) in &lit {
+                match run {
+                    Some((rx, y0, y1, rc)) if rx == gx && y1 + 1 == gy && rc == rgb => {
+                        run = Some((rx, y0, gy, rc));
+                    }
+                    Some((rx, y0, y1, rc)) => {
+                        flush_run(rx, y0, y1, rc);
+                        run = Some((gx, gy, gy, rgb));
+                    }
+                    None => run = Some((gx, gy, gy, rgb)),
+                }
+            }
+            if let Some((rx, y0, y1, rc)) = run {
+                flush_run(rx, y0, y1, rc);
             }
         }
 
@@ -1721,10 +1762,9 @@ async fn main() {
         if organisms_on && !sun_day {
             draw_canopy_air_dim(
                 &scene.world,
-                &scene.organisms,
+                &org_posed,
+                &org_canopy,
                 &scene.humidity,
-                scene.world.tick,
-                draw_wind_vx,
                 sun_local,
                 celestial_sx,
                 celestial_sy,
