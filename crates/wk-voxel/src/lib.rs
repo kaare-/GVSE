@@ -51,9 +51,10 @@ pub mod worldgen;
 pub use active::{clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk};
 pub use atmosphere_metrics::{
     apply_weather_rgb, carbon_ratio, cloud_sky_transmit, column_surface_lee, humidity_mean_norm,
-    humidity_norm_at, lit_sky_at, precip_cover_fraction, sky_rgb_at_height_weather, sky_transmit,
-    sky_transmit_at, sun_sky_transmit, SkyWeatherParams, CLOUD_COVER_MAX, CLOUD_TRANSMIT_FLOOR,
-    HUMIDITY_SKY_ATTEN, SUN_TRANSMIT_FLOOR,
+    humidity_norm_at, lit_sky_at, occupied_sky_sample, precip_cover_fraction,
+    sky_rgb_at_height_weather, sky_transmit, sky_transmit_at, sun_sky_transmit, OccupiedSkySample,
+    SkyWeatherParams, CLOUD_COVER_MAX, CLOUD_TRANSMIT_FLOOR, HUMIDITY_SKY_ATTEN,
+    SUN_TRANSMIT_FLOOR,
 };
 pub use audit::{
     assert_cell_sat_conserved, mass_audit_enabled, sat_totals, set_mass_audit_enabled,

@@ -7,6 +7,7 @@ use crate::carbon::AMBIENT_ATM_C;
 use crate::climate::sky_rgb_at_height;
 use crate::grid::World;
 use crate::humidity::Humidity;
+use crate::temperature::Temperature;
 
 /// Clear-sky cloud transmit floor so night under storms is not pure black.
 pub const CLOUD_TRANSMIT_FLOOR: f32 = 0.28;
@@ -204,6 +205,81 @@ pub fn humidity_mean_norm(humidity: &Humidity, sky_hy_min: i32) -> f32 {
     }
 }
 
+/// Cover, humidity mean, air °C, and snow fraction from one occupied walk.
+///
+/// The sky used to walk the vapour field four times a frame (cover,
+/// mean, temperature, snow). Same column peaks and the same mean as
+/// [`precip_cover_fraction`] / [`humidity_mean_norm`] with
+/// `sky_hy_min = i32::MIN`. Temperature is the packed slab when it
+/// covers the box — the sparse map can miss live lake °C.
+pub struct OccupiedSkySample {
+    pub precip_cover: f32,
+    pub humidity_mean: f32,
+    pub temp_mean_c: Option<f32>,
+    pub snow_bias: f32,
+}
+
+pub fn occupied_sky_sample(
+    humidity: &Humidity,
+    temperature: &Temperature,
+    x0: i32,
+    x1: i32,
+    freeze_c: f32,
+) -> OccupiedSkySample {
+    let width = (x1 - x0).max(1);
+    let tc = humidity.tile_cols.max(1);
+    let mut peak = vec![0.0f32; width as usize];
+    let mut hum_sum = 0.0f32;
+    let mut hum_n = 0u32;
+    let mut t_sum = 0.0f32;
+    let mut t_n = 0u32;
+    let mut wet = 0u32;
+    let mut snow = 0u32;
+    humidity.for_each_occupied(|(hx, hy), mass| {
+        let gx = hx * tc + tc / 2;
+        if gx >= x0 && gx < x1 {
+            let i = (gx - x0) as usize;
+            peak[i] = peak[i].max(mass);
+        }
+        if mass <= 0.0 {
+            return;
+        }
+        hum_sum += (mass / Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);
+        hum_n += 1;
+        let t_c = temperature.at_tile_packed(hx, hy);
+        t_sum += t_c;
+        t_n += 1;
+        wet += 1;
+        if t_c <= freeze_c {
+            snow += 1;
+        }
+    });
+    let mut cover_sum = 0.0f32;
+    for p in peak {
+        let wet = (p / Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);
+        let t = cloud_sky_transmit_from_wet(wet);
+        cover_sum += (1.0 - t) / (1.0 - CLOUD_TRANSMIT_FLOOR).max(1e-3);
+    }
+    OccupiedSkySample {
+        precip_cover: (cover_sum / width as f32).clamp(0.0, 1.0),
+        humidity_mean: if hum_n == 0 {
+            0.0
+        } else {
+            (hum_sum / hum_n as f32).clamp(0.0, 1.0)
+        },
+        temp_mean_c: if t_n == 0 {
+            None
+        } else {
+            Some(t_sum / t_n as f32)
+        },
+        snow_bias: if wet == 0 {
+            0.0
+        } else {
+            snow as f32 / wet as f32
+        },
+    }
+}
+
 /// Carbon ratio for tint (`atmosphere / ambient`).
 pub fn carbon_ratio(atmosphere: f32) -> f32 {
     (atmosphere / AMBIENT_ATM_C.max(1.0)).clamp(0.0, 4.0)
@@ -373,6 +449,63 @@ mod tests {
         }
         let cover = precip_cover_fraction(&h, 0, 32);
         assert!(cover > 0.15, "cover={cover}");
+    }
+
+    #[test]
+    fn occupied_sky_sample_matches_the_separate_walks() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        h.add(4, 16, 40.0);
+        h.add(8, 20, Humidity::MAX_MASS_PER_TILE);
+        h.add(40, 8, 10.0);
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 20, false);
+        // Tile centres: (4,16) → (1,4), (8,20) → (2,5), (40,8) → (10,2).
+        t.set_tile_c(1, 4, 30.0);
+        t.set_tile_c(2, 5, -5.0);
+        let sample = occupied_sky_sample(&h, &t, 0, 32, 0.0);
+        let cover = precip_cover_fraction(&h, 0, 32);
+        let mean = humidity_mean_norm(&h, i32::MIN);
+        assert!(
+            (sample.precip_cover - cover).abs() < 1e-5,
+            "cover {} vs {}",
+            sample.precip_cover,
+            cover
+        );
+        assert!(
+            (sample.humidity_mean - mean).abs() < 1e-5,
+            "mean {} vs {}",
+            sample.humidity_mean,
+            mean
+        );
+        // `with_world_bounds` fills a climate, so the unset tile is not
+        // the 18 °C base. The one walk must still match packed reads.
+        assert!((t.at_tile_packed(1, 4) - 30.0).abs() < 1e-4);
+        assert!((t.at_tile_packed(2, 5) - -5.0).abs() < 1e-4);
+        let mut expect_sum = 0.0f32;
+        let mut expect_n = 0u32;
+        let mut expect_snow = 0u32;
+        h.for_each_occupied(|(hx, hy), mass| {
+            if mass <= 0.0 {
+                return;
+            }
+            let c = t.at_tile_packed(hx, hy);
+            expect_sum += c;
+            expect_n += 1;
+            if c <= 0.0 {
+                expect_snow += 1;
+            }
+        });
+        assert_eq!(expect_n, 3, "three vapour tiles");
+        assert!(expect_snow >= 1, "the −5 °C tile must count as snow");
+        let got_t = sample.temp_mean_c.expect("three wet tiles");
+        let expect_t = expect_sum / expect_n as f32;
+        assert!((got_t - expect_t).abs() < 1e-4, "temp {got_t} vs {expect_t}");
+        let expect_bias = expect_snow as f32 / expect_n as f32;
+        assert!(
+            (sample.snow_bias - expect_bias).abs() < 1e-5,
+            "snow {} vs {}",
+            sample.snow_bias,
+            expect_bias
+        );
     }
 
     #[test]

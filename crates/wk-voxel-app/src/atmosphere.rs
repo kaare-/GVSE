@@ -9,9 +9,8 @@ use wk_material::MaterialId;
 use wk_voxel::{
     airborne_loose_at, build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
-    day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
-    precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
-    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, Humidity, ModuleId,
+    day_night_factor_cfg, falls_through_empty_air, is_standing_water, occupied_sky_sample,
+    resolve_organism_draw_cells, shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, Humidity, ModuleId,
     OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H,
     CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH,
 };
@@ -785,32 +784,18 @@ fn sample_sky_weather(
     temperature: &Temperature,
     carbon: &CarbonBudget,
     width_cols: i32,
-    snow_bias: f32,
+    freeze_c: f32,
 ) -> SkyWeatherParams {
-    let precip_cover = precip_cover_fraction(humidity, 0, width_cols);
-    // Mean the tiles that actually hold vapour — not a global sea+4 cut
-    // that pinned haze / sky tint to the lake line.
-    let humidity_mean = humidity_mean_norm(humidity, i32::MIN);
-    let mut t_sum = 0.0f32;
-    let mut t_n = 0u32;
-    humidity.for_each_occupied(|(hx, hy), mass| {
-        if mass <= 0.0 {
-            return;
-        }
-        t_sum += temperature.at_tile(hx, hy);
-        t_n += 1;
-    });
-    let mean_t = if t_n > 0 {
-        t_sum / t_n as f32
-    } else {
-        MILD_TEMP_C
-    };
+    // One occupied walk: cover, humidity mean, packed °C, snow fraction.
+    // Four separate passes were hashing a filled sky every frame.
+    let sample = occupied_sky_sample(humidity, temperature, 0, width_cols, freeze_c);
+    let mean_t = sample.temp_mean_c.unwrap_or(MILD_TEMP_C);
     SkyWeatherParams {
-        precip_cover,
-        humidity_mean,
+        precip_cover: sample.precip_cover,
+        humidity_mean: sample.humidity_mean,
         temp_bias_c: mean_t - MILD_TEMP_C,
         carbon_ratio: carbon_ratio(carbon.atmosphere),
-        snow_bias,
+        snow_bias: sample.snow_bias,
     }
 }
 
@@ -2440,7 +2425,7 @@ pub fn sky_weather_for_scene(
     temperature: &Temperature,
     carbon: &CarbonBudget,
     width_cols: i32,
-    snow_bias: f32,
+    freeze_c: f32,
 ) -> SkyWeatherParams {
     sample_sky_weather(
         tick,
@@ -2449,28 +2434,16 @@ pub fn sky_weather_for_scene(
         temperature,
         carbon,
         width_cols,
-        snow_bias,
+        freeze_c,
     )
 }
 
 /// Snow bias from wet tiles that sit at or below freeze (0..1).
+///
+/// The frame path folds this into [`sky_weather_for_scene`] so the sky
+/// does not walk the vapour field a second time.
 pub fn estimate_snow_bias(humidity: &Humidity, temperature: &Temperature, freeze_c: f32) -> f32 {
-    let mut wet = 0u32;
-    let mut snow = 0u32;
-    humidity.for_each_occupied(|(hx, hy), mass| {
-        if mass <= 0.0 {
-            return;
-        }
-        wet += 1;
-        if temperature.at_tile(hx, hy) <= freeze_c {
-            snow += 1;
-        }
-    });
-    if wet == 0 {
-        0.0
-    } else {
-        snow as f32 / wet as f32
-    }
+    occupied_sky_sample(humidity, temperature, 0, 1, freeze_c).snow_bias
 }
 
 #[cfg(test)]
