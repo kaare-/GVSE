@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use macroquad::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
-    airborne_loose_at, build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
-    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
-    day_night_factor_cfg, falls_through_empty_air, is_standing_water, occupied_sky_sample,
-    resolve_organism_draw_cells, shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, Humidity, ModuleId,
-    OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H,
+    airborne_loose_at, carbon_ratio, celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg,
+    cloud_floor_y, cloud_sky_transmit, continental_surface_y, day_night_factor_cfg,
+    falls_through_empty_air, is_standing_water, occupied_sky_sample,
+    shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig,
+    Humidity, ModuleId, PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H,
     CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH,
 };
 
@@ -1769,12 +1769,14 @@ fn draw_streak_samples(
 /// Day: sun cast (call before organisms). Night: moon cast, near-black lee
 /// (call after organisms). Cast direction is **viewport-relative** to the
 /// on-screen sun/moon so shadows never fall toward the light.
+///
+/// `posed` / `canopy` come from the shared frame resolve (same as organism
+/// draw) so a night frame does not rebuild flop+pile twice.
 pub fn draw_canopy_air_dim(
     world: &World,
-    organisms: &OrganismStore,
+    posed: &[PosedModule],
+    canopy: &CanopyIndex,
     humidity: &Humidity,
-    tick: u64,
-    wind_vx: f32,
     celestial_local: f32,
     celestial_sx: f32,
     _celestial_sy: f32,
@@ -1791,9 +1793,10 @@ pub fn draw_canopy_air_dim(
     sw: f32,
     sh: f32,
 ) {
-    let _ = (sw, sh); // frustum already applied by caller via y_min/y_max
-    let posed = resolve_organism_draw_cells(world, &organisms.atoms, tick, wind_vx);
-    let canopy = build_canopy_index_posed(&organisms.atoms, &posed);
+    // Minimized / zero-size window: no shade stamps (and no cast work).
+    if !(cell_px > 0.0) || !(sw > 0.0) {
+        return;
+    }
     let cast_k = look.cast_shadow_strength.clamp(0.0, 1.0);
     let cloud_k = look.cloud_shade_strength.clamp(0.0, 1.0);
 
@@ -2226,6 +2229,58 @@ impl ShadowSurfaceCache {
 /// Horizontal reach of a cast ray (`max_steps` 40 × slant 1.7, plus penumbra).
 const SHADOW_VIEW_PAD: i32 = 72;
 
+/// Tallest Photosystem / Stem index per wrapped column that can cast into view.
+///
+/// Understory modules in the same column used to each walk a full shadow ray;
+/// shade already takes `max`, so only the crown matters for the lee.
+fn crown_casters_near_view(
+    world: &World,
+    posed: &[PosedModule],
+    origin_x: f32,
+    cell_px: f32,
+    sw: f32,
+    width_cols: i32,
+    wrap_x: bool,
+) -> Vec<usize> {
+    // wrapped_x → posed index
+    let mut best: HashMap<i32, usize> = HashMap::new();
+    for (i, p) in posed.iter().enumerate() {
+        if !matches!(p.mid, ModuleId::Photosystem | ModuleId::Stem) {
+            continue;
+        }
+        // Offscreen crowns still in the atom list must not ray the sky.
+        // A minimized window (sw ≈ 0) skips the whole cast.
+        if !column_near_view(
+            p.wx,
+            origin_x,
+            cell_px,
+            sw,
+            width_cols,
+            wrap_x,
+            SHADOW_VIEW_PAD,
+        ) {
+            continue;
+        }
+        let x = world.wrap_x(p.wx);
+        match best.get(&x).copied() {
+            Some(j) => {
+                let q = &posed[j];
+                let better = p.wy > q.wy
+                    || (p.wy == q.wy
+                        && p.mid == ModuleId::Photosystem
+                        && q.mid != ModuleId::Photosystem);
+                if better {
+                    best.insert(x, i);
+                }
+            }
+            None => {
+                best.insert(x, i);
+            }
+        }
+    }
+    best.into_values().collect()
+}
+
 /// True when column `x` (or a ±width wrap copy) can paint into the
 /// framebuffer, expanded by `pad_cells`.
 fn column_near_view(
@@ -2292,7 +2347,13 @@ fn is_dry_air(world: &World, x: i32, y: i32) -> bool {
 /// Pan-invariant: decorative sun stays fixed on screen while terrain scrolls, so
 /// comparing plant_sx to celestial_sx flipped lees when the camera moved.
 ///
-/// Leaves stamp a soft air corridor + ground lee; stems stamp ground only.
+/// Leaves stamp a light air corridor + ground lee; stems stamp ground only.
+/// Only the tallest caster per wrapped column rays — understory leaves in the
+/// same column were max()-merged into the same lee and dominated frame time
+/// in grown forests (minimize → sim-rate FPS).
+///
+/// Air stamps are core-only and strided: the old ±1 penumbra on every ray
+/// step multiplied shade HashMap entries (and quads) far past what reads.
 fn stamp_celestial_cast_shadows(
     world: &World,
     posed: &[PosedModule],
@@ -2325,23 +2386,17 @@ fn stamp_celestial_cast_shadows(
     let air_k = if is_day { 0.22 } else { 0.30 };
     let air_cap = if is_day { 0.24 } else { 0.32 };
 
-    for p in posed {
-        if !matches!(p.mid, ModuleId::Photosystem | ModuleId::Stem) {
-            continue;
-        }
-        // Offscreen crowns still in the atom list must not ray the sky.
-        // A minimized window (sw ≈ 0) skips the whole cast.
-        if !column_near_view(
-            p.wx,
-            origin_x,
-            cell_px,
-            sw,
-            width_cols,
-            wrap_x,
-            SHADOW_VIEW_PAD,
-        ) {
-            continue;
-        }
+    let crowns = crown_casters_near_view(
+        world,
+        posed,
+        origin_x,
+        cell_px,
+        sw,
+        width_cols,
+        wrap_x,
+    );
+    for &pi in &crowns {
+        let p = &posed[pi];
         let is_leaf = p.mid == ModuleId::Photosystem;
         let caster = if is_leaf { 1.0 } else { 0.62 };
 
@@ -2379,22 +2434,14 @@ fn stamp_celestial_cast_shadows(
                 .max(noon_floor)
                 .clamp(0.0, 0.90);
 
-            // Soft air corridor (leaves only) — core + 1-cell penumbra.
+            // Soft air corridor (leaves only) — core, every other step.
+            // Penumbra neighbours used to triple shade cells for little gain.
             if ray_y > surf {
-                if is_leaf && is_dry_air(world, ix, ray_y) {
+                if is_leaf && (step & 1) == 1 && is_dry_air(world, ix, ray_y) {
                     let air_dim = (dim * air_k).clamp(0.0, air_cap);
                     if air_dim >= 0.03 {
                         let e = shade.entry((ix, ray_y)).or_insert(0.0);
                         *e = (*e).max(air_dim);
-                        for &ddx in &[-1i32, 1] {
-                            let nx = world.wrap_x(ix + ddx);
-                            if let Some(ns) = surfaces.at(world, nx) {
-                                if ray_y > ns && is_dry_air(world, nx, ray_y) {
-                                    let e = shade.entry((nx, ray_y)).or_insert(0.0);
-                                    *e = (*e).max(air_dim * 0.38);
-                                }
-                            }
-                        }
                     }
                 }
                 continue;
@@ -2495,6 +2542,54 @@ mod tests {
         assert!(!column_near_view(99, 0.0, 10.0, 100.0, 100, false, 0));
         // Minimized / zero-size window draws nothing.
         assert!(!column_near_view(0, 0.0, 10.0, 0.0, 100, true, 72));
+    }
+
+    #[test]
+    fn crown_casters_keep_one_tallest_leaf_per_column() {
+        use super::crown_casters_near_view;
+        use wk_voxel::{ModuleId, PosedModule, World};
+
+        let mut w = World::new(1);
+        w.wrap_width = Some(32);
+        let posed = vec![
+            PosedModule {
+                atom_idx: 0,
+                wx: 3,
+                wy: 8,
+                mid: ModuleId::Stem,
+            },
+            PosedModule {
+                atom_idx: 0,
+                wx: 3,
+                wy: 12,
+                mid: ModuleId::Photosystem,
+            },
+            PosedModule {
+                atom_idx: 0,
+                wx: 3,
+                wy: 10,
+                mid: ModuleId::Photosystem,
+            },
+            PosedModule {
+                atom_idx: 1,
+                wx: 5,
+                wy: 9,
+                mid: ModuleId::Stem,
+            },
+            PosedModule {
+                atom_idx: 2,
+                wx: 7,
+                wy: 11,
+                mid: ModuleId::Nucleus,
+            },
+        ];
+        // Wide window so columns 3 and 5 are near view.
+        let mut crowns = crown_casters_near_view(&w, &posed, 0.0, 10.0, 400.0, 32, true);
+        crowns.sort_unstable();
+        assert_eq!(crowns, vec![1, 3], "tallest leaf @3 and stem @5");
+        // Minimized window: no casters.
+        let empty = crown_casters_near_view(&w, &posed, 0.0, 10.0, 0.0, 32, true);
+        assert!(empty.is_empty());
     }
 
     #[test]
