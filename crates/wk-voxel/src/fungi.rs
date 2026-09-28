@@ -2766,16 +2766,19 @@ fn prune_stale_mycelium_ledger(world: &mut World) {
     }
 }
 
-/// Drop [`World::sym_net_flow`] rows for strain ids with no live cream shares.
+/// Drop trade / strain-lineage rows for strain ids with no live cream shares.
 ///
-/// Trade lasts clear every physics tick over this map — dead strains from a
-/// finished infection kept walking an ever-growing ledger for free.
+/// Trade lasts clear every physics tick over `sym_net_flow` — dead strains
+/// from a finished infection kept walking an ever-growing ledger for free.
+/// `mycelium_strain_lineage` had the same ghost: emerge / treaty lookups
+/// kept hashing dead ids after the cream was gone.
 fn prune_orphan_sym_net_flow(world: &mut World) {
-    if world.sym_net_flow.is_empty() {
+    if world.sym_net_flow.is_empty() && world.mycelium_strain_lineage.is_empty() {
         return;
     }
     if world.mycelium_strains.is_empty() {
         world.sym_net_flow.clear();
+        world.mycelium_strain_lineage.clear();
         return;
     }
     let mut live: FxHashSet<u32> = FxHashSet::default();
@@ -2787,6 +2790,9 @@ fn prune_orphan_sym_net_flow(world: &mut World) {
         }
     }
     world.sym_net_flow.retain(|s, _| live.contains(s));
+    world
+        .mycelium_strain_lineage
+        .retain(|s, _| live.contains(s));
 }
 
 /// Sample cream cells from the strain ledger, then pick up to `max`.
@@ -3073,13 +3079,15 @@ mod tests {
         w.mycelium_energy.insert((4, 2), 12);
         w.sym_net_flow
             .insert(live_s, crate::symbiosis::SymNetFlow::default());
+        bind_strain_lineage(&mut w, live_s, Genome::default(), fungus_body());
 
-        // Ghost: pad gone, strain + energy + trade row left behind.
+        // Ghost: pad gone, strain + energy + trade + lineage row left behind.
         let dead_s = alloc_mycelium_strain(&mut w);
         w.mycelium_strains.insert((6, 2), vec![(dead_s, 30)]);
         w.mycelium_energy.insert((6, 2), 8);
         w.sym_net_flow
             .insert(dead_s, crate::symbiosis::SymNetFlow::default());
+        bind_strain_lineage(&mut w, dead_s, Genome::default(), fungus_body());
         // Orphan energy with no strain key at all.
         w.mycelium_energy.insert((8, 2), 5);
 
@@ -3096,6 +3104,10 @@ mod tests {
         );
         assert!(w.sym_net_flow.contains_key(&live_s));
         assert!(
+            w.mycelium_strain_lineage.contains_key(&live_s),
+            "live strain must keep its emergence lineage"
+        );
+        assert!(
             !w.mycelium_strains.contains_key(&(6, 2)),
             "myc==0 ghost strain key must be collected"
         );
@@ -3103,6 +3115,10 @@ mod tests {
         assert!(
             !w.sym_net_flow.contains_key(&dead_s),
             "dead strain must leave the trade ledger"
+        );
+        assert!(
+            !w.mycelium_strain_lineage.contains_key(&dead_s),
+            "dead strain must leave the lineage treaty map"
         );
         assert_eq!(
             w.mycelium_energy.get(&(8, 2)),
