@@ -95,6 +95,13 @@ pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bo
                 if cell.material == MaterialId::Snow {
                     continue;
                 }
+                // Falling leaves / mid-air litter: rise+soak handles
+                // buoyancy, and shallow settle still seats them. Counting
+                // Organic here forced ×64 deep settle every plant death
+                // and dominated plant-soak physics while org stayed flat.
+                if cell.material == MaterialId::Organic {
+                    continue;
+                }
                 let loose = is_grain(cell.material) || falls_through_empty_air(cell.material);
                 if !loose {
                     continue;
