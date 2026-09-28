@@ -22,10 +22,10 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::{ensure_symbiont_inherited, mutate_body, Genome};
-use crate::fasthash::FxHashMap;
-use crate::cell::{hosts_mycelium, water_capacity_cell, Cell, CellFlags};
 #[cfg(test)]
 use crate::cell::water_capacity;
+use crate::cell::{hosts_mycelium, water_capacity_cell, Cell, CellFlags};
+use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
 use crate::plant::{apply_genome, find_fungus_slot_biased, pin_plant_pose};
@@ -1218,6 +1218,12 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     if tick % (MYCELIUM_FIELD_PERIOD * 4) == 0 {
         heal_orphan_mycelium_pads(world);
     }
+    // Drop strain/energy keys whose cream is gone (`myc == 0` / non-host).
+    // Collect used to skip them but left the keys, so every pulse still
+    // cloned+sorted a growing ghost ledger and clear_sym_net_flow_lasts
+    // walked dead strain rows every physics tick.
+    prune_stale_mycelium_ledger(world);
+    prune_orphan_sym_net_flow(world);
     // Plantless / quiet demos: no strain ledger → nothing to grow.
     // Avoid the old full-grid cream scan (~0.5 ms/tick amortized).
     if world.mycelium_strains.is_empty() {
@@ -2745,6 +2751,69 @@ fn hash_u64(a: u64, b: u64, c: u64, salt: u64) -> u64 {
     x
 }
 
+/// Remove strain / energy ledger keys that no longer host live cream.
+///
+/// Field collect used to `continue` on `myc == 0` without deleting the key,
+/// so oxidized / composted pads left a permanent HashMap ghost that every
+/// pulse still sorted. Energy left behind a vanished pad is dropped too.
+fn prune_stale_mycelium_ledger(world: &mut World) {
+    if world.mycelium_strains.is_empty() && world.mycelium_energy.is_empty() {
+        return;
+    }
+    let mut drop: Vec<(i32, i32)> = Vec::new();
+    for &(gx, gy) in world.mycelium_strains.keys() {
+        match world.get_cell(gx, gy) {
+            Some(c) if hosts_mycelium(c.material) && c.mycelium() > 0 => {}
+            _ => drop.push((gx, gy)),
+        }
+    }
+    for (gx, gy) in drop {
+        clear_mycelium_shares(world, gx, gy);
+    }
+    if world.mycelium_energy.is_empty() {
+        return;
+    }
+    let mut drop_e: Vec<(i32, i32)> = Vec::new();
+    for &(gx, gy) in world.mycelium_energy.keys() {
+        if world.mycelium_strains.contains_key(&(gx, gy)) {
+            continue;
+        }
+        drop_e.push((gx, gy));
+    }
+    for (gx, gy) in drop_e {
+        world.mycelium_energy.remove(&(gx, gy));
+    }
+}
+
+/// Drop trade / strain-lineage rows for strain ids with no live cream shares.
+///
+/// Trade lasts clear every physics tick over `sym_net_flow` — dead strains
+/// from a finished infection kept walking an ever-growing ledger for free.
+/// `mycelium_strain_lineage` had the same ghost: emerge / treaty lookups
+/// kept hashing dead ids after the cream was gone.
+fn prune_orphan_sym_net_flow(world: &mut World) {
+    if world.sym_net_flow.is_empty() && world.mycelium_strain_lineage.is_empty() {
+        return;
+    }
+    if world.mycelium_strains.is_empty() {
+        world.sym_net_flow.clear();
+        world.mycelium_strain_lineage.clear();
+        return;
+    }
+    let mut live: FxHashSet<u32> = FxHashSet::default();
+    for shares in world.mycelium_strains.values() {
+        for &(s, amt) in shares {
+            if amt > 0 {
+                live.insert(s);
+            }
+        }
+    }
+    world.sym_net_flow.retain(|s, _| live.contains(s));
+    world
+        .mycelium_strain_lineage
+        .retain(|s, _| live.contains(s));
+}
+
 /// Sample cream cells from the strain ledger, then pick up to `max`.
 ///
 /// ~¾ of the budget prefers frontier cells (`myc < 80`) so networks keep
@@ -3066,6 +3135,67 @@ mod tests {
         assert!(
             frontier_hits >= 3,
             "frontier corridor must get slots when hubs overflow the cap (hits={frontier_hits})"
+        );
+    }
+
+    #[test]
+    fn field_pulse_drops_dead_myc_zero_ledger_keys() {
+        let mut w = litter_plot();
+        // Live cream — must survive the prune.
+        let mut live = Cell::solid(MaterialId::Organic);
+        live.sat = Sat(160);
+        live.set_mycelium(40);
+        w.set_cell(4, 2, live);
+        let live_s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(live_s, 40)]);
+        w.mycelium_energy.insert((4, 2), 12);
+        w.sym_net_flow
+            .insert(live_s, crate::symbiosis::SymNetFlow::default());
+        bind_strain_lineage(&mut w, live_s, Genome::default(), fungus_body());
+
+        // Ghost: pad gone, strain + energy + trade + lineage row left behind.
+        let dead_s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((6, 2), vec![(dead_s, 30)]);
+        w.mycelium_energy.insert((6, 2), 8);
+        w.sym_net_flow
+            .insert(dead_s, crate::symbiosis::SymNetFlow::default());
+        bind_strain_lineage(&mut w, dead_s, Genome::default(), fungus_body());
+        // Orphan energy with no strain key at all.
+        w.mycelium_energy.insert((8, 2), 5);
+
+        w.tick = MYCELIUM_FIELD_PERIOD;
+        step_mycelium_field(&mut w);
+
+        assert!(
+            w.mycelium_strains.contains_key(&(4, 2)),
+            "live cream must keep its strain key"
+        );
+        assert!(
+            w.mycelium_energy.get(&(4, 2)).copied().unwrap_or(0) >= 12,
+            "live cream must keep its energy bank"
+        );
+        assert!(w.sym_net_flow.contains_key(&live_s));
+        assert!(
+            w.mycelium_strain_lineage.contains_key(&live_s),
+            "live strain must keep its emergence lineage"
+        );
+        assert!(
+            !w.mycelium_strains.contains_key(&(6, 2)),
+            "myc==0 ghost strain key must be collected"
+        );
+        assert_eq!(w.mycelium_energy.get(&(6, 2)), None);
+        assert!(
+            !w.sym_net_flow.contains_key(&dead_s),
+            "dead strain must leave the trade ledger"
+        );
+        assert!(
+            !w.mycelium_strain_lineage.contains_key(&dead_s),
+            "dead strain must leave the lineage treaty map"
+        );
+        assert_eq!(
+            w.mycelium_energy.get(&(8, 2)),
+            None,
+            "energy without a strain pad must go"
         );
     }
 
