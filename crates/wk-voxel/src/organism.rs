@@ -2008,13 +2008,26 @@ impl OrganismStore {
                 && atom.energy >= atom.energy_max * REPRODUCE_AT
                 && pop + births.len() < atom_cap
             {
-                let cost = atom.energy_max * REPRO_COST_FRAC;
-                atom.energy -= cost;
-                atom.cooldown = REPRO_PERIOD;
-                if let Some(child) = try_fission(world, atom, cost * 0.5, tick) {
-                    births.push(child);
-                } else {
-                    atom.energy += cost;
+                // E46d: cold below the comfort band sterilises fission.
+                // Energy is not spent; the founder keeps living.
+                let too_cold = temperature
+                    .map(|temp| {
+                        let (hx, hy) = temp.tile_of(atom.gx, atom.gy);
+                        cold_blocks_reproduction(
+                            temp.at_tile_packed(hx, hy),
+                            &atom.genome,
+                        )
+                    })
+                    .unwrap_or(false);
+                if !too_cold {
+                    let cost = atom.energy_max * REPRO_COST_FRAC;
+                    atom.energy -= cost;
+                    atom.cooldown = REPRO_PERIOD;
+                    if let Some(child) = try_fission(world, atom, cost * 0.5, tick) {
+                        births.push(child);
+                    } else {
+                        atom.energy += cost;
+                    }
                 }
             }
             other_ns += t_other.elapsed();
@@ -4762,6 +4775,15 @@ fn organism_heat_celsius(temp: &Temperature, atom: &Atom) -> f32 {
     best
 }
 
+/// True when local °C sits below `optimum − width` (E46d).
+///
+/// Atom fission must not fire while this is true. The founder keeps its
+/// tank — cold is sterility, not death. No temperature field → false.
+pub(crate) fn cold_blocks_reproduction(temp_c: f32, genome: &Genome) -> bool {
+    let width = genome.temp_width.max(1.0);
+    temp_c < genome.temp_optimum - width
+}
+
 /// Drain energy for heat past the comfort edge. Returns true when the
 /// tank hits zero (caller records the death).
 fn apply_heat_stress(atom: &mut Atom, temp_c: f32, day: f32) -> bool {
@@ -6780,6 +6802,79 @@ mod tests {
         assert!(
             end_ok > start_ok,
             "comfort band must still grow (start={start_ok} end={end_ok})"
+        );
+    }
+
+    #[test]
+    fn cold_blocks_reproduction_is_cold_side_only() {
+        let g = Genome::default(); // opt 22, width 18 → cold below 4 °C
+        assert!(!cold_blocks_reproduction(22.0, &g), "comfort centre");
+        assert!(!cold_blocks_reproduction(4.0, &g), "edge is still open");
+        assert!(cold_blocks_reproduction(3.0, &g), "just below the edge");
+        assert!(!cold_blocks_reproduction(70.0, &g), "hot is not this gate");
+        let mut narrow = Genome::default();
+        narrow.temp_width = 4.0; // cold below 18 °C
+        assert!(cold_blocks_reproduction(3.0, &narrow));
+        assert!(!cold_blocks_reproduction(22.0, &narrow));
+    }
+
+    /// E46d: 3 °C water with a narrow TempWidth yields zero births and a
+    /// living founder; the same genome at 22 °C fissions.
+    #[test]
+    fn cold_water_blocks_atom_fission_founder_survives() {
+        fn run(temp_c: f32, genome: Genome, ticks: u64) -> OrganismStore {
+            let mut w = wet_column();
+            let mut store = OrganismStore::new();
+            let mut parent = Atom::new(4, 5, 40.0);
+            parent.genome = genome;
+            parent.energy = 40.0;
+            parent.cooldown = 0;
+            store.atoms.push(parent);
+            let mut temp = Temperature::with_world_bounds(8, 0, 0, 64, 32, 1, 16, 8, false);
+            let (hx, hy) = {
+                let a = &store.atoms[0];
+                temp.tile_of(a.gx, a.gy)
+            };
+            temp.set_tile_c(hx, hy, temp_c);
+            let climate = ClimateConfig::default();
+            for t in 0..ticks {
+                // Scenario: energy topped each tick so only the cold gate
+                // can stop births (not starvation or harvest luck).
+                if let Some(a) = store.atoms.first_mut() {
+                    a.energy = a.energy_max;
+                    a.cooldown = 0;
+                }
+                // Keep the pocket on the founder as buoyancy drifts it.
+                if let Some(a) = store.atoms.first() {
+                    let (hx, hy) = temp.tile_of(a.gx, a.gy);
+                    temp.set_tile_c(hx, hy, temp_c);
+                }
+                let _ = store.step_with_climate_wind_temp(
+                    &mut w, t, &climate, None, 0.0, Some(&temp),
+                );
+            }
+            store
+        }
+
+        let mut narrow = Genome::default();
+        narrow.temp_width = 4.0;
+        let cold = run(3.0, narrow, 80);
+        assert_eq!(cold.len(), 1, "founder must survive the cold");
+        assert_eq!(cold.corpse_count(), 0, "cold must not kill");
+        assert_eq!(
+            cold.atoms.len(),
+            1,
+            "E46d: cold births=0 (got {})",
+            cold.atoms.len().saturating_sub(1)
+        );
+
+        let mut warm_g = Genome::default();
+        warm_g.temp_width = 4.0;
+        let warm = run(22.0, warm_g, 80);
+        assert!(
+            warm.len() >= 2,
+            "E46d: warm births>0 (got {} living)",
+            warm.len()
         );
     }
 
