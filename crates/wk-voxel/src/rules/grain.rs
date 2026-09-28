@@ -2227,6 +2227,15 @@ pub fn drift_floating_organic_columns_cfg(
 /// clear (or a lip), the film moves one column.
 pub fn shove_floating_organic_with_current(world: &mut World) -> u32 {
     let columns = collect_floating_organic_columns(world);
+    shove_floating_organic_columns(world, &columns)
+}
+
+/// [`shove_floating_organic_with_current`] with a precomputed floating
+/// column map — world_step reuses the sail/drift collect when nothing moved.
+pub fn shove_floating_organic_columns(
+    world: &mut World,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) -> u32 {
     if columns.is_empty() {
         return 0;
     }

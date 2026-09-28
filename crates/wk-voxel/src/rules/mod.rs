@@ -48,7 +48,7 @@ pub use grain::{
     collect_floating_organic_columns, collect_floating_organic_columns_near,
     floating_organic_column_at,     drift_floating_organic, drift_floating_organic_cfg,
     drift_floating_organic_columns, drift_floating_organic_columns_cfg,
-    shove_floating_organic_with_current,
+    shove_floating_organic_columns, shove_floating_organic_with_current,
     punch_through_floating_rafts,
     rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
     soak_floating_litter, soak_floating_litter_cfg,

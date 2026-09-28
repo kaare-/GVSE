@@ -1204,6 +1204,19 @@ pub fn sail_plants_on_wind_rafts_cfg(
     grain: &crate::GrainConfig,
 ) -> u32 {
     let columns = crate::rules::collect_floating_organic_columns(world);
+    sail_plants_on_wind_rafts_columns(world, atoms, wind_vx_tiles, tile_cols, grain, &columns)
+}
+
+/// [`sail_plants_on_wind_rafts_cfg`] with a precomputed floating-Organic map
+/// so world_step can share one collect with cascade shove.
+pub fn sail_plants_on_wind_rafts_columns(
+    world: &mut World,
+    atoms: &mut [Atom],
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    grain: &crate::GrainConfig,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) -> u32 {
     let mut bound_cols: HashSet<i32> = HashSet::new();
     let mut raft_mounted: Vec<usize> = Vec::new();
 
@@ -1212,7 +1225,7 @@ pub fn sail_plants_on_wind_rafts_cfg(
             continue;
         }
         // Sand-rooted plants stay put — beach litter must not drag them.
-        if crate::organism::plant_grounded_in_substrate(world, atom, &columns) {
+        if crate::organism::plant_grounded_in_substrate(world, atom, columns) {
             continue;
         }
         let mut min_dx = i16::MAX;
@@ -1226,7 +1239,7 @@ pub fn sail_plants_on_wind_rafts_cfg(
             let wy = atom.gy + dy as i32;
             min_dx = min_dx.min(dx);
             max_dx = max_dx.max(dx);
-            if holdfast_on_float_column(&columns, m, wx, wy) {
+            if holdfast_on_float_column(columns, m, wx, wy) {
                 mounted = true;
             }
         }
@@ -1251,7 +1264,7 @@ pub fn sail_plants_on_wind_rafts_cfg(
     );
     let (moved, sign, moved_cols) = crate::rules::drift_floating_organic_columns_cfg(
         world,
-        &columns,
+        columns,
         wind_vx_tiles,
         tile_cols,
         Some(&sails),

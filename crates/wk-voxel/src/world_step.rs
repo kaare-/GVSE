@@ -57,13 +57,14 @@ use crate::phase::{apply_phase, PhaseConfig};
 use crate::pore_ice::apply_pore_ice;
 use crate::cave_humidity::apply_cave_humidity;
 use crate::steam::{apply_leftover_motor, apply_steam_cadence, SteamConfig};
-use crate::plant::{collect_live_root_world_cells, sail_plants_on_wind_rafts_cfg};
+use crate::plant::{collect_live_root_world_cells, sail_plants_on_wind_rafts_columns};
 use crate::rules::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity_climate,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_snow_wind_drift,
-    drift_floating_organic_cfg, precipitate_thermal_surplus, shove_floating_organic_with_current,
-    tick_with_life, tick_with_life_profiled, CompetentFallConfig, CondensationConfig, EvapConfig,
-    GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhysicsTimings,
+    collect_floating_organic_columns, drift_floating_organic_columns_cfg,
+    precipitate_thermal_surplus, shove_floating_organic_columns, tick_with_life,
+    tick_with_life_profiled, CompetentFallConfig, CondensationConfig, EvapConfig, GrainConfig,
+    KarstConfig, OrographicConfig, PerfConfig, PhysicsTimings,
 };
 use crate::sediment::apply_suspension;
 use crate::support_map::{support_map_due, SupportMap};
@@ -378,27 +379,42 @@ pub fn step_world(
 
     {
         let t0 = profile.then(Instant::now);
-        if organisms_on {
+        // One floating-Organic collect for sail/drift + cascade shove.
+        // Quiet compost land (no rafts moving) used to pay the full-chunk
+        // walk twice every tick.
+        let columns = collect_floating_organic_columns(world);
+        let moved = if organisms_on {
             if let Some(store) = organisms.as_mut() {
-                sail_plants_on_wind_rafts_cfg(
+                sail_plants_on_wind_rafts_columns(
                     world,
                     &mut store.atoms,
                     wind_vx,
                     wind.tile_cols,
                     cfg.grain,
-                );
+                    &columns,
+                )
+            } else {
+                0
             }
         } else {
-            let _ = drift_floating_organic_cfg(
+            drift_floating_organic_columns_cfg(
                 world,
+                &columns,
                 wind_vx,
                 wind.tile_cols,
                 None,
                 None,
                 cfg.grain,
-            );
+            )
+            .0
+        };
+        if moved > 0 {
+            // Drift relocated columns — shove needs fresh seats.
+            let columns = collect_floating_organic_columns(world);
+            let _ = shove_floating_organic_columns(world, &columns);
+        } else {
+            let _ = shove_floating_organic_columns(world, &columns);
         }
-        let _ = shove_floating_organic_with_current(world);
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
             t.rafts += t0.elapsed();
         }

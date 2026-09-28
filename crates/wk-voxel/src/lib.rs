@@ -171,7 +171,8 @@ pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,
     find_fungus_slot, find_plant_slot, find_surface_air_slot, is_land_plant,
     plant_resists_rock_shove, plant_rooted_in_loose, sail_plants_on_wind_rafts,
-    sail_plants_on_wind_rafts_cfg, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES,
+    sail_plants_on_wind_rafts_cfg, sail_plants_on_wind_rafts_columns, sync_alloc_to_body,
+    PlantGrowthCaps, MAX_PHOTO_MODULES,
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use rules::{
@@ -190,7 +191,8 @@ pub use rules::{
     drift_floating_organic_columns_cfg, floating_organic_column_at, is_standing_water,
     precipitate_thermal_surplus, punch_through_floating_rafts, rise_and_soak_buoyant_litter,
     rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter, settle_loose_grains,
-    settle_loose_grains_regions, shove_floating_organic_with_current, soak_floating_litter,
+    settle_loose_grains_regions, shove_floating_organic_columns,
+    shove_floating_organic_with_current, soak_floating_litter,
     soak_floating_litter_cfg, tick, tick_with_configs, tick_with_configs_and_geotech,
     tick_with_life, tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled,
     wake_competent_bodies, wake_competent_bodies_all, wake_competent_bodies_regions,
