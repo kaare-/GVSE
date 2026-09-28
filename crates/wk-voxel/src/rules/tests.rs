@@ -1378,6 +1378,40 @@ fn buried_root_organic_clears_buoyant_not_organic_flag() {
 }
 
 #[test]
+fn organic_flag_alone_does_not_force_buoyant_rescan() {
+    // After has_buoyant clears, compost must not re-enter the collect set
+    // through sticky has_organic — that was a full 64×64 walk every tick
+    // on every forested land chunk. Falling leaves still stamp has_buoyant.
+    let mut w = setup_column_world();
+    w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+    w.set_cell(2, 2, Cell::solid(MaterialId::Organic));
+    w.set_cell(2, 3, Cell::solid(MaterialId::Sand));
+    rise_and_soak_buoyant_litter(&mut w);
+    assert!(!w.chunks[&ChunkCoord::new(0, 0)].has_buoyant);
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_organic);
+    assert!(w.buoyant_flags_ready);
+    // Quiet compost-only world: second pass must stay off the buoyant set.
+    rise_and_soak_buoyant_litter(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_buoyant,
+        "has_organic alone must not reselect the chunk"
+    );
+    // Airborne leaf stamps has_buoyant and re-enters the walk.
+    w.set_cell(2, 8, Cell::solid(MaterialId::Organic));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_buoyant);
+    rise_and_soak_buoyant_litter(&mut w);
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_buoyant,
+        "freefall leaf (Air below) must stay on the buoyant walk"
+    );
+    assert_eq!(
+        w.get_cell(2, 2).map(|c| c.material),
+        Some(MaterialId::Organic),
+        "buried compost must not be disturbed"
+    );
+}
+
+#[test]
 fn falling_leaf_does_not_leave_sky_chunks_in_the_raft_scan() {
     // Same leak as falling snow: a leaf marks every chunk it falls
     // through. After it lands, vacated sky must drop `has_organic`.
