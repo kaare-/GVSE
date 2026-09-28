@@ -11,7 +11,7 @@ use crate::cell::{
     falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity_cell, Cell, CellFlags, Sat,
 };
-use crate::chunk::{ChunkCoord, STANDING_AIR_SAT, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{Chunk, ChunkCoord, STANDING_AIR_SAT, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
 use crate::grid::World;
 use crate::parallel::{
@@ -1721,6 +1721,55 @@ fn chunk_matches_float_gate(chunk: &crate::chunk::Chunk, prefer_buoyant: bool) -
     }
 }
 
+/// True when `(lx, ly)` is the bottom of a floating Organic stack.
+///
+/// One read of the cell below. Interior rows use this slab; the bottom
+/// row still crosses into the chunk underneath.
+fn organic_float_base(
+    chunk: &Chunk,
+    world: &World,
+    lx: usize,
+    ly: usize,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    let below = if ly > 0 {
+        Some(chunk.get(lx, ly - 1))
+    } else {
+        world.get_cell(gx, gy - 1)
+    };
+    match below {
+        Some(seat) if seat.material == MaterialId::Organic => false,
+        Some(seat) => drift_float_seat(seat),
+        None => false,
+    }
+}
+
+/// Cells of Organic stacked on `gy`, staying in `chunk` until the seam.
+fn organic_stack_height(
+    chunk: &Chunk,
+    world: &World,
+    lx: usize,
+    ly: usize,
+    gx: i32,
+    gy: i32,
+) -> i32 {
+    let mut height = 1i32;
+    while height <= 48 {
+        let ay = ly as i32 + height;
+        let above = if ay >= 0 && (ay as usize) < CHUNK_CELLS_H {
+            Some(chunk.get(lx, ay as usize))
+        } else {
+            world.get_cell(gx, gy + height)
+        };
+        match above {
+            Some(c) if c.material == MaterialId::Organic => height += 1,
+            _ => break,
+        }
+    }
+    height
+}
+
 /// Scan `coords` (same world-x strip) for a floating Organic column at `gx`.
 fn floating_organic_column_at_in(
     world: &World,
@@ -1741,27 +1790,10 @@ fn floating_organic_column_at_in(
                 continue;
             }
             let gy = y0 + ly as i32;
-            if let Some(below_org) = world.get_cell(gx, gy - 1) {
-                if below_org.material == MaterialId::Organic {
-                    continue;
-                }
-            }
-            let Some(seat) = world.get_cell(gx, gy - 1) else {
-                continue;
-            };
-            if !drift_float_seat(seat) {
+            if !organic_float_base(chunk, world, lx, ly, gx, gy) {
                 continue;
             }
-            let mut height = 1i32;
-            while let Some(above) = world.get_cell(gx, gy + height) {
-                if above.material != MaterialId::Organic {
-                    break;
-                }
-                height += 1;
-                if height > 48 {
-                    break;
-                }
-            }
+            let height = organic_stack_height(chunk, world, lx, ly, gx, gy);
             best = Some((gy, height));
         }
     }
@@ -1816,27 +1848,10 @@ pub fn collect_floating_organic_columns(
                 }
                 let gx = x0 + lx as i32;
                 let gy = y0 + ly as i32;
-                if let Some(below_org) = world.get_cell(gx, gy - 1) {
-                    if below_org.material == MaterialId::Organic {
-                        continue;
-                    }
-                }
-                let Some(seat) = world.get_cell(gx, gy - 1) else {
-                    continue;
-                };
-                if !drift_float_seat(seat) {
+                if !organic_float_base(chunk, world, lx, ly, gx, gy) {
                     continue;
                 }
-                let mut height = 1i32;
-                while let Some(above) = world.get_cell(gx, gy + height) {
-                    if above.material != MaterialId::Organic {
-                        break;
-                    }
-                    height += 1;
-                    if height > 48 {
-                        break;
-                    }
-                }
+                let height = organic_stack_height(chunk, world, lx, ly, gx, gy);
                 columns.insert(gx, (gy, height));
             }
         }
@@ -3696,5 +3711,37 @@ mod wake_read_tests {
             w.chunks[&ChunkCoord::new(0, 1)].dirty_bits.get(4, 0),
             "seam air-below sand wakes"
         );
+    }
+}
+
+#[cfg(test)]
+mod raft_seat_tests {
+    use super::collect_floating_organic_columns;
+    use crate::cell::Cell;
+    use crate::chunk::ChunkCoord;
+    use crate::grid::World;
+    use wk_material::MaterialId;
+
+    #[test]
+    fn floating_organic_column_reads_the_seat_once() {
+        let mut w = World::new(8);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        // Interior stack on standing water: one column, height 2.
+        w.set_cell(4, 9, Cell::water());
+        w.set_cell(4, 10, Cell::solid(MaterialId::Organic));
+        w.set_cell(4, 11, Cell::solid(MaterialId::Organic));
+        // Seated on stone: not a raft.
+        w.set_cell(6, 9, Cell::solid(MaterialId::Stone));
+        w.set_cell(6, 10, Cell::solid(MaterialId::Organic));
+        // Chunk seam: water at y=63, organic at y=64 and y=65.
+        w.set_cell(2, 63, Cell::water());
+        w.set_cell(2, 64, Cell::solid(MaterialId::Organic));
+        w.set_cell(2, 65, Cell::solid(MaterialId::Organic));
+
+        let cols = collect_floating_organic_columns(&w);
+        assert_eq!(cols.get(&4), Some(&(10, 2)), "interior stack is one column");
+        assert!(!cols.contains_key(&6), "organic on stone is not floating");
+        assert_eq!(cols.get(&2), Some(&(64, 2)), "seam stack is one column");
     }
 }
