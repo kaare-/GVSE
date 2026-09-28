@@ -2644,9 +2644,15 @@ pub fn wake_floating_competent(world: &mut World) {
         saw_competent = true;
         let gx = world.wrap_x(base_gx + lx as i32);
         let gy = base_gy + ly as i32;
-        let air_below = match world.get_cell(gx, gy - 1) {
-          None => true,
-          Some(b) => body_passable_at(world, gx, gy - 1, &b),
+        // Same cell `get_cell` would return. Interior rows are the
+        // whole hill — a chunk-map hop per stone was the cadence cost.
+        let air_below = if ly > 0 {
+          body_passable_at(world, gx, gy - 1, &chunk.get(lx, ly - 1))
+        } else {
+          match world.get_cell(gx, gy - 1) {
+            None => true,
+            Some(b) => body_passable_at(world, gx, gy - 1, &b),
+          }
         };
         if !air_below {
           continue;
@@ -4794,6 +4800,30 @@ mod tests {
       hang_set.iter().any(|(x, _)| *x < 20),
       "the actual overhang must still peel"
     );
+  }
+
+  #[test]
+  fn floating_wake_uses_the_in_chunk_cell_below() {
+    let mut w = World::new(8);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Seated on bedrock — not a floater.
+    w.set_cell(2, 1, Cell::solid(MaterialId::Stone));
+    // Chunk seam: stone at y=64, air at y=63.
+    w.set_cell(8, 64, Cell::solid(MaterialId::Stone));
+    // Interior of cy=1: air under y=74, stone under y=75.
+    w.set_cell(8, 74, Cell::solid(MaterialId::Stone));
+    w.set_cell(8, 75, Cell::solid(MaterialId::Stone));
+    w.competent_wake.clear();
+    wake_floating_competent(&mut w);
+    let woke: std::collections::HashSet<(i32, i32)> = w.competent_wake.iter().copied().collect();
+    assert!(woke.contains(&(8, 64)), "air under a chunk seam must wake");
+    assert!(woke.contains(&(8, 74)), "air under an interior row must wake");
+    assert!(!woke.contains(&(8, 75)), "stone on stone is not floating");
+    assert!(!woke.contains(&(2, 1)), "stone on bedrock is not floating");
   }
 
   #[test]
