@@ -69,8 +69,9 @@ pub struct Genome {
     /// Comfort-centre temperature (°C). Heat past `optimum + width` drains energy.
     #[serde(default = "default_temp_optimum")]
     pub temp_optimum: f32,
-    /// Degrees above `temp_optimum` before heat stress starts. Narrow
-    /// specialists die in hot pockets. Cold does not use this width.
+    /// Comfort half-width (°C). Heat past `optimum + width` drains energy
+    /// (E34). Cold below `optimum − width` blocks Atom fission (E46d) —
+    /// the founder stays alive.
     #[serde(default = "default_temp_width")]
     pub temp_width: f32,
 }
