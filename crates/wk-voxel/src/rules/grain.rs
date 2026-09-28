@@ -1645,11 +1645,32 @@ fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx:
     }
 }
 
-/// True when float-raft walks should prefer sticky `has_buoyant` over
-/// `has_organic`. Floating seats stamp buoyant; buried compost keeps
-/// `has_organic` after buoyant clears and must not be scanned as a raft.
-fn prefer_buoyant_float_chunks(world: &World) -> bool {
-    world.buoyant_flags_ready && world.chunks.values().any(|c| c.has_buoyant)
+/// Occupancy filter for float-raft walks.
+///
+/// - `Some(true)` — sticky `has_buoyant` only (live rafts).
+/// - `Some(false)` — legacy `has_organic` (buoyant flags not ready yet).
+/// - `None` — flags are live and no chunk is buoyant: return empty.
+///   Buried compost keeps `has_organic` after buoyant clears; rescanning
+///   it as a raft every plant tick is the soak tax `#327` already removed
+///   from buoyant litter.
+fn float_chunk_gate(world: &World) -> Option<bool> {
+    if !world.buoyant_flags_ready {
+        return Some(false);
+    }
+    if world.chunks.values().any(|c| c.has_buoyant) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn chunk_matches_float_gate(chunk: &crate::chunk::Chunk, prefer_buoyant: bool) -> bool {
+    if prefer_buoyant {
+        chunk.has_buoyant
+    } else {
+        chunk.has_organic
+    }
 }
 
 /// Scan `coords` (same world-x strip) for a floating Organic column at `gx`.
@@ -1701,19 +1722,14 @@ fn floating_organic_column_at_in(
 
 /// One floating Organic column at `gx`, if present: `(bottom_y, height)`.
 pub fn floating_organic_column_at(world: &World, gx: i32) -> Option<(i32, i32)> {
+    let prefer = float_chunk_gate(world)?;
     let gx = world.wrap_x(gx);
     let cx = gx.div_euclid(CHUNK_CELLS_W as i32);
-    let prefer = prefer_buoyant_float_chunks(world);
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
         .filter(|(&coord, chunk)| {
-            coord.cx == cx
-                && if prefer {
-                    chunk.has_buoyant
-                } else {
-                    chunk.has_organic
-                }
+            coord.cx == cx && chunk_matches_float_gate(chunk, prefer)
         })
         .map(|(&coord, _)| coord)
         .collect();
@@ -1722,17 +1738,21 @@ pub fn floating_organic_column_at(world: &World, gx: i32) -> Option<(i32, i32)> 
 
 /// Floating Organic columns: `gx → (waterline_y, stack_height)`.
 ///
-/// Skips chunks that never held Organic (`has_organic`).
+/// Once buoyant flags are live, only `has_buoyant` chunks are walked.
+/// Buried compost that cleared buoyant must not own a full-chunk scan.
 pub fn collect_floating_organic_columns(
     world: &World,
 ) -> std::collections::HashMap<i32, (i32, i32)> {
     let mut columns: std::collections::HashMap<i32, (i32, i32)> =
         std::collections::HashMap::new();
+    let Some(prefer) = float_chunk_gate(world) else {
+        return columns;
+    };
     for &coord in world.chunks.keys() {
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
-        if !chunk.has_organic {
+        if !chunk_matches_float_gate(chunk, prefer) {
             continue;
         }
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
@@ -1790,25 +1810,17 @@ pub fn collect_floating_organic_columns_near(
     if xs.is_empty() {
         return columns;
     }
-    let prefer = prefer_buoyant_float_chunks(world);
-    let any = if prefer {
-        world.chunks.values().any(|c| c.has_buoyant)
-    } else {
-        world.chunks.values().any(|c| c.has_organic)
-    };
-    if !any {
+    let Some(prefer) = float_chunk_gate(world) else {
         return columns;
-    }
+    };
     let mut by_cx: HashMap<i32, Vec<ChunkCoord>> = HashMap::new();
     for (&coord, chunk) in &world.chunks {
-        let ok = if prefer {
-            chunk.has_buoyant
-        } else {
-            chunk.has_organic
-        };
-        if ok {
+        if chunk_matches_float_gate(chunk, prefer) {
             by_cx.entry(coord.cx).or_default().push(coord);
         }
+    }
+    if by_cx.is_empty() {
+        return columns;
     }
     let pad = pad.max(0);
     let mut seen = HashSet::new();
