@@ -1510,10 +1510,7 @@ fn water_current_vector(
         }
     }
 
-    (
-        (vx * 1.15).clamp(-1.0, 1.0),
-        (vy * 1.35).clamp(-1.0, 1.0),
-    )
+    ((vx * 1.15).clamp(-1.0, 1.0), (vy * 1.35).clamp(-1.0, 1.0))
 }
 
 /// World-space wind strokes (`V` overlay) from the local heatmap.
@@ -1816,15 +1813,31 @@ pub fn draw_canopy_air_dim(
     let cloud_k = look.cloud_shade_strength.clamp(0.0, 1.0);
 
     let mut shade: HashMap<(i32, i32), f32> = HashMap::new();
+    // One surface per column, filled on first use. The old per-leaf walk
+    // re-scanned the visible strip (often hundreds of sky cells) on every
+    // shadow step. A grown forest is tens of thousands of leaves, so that
+    // pinned a visible window to single-digit FPS. Minimizing the window
+    // collapses the strip and the frame jumps back to the sim rate.
+    let mut surfaces = ShadowSurfaceCache::new(width_cols, y_min_vis, y_max_vis);
 
     // 1) Day: mild ground/water dim under foliage.
     if is_day && !canopy.is_empty() {
-        stamp_under_canopy_surface(world, &canopy, width_cols, y_min_vis, y_max_vis, &mut shade);
+        stamp_under_canopy_surface(
+            world,
+            &canopy,
+            width_cols,
+            &mut surfaces,
+            &mut shade,
+            origin_x,
+            cell_px,
+            sw,
+            wrap_x,
+        );
     }
 
     // 2) Time-of-day cast (pan-invariant): soft air corridor + exposed ground.
     if cast_k > 0.02 && !posed.is_empty() {
-        let _ = (celestial_sx, origin_x, cell_px);
+        let _ = celestial_sx;
         let strength = if is_day {
             (cast_k * 0.90).clamp(0.0, 1.0)
         } else {
@@ -1836,16 +1849,24 @@ pub fn draw_canopy_air_dim(
             strength,
             is_day,
             y_min_vis,
-            y_max_vis,
+            &mut surfaces,
             &mut shade,
             celestial_local,
+            origin_x,
+            cell_px,
+            sw,
+            width_cols,
+            wrap_x,
         );
     }
 
     // 3) Mild vapour dim on exposed surface (day + night).
     if cloud_k > 0.02 && humidity.has_mass() {
         for x in 0..width_cols {
-            let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) else {
+            if !column_near_view(x, origin_x, cell_px, sw, width_cols, wrap_x, 0) {
+                continue;
+            }
+            let Some(y) = surfaces.at(world, x) else {
                 continue;
             };
             let ct = cloud_sky_transmit(humidity, x, y);
@@ -2172,17 +2193,96 @@ fn top_shadow_receiver_y(world: &World, x: i32, y_min: i32, y_max: i32) -> Optio
     None
 }
 
+/// Topmost shadow receiver in the visible strip, one entry per wrapped column.
+///
+/// Filled on first lookup. `i32::MIN` means the column was scanned and has
+/// no receiver. Leaf rays must not each re-walk the sky.
+struct ShadowSurfaceCache {
+    width: i32,
+    y_min: i32,
+    y_max: i32,
+    /// `known[i] == false` until that column is scanned.
+    known: Vec<bool>,
+    y: Vec<i32>,
+}
+
+impl ShadowSurfaceCache {
+    fn new(width_cols: i32, y_min: i32, y_max: i32) -> Self {
+        let width = width_cols.max(0);
+        let n = width as usize;
+        Self {
+            width,
+            y_min,
+            y_max,
+            known: vec![false; n],
+            y: vec![i32::MIN; n],
+        }
+    }
+
+    fn at(&mut self, world: &World, x: i32) -> Option<i32> {
+        let x = world.wrap_x(x);
+        if x < 0 || x >= self.width {
+            return top_shadow_receiver_y(world, x, self.y_min, self.y_max);
+        }
+        let i = x as usize;
+        if !self.known[i] {
+            self.y[i] = top_shadow_receiver_y(world, x, self.y_min, self.y_max).unwrap_or(i32::MIN);
+            self.known[i] = true;
+        }
+        let s = self.y[i];
+        if s == i32::MIN {
+            None
+        } else {
+            Some(s)
+        }
+    }
+}
+
+/// Horizontal reach of a cast ray (`max_steps` 40 × slant 1.7, plus penumbra).
+const SHADOW_VIEW_PAD: i32 = 72;
+
+/// True when column `x` (or a ±width wrap copy) can paint into the
+/// framebuffer, expanded by `pad_cells`.
+fn column_near_view(
+    x: i32,
+    origin_x: f32,
+    cell_px: f32,
+    sw: f32,
+    width: i32,
+    wrap: bool,
+    pad_cells: i32,
+) -> bool {
+    if !(cell_px > 0.0) || !(sw > 0.0) {
+        return false;
+    }
+    let margin = pad_cells.max(0) as f32 * cell_px;
+    let copies: &[i32] = if wrap && width > 0 { &[-1, 0, 1] } else { &[0] };
+    for &k in copies {
+        let sx = origin_x + (x + k * width) as f32 * cell_px;
+        if sx + cell_px >= -margin && sx <= sw + margin {
+            return true;
+        }
+    }
+    false
+}
+
 /// Dim terrain/water directly under canopy columns.
 fn stamp_under_canopy_surface(
     world: &World,
     canopy: &CanopyIndex,
     width_cols: i32,
-    y_min_vis: i32,
-    y_max_vis: i32,
+    surfaces: &mut ShadowSurfaceCache,
     shade: &mut HashMap<(i32, i32), f32>,
+    origin_x: f32,
+    cell_px: f32,
+    sw: f32,
+    wrap_x: bool,
 ) {
     for x in 0..width_cols {
-        let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) else {
+        if !column_near_view(x, origin_x, cell_px, sw, width_cols, wrap_x, 0) {
+            continue;
+        }
+        let Some(y) = surfaces.at(world, x) else {
             continue;
         };
         let t = shade_transmit_column(canopy, x, y);
@@ -2214,9 +2314,14 @@ fn stamp_celestial_cast_shadows(
     strength: f32,
     is_day: bool,
     y_min_vis: i32,
-    y_max_vis: i32,
+    surfaces: &mut ShadowSurfaceCache,
     shade: &mut HashMap<(i32, i32), f32>,
     celestial_local: f32,
+    origin_x: f32,
+    cell_px: f32,
+    sw: f32,
+    width_cols: i32,
+    wrap_x: bool,
 ) {
     let local = celestial_local.clamp(0.0, 1.0);
     let elev = (local * std::f32::consts::PI).sin().clamp(0.05, 1.0);
@@ -2239,15 +2344,27 @@ fn stamp_celestial_cast_shadows(
         if !matches!(p.mid, ModuleId::Photosystem | ModuleId::Stem) {
             continue;
         }
+        // Offscreen crowns still in the atom list must not ray the sky.
+        // A minimized window (sw ≈ 0) skips the whole cast.
+        if !column_near_view(
+            p.wx,
+            origin_x,
+            cell_px,
+            sw,
+            width_cols,
+            wrap_x,
+            SHADOW_VIEW_PAD,
+        ) {
+            continue;
+        }
         let is_leaf = p.mid == ModuleId::Photosystem;
         let caster = if is_leaf { 1.0 } else { 0.62 };
 
         // Reach must cover plant height — slant-only caps left tall plants unshadowed.
-        let local_surf = top_shadow_receiver_y(world, p.wx, y_min_vis, y_max_vis)
-            .unwrap_or(p.wy.saturating_sub(1));
+        let local_surf = surfaces.at(world, p.wx).unwrap_or(p.wy.saturating_sub(1));
         let height = (p.wy - local_surf).max(0);
         if height == 0 {
-            if let Some(surf) = top_shadow_receiver_y(world, p.wx, y_min_vis, y_max_vis) {
+            if let Some(surf) = surfaces.at(world, p.wx) {
                 if is_exposed_surface_top(world, p.wx, surf) {
                     let dim = (strength * caster * 0.40).clamp(0.0, 0.70);
                     let e = shade.entry((p.wx, surf)).or_insert(0.0);
@@ -2269,7 +2386,7 @@ fn stamp_celestial_cast_shadows(
                 break;
             }
             let ix = world.wrap_x((p.wx as f32 + shadow_dir * horiz * step as f32).round() as i32);
-            let Some(surf) = top_shadow_receiver_y(world, ix, y_min_vis, y_max_vis) else {
+            let Some(surf) = surfaces.at(world, ix) else {
                 continue;
             };
             let falloff = 1.0 - (step as f32 - 1.0) / max_steps as f32;
@@ -2286,8 +2403,7 @@ fn stamp_celestial_cast_shadows(
                         *e = (*e).max(air_dim);
                         for &ddx in &[-1i32, 1] {
                             let nx = world.wrap_x(ix + ddx);
-                            if let Some(ns) = top_shadow_receiver_y(world, nx, y_min_vis, y_max_vis)
-                            {
+                            if let Some(ns) = surfaces.at(world, nx) {
                                 if ray_y > ns && is_dry_air(world, nx, ray_y) {
                                     let e = shade.entry((nx, ray_y)).or_insert(0.0);
                                     *e = (*e).max(air_dim * 0.38);
@@ -2304,7 +2420,7 @@ fn stamp_celestial_cast_shadows(
                 let e = shade.entry((ix, surf)).or_insert(0.0);
                 *e = (*e).max(dim);
                 let nx = world.wrap_x(ix + shadow_dir as i32);
-                if let Some(ns) = top_shadow_receiver_y(world, nx, y_min_vis, y_max_vis) {
+                if let Some(ns) = surfaces.at(world, nx) {
                     if is_exposed_surface_top(world, nx, ns) {
                         let e = shade.entry((nx, ns)).or_insert(0.0);
                         *e = (*e).max(dim * 0.50);
@@ -2367,6 +2483,46 @@ mod tests {
     };
     use std::collections::HashMap;
     use wk_voxel::Humidity;
+
+    #[test]
+    fn shadow_surface_cache_matches_the_column_walk() {
+        use super::{top_shadow_receiver_y, ShadowSurfaceCache};
+        use wk_material::MaterialId;
+        use wk_voxel::{Cell, World};
+
+        let mut w = World::new(1);
+        w.wrap_width = Some(32);
+        w.set_cell(3, 4, Cell::solid(MaterialId::Stone));
+        // A leaf in the sky is a receiver. The cache must keep it, not the stone.
+        w.set_cell(3, 12, Cell::solid(MaterialId::Organic));
+        let y_min = 0;
+        let y_max = 40;
+        let mut cache = ShadowSurfaceCache::new(32, y_min, y_max);
+        assert_eq!(cache.at(&w, 3), Some(12));
+        assert_eq!(cache.at(&w, 3), top_shadow_receiver_y(&w, 3, y_min, y_max));
+        // Wrapped duplicate of the same column.
+        assert_eq!(cache.at(&w, 3 + 32), Some(12));
+        assert_eq!(cache.at(&w, 7), top_shadow_receiver_y(&w, 7, y_min, y_max));
+        assert_eq!(cache.at(&w, 7), None);
+    }
+
+    #[test]
+    fn column_near_view_includes_wrap_copy_and_shadow_pad() {
+        use super::column_near_view;
+        // 10 px cells, 100 px wide window, origin at 0 → columns 0..=10.
+        assert!(column_near_view(0, 0.0, 10.0, 100.0, 100, true, 0));
+        assert!(column_near_view(10, 0.0, 10.0, 100.0, 100, true, 0));
+        assert!(!column_near_view(11, 0.0, 10.0, 100.0, 100, true, 0));
+        // A crown 5 cells offscreen can still cast into the window.
+        assert!(column_near_view(16, 0.0, 10.0, 100.0, 100, true, 8));
+        assert!(!column_near_view(20, 0.0, 10.0, 100.0, 100, true, 8));
+        // Wrap copy of column 99 sits at x = 99 - 100 = -1 → sx = -10,
+        // which still clips the left edge of a window at origin 0.
+        assert!(column_near_view(99, 0.0, 10.0, 100.0, 100, true, 0));
+        assert!(!column_near_view(99, 0.0, 10.0, 100.0, 100, false, 0));
+        // Minimized / zero-size window draws nothing.
+        assert!(!column_near_view(0, 0.0, 10.0, 0.0, 100, true, 72));
+    }
 
     #[test]
     fn airborne_snow_does_not_spike_the_ridge() {
@@ -2902,7 +3058,10 @@ mod tests {
         let origin_y = 100.0;
         let box_ =
             view_tile_box(tc, origin_x, origin_y, cell, 0, true, width, sw, sh).expect("box");
-        assert_eq!(box_.n_hx, 2, "seam-straddling camera must yield two hx ranges");
+        assert_eq!(
+            box_.n_hx, 2,
+            "seam-straddling camera must yield two hx ranges"
+        );
         let mut saw_low = false;
         let mut saw_high = false;
         let hx_span = width / tc;
@@ -2914,12 +3073,17 @@ mod tests {
                 saw_high = true;
             }
         });
-        assert!(saw_low, "wrapped view must include the low-x side of the seam");
-        assert!(saw_high, "wrapped view must include the high-x side of the seam");
-
-        let mut t = wk_voxel::Temperature::with_world_bounds(
-            tc, 0, 0, width, 128, 1, width, 16, true,
+        assert!(
+            saw_low,
+            "wrapped view must include the low-x side of the seam"
         );
+        assert!(
+            saw_high,
+            "wrapped view must include the high-x side of the seam"
+        );
+
+        let mut t =
+            wk_voxel::Temperature::with_world_bounds(tc, 0, 0, width, 128, 1, width, 16, true);
         assert_eq!(t.wrap_tile_x(-1), Some(hx_span - 1));
         assert_eq!(t.wrap_tile_x(hx_span), Some(0));
         t.cells.insert((0, 10), 18.0);
