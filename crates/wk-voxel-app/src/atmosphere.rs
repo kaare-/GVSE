@@ -2347,10 +2347,13 @@ fn is_dry_air(world: &World, x: i32, y: i32) -> bool {
 /// Pan-invariant: decorative sun stays fixed on screen while terrain scrolls, so
 /// comparing plant_sx to celestial_sx flipped lees when the camera moved.
 ///
-/// Leaves stamp a soft air corridor + ground lee; stems stamp ground only.
+/// Leaves stamp a light air corridor + ground lee; stems stamp ground only.
 /// Only the tallest caster per wrapped column rays — understory leaves in the
 /// same column were max()-merged into the same lee and dominated frame time
 /// in grown forests (minimize → sim-rate FPS).
+///
+/// Air stamps are core-only and strided: the old ±1 penumbra on every ray
+/// step multiplied shade HashMap entries (and quads) far past what reads.
 fn stamp_celestial_cast_shadows(
     world: &World,
     posed: &[PosedModule],
@@ -2431,22 +2434,14 @@ fn stamp_celestial_cast_shadows(
                 .max(noon_floor)
                 .clamp(0.0, 0.90);
 
-            // Soft air corridor (leaves only) — core + 1-cell penumbra.
+            // Soft air corridor (leaves only) — core, every other step.
+            // Penumbra neighbours used to triple shade cells for little gain.
             if ray_y > surf {
-                if is_leaf && is_dry_air(world, ix, ray_y) {
+                if is_leaf && (step & 1) == 1 && is_dry_air(world, ix, ray_y) {
                     let air_dim = (dim * air_k).clamp(0.0, air_cap);
                     if air_dim >= 0.03 {
                         let e = shade.entry((ix, ray_y)).or_insert(0.0);
                         *e = (*e).max(air_dim);
-                        for &ddx in &[-1i32, 1] {
-                            let nx = world.wrap_x(ix + ddx);
-                            if let Some(ns) = surfaces.at(world, nx) {
-                                if ray_y > ns && is_dry_air(world, nx, ray_y) {
-                                    let e = shade.entry((nx, ray_y)).or_insert(0.0);
-                                    *e = (*e).max(air_dim * 0.38);
-                                }
-                            }
-                        }
                     }
                 }
                 continue;
