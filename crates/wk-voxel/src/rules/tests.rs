@@ -7307,6 +7307,45 @@ fn float_column_near_indexes_by_chunk_x() {
 }
 
 #[test]
+fn float_collect_skips_organic_when_buoyant_flags_live_and_empty() {
+    // After #318 clears buoyant on buried roots, a land meadow has
+    // has_organic and no has_buoyant. Prefer-false used to fall back to
+    // scanning every compost chunk every plant tick — the soak tax #327
+    // already removed from buoyant litter.
+    let mut w = setup_column_world();
+    for x in 2..=6 {
+        w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(x, 2, Cell::solid(MaterialId::Organic));
+        w.set_cell(x, 3, Cell::solid(MaterialId::Sand));
+    }
+    for chunk in w.chunks.values_mut() {
+        chunk.has_buoyant = false;
+    }
+    w.buoyant_flags_ready = true;
+    assert!(
+        w.chunks.values().any(|c| c.has_organic),
+        "setup: compost must keep has_organic"
+    );
+    assert!(
+        !w.chunks.values().any(|c| c.has_buoyant),
+        "setup: no raft left"
+    );
+
+    assert!(
+        collect_floating_organic_columns(&w).is_empty(),
+        "live empty buoyant must not walk buried compost as rafts"
+    );
+    assert!(
+        collect_floating_organic_columns_near(&w, &[2, 4, 6], 2).is_empty(),
+        "near collect must also skip"
+    );
+    assert!(
+        floating_organic_column_at(&w, 4).is_none(),
+        "single-column probe must skip"
+    );
+}
+
+#[test]
 fn floating_organic_drifts_with_stream_without_wind() {
     // Flat freeboard with a sat gradient toward +x (wind calm).
     let mut w = setup_column_world();
