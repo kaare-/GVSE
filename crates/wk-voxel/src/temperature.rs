@@ -569,6 +569,17 @@ impl Temperature {
         self.at_tile(hx, hy)
     }
 
+    /// Cell temperature from the packed slab when a dense step has filled it.
+    ///
+    /// Phase used to read only the sparse map. Lake and vent °C can live in
+    /// the slab the overlay shows while `cells` is still the last unpacked
+    /// value. Empty slabs fall back to [`Self::at_tile`], so tests that only
+    /// fill the map keep working.
+    pub fn at_cell_packed(&self, gx: i32, gy: i32) -> f32 {
+        let (hx, hy) = self.tile_of(gx, gy);
+        self.at_tile_packed(hx, hy)
+    }
+
     /// Bilinear °C in world-cell space (no 4×4 facets).
     ///
     /// Tile centres sit at `(hx + 0.5, hy + 0.5) * tile_cols`, same as

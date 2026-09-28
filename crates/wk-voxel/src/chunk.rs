@@ -227,6 +227,11 @@ pub struct Chunk {
     /// scan finds no flake left.
     #[serde(default)]
     pub has_snow: bool,
+    /// Sticky occupancy: at least one `Ice` cell. Scalding thaw skips
+    /// chunks that have never held ice. Cleared by
+    /// [`crate::phase::apply_phase`] when a scalding scan finds none left.
+    #[serde(default)]
+    pub has_ice: bool,
     /// Sticky occupancy: at least one competent rock cell (stone /
     /// limestone / flowstone / sandstone / conglomerate). Floating-body
     /// wake skips empty sky and bedrock chunks. Cleared by
@@ -325,6 +330,7 @@ impl Chunk {
             has_organic: false,
             has_buoyant: false,
             has_snow: false,
+            has_ice: false,
             has_competent: false,
             has_standing_air: false,
             has_solid: false,
@@ -404,6 +410,9 @@ impl Chunk {
         }
         if cell.material == MaterialId::Snow {
             self.has_snow = true;
+        }
+        if cell.material == MaterialId::Ice {
+            self.has_ice = true;
         }
         if crate::cell::is_competent_rock(cell.material) {
             self.has_competent = true;
