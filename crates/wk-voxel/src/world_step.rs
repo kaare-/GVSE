@@ -189,9 +189,19 @@ pub fn step_world(
     {
         let t0 = profile.then(Instant::now);
         if tick_no % WIND_FIELD_PERIOD == 0 || wind.field_is_empty() {
-            let mut occupied = Vec::with_capacity(humidity.occupied_len());
-            humidity.for_each_occupied(|k, _| occupied.push(k));
-            wind.rebuild_field(Some(world), Some(temperature), tick_no, &occupied, None);
+            // Filled sky: seat from the humidity slab. Sparse maps still
+            // collect keys — a half-empty HashMap is cheaper than a box.
+            if !wind.try_rebuild_dense_from_humidity(
+                Some(world),
+                Some(temperature),
+                tick_no,
+                humidity,
+                None,
+            ) {
+                let mut occupied = Vec::with_capacity(humidity.occupied_len());
+                humidity.for_each_occupied(|k, _| occupied.push(k));
+                wind.rebuild_field(Some(world), Some(temperature), tick_no, &occupied, None);
+            }
         }
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
             t.wind_rebuild += t0.elapsed();
