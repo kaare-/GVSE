@@ -1412,6 +1412,49 @@ fn organic_flag_alone_does_not_force_buoyant_rescan() {
 }
 
 #[test]
+fn buried_root_organic_clears_loose_flag() {
+    // Dead roots paint Organic between Sand cells. That used to keep the
+    // chunk in every sticky-loose wake forever and dirty repose seats that
+    // can never slide. After one wake, compost-only chunks must drop
+    // `has_loose`; surface litter must still wake.
+    let mut w = setup_column_world();
+    w.set_cell(2, 1, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(2, 2, Cell::solid(MaterialId::Organic));
+    w.set_cell(2, 3, Cell::solid(MaterialId::Bedrock));
+    // Replace floor sand with bedrock so Organic is the only "loose" cell.
+    for x in 0..(CHUNK_CELLS_W as i32) {
+        if x != 2 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+    }
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_loose);
+    let _ = wake_grains_for_settle(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_loose,
+        "buried compost alone must leave the grain wake"
+    );
+    assert_eq!(
+        w.get_cell(2, 2).map(|c| c.material),
+        Some(MaterialId::Organic),
+        "buried root must stay put"
+    );
+
+    // Surface litter on bedrock still keeps the flag.
+    w.set_cell(4, 1, Cell::solid(MaterialId::Organic));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_loose);
+    let wake = wake_grains_for_settle(&mut w);
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_loose,
+        "surface Organic litter must stay in the wake"
+    );
+    assert!(
+        wake.freefall > 0 || w.chunks[&ChunkCoord::new(0, 0)].has_loose,
+        "surface litter should remain wakeable"
+    );
+}
+
+
+#[test]
 fn falling_leaf_does_not_leave_sky_chunks_in_the_raft_scan() {
     // Same leak as falling snow: a leaf marks every chunk it falls
     // through. After it lands, vacated sky must drop `has_organic`.
