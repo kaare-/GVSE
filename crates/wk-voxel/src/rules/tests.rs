@@ -1792,6 +1792,49 @@ fn grain_falls_through_empty_air() {
 }
 
 #[test]
+fn unsupported_sand_falls_on_tick_when_world_is_quiescent() {
+    // Erosion / dig can leave Air under sand and dirty those cells; the
+    // flow loop then clears dirty without rewriting dry Air. Cadence-gated
+    // wake must still catch hanging sand on a quiet tick — otherwise it
+    // waits up to GRAIN_WAKE_FULL_EVERY for a full sticky scan.
+    // Wake cadence (every 4) with an empty flow halo — the old dirty-only
+    // wake skipped overhangs after dig/erosion cleared their dirty bits.
+    let mut w = setup_column_world();
+    w.tick = 4;
+    // Stone walls so repose cannot slide the grain off-column.
+    for y in 1..=6 {
+        w.set_cell(3, y, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, y, Cell::solid(MaterialId::Stone));
+    }
+    w.set_cell(4, 6, Cell::solid(MaterialId::Sand));
+    clear_all_dirty(&mut w);
+    assert!(plan_active(&w).is_empty(), "fixture must be quiescent");
+    tick(&mut w);
+    assert_ne!(
+        w.get_cell(4, 6).unwrap().material,
+        MaterialId::Sand,
+        "quiescent mid-cadence tick must still grain-fall hanging sand"
+    );
+    // One cell / pass — a few ticks settles onto bedrock.
+    for _ in 0..10 {
+        clear_all_dirty(&mut w);
+        tick(&mut w);
+    }
+    assert_eq!(
+        w.get_cell(4, 1).unwrap().material,
+        MaterialId::Sand,
+        "unsupported sand must settle onto bedrock by gravity"
+    );
+    for y in 2..=6 {
+        assert_ne!(
+            w.get_cell(4, y).unwrap().material,
+            MaterialId::Sand,
+            "sand must not remain hanging at y={y}"
+        );
+    }
+}
+
+#[test]
 fn sparse_grain_plan_skips_the_aabb_hole() {
     use crate::active::ActiveChunk;
     use crate::chunk::{DirtyBits, Rect};
