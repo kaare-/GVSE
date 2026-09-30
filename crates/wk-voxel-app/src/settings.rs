@@ -882,7 +882,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "Night is the sun off. Land skins take the sun; lakes lag via heat capacity (not a darker leak). Humidity reflects sun and blankets the leak. Wet air holds more heat and a rising plume pulls it up. Lapse runs through the 1000-cell weather column (~250 m); tropopause default is y=1000 (920 above sea 80). Sky above that is a thin isothermal lid. 0 tropopause = old linear profile.",
+                        "Night is the sun off. Land skins take the sun; lakes lag via heat capacity (not a darker leak). Humidity reflects sun and blankets the leak. Wet air holds more heat and a rising plume pulls it up. Lapse runs through the 1000-cell weather column (~250 m); tropopause default is y=1000 (860 above sea 140). Sky above that is a thin isothermal lid. 0 tropopause = old linear profile.",
                     );
                     labeled_slider(ui, hash!(), "Sun on ground / step", 0.0..1.5, &mut self.temp.solar_heat_c);
                     labeled_slider(ui, hash!(), "Radiate from ground / step", 0.0..1.5, &mut self.temp.night_cool_c);

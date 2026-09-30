@@ -25,6 +25,19 @@ pub const TROPOSPHERE_TOP_Y: i32 = 1000;
 /// Stratospheric lid stamped above [`TROPOSPHERE_TOP_Y`].
 pub const STRATOSPHERE_CELLS: i32 = CHUNK_CELLS_H as i32;
 
+/// Default sea / water-table line for [`WorldgenParams::default`].
+///
+/// Raising this thickens every solid column (elevations are authored
+/// relative to sea) so land and seabed both carry more stone / mineral
+/// body above bedrock. Keep in sync with the tropopause knee default.
+pub const DEFAULT_SEA_LEVEL_Y: i32 = 140;
+
+/// Bathymetry offsets below sea (cells) for [`continental_surface_y`].
+/// Deeper abyss / slope = deeper ocean lakes without rewriting belts.
+const ABYSS_BELOW_SEA: f32 = 95.0;
+const SLOPE_BELOW_SEA: f32 = 35.0;
+const SHELF_BELOW_SEA: f32 = 4.0;
+
 /// Params driving one worldgen pass.
 ///
 /// Layout (world-x is horizontal, world-y is vertical; +y is up):
@@ -66,7 +79,9 @@ impl Default for WorldgenParams {
             bedrock_floor_y: 0,
             // Higher sea + taller relief; weather column to
             // [`TROPOSPHERE_TOP_Y`], tropopause + a thin strat lid above.
-            sea_level_y: 80,
+            // Surface elev = sea ± belt offset, so this also deepens the
+            // stone / mineral body under land and under the seabed.
+            sea_level_y: DEFAULT_SEA_LEVEL_Y,
             sky_ceiling_y: TROPOSPHERE_TOP_Y + STRATOSPHERE_CELLS,
             // Solid floor barrier — thick enough to read as "the
             // bottom of the world" in the demo.
@@ -128,9 +143,11 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
     let lerp = |a: f32, b: f32, u: f32| a + (b - a) * u;
 
     // Elevation targets — tall relief so land fills more of the view.
-    let abyss = sea_f - 55.0;
-    let slope = sea_f - 18.0;
-    let shelf = sea_f - 2.0;
+    // Abyss / slope sit farther below sea than the old −55 / −18 so the
+    // ocean lakes read as deep cuts while shelf stays a thin drowned lip.
+    let abyss = sea_f - ABYSS_BELOW_SEA;
+    let slope = sea_f - SLOPE_BELOW_SEA;
+    let shelf = sea_f - SHELF_BELOW_SEA;
     let coast = sea_f + 28.0;
     let plains = sea_f + 40.0;
 
@@ -487,11 +504,10 @@ fn body_material(
     let karst = lime_enabled && is_karst_zone_x(x, p.width_cols);
     // Limestone bed: mid-stack stratum when enabled; thicker in karst
     // shelf bands. Toggle off → stone fills that depth instead.
-    // Thicker than it was (was 12..22 outside karst): playtest wanted more
-    // limestone, and a thin bed is also hydraulically uninteresting — the
-    // limestone/stone contact is where the best perching was observed, so a taller
-    // band gives more of it.
-    let (lime_lo, lime_hi) = if karst { (5.0, 38.0) } else { (10.0, 30.0) };
+    // Widened with the deeper default column so the pale mineral band
+    // (and its bentonite/stone contacts) still occupy a readable share
+    // of the thicker stack — not a thin ribbon under a stone ocean.
+    let (lime_lo, lime_hi) = if karst { (5.0, 52.0) } else { (10.0, 45.0) };
 
     // Basement rubble just above the bedrock barrier.
     if above_bedrock < 2 || (above_bedrock < 4 && n < 0.55) {
@@ -549,7 +565,9 @@ fn body_material(
     // A second carbonate band well below the first, so the deep stack is not one
     // uniform stone mass. Real sections repeat: sequences of beds, not a single
     // sandwich. Its contacts give another perching horizon far from the surface.
-    if lime_enabled && d >= lime_hi + 22.0 && d < lime_hi + 40.0 && lens > 0.30 {
+    // Stretched with the deeper column (was +22..+40) so deep mineral beds
+    // remain a meaningful fraction of the thicker stone body.
+    if lime_enabled && d >= lime_hi + 20.0 && d < lime_hi + 55.0 && lens > 0.30 {
         return MaterialId::Limestone;
     }
     // Deep stone cut by connected gravel / fractured stringers — the
@@ -1175,13 +1193,15 @@ mod tests {
 
     fn small_params() -> WorldgenParams {
         // Wide enough for the ring zones to resolve, tall enough that
-        // mountain peaks fit under the sky ceiling.
+        // mountain peaks fit under the sky ceiling. Sea high enough that
+        // the deepened abyss offset still clears bedrock + sand cap
+        // (otherwise stamp clamps and the seam looks shallow).
         WorldgenParams {
             seed: 42,
             width_cols: (CHUNK_CELLS_W as i32) * 10, // 640 cols
             bedrock_floor_y: 0,
-            sea_level_y: 60,
-            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 3, // 192 rows
+            sea_level_y: 110,
+            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 4, // 256 rows
             bedrock_thickness: 8,
             stone_thickness: 8,
             sand_cap_thickness: 2,
@@ -1344,8 +1364,8 @@ mod tests {
                 }
             }
             assert!(
-                water_rows > 20,
-                "seam column x={x} should have deep water, got {water_rows}"
+                water_rows > 50,
+                "seam column x={x} should have deep ocean lake, got {water_rows}"
             );
         }
     }
@@ -1356,8 +1376,8 @@ mod tests {
         let a = continental_surface_y(p.seed, 0, p.sea_level_y, p.width_cols);
         let b = continental_surface_y(p.seed, p.width_cols, p.sea_level_y, p.width_cols);
         assert_eq!(a, b, "x=0 and x=width must agree under wrap");
-        // Both ends deep ocean.
-        assert!(a < p.sea_level_y - 20, "seam should be abyss, got {a}");
+        // Both ends deep ocean (abyss offset ≫ shelf lip).
+        assert!(a < p.sea_level_y - 50, "seam should be abyss, got {a}");
     }
 
     #[test]
