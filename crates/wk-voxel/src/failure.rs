@@ -14,10 +14,12 @@
 //! F3 — overburden compaction: deep wet Clay/Organic exude pore water
 //! upward when σᵥ (or solid-cell count) exceeds a threshold.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
-use crate::active::ActiveChunk;
+use crate::active::{plan_active, ActiveChunk};
 use crate::cell::{
     falls_through_empty_air, grain_max_stable_step, is_competent_rock, is_grain,
     water_capacity_cell, Cell, CellFlags, Sat,
@@ -27,6 +29,13 @@ use crate::cell::water_capacity;
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::move_mycelium_meta;
 use crate::grid::World;
+
+/// Re-scan every `has_solid` chunk on this cadence. Other failure ticks
+/// evaluate the dirty halo (+ orthogonal neighbour chunks) so digs /
+/// flow still wake roofs without paying O(solid-world) every pulse.
+/// Static karst rooms are caught on the full-scan ticks
+/// (docs/VOXEL_FAILURE.md).
+pub const FAILURE_FULL_SCAN_PERIOD: u64 = 8;
 
 /// Minimum relative σᵥ (density-sum/1000) to compact soft sediment.
 /// ≈ 8 cells of mid-density rock (~2.0 each).
@@ -349,14 +358,11 @@ fn is_roof_candidate(material: MaterialId) -> bool {
     material != MaterialId::Air && roof_span_limit_cells(material) < i32::MAX
 }
 
-/// Failure scans loaded chunks that hold a solid.
+/// All loaded chunks that hold a solid (insurance / full-scan path).
 ///
-/// Dirty halos from flow/seepage are often tiny and miss static wet
-/// cliff faces / roofs — so this is not the dirty set. Mid-ocean and
-/// empty sky never host a roof, shear face, or compactable bed;
-/// walking those 64×64s every `FAILURE_EVERY` was leftover.
-/// Occupancy is the source of truth.
-fn regions_for_failure(world: &World) -> Vec<ActiveChunk> {
+/// Mid-ocean and empty sky never host a roof, shear face, or compactable
+/// bed — occupancy is the source of truth.
+fn all_solid_chunk_regions(world: &World) -> Vec<ActiveChunk> {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -370,6 +376,46 @@ fn regions_for_failure(world: &World) -> Vec<ActiveChunk> {
         .collect()
 }
 
+fn push_failure_coords(coords: &mut HashSet<ChunkCoord>, ac: &ActiveChunk) {
+    let c = ac.coord;
+    coords.insert(c);
+    // Neighbours so roof spans that cross a seam still get measured.
+    coords.insert(ChunkCoord::new(c.cx - 1, c.cy));
+    coords.insert(ChunkCoord::new(c.cx + 1, c.cy));
+    coords.insert(ChunkCoord::new(c.cx, c.cy - 1));
+    coords.insert(ChunkCoord::new(c.cx, c.cy + 1));
+}
+
+/// Dirty-driven geotech regions most ticks; full `has_solid` world on
+/// [`FAILURE_FULL_SCAN_PERIOD`].
+///
+/// `wake` should be the dirty plan from **before** the flow loop clears
+/// rects (digs / re-wet / rain). End-of-tick dirty from grain/seepage is
+/// always unioned in via [`plan_active`].
+fn regions_for_failure(world: &World, wake: &[ActiveChunk]) -> Vec<ActiveChunk> {
+    if FAILURE_FULL_SCAN_PERIOD > 0 && world.tick % FAILURE_FULL_SCAN_PERIOD == 0 {
+        return all_solid_chunk_regions(world);
+    }
+    let mut coords: HashSet<ChunkCoord> = HashSet::new();
+    for ac in wake {
+        push_failure_coords(&mut coords, ac);
+    }
+    for ac in plan_active(world) {
+        push_failure_coords(&mut coords, &ac);
+    }
+    if coords.is_empty() {
+        return Vec::new();
+    }
+    let mut list: Vec<ChunkCoord> = coords
+        .into_iter()
+        .filter(|c| world.chunks.get(c).is_some_and(|ch| ch.has_solid))
+        .collect();
+    list.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    list.into_iter()
+        .map(|coord| ActiveChunk::new(coord, crate::chunk::Rect::full()))
+        .collect()
+}
+
 /// F1: collapse ceilings whose cavity span exceeds material capacity.
 ///
 /// Compute-then-apply. Converts roof rock to fallable debris and swaps
@@ -379,7 +425,8 @@ pub fn apply_roof_collapse(world: &mut World, cfg: &FailureConfig) -> u32 {
     if !cfg.enable_roof_collapse || cfg.max_roof_events == 0 {
         return 0;
     }
-    let regions = regions_for_failure(world);
+    let wake = plan_active(world);
+    let regions = regions_for_failure(world, &wake);
     apply_roof_collapse_regions(world, &regions, cfg)
 }
 
@@ -614,7 +661,8 @@ pub fn apply_shear_weaken(
     if !cfg.enable_shear_weaken || cfg.max_shear_events == 0 {
         return 0;
     }
-    let regions = regions_for_failure(world);
+    let wake = plan_active(world);
+    let regions = regions_for_failure(world, &wake);
     apply_shear_weaken_regions(world, &regions, cfg, geotech)
 }
 
@@ -831,7 +879,8 @@ pub fn apply_compaction(
     if !cfg.enable_compaction || cfg.max_compaction_events == 0 {
         return 0;
     }
-    let regions = regions_for_failure(world);
+    let wake = plan_active(world);
+    let regions = regions_for_failure(world, &wake);
     apply_compaction_regions(world, &regions, cfg, geotech)
 }
 
@@ -966,20 +1015,37 @@ impl FailureStats {
 }
 
 /// Run enabled failure passes (F1 roof, F2b shear, F3 compaction).
+///
+/// Uses the current dirty plan as the wake set. Prefer
+/// [`apply_failure_with_wake`] from the tick loop so digs cleared by
+/// flow still wake geotech.
 pub fn apply_failure(
     world: &mut World,
     cfg: &FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) -> FailureStats {
+    let wake = plan_active(world);
+    apply_failure_with_wake(world, cfg, geotech, &wake)
+}
+
+/// Like [`apply_failure`], but regions are planned from `wake` ∪ current
+/// dirty (and a periodic full `has_solid` scan).
+pub fn apply_failure_with_wake(
+    world: &mut World,
+    cfg: &FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+    wake: &[ActiveChunk],
+) -> FailureStats {
+    let regions = regions_for_failure(world, wake);
     let mut stats = FailureStats::default();
     if cfg.enable_roof_collapse {
-        stats.roof = apply_roof_collapse(world, cfg);
+        stats.roof = apply_roof_collapse_regions(world, &regions, cfg);
     }
     if cfg.enable_shear_weaken {
-        stats.shear = apply_shear_weaken(world, cfg, geotech);
+        stats.shear = apply_shear_weaken_regions(world, &regions, cfg, geotech);
     }
     if cfg.enable_compaction {
-        stats.compaction = apply_compaction(world, cfg, geotech);
+        stats.compaction = apply_compaction_regions(world, &regions, cfg, geotech);
     }
     stats
 }
@@ -987,6 +1053,7 @@ pub fn apply_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::active::clear_all_dirty;
     use crate::chunk::ChunkCoord;
     use crate::rules::{apply_grain_fall, apply_grain_repose, tick_with_configs, PerfConfig};
 
@@ -1003,6 +1070,58 @@ mod tests {
         assert!(roof_span_limit_cells(MaterialId::Stone) > 0);
         assert!(roof_span_limit_cells(MaterialId::Stone) < i32::MAX);
         assert_eq!(roof_span_limit_cells(MaterialId::Bedrock), i32::MAX);
+    }
+
+    #[test]
+    fn dirty_wake_skips_unrelated_solid_chunks_off_full_scan() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(2, 0));
+        bed(&mut w, 0, 8);
+        // Distant solid chunk so a full has_solid walk would visit it.
+        w.set_cell(128, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(128, 1, Cell::solid(MaterialId::Stone));
+        // Local sand bridge.
+        w.set_cell(3, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(5, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 1, Cell::air());
+        w.set_cell(3, 2, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 2, Cell::solid(MaterialId::Sand));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Sand));
+        clear_all_dirty(&mut w);
+        // Off the insurance cadence — must not fall back to all solids.
+        w.tick = 1;
+        assert!(FAILURE_FULL_SCAN_PERIOD > 1 && w.tick % FAILURE_FULL_SCAN_PERIOD != 0);
+        assert!(plan_active(&w).is_empty(), "precondition: cleared dirty");
+        let empty = regions_for_failure(&w, &[]);
+        assert!(
+            empty.is_empty(),
+            "no wake and no current dirty → empty region set"
+        );
+        // Dig the ceiling so the bridge column is dirty; wake must include
+        // it (and not need the distant stone chunk).
+        w.touch_dirty(4, 2);
+        let wake = plan_active(&w);
+        assert!(
+            !wake.is_empty(),
+            "touch_dirty must produce a plan_active wake; got {wake:?}"
+        );
+        let regions = regions_for_failure(&w, &wake);
+        let coords: Vec<_> = regions.iter().map(|ac| ac.coord).collect();
+        assert!(
+            coords.contains(&ChunkCoord::new(0, 0)),
+            "dirty wake must cover the dug chunk; wake={wake:?} coords={coords:?}"
+        );
+        assert!(
+            !coords.contains(&ChunkCoord::new(2, 0)),
+            "unrelated solid chunk must stay off the dirty path"
+        );
+        apply_roof_collapse_regions(&mut w, &regions, &FailureConfig::default());
+        assert_eq!(
+            w.get_cell(4, 2).unwrap().material,
+            MaterialId::Air,
+            "sand ceiling in the wake must still collapse"
+        );
     }
 
     #[test]
@@ -1046,7 +1165,7 @@ mod tests {
         w.set_cell(67, 2, Cell::solid(MaterialId::Sand));
         w.set_cell(68, 2, Cell::solid(MaterialId::Sand));
         w.set_cell(69, 2, Cell::solid(MaterialId::Sand));
-        let coords: Vec<_> = regions_for_failure(&w)
+        let coords: Vec<_> = all_solid_chunk_regions(&w)
             .into_iter()
             .map(|ac| ac.coord)
             .collect();

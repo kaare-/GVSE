@@ -97,10 +97,11 @@ pub use event_log::{
     SIM_LOG_DEFAULT_SAMPLE_PERIOD,
 };
 pub use failure::{
-    apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
-    effective_cohesion, face_shear_demand, grain_repose_max_step, pore_wetness, pore_wetness_with,
-    roof_collapse_debris, roof_span_cells, roof_span_limit_cells, shear_weaken_debris,
-    wet_repose_loosens, FailureConfig, FailureStats, COMPACTION_SIGMA_MIN,
+    apply_compaction, apply_failure, apply_failure_with_wake, apply_roof_collapse,
+    apply_shear_weaken, compaction_load_ok, effective_cohesion, face_shear_demand,
+    grain_repose_max_step, pore_wetness, pore_wetness_with, roof_collapse_debris, roof_span_cells,
+    roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig, FailureStats,
+    COMPACTION_SIGMA_MIN, FAILURE_FULL_SCAN_PERIOD,
 };
 pub use fasthash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 pub use fungi::{

@@ -439,9 +439,12 @@ F1/F2 start serial compute-then-apply. When hot, scan via
 across chunk seams for roof spans that cross chunks — either inflate
 halo or serialize span measurement per row.
 
-The insurance walk is occupancy-filtered: `!has_solid` chunks
-(mid-ocean / empty sky) are exact-skip. Occupancy is the source of
-truth. A sand ceiling beside ocean still collapses.
+Most failure pulses use the pre-flow dirty wake (+ orthogonal neighbour
+chunks), unioned with end-of-tick dirty from grain/seepage. A full
+`has_solid` insurance scan runs every `FAILURE_FULL_SCAN_PERIOD` ticks
+so static karst rooms still fail. Mid-ocean / empty sky (`!has_solid`)
+are exact-skip on both paths. Occupancy is the source of truth. A sand
+ceiling beside ocean still collapses.
 
 ## Save / schema
 
