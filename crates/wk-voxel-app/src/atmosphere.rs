@@ -2,6 +2,7 @@
 //!
 //! Design: `docs/SKY.md`. Isolation: wk-voxel + wk-material + macroquad only.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use macroquad::prelude::*;
@@ -14,6 +15,52 @@ use wk_voxel::{
     Humidity, ModuleId, PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H,
     CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH,
 };
+
+/// Reusable 1 px/cell atlas — fill on CPU, one Nearest upload + draw.
+struct PixelAtlas {
+    img: Image,
+    tex: Texture2D,
+}
+
+impl PixelAtlas {
+    fn new(w: u16, h: u16) -> Self {
+        let img = Image::gen_image_color(w.max(1), h.max(1), Color::from_rgba(0, 0, 0, 0));
+        let tex = Texture2D::from_image(&img);
+        tex.set_filter(FilterMode::Nearest);
+        Self { img, tex }
+    }
+
+    fn ensure(&mut self, w: u16, h: u16) {
+        let w = w.max(1);
+        let h = h.max(1);
+        if self.img.width != w || self.img.height != h {
+            *self = Self::new(w, h);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.img.bytes.fill(0);
+    }
+
+    fn draw_scaled(&mut self, dx: f32, dy: f32, dest_w: f32, dest_h: f32) {
+        self.tex.update(&self.img);
+        draw_texture_ex(
+            &self.tex,
+            dx,
+            dy,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(dest_w, dest_h)),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+thread_local! {
+    static SKY_ATLAS: RefCell<Option<PixelAtlas>> = const { RefCell::new(None) };
+    static RIDGE_ATLAS: RefCell<Option<PixelAtlas>> = const { RefCell::new(None) };
+}
 
 pub const FAR_RIDGE_PARALLAX: f32 = 0.12;
 pub const NEAR_RIDGE_PARALLAX: f32 = 0.32;
@@ -809,14 +856,23 @@ pub fn draw_sky(
     _look: &AtmosphereLookConfig,
 ) {
     let dn = day_night_factor_cfg(tick, climate);
-    const BANDS: i32 = 36;
-    for i in 0..BANDS {
-        let y0 = sh * (i as f32) / BANDS as f32;
-        let h = y0 + sh / BANDS as f32;
-        let height_01 = (i as f32 + 0.5) / BANDS as f32;
-        let [r, g, b] = sky_rgb_at_height_weather(dn, height_01, weather);
-        draw_rectangle(0.0, y0, sw, h - y0 + 1.0, Color::from_rgba(r, g, b, 255));
-    }
+    const BANDS: u16 = 36;
+    // 1×N gradient stretched once — avoids O(bands) fullscreen rects.
+    SKY_ATLAS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(PixelAtlas::new(1, BANDS));
+        }
+        let atlas = slot.as_mut().unwrap();
+        atlas.ensure(1, BANDS);
+        let pixels = atlas.img.get_image_data_mut();
+        for i in 0..BANDS {
+            let height_01 = (i as f32 + 0.5) / BANDS as f32;
+            let [r, g, b] = sky_rgb_at_height_weather(dn, height_01, weather);
+            pixels[i as usize] = [r, g, b, 255];
+        }
+        atlas.draw_scaled(0.0, 0.0, sw, sh);
+    });
 
     // Soft vapour veil — humidity-led mood wash (kept light to avoid blue cast).
     let veil = (weather.humidity_mean * 0.45 + weather.precip_cover * 0.18).clamp(0.0, 0.50);
@@ -1163,48 +1219,74 @@ fn draw_ridge_band(
     // Lag opposite camera so distant layers move slower in X and Y.
     let lag_x = cam_x * (1.0 - parallax);
     let lag_y = cam_y * (1.0 - parallax);
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    let _ = sea_level_y;
+    let _ = (sea_level_y, wrap_x, width_cols);
     let n = profile.len() as i32;
-    if n <= 0 {
+    if n <= 0 || cell_px <= 0.0 {
         return;
     }
     let feather = feather_cells.max(2);
     let feather_px = feather as f32 * cell_px;
     let crest_w = crest_blend.clamp(0.0, 1.0);
     let far_w = far_into_crest.clamp(0.0, 1.0);
+    let fr = (fill.r * 255.0) as u8;
+    let fg = (fill.g * 255.0) as u8;
+    let fb = (fill.b * 255.0) as u8;
 
-    for &x_copy in x_copies {
-        for (i, &surf_y) in profile.iter().enumerate() {
-            let x = i as i32 + x_copy * width_cols;
-            let sx = origin_x + x as f32 * cell_px + lag_x;
-            if sx + cell_px < 0.0 || sx > sw {
-                continue;
-            }
-            // Neighbour blend softens the jagged crest line.
-            let i0 = i as i32;
+    // Viewport unwrapped columns only — world width must not size the atlas.
+    let x0_vis = ((0.0 - origin_x - lag_x) / cell_px).floor() as i32;
+    let x1_vis = ((sw - origin_x - lag_x) / cell_px).ceil() as i32 + 1;
+    if x1_vis <= x0_vis {
+        return;
+    }
+
+    // Screen-visible visual-y band (cell top at origin_y - (y-bedrock)*cell_px + lag_y).
+    // Extending the solid body to the viewport bottom (not bedrock) avoids the
+    // transparency shelf through dug holes / dropped oceans.
+    let y_lo = bedrock_floor_y + ((origin_y + lag_y - sh) / cell_px).floor() as i32 - 1;
+    let y_hi = bedrock_floor_y + ((origin_y + lag_y) / cell_px).ceil() as i32 + feather + 1;
+
+    let mut y_max = y_lo + 1;
+    let mut y_min = y_hi;
+    for x_unwrapped in x0_vis..x1_vis {
+        let i0 = x_unwrapped.rem_euclid(n);
+        let surf_y = profile[i0 as usize];
+        let yl = profile[((i0 - 1).rem_euclid(n)) as usize];
+        let yr = profile[((i0 + 1).rem_euclid(n)) as usize];
+        let surf_soft = ((surf_y as i64 + yl as i64 + yr as i64) / 3) as i32;
+        let y_vis =
+            bedrock_floor_y + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
+        y_max = y_max.max(y_vis + 1);
+        y_min = y_min.min(y_vis - feather);
+    }
+    y_min = y_min.max(y_lo);
+    y_max = y_max.min(y_hi).max(y_min + 1);
+
+    let atlas_w = (x1_vis - x0_vis).clamp(1, 4096) as u16;
+    let atlas_h = (y_max - y_min).clamp(1, 4096) as u16;
+
+    RIDGE_ATLAS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(PixelAtlas::new(atlas_w, atlas_h));
+        }
+        let atlas = slot.as_mut().unwrap();
+        atlas.ensure(atlas_w, atlas_h);
+        atlas.clear();
+        let w_u = atlas_w as usize;
+        let h_u = atlas_h as usize;
+        let pixels = atlas.img.get_image_data_mut();
+
+        for ax in 0..w_u {
+            let x_unwrapped = x0_vis + ax as i32;
+            let i0 = x_unwrapped.rem_euclid(n);
+            let surf_y = profile[i0 as usize];
             let yl = profile[((i0 - 1).rem_euclid(n)) as usize];
             let yr = profile[((i0 + 1).rem_euclid(n)) as usize];
             let surf_soft = ((surf_y as i64 + yl as i64 + yr as i64) / 3) as i32;
-            let y_vis = bedrock_floor_y + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
+            let y_vis =
+                bedrock_floor_y + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
             let top_sy = origin_y - (y_vis - bedrock_floor_y) as f32 * cell_px + lag_y;
-            // Extend solid fill to the bottom of the viewport. Stopping at
-            // `origin_y + lag_y` (parallax-lagged bedrock line) left a hard
-            // transparency shelf — visible through dug holes, a dropped
-            // ocean, or heatmap-only / no-landscape.
-            let bottom_sy = sh;
-            if top_sy > sh {
-                continue;
-            }
 
-            // Opaque body below the feather zone (mid-ground stays solid).
-            let body_top = (top_sy + feather_px).min(bottom_sy);
-            let body_h = (bottom_sy - body_top).max(0.0);
-            if body_h > 0.5 {
-                draw_rectangle(sx, body_top, cell_px + 0.5, body_h, fill);
-            }
-
-            // Crest target: sky, or far-plate color when that plate rises behind us.
             let mut edge_rgb = sky_rgb;
             if let Some(ref b) = behind {
                 let bn = b.profile.len() as i32;
@@ -1226,10 +1308,11 @@ fn draw_ridge_band(
                 }
             }
 
-            let fr = (fill.r * 255.0) as u8;
-            let fg = (fill.g * 255.0) as u8;
-            let fb = (fill.b * 255.0) as u8;
             for k in 0..feather {
+                let wy = y_vis - k;
+                if wy < y_min || wy >= y_max {
+                    continue;
+                }
                 let t = (k as f32 + 0.5) / feather as f32; // 0 tip → 1 body
                 let w = (1.0 - t) * crest_w;
                 let rgb = [
@@ -1237,20 +1320,35 @@ fn draw_ridge_band(
                     lerp_u8(fg, edge_rgb[1], w),
                     lerp_u8(fb, edge_rgb[2], w),
                 ];
-                let y0 = top_sy + k as f32 * cell_px;
-                if y0 > sh || y0 + cell_px < 0.0 {
-                    continue;
+                let img_y = (y_max - 1 - wy) as usize;
+                if img_y < h_u {
+                    pixels[img_y * w_u + ax] = [rgb[0], rgb[1], rgb[2], 255];
                 }
-                draw_rectangle(
-                    sx,
-                    y0,
-                    cell_px + 0.5,
-                    cell_px + 0.5,
-                    Color::from_rgba(rgb[0], rgb[1], rgb[2], 255),
-                );
+            }
+            let body_top_y = (y_vis - feather).min(y_max - 1);
+            if body_top_y >= y_min {
+                for wy in y_min..=body_top_y {
+                    let img_y = (y_max - 1 - wy) as usize;
+                    if img_y < h_u {
+                        pixels[img_y * w_u + ax] = [fr, fg, fb, 255];
+                    }
+                }
             }
         }
-    }
+
+        let dest_w = atlas_w as f32 * cell_px;
+        let dest_h = atlas_h as f32 * cell_px;
+        let atlas_top = origin_y - (y_max - bedrock_floor_y) as f32 * cell_px + lag_y;
+        let atlas_left = origin_x + x0_vis as f32 * cell_px + lag_x;
+        if atlas_left + dest_w < 0.0
+            || atlas_left > sw
+            || atlas_top > sh
+            || atlas_top + dest_h < 0.0
+        {
+            return;
+        }
+        atlas.draw_scaled(atlas_left, atlas_top, dest_w, dest_h);
+    });
 }
 
 /// Humidity tile diagnostic (front of terrain).
