@@ -423,6 +423,9 @@ fn tick_with_life_inner(
     let mut local = PhysicsTimings::default();
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Snapshot dirty before the flow loop clears it so geotech still
+    // sees digs / re-wets / rain that didn't rewrite those cells.
+    let geotech_wake = plan_active(world);
     // Underground is not time-critical: pore water that has already entered
     // a material may lag the surface. The lake-bed / seam wakes ride the
     // same cadence as seepage itself — they only exist to re-dirty pore
@@ -784,13 +787,14 @@ fn tick_with_life_inner(
     mass_checkpoint!("competent bodies");
 
     // Geotech: roof / overhang collapse after grain has seated.
-    // Cadence-gated — full-grid ~1.3 ms/call on Super-Server; every 4
-    // ticks keeps cliffs responding without owning the quiet-world budget.
-    // Occupancy skips !has_solid (mid-ocean / empty sky).
+    // Cadence-gated — every 4 ticks. Most pulses use the pre-flow dirty
+    // wake (+ neighbours); a full has_solid scan runs on
+    // FAILURE_FULL_SCAN_PERIOD so static karst rooms still fail.
     const FAILURE_EVERY: u64 = 4;
     let failure_stats = if world.tick % FAILURE_EVERY == 0 {
         let t0 = profile.then(Instant::now);
-        let stats = crate::failure::apply_failure(world, failure, geotech);
+        let stats =
+            crate::failure::apply_failure_with_wake(world, failure, geotech, &geotech_wake);
         if let (true, Some(t0)) = (profile, t0) {
             local.failure += t0.elapsed();
         }
