@@ -7452,11 +7452,13 @@ fn punch_continues_through_organic_sandwiched_on_sunk_rock() {
 fn demo_ocean_loose_rock_punches_organic_mat() {
     use crate::worldgen::{stamp_world, WorldgenParams};
     let mut w = World::new(9);
-    let p = WorldgenParams {
+    let mut p = WorldgenParams {
         width_cols: (CHUNK_CELLS_W as i32) * 4,
-        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 2,
         ..WorldgenParams::default()
     };
+    // Sky must clear sea — default sea is now 140, so a 128-row ceiling
+    // stamped no water column at all.
+    p.sky_ceiling_y = p.sea_level_y + (CHUNK_CELLS_H as i32) * 2;
     stamp_world(&mut w, &p);
     let y_surf = p.sea_level_y;
     let mut ox = None;

@@ -196,7 +196,11 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
         abyss + n(41) * 0.5
     };
 
-    elev.round() as i32
+    // Never author a surface below the world floor. Deep abyss offsets
+    // with a low custom sea would otherwise return negative y, and
+    // [`live_surface_at`] treats an unloaded negative hint as gospel
+    // (no roof probe), poisoning free-air / crest-hoist for whole columns.
+    elev.round().max(0.0) as i32
 }
 
 /// Pick a solid body material for cell `(x, y)` under the sand cap.
