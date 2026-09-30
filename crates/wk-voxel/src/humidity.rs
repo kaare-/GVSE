@@ -2470,16 +2470,23 @@ mod tests {
         );
         let mut hx_climb = 0;
         let mut best = 0.0f32;
+        let tc = 4;
+        // Land columns only — deep abyss→slope lofts hard, but flattening
+        // an underwater "hill" cannot change the live profile.
         for hx in 0..(p.width_cols / 4) {
+            let gx = hx * tc + tc / 2;
+            let surf = continental_surface_y(p.seed, gx, p.sea_level_y, p.width_cols);
+            if surf < p.sea_level_y {
+                continue;
+            }
             let l = wind.orographic_lift(None, hx);
             if l > best {
                 best = l;
                 hx_climb = hx;
             }
         }
-        assert!(best > 1e-4, "seed profile should loft somewhere, got {best}");
+        assert!(best > 1e-4, "seed profile should loft on land, got {best}");
 
-        let tc = 4;
         let gx = hx_climb * tc + tc / 2;
         let sign = if wind.climate_vx >= 0.0 { 1 } else { -1 };
         let gx_dn = gx + sign * tc;

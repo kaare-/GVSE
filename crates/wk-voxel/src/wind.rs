@@ -2030,16 +2030,28 @@ mod tests {
         );
         let mut hx_peak = 0;
         let mut best = 0.0f32;
+        let tc = 4;
+        // Pick a *land* climb. Deep abyss→slope is a larger ascent now, but
+        // that column sits underwater so a sea..=hint stamp is empty.
         for hx in 0..(p.width_cols / 4) {
+            let gx = hx * tc + tc / 2;
+            let surf = crate::worldgen::continental_surface_y(
+                p.seed,
+                gx,
+                p.sea_level_y,
+                p.width_cols,
+            );
+            if surf < p.sea_level_y {
+                continue;
+            }
             let a = wind.ascent_cells(None, hx);
             if a > best {
                 best = a;
                 hx_peak = hx;
             }
         }
-        assert!(best > 5.0, "need a seed-profile climb, got {best}");
+        assert!(best > 5.0, "need a seed-profile land climb, got {best}");
 
-        let tc = 4;
         let gx = hx_peak * tc + tc / 2;
         let hint = crate::worldgen::continental_surface_y(
             p.seed,

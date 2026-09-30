@@ -169,10 +169,11 @@ fn default_wind_mix() -> f32 {
 fn default_humid_heat_scale() -> f32 {
     1.0
 }
-/// Knee at [`crate::worldgen::TROPOSPHERE_TOP_Y`] when sea is 80
-/// (y=1000 ≈ 250 m). Peaks stay in the lapse; the lid sits above that.
+/// Knee at [`crate::worldgen::TROPOSPHERE_TOP_Y`] relative to the
+/// default sea ([`crate::worldgen::DEFAULT_SEA_LEVEL_Y`]). Peaks stay
+/// in the lapse; the lid sits above that.
 fn default_tropopause_elev_cells() -> i32 {
-    (crate::worldgen::TROPOSPHERE_TOP_Y - 80).max(1)
+    (crate::worldgen::TROPOSPHERE_TOP_Y - crate::worldgen::DEFAULT_SEA_LEVEL_Y).max(1)
 }
 fn default_strat_lapse_c() -> f32 {
     0.0

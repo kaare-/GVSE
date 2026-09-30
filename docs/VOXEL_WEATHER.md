@@ -415,7 +415,7 @@ near land (`water_night_cool_scale` 0.70), and only 12 water cells add stack
 capacity. Lakes stay a buffer. Land skins lead the day.
 
 Air lapse follows the tile's own height up to a **tropopause knee**
-(`tropopause_elev_cells`, default 920 above sea 80 → **y = 1000**). One cell
+(`tropopause_elev_cells`, default 860 above sea 140 → **y = 1000**). One cell
 is 0.25 m, so that weather column is only **~250 m** — coarse, but it keeps
 peaks and climatic zones in the lapse instead of flattening halfway up.
 Above the knee the profile is a weak stratospheric slope (default 0 —
