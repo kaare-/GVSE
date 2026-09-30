@@ -603,13 +603,17 @@ fn tick_with_life_inner(
     // Re-wake unsupported grains and steep cliff faces. Cadence-gated:
     // full sticky-loose scan every 16 ticks; dirty-halo wake every 4.
     // Tick 0 always full-scans so save-load / first frame catch orphans.
+    // Quiet water (empty flow halo) also takes the sticky scan: dig/erosion
+    // can leave Air under sand then clear that dirty without rewriting the
+    // seat — a dirty-halo wake would see nothing and hang the overhang
+    // until the period-16 full pass (#143).
     const GRAIN_WAKE_EVERY: u64 = 4;
     const GRAIN_WAKE_FULL_EVERY: u64 = 16;
     let mut raft_cargo_seen = 0u32;
     let mut did_wake = false;
     if world.tick % GRAIN_WAKE_EVERY == 0 {
         let t0 = profile.then(Instant::now);
-        let wake = if world.tick % GRAIN_WAKE_FULL_EVERY == 0 {
+        let wake = if world.tick % GRAIN_WAKE_FULL_EVERY == 0 || flow_active.is_empty() {
             super::grain::wake_grains_for_settle(world)
         } else {
             let halo = filter_loose_regions(world, &flow_active);
