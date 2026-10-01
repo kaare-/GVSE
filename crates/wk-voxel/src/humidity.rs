@@ -3439,21 +3439,13 @@ mod convection_tests {
         use crate::chunk::ChunkCoord;
         use crate::grid::World;
         use crate::wind::Wind;
-        use crate::worldgen::WorldgenParams;
         use wk_material::MaterialId;
 
-        let p = WorldgenParams::default();
-        let wind = Wind::climate(
-            4,
-            0.0,
-            p.seed,
-            p.width_cols,
-            p.sea_level_y,
-            p.bedrock_floor_y,
-            p.sky_ceiling_y,
-            false,
-        );
-        let mut world = World::new(p.seed);
+        // Short fixture column — do not pull DEFAULT_SEA_LEVEL_Y (seed
+        // hint would sit far above the stamped bedrock and ignore the pond).
+        let sea = 8;
+        let wind = Wind::climate(4, 0.0, 1, 64, sea, 0, 64, false);
+        let mut world = World::new(1);
         world.ensure_chunk(ChunkCoord::new(0, 0));
         for x in 0..16 {
             world.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
