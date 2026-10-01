@@ -30,7 +30,7 @@ pub const STRATOSPHERE_CELLS: i32 = CHUNK_CELLS_H as i32;
 /// Raising this thickens every solid column (elevations are authored
 /// relative to sea) so land and seabed both carry more stone / mineral
 /// body above bedrock. Keep in sync with the tropopause knee default.
-pub const DEFAULT_SEA_LEVEL_Y: i32 = 140;
+pub const DEFAULT_SEA_LEVEL_Y: i32 = 240;
 
 /// Bathymetry offsets below sea (cells) for [`continental_surface_y`].
 /// Deeper abyss / slope = deeper ocean lakes without rewriting belts.

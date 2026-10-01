@@ -2873,17 +2873,18 @@ mod tests {
 
     #[test]
     fn buried_bedrock_ignores_night_air_snap() {
-        let p = WorldgenParams::default();
-        let sea = p.sea_level_y;
+        // Pin sea to the stamped column — default sea sits far above this
+        // short fixture and leaves the seed crest unloaded.
+        let sea: i32 = 40;
         let x0: i32 = 8;
         let mut world = World::new(3);
         fill_buried_rock(&mut world, x0, sea, 24);
         let mut t = Temperature::with_world_bounds(
             4,
             0,
-            p.bedrock_floor_y,
+            0,
             32,
-            p.sky_ceiling_y,
+            128,
             1,
             32,
             sea,
@@ -2894,9 +2895,10 @@ mod tests {
         }
         t.config.base_temp_c = -20.0;
         t.config.diffuse_alpha = 0.0;
-        let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
-        // One climate "night" worth of thermal steps.
-        for i in 0..8 {
+        let h = Humidity::with_world_bounds(4, 0, 0, 32, 128);
+        // Several climate "night" steps so sky air can fall well below the
+        // buried start temp (gap assertion is about insulation, not geo).
+        for i in 0..24 {
             t.step(
                 Some(&world),
                 &h,
@@ -2909,7 +2911,7 @@ mod tests {
         let air_y = sea + 20;
         let air_t = t.at_cell(x0 + 1, air_y);
         assert!(
-            deep_t > 12.0,
+            deep_t > 18.0,
             "buried bedrock must not drop with night air (deep={deep_t:.1})"
         );
         assert!(
