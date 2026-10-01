@@ -3781,8 +3781,11 @@ mod tests {
         let sea = 24;
         let mut world = World::new(11);
         // Two adjacent free-water tiles at hy=5 (y 20..23), air above.
+        // Load sky above seed mountain hints (sea + plains + ridges) so
+        // column_surface_y_estimate walks down to the lake instead of
+        // treating an unloaded crest as the skin (which skips wind drift).
         for x in 0i32..12 {
-            for y in 0i32..=20 {
+            for y in (0i32..=400).step_by(crate::chunk::CHUNK_CELLS_H) {
                 world.ensure_chunk(ChunkCoord::new(
                     x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
                     y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),

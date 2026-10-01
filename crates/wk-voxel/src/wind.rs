@@ -2563,8 +2563,10 @@ mod tests {
 
         let sea: i32 = 16;
         let mut w = crate::grid::World::new(3);
-        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
-        for x in 0..32 {
+        // Stamp past the occupied halo (hx≤8 → gx≤34) and load sky above
+        // the seed mountain hints so live_surface walks the flat bed.
+        load_sky_so_live_surface_can_walk(&mut w, 48, 400);
+        for x in 0..48 {
             for y in 0..=sea {
                 w.set_cell(x, y, Cell::solid(MaterialId::Stone));
             }
