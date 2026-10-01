@@ -32,11 +32,21 @@ pub const STRATOSPHERE_CELLS: i32 = CHUNK_CELLS_H as i32;
 /// body above bedrock. Keep in sync with the tropopause knee default.
 pub const DEFAULT_SEA_LEVEL_Y: i32 = 240;
 
-/// Bathymetry offsets below sea (cells) for [`continental_surface_y`].
-/// Deeper abyss / slope = deeper ocean lakes without rewriting belts.
-const ABYSS_BELOW_SEA: f32 = 95.0;
-const SLOPE_BELOW_SEA: f32 = 35.0;
-const SHELF_BELOW_SEA: f32 = 4.0;
+/// Bathymetry / land offsets (cells) for [`continental_surface_y`].
+///
+/// Sized for [`DEFAULT_SEA_LEVEL_Y`]: abyss stays above bedrock with a
+/// thick mineral body under the seabed, and mountain peaks stay under
+/// [`TROPOSPHERE_TOP_Y`]. Raising sea alone used to leave the same
+/// shallow −95 lakes and +72 ridges — these fill the taller column.
+const ABYSS_BELOW_SEA: f32 = 180.0;
+const SLOPE_BELOW_SEA: f32 = 70.0;
+const SHELF_BELOW_SEA: f32 = 6.0;
+const COAST_ABOVE_SEA: f32 = 48.0;
+const PLAINS_ABOVE_SEA: f32 = 72.0;
+/// Gaussian ridge amplitudes on the plains (mountain core).
+const RIDGE_AMP_A: f32 = 100.0;
+const RIDGE_AMP_B: f32 = 170.0;
+const RIDGE_AMP_C: f32 = 120.0;
 
 /// Params driving one worldgen pass.
 ///
@@ -142,14 +152,13 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
     };
     let lerp = |a: f32, b: f32, u: f32| a + (b - a) * u;
 
-    // Elevation targets — tall relief so land fills more of the view.
-    // Abyss / slope sit farther below sea than the old −55 / −18 so the
-    // ocean lakes read as deep cuts while shelf stays a thin drowned lip.
+    // Elevation targets — deep ocean lakes + high inland ridges, using
+    // the room under a high default sea / tall sky ceiling.
     let abyss = sea_f - ABYSS_BELOW_SEA;
     let slope = sea_f - SLOPE_BELOW_SEA;
     let shelf = sea_f - SHELF_BELOW_SEA;
-    let coast = sea_f + 28.0;
-    let plains = sea_f + 40.0;
+    let coast = sea_f + COAST_ABOVE_SEA;
+    let plains = sea_f + PLAINS_ABOVE_SEA;
 
     // Ring zones as fractions of width. Symmetric: ocean at both
     // ends, mountains in the middle.
@@ -182,8 +191,10 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
         let peak = |center: f32, width: f32, amp: f32| {
             amp * (-(u - center) * (u - center) / (2.0 * width * width)).exp()
         };
-        let ridges = peak(0.25, 0.12, 48.0) + peak(0.55, 0.14, 72.0) + peak(0.80, 0.11, 56.0);
-        plains + ridges + n(36) * 0.7
+        let ridges = peak(0.25, 0.12, RIDGE_AMP_A)
+            + peak(0.55, 0.14, RIDGE_AMP_B)
+            + peak(0.80, 0.11, RIDGE_AMP_C);
+        plains + ridges + n(36) * 1.2
     } else if t < 0.70 {
         lerp(plains, coast, smoothstep(0.60, 0.70, t)) + n(37) * 0.6
     } else if t < 0.78 {
@@ -1196,16 +1207,15 @@ mod tests {
     use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 
     fn small_params() -> WorldgenParams {
-        // Wide enough for the ring zones to resolve, tall enough that
-        // mountain peaks fit under the sky ceiling. Sea high enough that
-        // the deepened abyss offset still clears bedrock + sand cap
-        // (otherwise stamp clamps and the seam looks shallow).
+        // Wide enough for the ring zones to resolve. Sea high enough that
+        // the deep abyss offset still clears bedrock + sand cap; sky tall
+        // enough for the scaled mountain ridges under the ceiling.
         WorldgenParams {
             seed: 42,
             width_cols: (CHUNK_CELLS_W as i32) * 10, // 640 cols
             bedrock_floor_y: 0,
-            sea_level_y: 110,
-            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 4, // 256 rows
+            sea_level_y: 200,
+            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 8, // 512 rows
             bedrock_thickness: 8,
             stone_thickness: 8,
             sand_cap_thickness: 2,
@@ -1368,7 +1378,7 @@ mod tests {
                 }
             }
             assert!(
-                water_rows > 50,
+                water_rows > 120,
                 "seam column x={x} should have deep ocean lake, got {water_rows}"
             );
         }
@@ -1381,7 +1391,41 @@ mod tests {
         let b = continental_surface_y(p.seed, p.width_cols, p.sea_level_y, p.width_cols);
         assert_eq!(a, b, "x=0 and x=width must agree under wrap");
         // Both ends deep ocean (abyss offset ≫ shelf lip).
-        assert!(a < p.sea_level_y - 50, "seam should be abyss, got {a}");
+        assert!(a < p.sea_level_y - 120, "seam should be abyss, got {a}");
+    }
+
+    #[test]
+    fn default_profile_has_deep_lakes_and_high_mountains() {
+        let p = WorldgenParams::default();
+        let seam = continental_surface_y(p.seed, 0, p.sea_level_y, p.width_cols);
+        let lake_depth = p.sea_level_y - seam;
+        assert!(
+            lake_depth >= 160,
+            "default ocean seam should be a deep lake (depth={lake_depth})"
+        );
+        assert!(
+            seam > p.bedrock_floor_y + p.bedrock_thickness + p.sand_cap_thickness,
+            "abyss must leave a rock body under the seabed (seam={seam})"
+        );
+        let mut peak = i32::MIN;
+        for x in 0..p.width_cols {
+            peak = peak.max(continental_surface_y(
+                p.seed,
+                x,
+                p.sea_level_y,
+                p.width_cols,
+            ));
+        }
+        let rise = peak - p.sea_level_y;
+        assert!(
+            rise >= 200,
+            "default mountain core should rise high above sea (rise={rise}, peak={peak})"
+        );
+        assert!(
+            peak < p.sky_ceiling_y,
+            "peaks must fit under the sky ceiling ({peak} vs {})",
+            p.sky_ceiling_y
+        );
     }
 
     #[test]
