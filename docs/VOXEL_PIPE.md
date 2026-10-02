@@ -353,6 +353,17 @@ Those were real destroy bugs but intermittent — they do not explain a
 bed soak / throughflow / H export). See
 [`VOXEL_WATER.md`](VOXEL_WATER.md) § Mass inventory.
 
+### HUD `sat=` / save-load expand
+
+The steam HUD `sat=` is **`pipe_mass_sat` = (live + residual) /
+`pipe_expand`**, not free+pore cell water. Units are stored at the
+saved `world.pipe_expand`; Tab `phase_expansion_drive` is **not** in
+the snapshot. Loading a 192-expand soak under a restarted default of
+96 used to overwrite expand on the first motor tick and re-read the
+same book at half scale — HUD sat jumped ~2× (e.g. 8M → 16M) with no
+real mint. Fix: `rescale_pipe_book` whenever expand changes, and F9
+load syncs Tab expand from `world.pipe_expand`.
+
 ## Tunables (`SteamConfig`)
 
 | Knob | Default | Meaning |
