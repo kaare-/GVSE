@@ -426,6 +426,11 @@ async fn main() {
                         scene = Scene::from_snapshot(snap);
                         settings.on_world_reseed(&scene.params);
                         settings.sync_caps_from_organisms(&scene.organisms);
+                        // Pipe units are saved at `world.pipe_expand`. Tab
+                        // steam settings are not — sync so the first motor
+                        // tick does not reinterpret the book at default 96.
+                        settings.steam.phase_expansion_drive =
+                            scene.world.pipe_expand.max(1);
                         inspect = None;
                         let msg = format!("Loaded {}", path.display());
                         terrain.status = msg.clone();
