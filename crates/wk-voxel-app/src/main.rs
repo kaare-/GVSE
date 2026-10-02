@@ -452,6 +452,7 @@ async fn main() {
             let params = settings.draft_world_params(&scene.params);
             scene = Scene::new(params);
             settings.on_world_reseed(&scene.params);
+            ridges.invalidate();
             inspect = None;
             terrain.status = format!(
                 "Regenerated {}×{} (sea={})",
@@ -479,6 +480,7 @@ async fn main() {
                     ..scene.params
                 });
                 settings.on_world_reseed(&scene.params);
+                ridges.invalidate();
                 inspect = None;
             }
             if is_key_pressed(KeyCode::C) {

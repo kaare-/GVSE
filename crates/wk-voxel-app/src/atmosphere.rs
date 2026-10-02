@@ -65,6 +65,10 @@ thread_local! {
 pub const FAR_RIDGE_PARALLAX: f32 = 0.12;
 pub const NEAR_RIDGE_PARALLAX: f32 = 0.32;
 const RIDGE_REFRESH_TICKS: u64 = 30;
+/// Column height the far/near squash constants were tuned for (pre-deep sea).
+const RIDGE_REF_COL_H: f32 = 320.0;
+/// Ring width the lowpass windows were tuned for (16×64 default).
+const RIDGE_REF_WIDTH: i32 = 1024;
 const MILD_TEMP_C: f32 = 18.0;
 
 /// Live-tunable sky / ridge / cloud cosmetics (Tab → Climate → Sky look).
@@ -127,13 +131,37 @@ impl Default for AtmosphereLookConfig {
 }
 
 /// Cached dual-parallax silhouettes derived from live surface heights.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RidgeSilhouette {
     pub width_cols: i32,
     pub far: Vec<i32>,
     pub near: Vec<i32>,
+    /// Vertical squash applied when drawing the far plate (depth-scaled).
+    pub far_squash: f32,
+    /// Vertical squash applied when drawing the mid (near) plate.
+    pub near_squash: f32,
+    bedrock_floor_y: i32,
+    sky_ceiling_y: i32,
+    sea_level_y: i32,
     last_tick: u64,
     last_seed: u64,
+}
+
+impl Default for RidgeSilhouette {
+    fn default() -> Self {
+        Self {
+            width_cols: 0,
+            far: Vec::new(),
+            near: Vec::new(),
+            far_squash: 0.78,
+            near_squash: 0.90,
+            bedrock_floor_y: 0,
+            sky_ceiling_y: 0,
+            sea_level_y: 0,
+            last_tick: 0,
+            last_seed: 0,
+        }
+    }
 }
 
 impl RidgeSilhouette {
@@ -158,6 +186,9 @@ impl RidgeSilhouette {
     ) {
         let due = self.far.is_empty()
             || self.width_cols != width_cols
+            || self.bedrock_floor_y != bedrock_floor_y
+            || self.sky_ceiling_y != sky_ceiling_y
+            || self.sea_level_y != sea_level_y
             || self.last_seed != seed
             || tick.saturating_sub(self.last_tick) >= RIDGE_REFRESH_TICKS;
         if !due {
@@ -175,11 +206,41 @@ impl RidgeSilhouette {
                 width_cols,
             ));
         }
-        self.far = lowpass_wrap(&raw, 8);
-        self.near = lowpass_wrap(&raw, 3);
+        // Wider rings need a wider blur so the far plate stays a soft echo,
+        // not a 1:1 copy of the foreground profile.
+        self.far = lowpass_wrap(&raw, ridge_lowpass_half(false, width_cols));
+        self.near = lowpass_wrap(&raw, ridge_lowpass_half(true, width_cols));
+        self.far_squash = ridge_y_squash(false, bedrock_floor_y, sky_ceiling_y);
+        self.near_squash = ridge_y_squash(true, bedrock_floor_y, sky_ceiling_y);
         self.width_cols = width_cols;
+        self.bedrock_floor_y = bedrock_floor_y;
+        self.sky_ceiling_y = sky_ceiling_y;
+        self.sea_level_y = sea_level_y;
         self.last_tick = tick;
         self.last_seed = seed;
+    }
+}
+
+/// Vertical squash for mid/far plates. Tuned at [`RIDGE_REF_COL_H`]; deeper
+/// maps compress a little so the background does not tower with the FG.
+fn ridge_y_squash(near: bool, bedrock_floor_y: i32, sky_ceiling_y: i32) -> f32 {
+    let base = if near { 0.90 } else { 0.78 };
+    let h = (sky_ceiling_y - bedrock_floor_y).max(1) as f32;
+    // Soft: at 320 cells → 1.0; at ~1064 (default deep map) → ~0.69.
+    let depth_k = (0.55 + 0.45 * (RIDGE_REF_COL_H / h).clamp(0.0, 1.0)).clamp(0.55, 1.0);
+    (base * depth_k).clamp(0.35, 1.0)
+}
+
+/// Lowpass half-window in columns. Scales with ring width so a 32-chunk
+/// world does not keep the same 8-cell blur tuned for 16 chunks.
+fn ridge_lowpass_half(near: bool, width_cols: i32) -> i32 {
+    let base = if near { 3 } else { 8 };
+    let scaled =
+        (i64::from(base) * i64::from(width_cols.max(1)) / i64::from(RIDGE_REF_WIDTH)) as i32;
+    if near {
+        scaled.clamp(2, 24)
+    } else {
+        scaled.clamp(4, 48)
     }
 }
 
@@ -1044,7 +1105,8 @@ fn celestial_far_reveal(
             return if cy > sh * 0.78 { 0.0 } else { 1.0 };
         };
         let surf = ridges.far[idx.min(ridges.far.len() - 1)];
-        let y_vis = bedrock_floor_y + ((surf - bedrock_floor_y) as f32 * 0.78) as i32;
+        let squash = ridges.far_squash;
+        let y_vis = bedrock_floor_y + ((surf - bedrock_floor_y) as f32 * squash) as i32;
         origin_y - (y_vis - bedrock_floor_y) as f32 * cell_px + lag_y
     };
     // Positive clearance = centre above crest (smaller screen y).
@@ -1131,6 +1193,8 @@ pub fn draw_ridge_silhouettes(
     let (near_fill, near_sky) = ridge_palette(day_night, weather, look, true);
     let far_feather = look.ridge_feather_far.round().clamp(2.0, 10.0) as i32;
     let near_feather = look.ridge_feather_near.round().clamp(2.0, 10.0) as i32;
+    let far_squash = ridges.far_squash;
+    let near_squash = ridges.near_squash;
     draw_ridge_band(
         &ridges.far,
         None,
@@ -1148,7 +1212,7 @@ pub fn draw_ridge_silhouettes(
         sh,
         far_fill,
         far_sky,
-        0.78,
+        far_squash,
         far_feather,
         look.ridge_crest_blend,
         0.0,
@@ -1163,7 +1227,7 @@ pub fn draw_ridge_silhouettes(
         Some(RidgeBehind {
             profile: &ridges.far,
             parallax: FAR_RIDGE_PARALLAX,
-            y_squash: 0.78,
+            y_squash: far_squash,
             fill_rgb: far_rgb,
         }),
         cam_x,
@@ -1180,7 +1244,7 @@ pub fn draw_ridge_silhouettes(
         sh,
         near_fill,
         near_sky,
-        0.90,
+        near_squash,
         near_feather,
         look.ridge_crest_blend,
         look.ridge_far_into_crest,
@@ -2688,6 +2752,77 @@ mod tests {
         // Minimized window: no casters.
         let empty = crown_casters_near_view(&w, &posed, 0.0, 10.0, 0.0, 32, true);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn ridge_squash_eases_on_deeper_columns() {
+        use super::ridge_y_squash;
+        // Pre-deep map (~320) keeps the tuned squash; default deep column
+        // (~1064) compresses mid/far so they do not tower with the FG.
+        let shallow_far = ridge_y_squash(false, 0, 320);
+        let shallow_near = ridge_y_squash(true, 0, 320);
+        assert!((shallow_far - 0.78).abs() < 0.02, "far={shallow_far}");
+        assert!((shallow_near - 0.90).abs() < 0.02, "near={shallow_near}");
+        let deep_far = ridge_y_squash(false, 0, 1064);
+        let deep_near = ridge_y_squash(true, 0, 1064);
+        assert!(deep_far < shallow_far * 0.85, "deep far={deep_far}");
+        assert!(deep_near < shallow_near * 0.85, "deep near={deep_near}");
+        assert!(deep_far > 0.35 && deep_near > deep_far);
+    }
+
+    #[test]
+    fn ridge_lowpass_scales_with_ring_width() {
+        use super::ridge_lowpass_half;
+        assert_eq!(ridge_lowpass_half(false, 1024), 8);
+        assert_eq!(ridge_lowpass_half(true, 1024), 3);
+        assert!(ridge_lowpass_half(false, 2048) > 8);
+        assert!(ridge_lowpass_half(true, 512) < 3);
+        assert!(ridge_lowpass_half(false, 256) >= 4);
+    }
+
+    #[test]
+    fn ridge_ensure_rebuilds_when_sea_or_sky_changes() {
+        use super::RidgeSilhouette;
+        use wk_voxel::{stamp_world, World, WorldgenParams, CHUNK_CELLS_W};
+
+        let params = WorldgenParams {
+            seed: 3,
+            width_cols: CHUNK_CELLS_W as i32 * 2,
+            sea_level_y: 40,
+            sky_ceiling_y: 128,
+            wrap_x: true,
+            ..WorldgenParams::default()
+        };
+        let mut world = World::new(params.seed);
+        stamp_world(&mut world, &params);
+        let mut ridges = RidgeSilhouette::default();
+        ridges.ensure(
+            &world,
+            params.width_cols,
+            params.bedrock_floor_y,
+            params.sky_ceiling_y,
+            params.sea_level_y,
+            1,
+            params.seed,
+        );
+        let far0 = ridges.far_squash;
+        let sky0 = ridges.sky_ceiling_y;
+        // Taller sky without waiting for the refresh cadence.
+        ridges.ensure(
+            &world,
+            params.width_cols,
+            params.bedrock_floor_y,
+            params.sky_ceiling_y * 4,
+            params.sea_level_y,
+            2,
+            params.seed,
+        );
+        assert_ne!(ridges.sky_ceiling_y, sky0);
+        assert!(
+            ridges.far_squash < far0,
+            "deeper column must rebuild with a softer far squash ({far0} → {})",
+            ridges.far_squash
+        );
     }
 
     #[test]
