@@ -153,6 +153,30 @@ pub fn pipe_expand(world: &World) -> u16 {
     world.pipe_expand.max(1)
 }
 
+/// Retarget live + residual units when the sat↔unit scale changes.
+///
+/// `pipe_mass_sat = units / expand`. Overwriting `world.pipe_expand` from
+/// Tab settings (which are **not** saved) without rescaling reinterpreted
+/// the same book at a new scale — HUD `sat=` jumped ~2× on load when a
+/// play expand of 192 met a restarted default of 96. Preserve sat-equivalent
+/// mass across the change.
+pub fn rescale_pipe_book(world: &mut World, old_expand: u16, new_expand: u16) {
+    let old = u64::from(old_expand.max(1));
+    let new = u64::from(new_expand.max(1));
+    if old == new {
+        return;
+    }
+    if world.pipe_steam.is_empty() && world.pipe_res.is_empty() {
+        return;
+    }
+    for v in world.pipe_steam.values_mut() {
+        *v = ((*v as u64).saturating_mul(new) / old) as u32;
+    }
+    for v in world.pipe_res.values_mut() {
+        *v = ((*v as u64).saturating_mul(new) / old) as u32;
+    }
+}
+
 #[inline]
 pub fn pipe_live_at(world: &World, gx: i32, gy: i32) -> u32 {
     world
@@ -2623,6 +2647,10 @@ pub fn apply_pipe_motor(
     let sides = u32::from(cfg.pipe_sides.max(1));
     let stroke = cfg.pipe_stroke.max(1);
     let beat = cfg.pipe_beat.max(1);
+    let prev_expand = pipe_expand(world);
+    if expand != prev_expand {
+        rescale_pipe_book(world, prev_expand, expand);
+    }
     world.pipe_expand = expand;
     bind_memo(world);
     if world.tick % beat != 0 {
@@ -2897,6 +2925,21 @@ mod tests {
         assert_eq!(w.get_cell(4, 1).unwrap().sat.0, 0);
         assert_eq!(pipe_live_at(&w, 4, 1), units);
         assert_eq!(sat_totals(&w).cell_total, before);
+    }
+
+    #[test]
+    fn rescale_pipe_book_keeps_hud_sat_flat() {
+        // Save/load bug: play expand 192, restart defaults to 96, motor
+        // used to overwrite expand and double HUD sat=. Rescale first.
+        let mut w = plot();
+        w.pipe_expand = 192;
+        w.pipe_res.insert((5, 5), 192 * 8_000);
+        let before = pipe_mass_sat(&w);
+        assert_eq!(before, 8_000);
+        rescale_pipe_book(&mut w, 192, 96);
+        w.pipe_expand = 96;
+        assert_eq!(pipe_mass_sat(&w), before);
+        assert_eq!(w.pipe_res.get(&(5, 5)), Some(&(96 * 8_000)));
     }
 
     #[test]
