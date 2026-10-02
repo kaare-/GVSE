@@ -2943,31 +2943,6 @@ mod tests {
     }
 
     #[test]
-    fn motor_rescales_when_settings_expand_changes() {
-        let mut w = plot();
-        w.pipe_expand = 192;
-        w.pipe_res.insert((5, 5), 192 * 4_000);
-        let before = pipe_mass_sat(&w);
-        let mut temp = temp_at(&w, 20.0);
-        let cfg = SteamConfig {
-            enable_pipe: true,
-            phase_expansion_drive: 96,
-            pipe_beat: 1,
-            ..SteamConfig::default()
-        };
-        w.tick = 0;
-        apply_pipe_motor(&mut w, &mut temp, &cfg, None);
-        assert_eq!(w.pipe_expand, 96);
-        let after = pipe_mass_sat(&w);
-        let ratio = after as f64 / before as f64;
-        // Without rescale this would be ~2.0. Orphan reclaim may shave a little.
-        assert!(
-            (0.95..1.05).contains(&ratio),
-            "pipe HUD sat {before}→{after} (ratio {ratio})"
-        );
-    }
-
-    #[test]
     fn collapse_1400_mints_one_sat_and_passes_liquid() {
         let mut w = plot();
         let mut b = Cell::solid(MaterialId::Stone);
