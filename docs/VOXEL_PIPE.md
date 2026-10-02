@@ -340,6 +340,19 @@ Every hop is conservative, and two paths used to break that:
 `long_soak_of_apply_pipe_motor_is_mass_flat` asserts exact conservation
 over 1000 beats: opening sat + recharge == cells + humidity.
 
+Also tightened after the highland-lake play watch:
+
+- `concentrate_hot_mouth` used to ignore `add_sat`'s shortfall when sky H
+  and cavity steam both refused the boiled lip water. It now parks
+  orphan liquid, then banks expand-scaled `pipe_res`.
+- Steam-side `park_or_restore_vapour` / `evict_steam_seat` no longer drop
+  shortfalls on full neighbour seats (ghost steam column / residual).
+
+Those were real destroy bugs but intermittent — they do not explain a
+~25 m free-surface drop with a flat HUD `sat` total (that still reads as
+bed soak / throughflow / H export). See
+[`VOXEL_WATER.md`](VOXEL_WATER.md) § Mass inventory.
+
 ## Tunables (`SteamConfig`)
 
 | Knob | Default | Meaning |

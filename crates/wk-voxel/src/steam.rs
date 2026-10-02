@@ -670,9 +670,10 @@ fn is_steam_discharge_vent(world: &World, gx: i32, gy: i32, cell: Cell) -> bool 
 /// Move steam off a cell that is no longer a void (editor brick, collapse).
 ///
 /// Only touches [`World::steam`] — safe to call from [`World::set_cell`].
+/// Mass-flat: never drops a shortfall when a neighbour seat is already hot.
 pub fn evict_steam_seat(world: &mut World, gx: i32, gy: i32) {
-    let amt = take_steam(world, gx, gy, u8::MAX);
-    if amt == 0 {
+    let mut left = u32::from(take_steam(world, gx, gy, u8::MAX));
+    if left == 0 {
         return;
     }
     const DELTAS: [(i32, i32); 8] = [
@@ -686,26 +687,32 @@ pub fn evict_steam_seat(world: &mut World, gx: i32, gy: i32) {
         (1, -1),
     ];
     for (dx, dy) in DELTAS {
+        if left == 0 {
+            break;
+        }
         let tx = world.wrap_x(gx + dx);
         let ty = gy + dy;
-        if world.get_cell(tx, ty).is_some_and(is_steam_void) {
-            let _ = add_steam(world, tx, ty, amt);
-            return;
+        if !world.get_cell(tx, ty).is_some_and(is_steam_void) {
+            continue;
         }
+        left = place_steam_units(world, tx, ty, left);
     }
-    // No neighbour void: park on any remaining steam key so mass stays.
-    if let Some((&(x, y), slot)) = world.steam.iter_mut().next() {
-        let before = *slot;
-        *slot = before.saturating_add(amt);
-        if *slot != before {
-            world.steam_rev = world.steam_rev.wrapping_add(1);
-        }
-        let _ = (x, y);
+    if left == 0 {
         return;
     }
-    // Last resort: keep a ghost key one cell up so apply_steam can park
-    // liquid. Overlay ignores non-Air steam.
-    let _ = add_steam(world, gx, gy + 1, amt);
+    // No neighbour void: pack onto existing steam keys, then a ghost column.
+    let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    for (x, y) in keys {
+        if left == 0 {
+            break;
+        }
+        left = place_steam_units(world, x, y, left);
+    }
+    let mut dy = 1i32;
+    while left > 0 && dy < 64 {
+        left = place_steam_units(world, gx, gy + dy, left);
+        dy += 1;
+    }
 }
 
 /// Relocate steam sitting on rock / missing cells (mass-flat).
@@ -727,10 +734,9 @@ fn scrub_invalid_steam_seats(world: &mut World, max_cells: usize) {
             let placed = inject_steam_near(world, gx, gy, amt, max_cells);
             let left = amt.saturating_sub(placed);
             if left > 0 {
-                let parked = crate::displace::park_orphan_water(world, gx, gy, left as u32);
-                if parked > 0 {
-                    let _ = add_steam(world, gx, gy, parked.min(255) as u8);
-                }
+                // Liquid first; anything still unplaced must stay in the
+                // steam book (partial `add_steam` used to drop the rest).
+                park_or_restore_vapour(world, gx, gy, left as u32);
             }
             continue;
         }
@@ -739,11 +745,7 @@ fn scrub_invalid_steam_seats(world: &mut World, max_cells: usize) {
         if !void_is_confined(world, gx, gy) {
             let amt = take_steam(world, gx, gy, u8::MAX);
             if amt > 0 {
-                let parked = crate::displace::park_orphan_water(world, gx, gy, amt as u32);
-                if parked > 0 {
-                    // Could not seat liquid — only restore into a roofed void.
-                    let _ = inject_steam_near(world, gx, gy, parked.min(255) as u8, max_cells);
-                }
+                park_or_restore_vapour(world, gx, gy, amt as u32);
             }
         }
     }
@@ -1269,12 +1271,26 @@ fn bleed_steam_into_open_vent(world: &mut World, seats: &[(i32, i32)]) {
         let left = crate::displace::park_orphan_water(world, vx, vy, got as u32);
         if left > 0 {
             // Could not seat liquid — restore vapour so we stay mass-flat.
-            let _ = add_steam(world, sx, sy, left.min(255) as u8);
+            park_or_restore_vapour(world, sx, sy, left);
             budget = budget.saturating_sub((got as u32).saturating_sub(left));
         } else {
             budget = budget.saturating_sub(got as u32);
         }
     }
+}
+
+/// Place up to `units` into the steam book at `(gx, gy)` in 255-chunks.
+/// Returns units still unplaced (seat already at 255).
+fn place_steam_units(world: &mut World, gx: i32, gy: i32, mut units: u32) -> u32 {
+    while units > 0 {
+        let chunk = units.min(255) as u8;
+        let placed = add_steam(world, gx, gy, chunk);
+        if placed == 0 {
+            break;
+        }
+        units -= u32::from(placed);
+    }
+    units
 }
 
 /// Park leftover thermal mass. Anything that cannot seat as liquid is
@@ -1288,20 +1304,22 @@ fn park_or_restore_vapour(world: &mut World, gx: i32, gy: i32, units: u32) {
     if left == 0 {
         return;
     }
-    for (dx, dy) in [(0, 0), (0, 1), (-1, 0), (1, 0), (0, -1)] {
+    const DELTAS: [(i32, i32); 9] = [
+        (0, 0),
+        (0, 1),
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (-1, 1),
+        (1, 1),
+        (0, 2),
+        (0, 3),
+    ];
+    for (dx, dy) in DELTAS {
         if left == 0 {
             break;
         }
-        let nx = world.wrap_x(gx + dx);
-        let ny = gy + dy;
-        while left > 0 {
-            let chunk = left.min(255) as u8;
-            let placed = add_steam(world, nx, ny, chunk);
-            if placed == 0 {
-                break;
-            }
-            left -= placed as u32;
-        }
+        left = place_steam_units(world, world.wrap_x(gx + dx), gy + dy, left);
     }
     if left == 0 {
         return;
@@ -1312,7 +1330,18 @@ fn park_or_restore_vapour(world: &mut World, gx: i32, gy: i32, units: u32) {
         if put > 0 {
             c.sat = Sat(c.sat.0 + put as u8);
             world.set_cell(gx, gy, c);
+            left -= put;
         }
+    }
+    if left == 0 {
+        return;
+    }
+    // Neighbourhood full: climb a ghost steam column. `add_steam` does not
+    // enforce MAX_STEAM_CELLS, so this stays mass-flat even under a flood.
+    let mut dy = 1i32;
+    while left > 0 && dy < 64 {
+        left = place_steam_units(world, gx, gy + dy, left);
+        dy += 1;
     }
 }
 
@@ -3769,6 +3798,63 @@ mod tests {
         assert_eq!(steam_at(&w, 3, 1), 0);
         assert_eq!(w.get_cell(3, 1).unwrap().sat.0, 80);
         assert_eq!(sat_totals(&w).cell_total, before);
+    }
+
+    #[test]
+    fn evict_steam_seat_is_mass_flat_when_neighbours_are_full() {
+        // Editor brick / collapse used to `add_steam` once and return, so any
+        // shortfall on a hot neighbour seat was destroyed.
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..7 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        add_steam(&mut w, 4, 3, 200);
+        for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0), (-1, 1), (1, 1), (-1, -1), (1, -1)] {
+            add_steam(&mut w, 4 + dx, 3 + dy, 255);
+        }
+        let before = sat_totals(&w).cell_total;
+        // Brick the seat — set_cell evicts steam off non-voids.
+        w.set_cell(4, 3, Cell::solid(MaterialId::Stone));
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "evict must not drop steam when neighbour seats are full"
+        );
+        assert_eq!(steam_at(&w, 4, 3), 0);
+    }
+
+    #[test]
+    fn recondense_into_full_wet_column_is_mass_flat() {
+        // park_or_restore used to put a partial sat top-up and drop the rest
+        // when liquid park and local steam seats were already full.
+        let mut w = World::new(7);
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 2..7 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Single roofed wet seat packed with sat + steam; cool recondense
+        // must park the vapour without deleting it.
+        let mut wet = Cell::air();
+        wet.sat = Sat(255);
+        w.set_cell(4, 2, wet);
+        w.set_cell(4, 3, Cell::solid(MaterialId::Stone));
+        add_steam(&mut w, 4, 2, 200);
+        let before = sat_totals(&w).cell_total;
+        let mut cool = temp_fill(&w, 20.0);
+        w.tick = STEAM_EVERY;
+        apply_steam(&mut w, &mut cool, &SteamConfig::default());
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "full wet seat must not destroy recondensed vapour"
+        );
     }
 
     #[test]

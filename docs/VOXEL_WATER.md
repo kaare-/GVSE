@@ -56,6 +56,31 @@ free drops and pore rises by a similar amount, it is bed soak. If both
 drop and humidity rises, it is evap. If `cell_total` falls with no
 humidity gain, then chase a real destroy path.
 
+### Geyser / pipe mass audit (destroy vs design)
+
+Checked after the highland-lake watch. **No smoking-gun path that
+silently deletes ~25 m of free lake while HUD `sat` stays flat.** Near a
+vent the designed export is mouth / hot-film → sky H (humidity should
+rise). Pipe hops, `erupt_jet`, and `pool_residuals` are mass-flat under
+soak tests.
+
+Real destroy holes that *were* still open (intermittent / fractional —
+not a bathtub-ring motor):
+
+- `park_or_restore_vapour` — liquid park + local steam restore, then a
+  partial sat top-up that dropped the remainder when the neighbourhood
+  was full.
+- `evict_steam_seat` / `scrub_invalid_steam_seats` — one-shot
+  `add_steam` ignored shortfall on already-hot seats.
+- `concentrate_hot_mouth` — ignored `add_sat` shortfall after H / steam
+  refuse (now parks, then banks `pipe_res`).
+
+By design (can lower a free lake near a geyser, but credit another
+store): hot mouth boil → H, eruption leak → H, open hot evap → H,
+ice/snow column cull, humidity OOB drop. Pipe does **not** suck free
+`Air` lake cells into the straw (`hand_sat` skips Air donors); lake →
+bed soak → wick → mouth → H is the constructive export loop.
+
 ## Tick pipeline
 
 Each `tick`:

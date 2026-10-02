@@ -1794,7 +1794,20 @@ fn concentrate_hot_mouth(
         left -= placed;
     }
     if left > 0 {
-        let _ = add_sat(world, mx, my, left.min(u32::from(u8::MAX)) as u8);
+        left -= u32::from(add_sat(
+            world,
+            mx,
+            my,
+            left.min(u32::from(u8::MAX)) as u8,
+        ));
+    }
+    // Full mouth + full H: do not drop the boil take — run off, then bank.
+    if left > 0 {
+        left = park_orphan_water(world, mx, my, left);
+    }
+    if left > 0 {
+        let exp = pipe_expand(world).max(1) as u32;
+        add_residual(world, mx, my, left.saturating_mul(exp));
     }
 }
 
