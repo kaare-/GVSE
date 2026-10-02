@@ -25,6 +25,37 @@ Known sinks **outside** tick: bare evaporation, open-loop rain mint,
 ice/snow cull, humidity OOB drop. Do not expect `tracked` flat across
 those passes unless they are closed-loop.
 
+### Play watch — highland lake drawdown (~25 m overnight)
+
+Observed on the deep-relief default (sea ≈ 240): a perched mountain
+lake dropped roughly **25 cells of free surface overnight**, leaving a
+clear bathtub ring on the cliff. First read was “water destroy bug”;
+second read is **free water soaked into pore sat** (and/or left via
+throughflow / evap), not deleted.
+
+Clues from that save:
+
+- HUD `sat=` stayed enormous (~8.2M) while the free lake fell — total
+  cell water was not gone.
+- Bed / wall rock under the ring was wet; a probe on buried
+  `flowstone` read `sat=12/12` (full pore capacity) at ~36 °C.
+- Warm day (`day T≈30 °C`), `evap=on`, non-trivial `hum` / `steam`
+  counts — some mass can also leave free surface into humidity.
+
+Why that is plausible in-engine: **gravity fall** is not
+permeability-capped and is explicitly “how a lake bed fills sand, then
+clay/stone underneath, one cell per pass.” Seepage / throughflow then
+can move that pore water sideways or out a cliff. Free `Air+sat` and
+pore `sat` share one field but are separate lines in
+`audit::sat_totals` — a free-surface crash with flat `cell_total` is
+soak/migration, not a mint/destroy bug.
+
+**Next check when it happens again:** before/after
+`sat_totals` (free vs pore) + `tracked_totals` (humidity/clouds). If
+free drops and pore rises by a similar amount, it is bed soak. If both
+drop and humidity rises, it is evap. If `cell_total` falls with no
+humidity gain, then chase a real destroy path.
+
 ## Tick pipeline
 
 Each `tick`:
