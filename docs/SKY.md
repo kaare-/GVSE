@@ -32,6 +32,7 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 | **V** | Wind lattice above water + teal water-current arrows in free water (default off) |
 | **P** | Steam pipe — claimed boiler / straw / mouth / live. Leftover-field volume only if the pipe is off. |
 | **F6** | Glossary — keys, water / sky / ground / HUD words, including the pipe |
+| **B** | Mass-budget ledger (text, not a heatmap). `N` remakes the mark while on — not the old `N` bank overlay. |
 
 Humidity **is** the weather store, now with temperature/wind:
 evap(T, wind) → thermal rise → drizzle when vapor meets colder air /
