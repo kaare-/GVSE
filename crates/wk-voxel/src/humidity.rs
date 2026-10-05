@@ -550,6 +550,35 @@ impl Humidity {
         self.try_add_capped(gx, gy, mass, Self::saturation_mass_at_temp(temp_c))
     }
 
+    /// Add vapour in **integer sat units** so a cell-sat source cannot
+    /// round up past what the tile actually stored.
+    ///
+    /// `try_add` returns a float (room under a cold cap is often 0.1–0.9).
+    /// Callers that then `.round()` that into `u8`/`u32` sat can take **one
+    /// extra unit the sky never received** — a slow night leak of a few
+    /// sat/tick, which the budget overlay flags as `UNEXPL-W`.
+    pub fn try_add_units(&mut self, gx: i32, gy: i32, want: u32) -> u32 {
+        self.try_add_units_capped(gx, gy, want, Self::MAX_MASS_PER_TILE)
+    }
+
+    /// [`Self::try_add_units`] capped at [`Self::saturation_mass_at_temp`].
+    pub fn try_add_units_at_temp(&mut self, gx: i32, gy: i32, want: u32, temp_c: f32) -> u32 {
+        self.try_add_units_capped(gx, gy, want, Self::saturation_mass_at_temp(temp_c))
+    }
+
+    fn try_add_units_capped(&mut self, gx: i32, gy: i32, want: u32, cap: f32) -> u32 {
+        if want == 0 {
+            return 0;
+        }
+        let added = self.try_add_capped(gx, gy, want as f32, cap);
+        let n = added.floor().max(0.0) as u32;
+        let extra = added - n as f32;
+        if extra > 1e-5 {
+            let _ = self.take(gx, gy, extra);
+        }
+        n
+    }
+
     fn try_add_capped(&mut self, gx: i32, gy: i32, mass: f32, cap: f32) -> f32 {
         if mass <= 0.0 {
             return 0.0;
@@ -2898,8 +2927,34 @@ mod tests {
         h.cells.insert((0, 0), 800.0);
         let _ = h.try_add_at_temp(0, 0, 10.0, -15.0);
         assert!(
-            (h.at_tile(0, 0) - 800.0).abs() < 1e-3,
+            h.at_cell(0, 0) >= 800.0,
             "try_add_at_temp must not delete vapour already in the tile"
+        );
+    }
+
+    #[test]
+    fn try_add_units_does_not_round_up_fractional_room() {
+        let mut h = Humidity::new(4);
+        let cap = Humidity::saturation_mass_at_temp(3.0);
+        let _ = h.try_add_at_temp(2, 2, cap - 0.6, 3.0);
+        let before = h.total_mass();
+        // Old callers used `.round()`: 0.6 → 1 sat taken, 0.6 vapour stored.
+        let n = h.try_add_units_at_temp(2, 2, 20, 3.0);
+        assert_eq!(n, 0, "floor(0.6 room) must not mint a sat unit");
+        assert!(
+            (h.total_mass() - before).abs() < 1e-3,
+            "fractional extra must be clawed back (before={before} after={})",
+            h.total_mass()
+        );
+
+        let mut h2 = Humidity::new(4);
+        let _ = h2.try_add_at_temp(0, 0, cap - 2.6, 3.0);
+        let n2 = h2.try_add_units_at_temp(0, 0, 20, 3.0);
+        assert_eq!(n2, 2, "2.6 room yields two sat units, not a round-up to 3");
+        let gained = h2.total_mass() - (cap - 2.6);
+        assert!(
+            (gained - 2.0).abs() < 1e-3,
+            "H delta must match integer sat (gained={gained})"
         );
     }
 

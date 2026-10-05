@@ -1715,7 +1715,7 @@ fn leak_pipe_mouth(
     }
     if mouth_t >= boil {
         if let Some(h) = humidity {
-            let accepted = h.try_add(mx, my, mass as f32).round().max(0.0) as u32;
+            let accepted = h.try_add_units(mx, my, mass);
             mass = mass.saturating_sub(accepted);
         }
     }
@@ -1810,7 +1810,7 @@ fn concentrate_hot_mouth(
     // book both refuse goes back as water.
     let mut left = u32::from(taken);
     if let Some(h) = humidity {
-        let accepted = h.try_add(mx, my, left as f32).round().max(0.0) as u32;
+        let accepted = h.try_add_units(mx, my, left);
         left = left.saturating_sub(accepted);
     }
     if left > 0 && can_admit_steam_cell(world, mx, my) {

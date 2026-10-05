@@ -2162,8 +2162,8 @@ impl OrganismStore {
                     if sat == 0 {
                         continue;
                     }
-                    let accepted = hum.try_add(gx, gy, sat as f32);
-                    let rejected = (sat as f32 - accepted).round().max(0.0) as u32;
+                    let accepted = hum.try_add_units(gx, gy, sat);
+                    let rejected = sat.saturating_sub(accepted);
                     if rejected > 0 {
                         let _ = crate::displace::park_orphan_water(world, gx, gy, rejected);
                     }

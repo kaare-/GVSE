@@ -2573,7 +2573,7 @@ fn leak_choked_boiler_mouth(
         let mut left = took as u32;
         if mouth_t >= boil {
             if let Some(h) = humidity.as_deref_mut() {
-                let accepted = h.try_add(mx, my, left as f32).round() as u32;
+                let accepted = h.try_add_units(mx, my, left);
                 left = left.saturating_sub(accepted);
             }
         }
