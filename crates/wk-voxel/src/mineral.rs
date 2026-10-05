@@ -150,14 +150,41 @@ pub fn dissolved_at(world: &World, gx: i32, gy: i32) -> u16 {
     world.dissolved.get(&(gx, gy)).copied().unwrap_or(0)
 }
 
-/// Add load to a cell, saturating.
-pub fn add_dissolved(world: &mut World, gx: i32, gy: i32, add: u16) {
+/// Add load to a cell.
+///
+/// One cell is a `u16` slot. Leftover / geyser mouths skip the lake dump so
+/// they can bank far past the solubility ceiling; `saturating_add` then
+/// silently dropped the overflow (the B overlay's UNEXPL-M leftover). Park
+/// whatever will not fit on orthogonal neighbours instead of clipping.
+pub fn add_dissolved(world: &mut World, gx: i32, gy: i32, mut add: u16) {
     if add == 0 {
         return;
     }
     let gx = world.wrap_x(gx);
+    add = put_dissolved(world, gx, gy, add);
+    if add == 0 {
+        return;
+    }
+    for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0)] {
+        if add == 0 {
+            break;
+        }
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if world.get_cell(nx, ny).is_none() {
+            continue;
+        }
+        add = put_dissolved(world, nx, ny, add);
+    }
+    let _ = add;
+}
+
+fn put_dissolved(world: &mut World, gx: i32, gy: i32, add: u16) -> u16 {
     let e = world.dissolved.entry((gx, gy)).or_insert(0);
-    *e = e.saturating_add(add);
+    let room = u16::MAX - *e;
+    let put = add.min(room);
+    *e = e.saturating_add(put);
+    add - put
 }
 
 /// Remove up to `want` load, returning what was taken.
@@ -353,6 +380,32 @@ pub fn widen_aperture(
         add_dissolved(world, gx, gy, 1);
     }
     false
+}
+
+/// Open a grain cell's pore by one step (throughput scour).
+///
+/// Steam reverse-seep used to `pore += 1` on any grain dest. Sand / gravel
+/// are off the mineral ledger, but [`MaterialId::LooseLimestone`] is not —
+/// one pore step is one load unit, same as [`widen_aperture`]. Stops at
+/// `pore_cap` so a sand lens does not become a void pipe.
+pub fn scour_grain_pore(world: &mut World, gx: i32, gy: i32, pore_cap: u8) -> bool {
+    let gx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return false;
+    };
+    if cell.material == MaterialId::Air || cell.pore >= pore_cap {
+        return false;
+    }
+    let mut next = cell;
+    next.pore = cell.pore.saturating_add(1);
+    if next.pore == cell.pore {
+        return false;
+    }
+    world.set_cell(gx, gy, next);
+    if cell_mineral(cell) > 0 {
+        add_dissolved(world, gx, gy, 1);
+    }
+    true
 }
 
 /// The rock a loose sediment becomes when carbonate cements its grains.
@@ -1546,10 +1599,7 @@ mod tests {
         sand.sat = Sat(water_capacity_cell(sand, &w.hydro).max(1));
         w.set_cell(5, 5, sand);
         let before = sat_totals(&w).cell_total;
-        assert!(
-            before > 0,
-            "packed sand must start wet ({before})"
-        );
+        assert!(before > 0, "packed sand must start wet ({before})");
         assert!(pressure_sinter_cell(&mut w, 5, 5));
         assert_eq!(
             w.get_cell(5, 5).unwrap().material,
@@ -1674,6 +1724,62 @@ mod tests {
             crate::audit::mineral_total(&w),
             before,
             "collapse to LooseLimestone must keep the carbonate on the ledger"
+        );
+    }
+
+    #[test]
+    fn scour_loose_limestone_emits_one_load() {
+        let mut w = bed(21);
+        let mut loose = Cell::solid(MaterialId::LooseLimestone);
+        loose.pore = 40;
+        w.set_cell(4, 1, loose);
+        let before = crate::audit::mineral_total(&w);
+        assert!(scour_grain_pore(&mut w, 4, 1, 220));
+        assert_eq!(w.get_cell(4, 1).unwrap().pore, 41);
+        assert_eq!(dissolved_at(&w, 4, 1), 1);
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "carbonate grain scour must emit the pore step as load"
+        );
+    }
+
+    #[test]
+    fn scour_sand_mints_no_load() {
+        let mut w = bed(22);
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.pore = 40;
+        w.set_cell(4, 1, sand);
+        let before = crate::audit::mineral_total(&w);
+        assert!(scour_grain_pore(&mut w, 4, 1, 220));
+        assert_eq!(dissolved_at(&w, 4, 1), 0);
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "silicate scour stays off the carbonate ledger"
+        );
+    }
+
+    #[test]
+    fn add_dissolved_spills_when_cell_is_full() {
+        let mut w = bed(23);
+        w.set_cell(4, 2, Cell::water());
+        w.set_cell(4, 3, Cell::water());
+        add_dissolved(&mut w, 4, 2, u16::MAX);
+        add_dissolved(&mut w, 4, 2, 40);
+        assert_eq!(dissolved_at(&w, 4, 2), u16::MAX);
+        assert_eq!(
+            dissolved_at(&w, 4, 3)
+                + dissolved_at(&w, 4, 1)
+                + dissolved_at(&w, 3, 2)
+                + dissolved_at(&w, 5, 2),
+            40,
+            "overflow must park on a neighbour, not clip"
+        );
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            u16::MAX as i64 + 40,
+            "u16 ceiling must not destroy load"
         );
     }
 
