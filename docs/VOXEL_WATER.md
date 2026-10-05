@@ -23,7 +23,10 @@ debug assert: `set_mass_audit_enabled(true)` or `GVSE_MASS_AUDIT=1`
 
 Known sinks **outside** tick: bare evaporation, open-loop rain mint,
 ice/snow cull, humidity OOB drop. Do not expect `tracked` flat across
-those passes unless they are closed-loop.
+those passes unless they are closed-loop. Cell→H movers (`E` evap,
+pipe mouth leak, plant transpiration) must credit **integer** sat
+equal to vapour stored — rounding a fractional cold-cap room *up*
+was a slow night `UNEXPL-W` leak.
 
 Play overlay **`B`** (`budget::BudgetSnap`) is the same cell+humidity
 inventory plus Ice/Snow thaw yield (255 per cell) so freeze is a store

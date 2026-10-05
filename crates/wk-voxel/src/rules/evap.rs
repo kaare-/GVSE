@@ -311,10 +311,13 @@ fn apply_evap_deltas(
                     0
                 } else {
                     match temp {
-                        Some(t) => h
-                            .try_add_at_temp(gx, gy, want_removed as f32, t.at_cell(gx, gy))
-                            .round() as i32,
-                        None => h.try_add(gx, gy, want_removed as f32).round() as i32,
+                        Some(t) => h.try_add_units_at_temp(
+                            gx,
+                            gy,
+                            want_removed as u32,
+                            t.at_cell(gx, gy),
+                        ) as i32,
+                        None => h.try_add_units(gx, gy, want_removed as u32) as i32,
                     }
                 }
             } else {
