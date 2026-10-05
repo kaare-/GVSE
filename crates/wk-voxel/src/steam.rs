@@ -43,7 +43,7 @@ use crate::mineral::{
     add_dissolved, carry_with_water, clear_leftover_lake_vents, dissolved_at, dump_dry_air_load,
     emit_from_dissolved_rock, is_soluble_rock, note_leftover_lake_vent, precipitate_artesian_warm,
     precipitate_at, precipitate_dry_cell, precipitate_vent_mouth, pressure_sinter_cell,
-    take_dissolved, widen_aperture, CEMENT_MIN_LOAD, VENT_PIPE_LUMEN,
+    scour_grain_pore, take_dissolved, widen_aperture, CEMENT_MIN_LOAD, VENT_PIPE_LUMEN,
 };
 use crate::sediment::{add_suspended, is_suspendable, SEDIMENT_PER_CELL};
 use crate::temperature::Temperature;
@@ -117,8 +117,6 @@ pub const REVERSE_SEEP_HOPS: u8 = 16;
 /// Throat lining stops once aperture falls to this — walls mineralize,
 /// the lumen stays a pipe. Below it, only the vent mouth deposits.
 const PIPE_LUMEN_FLOOR: u8 = VENT_PIPE_LUMEN;
-
-
 
 /// Min pocket density before escape fires.
 pub const ESCAPE_PRESSURE_MIN: f32 = 0.08;
@@ -283,14 +281,6 @@ struct PressMemo {
     map: FxHashMap<(i32, i32), f32>,
 }
 
-
-
-
-
-
-
-
-
 #[derive(Default)]
 struct OpenPipeCache {
     world_id: u64,
@@ -302,12 +292,12 @@ mod leftover;
 
 // The legacy motor lives in its own module now; steam.rs still drives it and
 // re-exports the handful of entry points the crate uses.
+pub(crate) use leftover::apply_leftover_motor;
 use leftover::*;
 pub use leftover::{
     ensure_leftover_hill_view, leftover_field_stats, leftover_soak_stats,
     prepare_leftover_pressure, LeftoverSoakStats,
 };
-pub(crate) use leftover::apply_leftover_motor;
 
 thread_local! {
     static SKY_PROBE: RefCell<SkyProbeCache> = RefCell::new(SkyProbeCache::default());
@@ -929,74 +919,6 @@ pub enum CellPressureKind {
     None,
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /// Standing leftover head: shove leftover mass every tick from each seed.
 ///
 /// Leftover volume (`mass × expand − seat`) *is* the pressure — hot
@@ -1031,19 +953,6 @@ fn shove_phreatic_bump(world: &mut World, temp: &mut Temperature) {
     leftover_erode_planned_route(world);
     leftover_conduct_wet_route(world, temp);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// Unified 0..=1 pressure readout for inspector + overlay.
 ///
@@ -1401,7 +1310,6 @@ fn apply_steam_with_weather(
     apply_steam_cadence(world, temp, cfg, humidity);
 }
 
-
 /// Cadence boil / flood / assault / escape. Leftover lives in
 /// [`apply_leftover_motor`].
 pub(crate) fn apply_steam_cadence(
@@ -1485,12 +1393,7 @@ fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32)
                             let moved = take_steam(world, gx, gy, put_up);
                             let placed = add_steam(world, gx, gy + 1, moved);
                             if placed < moved {
-                                park_or_restore_vapour(
-                                    world,
-                                    gx,
-                                    gy + 1,
-                                    (moved - placed) as u32,
-                                );
+                                park_or_restore_vapour(world, gx, gy + 1, (moved - placed) as u32);
                             }
                         }
                     }
@@ -3101,14 +3004,7 @@ fn reverse_push_pore_water_inner(
         world.set_cell(tx, ty, d);
     }
     if overflow > 0 {
-        let left = crate::displace::park_orphan_or_keep(
-            world,
-            tx,
-            ty + 1,
-            gx,
-            gy,
-            overflow as u32,
-        );
+        let left = crate::displace::park_orphan_or_keep(world, tx, ty + 1, gx, gy, overflow as u32);
         if left > 0 {
             park_or_restore_vapour(world, gx, gy, left);
         }
@@ -3138,15 +3034,11 @@ fn reverse_push_pore_water_inner(
         let _ = widen_aperture(world, gx, gy, thr, 2.4, 0x5EE0_u64, false);
     }
     // Loose / sand path: scour opens the same way rock widening does, so
-    // the next pulse prefers this lens over a dry neighbour.
+    // the next pulse prefers this lens over a dry neighbour. Carbonate
+    // rubble is on the mineral ledger — `scour_grain_pore` emits the unit.
     if dst.material != MaterialId::Air && (is_grain(dst.material) || is_flow_erodible(dst.material))
     {
-        if let Some(mut g) = world.get_cell(tx, ty) {
-            if g.pore < 220 {
-                g.pore = g.pore.saturating_add(1);
-                world.set_cell(tx, ty, g);
-            }
-        }
+        let _ = scour_grain_pore(world, tx, ty, 220);
     }
     if leftover_cell_charged(world, gx, gy) && leftover_is_weather_lake(world, tx, ty, dst) {
         // Proper lake: rim sinter + dilute. Do not drop at the mouth —
@@ -3184,12 +3076,6 @@ fn reverse_push_pore_water_inner(
     }
     (actually_moved, Some((tx, ty)), started_with_room)
 }
-
-
-
-
-
-
 
 /// True when `(gx, gy)` borders Air that opens to free sky (a real vent).
 fn near_open_air_vent(world: &World, gx: i32, gy: i32) -> bool {
@@ -3472,7 +3358,7 @@ fn bank_burst_solid(
         if nx == from_x && ny == from_y {
             continue;
         }
-        if try_place_burst_debris(world, nx, ny, was.material, tx, ty, from_x, from_y) {
+        if try_place_burst_debris(world, nx, ny, was, tx, ty, from_x, from_y) {
             return true;
         }
     }
@@ -3493,7 +3379,7 @@ fn try_place_burst_debris(
     world: &mut World,
     nx: i32,
     ny: i32,
-    material: MaterialId,
+    was: Cell,
     tube_x: i32,
     tube_y: i32,
     chamber_x: i32,
@@ -3512,7 +3398,10 @@ fn try_place_burst_debris(
     if steam_at(world, nx, ny) > 0 {
         return false;
     }
-    let mut grain = Cell::solid(material);
+    // Keep the source cell's pore. `Cell::solid` defaults pore=128, which
+    // mints or deletes carbonate on LooseLimestone / limestone debris
+    // depending on whether the lid was denser or more open than 128.
+    let mut grain = was;
     let cap = water_capacity_cell(grain, &world.hydro);
     let soak = dst.sat.0.min(cap);
     grain.sat = Sat(soak);
@@ -3585,7 +3474,6 @@ mod tests {
             "steam pass must leave open water for accelerated evap"
         );
     }
-
 
     #[test]
     fn roofed_cave_water_boils_into_steam() {
@@ -3660,9 +3548,7 @@ mod tests {
         );
         let painted = steam_haze_wash(&w, None)
             .iter()
-            .filter(|s| {
-                (3..7).contains(&s.gx) && (2..5).contains(&s.gy) && s.density >= 28
-            })
+            .filter(|s| (3..7).contains(&s.gx) && (2..5).contains(&s.gy) && s.density >= 28)
             .count();
         assert!(
             painted >= 10,
@@ -3812,7 +3698,16 @@ mod tests {
             }
         }
         add_steam(&mut w, 4, 3, 200);
-        for (dx, dy) in [(0, 1), (0, -1), (-1, 0), (1, 0), (-1, 1), (1, 1), (-1, -1), (1, -1)] {
+        for (dx, dy) in [
+            (0, 1),
+            (0, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (1, 1),
+            (-1, -1),
+            (1, -1),
+        ] {
             add_steam(&mut w, 4 + dx, 3 + dy, 255);
         }
         let before = sat_totals(&w).cell_total;
@@ -3895,7 +3790,6 @@ mod tests {
         let after = w.get_cell(2, 1).unwrap().sat.0;
         assert!(after >= before);
     }
-
 
     #[test]
     fn open_wet_boil_site_stays_out_of_steam() {
@@ -4457,8 +4351,6 @@ mod tests {
         assert_eq!(steam_total(&w), before, "u32 share must not truncate");
     }
 
-
-
     #[test]
     fn reverse_push_carries_heat_into_cold_neighbour() {
         let mut w = World::new(5);
@@ -4763,6 +4655,83 @@ mod tests {
     }
 
     #[test]
+    fn burst_loose_limestone_lid_keeps_mineral_and_pore() {
+        let mut w = World::new(39);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..6 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        let mut lid = Cell::solid(MaterialId::LooseLimestone);
+        lid.pore = 40;
+        w.set_cell(4, 4, lid);
+        w.set_cell(4, 5, Cell::air());
+        w.set_cell(5, 4, Cell::air());
+        add_steam(&mut w, 4, 3, 240);
+        let before = crate::audit::mineral_total(&w);
+        assert!(burst_grain_tube(&mut w, 4, 3, 4, 4, 64));
+        assert_eq!(w.get_cell(4, 4).unwrap().material, MaterialId::Air);
+        let debris = (3..8)
+            .flat_map(|x| (1..10).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y))
+            .find(|c| c.material == MaterialId::LooseLimestone)
+            .expect("burst must relocate the lid, not delete it");
+        assert_eq!(debris.pore, 40, "burst debris must keep the lid pore");
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "burst must not reset LooseLimestone onto Cell::solid pore=128"
+        );
+    }
+
+    #[test]
+    fn reverse_push_scours_loose_limestone_keeps_mineral() {
+        let mut w = World::new(43);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..7 {
+            for y in 1..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut src = Cell::solid(MaterialId::Limestone);
+        src.sat = Sat(220);
+        src.pore = 180;
+        w.set_cell(4, 2, src);
+        let mut dest = Cell::solid(MaterialId::LooseLimestone);
+        dest.sat = Sat(8);
+        dest.pore = 40;
+        w.set_cell(4, 3, dest);
+        w.set_cell(4, 4, Cell::solid(MaterialId::Stone));
+        let before = crate::audit::mineral_total(&w);
+        let pore0 = w.get_cell(4, 3).unwrap().pore;
+        let mut hot = temp_fill(&w, 40.0);
+        for _ in 0..16 {
+            let _ = reverse_push_pore_water(&mut w, &mut hot, 4, 2, 200);
+            if let Some(mut c) = w.get_cell(4, 2) {
+                if c.material != MaterialId::Air {
+                    c.sat = Sat(c.sat.0.max(180));
+                    w.set_cell(4, 2, c);
+                }
+            }
+        }
+        let dest1 = w.get_cell(4, 3).unwrap();
+        assert!(
+            dest1.pore > pore0 || dest1.sat.0 > 8,
+            "reverse seep should scour or wet the carbonate rubble (pore {pore0}→{}, sat {})",
+            dest1.pore,
+            dest1.sat.0
+        );
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "LooseLimestone dest scour must emit the pore step as load"
+        );
+    }
+
+    #[test]
     fn assault_widen_limestone_keeps_mineral_total() {
         let mut w = World::new(41);
         w.ensure_chunk(ChunkCoord::new(0, 0));
@@ -4981,9 +4950,6 @@ mod tests {
         assert_eq!(pore_boil_priority(50.0, 60.0, 255), 0);
     }
 
-
-
-
     #[test]
     fn open_weather_air_does_not_paint_pressure() {
         let mut w = World::new(215);
@@ -5070,10 +5036,7 @@ mod tests {
             w.set_cell(x, 6, Cell::air());
         }
         w.set_cell(7, 2, Cell::water());
-        assert!(
-            !vessel_is_boiler(&w, 7, 2),
-            "wide open U stays weather"
-        );
+        assert!(!vessel_is_boiler(&w, 7, 2), "wide open U stays weather");
         let mut hot = temp_fill(&w, 210.0);
         w.tick = STEAM_EVERY;
         apply_steam(&mut w, &mut hot, &SteamConfig::default());
@@ -5132,42 +5095,6 @@ mod tests {
         );
         assert_eq!(mineral_total(&w), min0, "solute rides liquid, never minted");
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     #[test]
     fn gas_climb_does_not_carry_solute() {
@@ -5325,7 +5252,6 @@ mod tests {
             "hydrothermal solute should appear, cement, or deposit along the hot path"
         );
     }
-
 
     #[test]
     fn wide_u_weather_does_not_paint_pressure() {
