@@ -7,6 +7,7 @@ pub mod active;
 pub mod atmosphere_metrics;
 pub mod audit;
 pub mod blueprint;
+pub mod budget;
 pub mod carbon;
 pub mod cave_humidity;
 pub mod cell;
@@ -63,6 +64,9 @@ pub use audit::{
 pub use blueprint::{
     ensure_symbiont_inherited, mutate_body, Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR,
     BODY_MUTATION_MAX_EDITS, BODY_MUTATION_MAX_MODULES,
+};
+pub use budget::{
+    BudgetDelta, BudgetLedger, BudgetSnap, BUDGET_SAMPLE_PERIOD, BUDGET_UNEXPLAINED_EPS,
 };
 pub use carbon::{
     gate_algae_photo, gate_plant_photo, step_carbon_budget, CarbonBudget, CarbonConfig,

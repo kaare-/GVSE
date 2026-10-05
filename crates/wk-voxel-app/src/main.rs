@@ -20,6 +20,8 @@
 //! - `P` — toggle steam-pipe overlay (claimed boiler / straw / mouth / live)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
 //! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
+//! - `B` — toggle mass-budget ledger (Δ stores vs a mark; not a heatmap)
+//! - `N` — remake the budget mark while `B` is on (not the old cloud-bank overlay)
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `Tab` → Climate → Cavity humidity — steam pipe knobs (leftover field optional)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
@@ -39,6 +41,7 @@
 //! Atmosphere stack: `docs/SKY.md` / [`atmosphere`].
 
 mod atmosphere;
+mod budget_hud;
 mod creature_list;
 mod editor;
 mod glossary;
@@ -70,6 +73,7 @@ use crate::atmosphere::{
     is_organism_aboveground, organism_celestial_rim, sky_weather_for_scene, toward_light_celestial,
     view_cell_x_ranges, view_tile_box, RidgeSilhouette,
 };
+use crate::budget_hud::BudgetHud;
 use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
 use crate::glossary::Glossary;
@@ -242,6 +246,8 @@ async fn main() {
     let mut pressure_overlay = false;
     let mut mycelium_overlay = false;
     let mut geotech_mode = GeotechOverlayMode::Off;
+    let mut budget = BudgetHud::default();
+    let mut f3_budget_cheat = false;
     let mut show_hud = true;
     let mut editor = CreatureEditor::default();
     let mut terrain = TerrainEditor::default();
@@ -300,6 +306,11 @@ async fn main() {
             } else if terrain.open {
                 terrain.open = false;
                 paused = terrain.was_paused;
+                if f3_budget_cheat {
+                    budget.note_cheat("F3 paint");
+                    budget.refresh(&scene.world, &scene.humidity);
+                    f3_budget_cheat = false;
+                }
                 // Mid-air F3 paint can lose its dirty wake; re-dirty
                 // unsupported sand/Organic so the next tick seats them.
                 wake_unsupported_grains(&mut scene.world);
@@ -354,6 +365,11 @@ async fn main() {
                 paused = true;
             } else {
                 paused = terrain.was_paused;
+                if f3_budget_cheat {
+                    budget.note_cheat("F3 paint");
+                    budget.refresh(&scene.world, &scene.humidity);
+                    f3_budget_cheat = false;
+                }
                 // Landscape entities first (whole hanging slabs), then CA competent.
                 scene.support.rebuild(&scene.world);
                 let active = plan_active(&scene.world);
@@ -432,6 +448,7 @@ async fn main() {
                         settings.steam.phase_expansion_drive =
                             scene.world.pipe_expand.max(1);
                         inspect = None;
+                        budget.remake(&scene.world, &scene.humidity, "load remake");
                         let msg = format!("Loaded {}", path.display());
                         terrain.status = msg.clone();
                         eprintln!("[wk-voxel-app] {msg}");
@@ -454,6 +471,7 @@ async fn main() {
             settings.on_world_reseed(&scene.params);
             ridges.invalidate();
             inspect = None;
+            budget.remake(&scene.world, &scene.humidity, "regen remake");
             terrain.status = format!(
                 "Regenerated {}×{} (sea={})",
                 scene.params.width_cols,
@@ -482,6 +500,7 @@ async fn main() {
                 settings.on_world_reseed(&scene.params);
                 ridges.invalidate();
                 inspect = None;
+                budget.remake(&scene.world, &scene.humidity, "R remake");
             }
             if is_key_pressed(KeyCode::C) {
                 settings.cond_rain_on = !settings.cond_rain_on;
@@ -512,6 +531,12 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::G) {
                 geotech_mode = geotech_mode.next();
+            }
+            if is_key_pressed(KeyCode::B) {
+                budget.toggle(&scene.world, &scene.humidity);
+            }
+            if is_key_pressed(KeyCode::N) && budget.is_on() {
+                budget.remake(&scene.world, &scene.humidity, "N remake");
             }
             if is_key_pressed(KeyCode::I) {
                 settings.phase.enabled = !settings.phase.enabled;
@@ -623,6 +648,7 @@ async fn main() {
             if let Some(org) = outcome.organisms {
                 spore_fx.burst_all(&org.spores, outcome.wind_vx);
             }
+            budget.sample_if_due(&scene.world, &scene.humidity);
         } else if !hard_pause {
             sim_skipped = true;
         }
@@ -703,6 +729,9 @@ async fn main() {
                     }
                     terrain.apply_at(&mut scene.world, gx, gy);
                     terrain.tool = prev_tool;
+                    if budget.is_on() {
+                        f3_budget_cheat = true;
+                    }
                     // Seed crest must not linger in the ridge plates after a
                     // hill wipe — `ensure` only resamples every 30 ticks.
                     ridges.invalidate();
@@ -1806,6 +1835,9 @@ async fn main() {
         creature_list.draw(&scene.organisms);
         settings.draw(&mut scene.world, &scene.carbon);
         glossary.draw();
+        if !quit_dialog.open {
+            budget.draw();
+        }
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -1869,7 +1901,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|C/E/K/O|I|T/U/H/V/M/G/P|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
+                "Tab|Space|R|C/E/K/O|I|T/U/H/V/M/G/P/B|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

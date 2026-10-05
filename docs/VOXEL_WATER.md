@@ -25,6 +25,12 @@ Known sinks **outside** tick: bare evaporation, open-loop rain mint,
 ice/snow cull, humidity OOB drop. Do not expect `tracked` flat across
 those passes unless they are closed-loop.
 
+Play overlay **`B`** (`budget::BudgetSnap`) is the same cell+humidity
+inventory plus Ice/Snow thaw yield (255 per cell) so freeze is a store
+move, not unexplained. `audit::tracked_totals` still omits ice. Scan
+runs only while the overlay is on, every 60 ticks. `N` remakes the
+mark. F3 paint is a named cheat; R / load remake the mark.
+
 ### Play watch — highland lake drawdown (~25 m overnight)
 
 Observed on the deep-relief default (sea ≈ 240): a perched mountain
@@ -50,11 +56,14 @@ pore `sat` share one field but are separate lines in
 `audit::sat_totals` — a free-surface crash with flat `cell_total` is
 soak/migration, not a mint/destroy bug.
 
-**Next check when it happens again:** before/after
-`sat_totals` (free vs pore) + `tracked_totals` (humidity/clouds). If
-free drops and pore rises by a similar amount, it is bed soak. If both
-drop and humidity rises, it is evap. If `cell_total` falls with no
-humidity gain, then chase a real destroy path.
+**Next check when it happens again:** press **`B`** (mass-budget
+ledger). It snapshots stores at a mark and dumps Δfree / Δpore /
+Δsteam / Δhum / Δice / TRACKED every 60 ticks. `N` remakes the mark.
+If free drops and pore rises by a similar amount, the flag is `SOAK`.
+If both drop and humidity rises, `EVAP`. If `TRACKED` leftover is
+red (`UNEXPL-W`) with no named cheat (F3 paint / R / load remake),
+then chase a real destroy path. Same numbers as
+`sat_totals` + ice/snow thaw yield + humidity.
 
 ### Geyser / pipe mass audit (destroy vs design)
 
