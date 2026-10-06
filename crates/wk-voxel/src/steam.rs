@@ -1252,6 +1252,7 @@ fn park_or_restore_vapour(world: &mut World, gx: i32, gy: i32, units: u32) {
         left = place_steam_units(world, gx, gy + dy, left);
         dy += 1;
     }
+    crate::budget::note_unplaced_water(left);
 }
 
 /// Prefer injecting boiled steam into void Air above / beside the source.

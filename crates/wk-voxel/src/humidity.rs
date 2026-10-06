@@ -585,6 +585,7 @@ impl Humidity {
         }
         let key = self.tile_of(gx, gy);
         if !self.accepts(key.0, key.1) {
+            crate::budget::note_water_hum_rej(mass);
             return 0.0;
         }
         let cur = self.at_tile(key.0, key.1);
@@ -832,7 +833,18 @@ impl Humidity {
         if self.slab.as_ref().is_some_and(|s| s.bounds != b) {
             self.flush_slab_into_cells();
         }
-        self.cells.retain(|&(hx, hy), _| b.contains(hx, hy));
+        let mut dropped = 0.0f32;
+        self.cells.retain(|&(hx, hy), v| {
+            if b.contains(hx, hy) {
+                true
+            } else {
+                dropped += *v;
+                false
+            }
+        });
+        if dropped > 1e-6 {
+            crate::budget::note_water_clamp(dropped);
+        }
     }
 
     /// Explicit 4-neighbour diffusion step.

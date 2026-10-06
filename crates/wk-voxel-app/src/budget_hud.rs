@@ -5,7 +5,7 @@
 //! that is not the retired humidity-bank overlay.
 
 use macroquad::prelude::*;
-use wk_voxel::{BudgetLedger, Humidity, World};
+use wk_voxel::{BudgetLedger, BudgetProbe, Humidity, World};
 
 const LINE_H: f32 = 15.0;
 const PAD: f32 = 8.0;
@@ -106,6 +106,18 @@ impl BudgetHud {
         } else {
             self.last_event.as_str()
         };
+        let dt = d.ticks.max(1) as f64;
+        let rate_w = d.d_tracked / dt;
+        let rate_m = d.d_min_total as f64 / dt;
+        let p = BudgetProbe::snapshot();
+        let probe_w = format!(
+            "swap:{:+} park:{:+} rej:{:+} clamp:{:+}",
+            p.water_swap, p.water_park, p.water_hum_rej, p.water_clamp
+        );
+        let probe_m = format!(
+            "bare:{:+} credit:{:+} clip:{:+}",
+            p.mineral_bare, p.mineral_credit, p.mineral_clip
+        );
 
         let lines = [
             format!("BUDGET  B=on  N=remake  scan/{}t", self.ledger.period),
@@ -150,13 +162,18 @@ impl BudgetHud {
                 now.mineral_total(),
                 d.d_min_total,
             ),
+            format!("rate    W {rate_w:+.2}/t   M {rate_m:+.2}/t"),
+            format!("probe-W {probe_w}"),
+            format!("probe-M {probe_m}"),
             format!("read   {flags}"),
             format!("cheats {cheats}"),
             "TRACKED leftover = mint/cull/OOB (or uncredited sink)".into(),
+            "W: swap=mat-change sat  park=dropped orphan  clamp=H OOB".into(),
+            "M: bare=set_cell outside ledger APIs  credit=widen/scour".into(),
             "SOAK=free→pore  EVAP=cell→hum  RAIN=hum→free/ice".into(),
         ];
 
-        let w = 420.0;
+        let w = 460.0;
         let h = PAD * 2.0 + lines.len() as f32 * LINE_H + 4.0;
         let x = 8.0;
         let y = 8.0;
@@ -165,17 +182,27 @@ impl BudgetHud {
         for (i, line) in lines.iter().enumerate() {
             let color = if i == 0 {
                 Color::from_rgba(255, 255, 0, 255)
-            } else if line.starts_with("TRACKED leftover") || line.starts_with("SOAK=") {
+            } else if line.starts_with("TRACKED leftover")
+                || line.starts_with("SOAK=")
+                || line.starts_with("W:")
+                || line.starts_with("M:")
+            {
                 Color::from_rgba(180, 180, 180, 255)
             } else if line.starts_with("read") && (d.unexplained_water() || d.unexplained_mineral())
             {
                 Color::from_rgba(255, 80, 80, 255)
-            } else if line.starts_with("TRACKED") {
+            } else if line.starts_with("TRACKED") || line.starts_with("rate") {
                 if d.unexplained_water() {
                     Color::from_rgba(255, 80, 80, 255)
                 } else {
                     Color::from_rgba(80, 255, 80, 255)
                 }
+            } else if line.starts_with("probe-M") && p.mineral_bare.abs() > 16 {
+                Color::from_rgba(255, 80, 80, 255)
+            } else if line.starts_with("probe-W")
+                && (p.water_park.abs() > 16 || p.water_clamp.abs() > 16 || p.water_swap.abs() > 16)
+            {
+                Color::from_rgba(255, 140, 80, 255)
             } else {
                 Color::from_rgba(255, 220, 80, 255)
             };

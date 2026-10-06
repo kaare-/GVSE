@@ -2165,14 +2165,16 @@ impl OrganismStore {
                     let accepted = hum.try_add_units(gx, gy, sat);
                     let rejected = sat.saturating_sub(accepted);
                     if rejected > 0 {
-                        let _ = crate::displace::park_orphan_water(world, gx, gy, rejected);
+                        let left = crate::displace::park_orphan_water(world, gx, gy, rejected);
+                        crate::budget::note_unplaced_water(left);
                     }
                 }
             }
             None => {
                 for (gx, gy, sat) in transpired {
                     if sat > 0 {
-                        let _ = crate::displace::park_orphan_water(world, gx, gy, sat as u32);
+                        let left = crate::displace::park_orphan_water(world, gx, gy, sat as u32);
+                        crate::budget::note_unplaced_water(left);
                     }
                 }
             }

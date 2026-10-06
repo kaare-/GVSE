@@ -189,16 +189,20 @@ pub fn park_orphan_or_keep(
     return 0;
   }
   let Some(mut c) = world.get_cell(keep_gx, keep_gy) else {
+    crate::budget::note_unplaced_water(left);
     return left;
   };
   let room = (u8::MAX - c.sat.0) as u32;
   let put = room.min(left);
   if put == 0 {
+    crate::budget::note_unplaced_water(left);
     return left;
   }
   c.sat = Sat(c.sat.0 + put as u8);
   world.set_cell(keep_gx, keep_gy, c);
-  left - put
+  let still = left - put;
+  crate::budget::note_unplaced_water(still);
+  still
 }
 
 /// Pour displaced water back into the world.

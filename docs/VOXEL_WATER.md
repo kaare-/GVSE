@@ -68,6 +68,24 @@ red (`UNEXPL-W`) with no named cheat (F3 paint / R / load remake),
 then chase a real destroy path. Same numbers as
 `sat_totals` + ice/snow thaw yield + humidity.
 
+While `B` is on the overlay also prints **rate /tick** and **probe-W /
+probe-M**. Those are not extra stores — they classify writes since the
+mark so the next hunt is not a guess:
+
+- `probe-W swap` — `set_cell` sat/ice change when the **material**
+  changed (gravity/evap keep the material and stay 0 here).
+- `probe-W park` — discarded `park_orphan` remainder.
+- `probe-W clamp` / `rej` — humidity OOB drop / refused add.
+- `probe-M bare` — carbonate `set_cell` outside widen / scour / precip
+  / emit (the Cell::default() pore-reset class).
+- `probe-M credit` — those ledger APIs (should pair with `min.load`).
+- `probe-M clip` — `add_dissolved` remainder after neighbour spill.
+
+If `UNEXPL-W` is ~−8/t and `swap`/`park`/`clamp` are ~0, the leak is
+same-material sat (evap without H, or H bookkeeping). If `bare`
+matches `UNEXPL-M`, hunt the `set_cell` that is not going through
+`mineral.rs`.
+
 ### Geyser / pipe mass audit (destroy vs design)
 
 Checked after the highland-lake watch. **No smoking-gun path that

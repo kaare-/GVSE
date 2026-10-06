@@ -176,7 +176,7 @@ pub fn add_dissolved(world: &mut World, gx: i32, gy: i32, mut add: u16) {
         }
         add = put_dissolved(world, nx, ny, add);
     }
-    let _ = add;
+    crate::budget::note_mineral_clip(add);
 }
 
 fn put_dissolved(world: &mut World, gx: i32, gy: i32, add: u16) -> u16 {
@@ -268,6 +268,7 @@ pub fn cell_mineral(cell: Cell) -> u16 {
 /// full aperture has released most of its mineral incrementally and must not
 /// emit a second full cell's worth.
 pub fn emit_from_dissolved_rock(world: &mut World, gx: i32, gy: i32, was: Cell) {
+    let _scope = crate::budget::MineralLedgerScope::enter();
     let remaining = cell_mineral(was);
     if remaining == 0 {
         return;
@@ -302,6 +303,7 @@ pub fn widen_aperture(
     seed_salt: u64,
     mint_void: bool,
 ) -> bool {
+    let _scope = crate::budget::MineralLedgerScope::enter();
     if throughput == 0 || scale <= 0.0 {
         return false;
     }
@@ -389,6 +391,7 @@ pub fn widen_aperture(
 /// one pore step is one load unit, same as [`widen_aperture`]. Stops at
 /// `pore_cap` so a sand lens does not become a void pipe.
 pub fn scour_grain_pore(world: &mut World, gx: i32, gy: i32, pore_cap: u8) -> bool {
+    let _scope = crate::budget::MineralLedgerScope::enter();
     let gx = world.wrap_x(gx);
     let Some(cell) = world.get_cell(gx, gy) else {
         return false;
@@ -461,6 +464,7 @@ pub const CEMENT_MIN_LOAD: u16 = 32;
 /// is therefore genuinely porous, and further precipitation tightens it through
 /// the normal occlusion path.
 fn cement_cell(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
+    let _scope = crate::budget::MineralLedgerScope::enter();
     let Some(cell) = world.get_cell(gx, gy) else {
         return 0;
     };
@@ -526,6 +530,7 @@ fn cement_cell(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
 /// — competent, outside the mineral ledger — so phase crack + reverse-seep
 /// widen can run. Does **not** invent carbonate from silicate dissolve.
 pub fn pressure_sinter_cell(world: &mut World, gx: i32, gy: i32) -> bool {
+    let _scope = crate::budget::MineralLedgerScope::enter();
     let Some(cell) = world.get_cell(gx, gy) else {
         return false;
     };
@@ -842,6 +847,7 @@ pub fn dump_dry_air_load(world: &mut World, gx: i32, gy: i32) -> u16 {
 
 /// Shared core: drop whatever load exceeds `ceiling`.
 fn precipitate_over(world: &mut World, gx: i32, gy: i32, ceiling: u16) -> u16 {
+    let _scope = crate::budget::MineralLedgerScope::enter();
     let gx = world.wrap_x(gx);
     let load = dissolved_at(world, gx, gy);
     if load == 0 {
