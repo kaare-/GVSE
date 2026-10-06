@@ -308,7 +308,7 @@ async fn main() {
                 paused = terrain.was_paused;
                 if f3_budget_cheat {
                     budget.note_cheat("F3 paint");
-                    budget.refresh(&scene.world, &scene.humidity);
+                    budget.refresh(&scene.world, &scene.humidity, &scene.landscape);
                     f3_budget_cheat = false;
                 }
                 // Mid-air F3 paint can lose its dirty wake; re-dirty
@@ -367,7 +367,7 @@ async fn main() {
                 paused = terrain.was_paused;
                 if f3_budget_cheat {
                     budget.note_cheat("F3 paint");
-                    budget.refresh(&scene.world, &scene.humidity);
+                    budget.refresh(&scene.world, &scene.humidity, &scene.landscape);
                     f3_budget_cheat = false;
                 }
                 // Landscape entities first (whole hanging slabs), then CA competent.
@@ -448,7 +448,7 @@ async fn main() {
                         settings.steam.phase_expansion_drive =
                             scene.world.pipe_expand.max(1);
                         inspect = None;
-                        budget.remake(&scene.world, &scene.humidity, "load remake");
+                        budget.remake(&scene.world, &scene.humidity, &scene.landscape, "load remake");
                         let msg = format!("Loaded {}", path.display());
                         terrain.status = msg.clone();
                         eprintln!("[wk-voxel-app] {msg}");
@@ -471,7 +471,7 @@ async fn main() {
             settings.on_world_reseed(&scene.params);
             ridges.invalidate();
             inspect = None;
-            budget.remake(&scene.world, &scene.humidity, "regen remake");
+            budget.remake(&scene.world, &scene.humidity, &scene.landscape, "regen remake");
             terrain.status = format!(
                 "Regenerated {}×{} (sea={})",
                 scene.params.width_cols,
@@ -500,7 +500,7 @@ async fn main() {
                 settings.on_world_reseed(&scene.params);
                 ridges.invalidate();
                 inspect = None;
-                budget.remake(&scene.world, &scene.humidity, "R remake");
+                budget.remake(&scene.world, &scene.humidity, &scene.landscape, "R remake");
             }
             if is_key_pressed(KeyCode::C) {
                 settings.cond_rain_on = !settings.cond_rain_on;
@@ -533,10 +533,10 @@ async fn main() {
                 geotech_mode = geotech_mode.next();
             }
             if is_key_pressed(KeyCode::B) {
-                budget.toggle(&scene.world, &scene.humidity);
+                budget.toggle(&scene.world, &scene.humidity, &scene.landscape);
             }
             if is_key_pressed(KeyCode::N) && budget.is_on() {
-                budget.remake(&scene.world, &scene.humidity, "N remake");
+                budget.remake(&scene.world, &scene.humidity, &scene.landscape, "N remake");
             }
             if is_key_pressed(KeyCode::I) {
                 settings.phase.enabled = !settings.phase.enabled;
@@ -648,7 +648,7 @@ async fn main() {
             if let Some(org) = outcome.organisms {
                 spore_fx.burst_all(&org.spores, outcome.wind_vx);
             }
-            budget.sample_if_due(&scene.world, &scene.humidity);
+            budget.sample_if_due(&scene.world, &scene.humidity, &scene.landscape);
         } else if !hard_pause {
             sim_skipped = true;
         }

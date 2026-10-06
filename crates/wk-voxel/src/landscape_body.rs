@@ -101,6 +101,25 @@ impl LandscapeBodyStore {
   pub fn len(&self) -> usize {
     self.bodies.len()
   }
+
+  /// Water + carbonate currently off the grid in flying slabs.
+  ///
+  /// Detach writes Air; stamp writes the cells back. The B overlay has to
+  /// count this book or a hanging limestone cliff looks like UNEXPL-M.
+  pub fn overlay_inventory(&self) -> (i64, i64) {
+    let mut water = 0i64;
+    let mut mineral = 0i64;
+    for body in &self.bodies {
+      for &(_, _, c) in body.cells.iter().chain(body.cargo.iter()) {
+        mineral += crate::mineral::cell_mineral(c) as i64;
+        water += match c.material {
+          MaterialId::Ice | MaterialId::Snow => u8::MAX as i64,
+          _ => c.sat.0 as i64,
+        };
+      }
+    }
+    (water, mineral)
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -184,18 +203,27 @@ fn stamp_cells_displacing(world: &mut World, cells: &[(i32, i32, Cell)]) -> u32 
 }
 
 fn stamp_cells(world: &mut World, cells: &[(i32, i32, Cell)]) {
+  // Seated / jammed rematerialize used to overwrite dest solids after only
+  // scooping free water. Loose limestone under a stamp is dest carbonate.
+  let shifted = take_obstacles(world, cells);
   let water = stamp_cells_displacing(world, cells);
+  if water == 0 && shifted.is_empty() {
+    return;
+  }
+  let occupied: HashSet<(i32, i32)> = cells
+    .iter()
+    .map(|&(x, y, _)| (world.wrap_x(x), y))
+    .collect();
+  // Push the lake / rubble up around the body rather than through it.
+  let above: Vec<(i32, i32)> = cells
+    .iter()
+    .map(|&(x, y, _)| (world.wrap_x(x), y + 1))
+    .filter(|p| !occupied.contains(p))
+    .collect();
+  if !shifted.is_empty() {
+    let _ = deposit_shifted_cells(world, shifted, &above, &occupied);
+  }
   if water > 0 {
-    let occupied: HashSet<(i32, i32)> = cells
-      .iter()
-      .map(|&(x, y, _)| (world.wrap_x(x), y))
-      .collect();
-    // Push the lake up around the body rather than through it.
-    let above: Vec<(i32, i32)> = cells
-      .iter()
-      .map(|&(x, y, _)| (world.wrap_x(x), y + 1))
-      .filter(|p| !occupied.contains(p))
-      .collect();
     let _ = deposit_free_water(world, water, &above, &occupied);
   }
 }
@@ -894,5 +922,25 @@ mod tests {
       sand_min <= stone_max + 4,
       "sand stays on rock (sand_min={sand_min}, stone_max={stone_max})"
     );
+  }
+
+  #[test]
+  fn overlay_inventory_counts_off_grid_limestone() {
+    let mut lime = Cell::solid(MaterialId::Limestone);
+    lime.pore = 40;
+    lime.sat.0 = 8;
+    let mut store = LandscapeBodyStore::new();
+    store.bodies.push(LandscapeBody {
+      id: 1,
+      cells: vec![(0, 0, lime)],
+      cargo: vec![(0, 1, Cell::water())],
+      ox: 0,
+      oy: 0,
+      fall_streak: 0,
+      stuck_ticks: 0,
+    });
+    let (water, mineral) = store.overlay_inventory();
+    assert_eq!(mineral, crate::mineral::cell_mineral(lime) as i64);
+    assert_eq!(water, 8 + u8::MAX as i64);
   }
 }

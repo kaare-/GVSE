@@ -30,9 +30,12 @@ fractional cold-cap room *up* was a slow night `UNEXPL-W` leak.
 
 Play overlay **`B`** (`budget::BudgetSnap`) is the same cell+humidity
 inventory plus Ice/Snow thaw yield (255 per cell) so freeze is a store
-move, not unexplained. `audit::tracked_totals` still omits ice. Scan
-runs only while the overlay is on, every 60 ticks. `N` remakes the
-mark. F3 paint is a named cheat; R / load remake the mark.
+move, not unexplained, plus **in-flight landscape slabs** (`body` /
+`min.body`) — detach writes Air, so hanging limestone would otherwise
+read as `UNEXPL-M` until stamp. `audit::tracked_totals` still omits ice
+and bodies. Scan runs only while the overlay is on, every 60 ticks.
+`N` remakes the mark. F3 paint is a named cheat; R / load remake the
+mark.
 
 ### Play watch — highland lake drawdown (~25 m overnight)
 
@@ -75,7 +78,8 @@ mark so the next hunt is not a guess:
 - `probe-W swap` — `set_cell` sat/ice change when the **material**
   changed (gravity/evap keep the material and stay 0 here).
 - `probe-W park` — discarded `park_orphan` remainder (should stay ~0
-  after leftover is banked as cavity steam).
+  after leftover is banked as cavity steam). Overnight soak after
+  park-bank: `park=+0`.
 - `probe-W clamp` / `rej` — humidity OOB drop / refused add.
 - `probe-M bare` — carbonate `set_cell` outside widen / scour / precip
   / emit / karst convert (the Cell::default() pore-reset class).
@@ -87,6 +91,12 @@ If `UNEXPL-W` is ~−8/t and `swap`/`park`/`clamp` are ~0, the leak is
 same-material sat (evap without H, or H bookkeeping). If `bare`
 matches `UNEXPL-M`, hunt the `set_cell` that is not going through
 `mineral.rs` / karst convert.
+
+A later overnight soak (`land=0`, `park=+0`) still showed `UNEXPL-M`
+~−2.8/t. That was **not** flying slabs: `write_roll_cells` crushed a
+tiny dest spec then overwrote the cell, deleting dest carbonate.
+Crushed dest is now `take_soft` (or load if no seat). Landscape stamp
+lifts crushable dest the same way.
 
 ### Geyser / pipe mass audit (destroy vs design)
 

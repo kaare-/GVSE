@@ -2,8 +2,9 @@
 //!
 //! Not a heatmap. Snapshot water / mineral stores at a mark and show
 //! deltas so a pretty cliff cannot impersonate physics. Closed-loop
-//! rain/evap/freeze should keep `tracked` (cells + humidity + ice/snow)
-//! near-flat; leftover after store-to-store moves is the unexplained term.
+//! rain/evap/freeze should keep `tracked` (cells + humidity + ice/snow
+//! + in-flight landscape sat) near-flat; leftover after store-to-store
+//! moves is the unexplained term.
 
 use std::cell::Cell as StdCell;
 
@@ -13,6 +14,7 @@ use crate::audit::{mineral_total, sat_totals};
 use crate::cell::Cell;
 use crate::grid::World;
 use crate::humidity::Humidity;
+use crate::landscape_body::LandscapeBodyStore;
 use crate::mineral::cell_mineral;
 use crate::pipe::pipe_mass_sat;
 
@@ -38,16 +40,32 @@ pub struct BudgetSnap {
     pub snow: i64,
     pub mineral_solid: i64,
     pub mineral_load: i64,
+    /// Sat in flying landscape entities (off-grid slabs).
+    pub body_water: i64,
+    /// Carbonate in those entities.
+    pub body_mineral: i64,
 }
 
 impl BudgetSnap {
     pub fn capture(world: &World, humidity: &Humidity) -> Self {
+        Self::capture_with(world, humidity, None)
+    }
+
+    /// [`Self::capture`] plus in-flight landscape slabs.
+    pub fn capture_with(
+        world: &World,
+        humidity: &Humidity,
+        landscape: Option<&LandscapeBodyStore>,
+    ) -> Self {
         let sat = sat_totals(world);
         let steam: i64 = world.steam.values().map(|&v| v as i64).sum();
         let cave_h: i64 = world.cave_humidity.values().map(|&v| v as i64).sum();
         let pipe = pipe_mass_sat(world);
         let load: i64 = world.dissolved.values().map(|&v| v as i64).sum();
         let mineral = mineral_total(world);
+        let (body_water, body_mineral) = landscape
+            .map(LandscapeBodyStore::overlay_inventory)
+            .unwrap_or((0, 0));
         let mut ice = 0i64;
         let mut snow = 0i64;
         let full = u8::MAX as i64;
@@ -72,6 +90,8 @@ impl BudgetSnap {
             snow,
             mineral_solid: mineral - load,
             mineral_load: load,
+            body_water,
+            body_mineral,
         }
     }
 
@@ -86,14 +106,17 @@ impl BudgetSnap {
         self.ice + self.snow
     }
 
-    /// Cell water + sky humidity + ice/snow. Closed-loop rain/evap/freeze
-    /// should keep this near-flat; leftover is unexplained.
+    /// Cell water + sky humidity + ice/snow + in-flight landscape sat.
+    /// Closed-loop rain/evap/freeze should keep this near-flat; leftover is unexplained.
     pub fn tracked(self) -> f64 {
-        self.cell_total() as f64 + f64::from(self.humidity) + self.phase_water() as f64
+        self.cell_total() as f64
+            + self.body_water as f64
+            + f64::from(self.humidity)
+            + self.phase_water() as f64
     }
 
     pub fn mineral_total(self) -> i64 {
-        self.mineral_solid + self.mineral_load
+        self.mineral_solid + self.mineral_load + self.body_mineral
     }
 
     pub fn delta(self, mark: Self) -> BudgetDelta {
@@ -104,12 +127,14 @@ impl BudgetSnap {
             d_steam: self.steam - mark.steam,
             d_cave: self.cave_h - mark.cave_h,
             d_pipe: self.pipe - mark.pipe,
+            d_body: self.body_water - mark.body_water,
             d_humidity: f64::from(self.humidity) - f64::from(mark.humidity),
             d_ice: self.ice - mark.ice,
             d_snow: self.snow - mark.snow,
             d_tracked: self.tracked() - mark.tracked(),
             d_min_solid: self.mineral_solid - mark.mineral_solid,
             d_min_load: self.mineral_load - mark.mineral_load,
+            d_min_body: self.body_mineral - mark.body_mineral,
             d_min_total: self.mineral_total() - mark.mineral_total(),
         }
     }
@@ -125,12 +150,14 @@ pub struct BudgetDelta {
     pub d_steam: i64,
     pub d_cave: i64,
     pub d_pipe: i64,
+    pub d_body: i64,
     pub d_humidity: f64,
     pub d_ice: i64,
     pub d_snow: i64,
     pub d_tracked: f64,
     pub d_min_solid: i64,
     pub d_min_load: i64,
+    pub d_min_body: i64,
     pub d_min_total: i64,
 }
 
@@ -213,7 +240,16 @@ impl BudgetLedger {
 
     /// Turn on and pin the mark to this inventory.
     pub fn enable(&mut self, world: &World, humidity: &Humidity) {
-        let s = BudgetSnap::capture(world, humidity);
+        self.enable_with(world, humidity, None);
+    }
+
+    pub fn enable_with(
+        &mut self,
+        world: &World,
+        humidity: &Humidity,
+        landscape: Option<&LandscapeBodyStore>,
+    ) {
+        let s = BudgetSnap::capture_with(world, humidity, landscape);
         self.mark = Some(s);
         self.now = Some(s);
         probe_reset();
@@ -235,13 +271,31 @@ impl BudgetLedger {
 
     /// Force a rescan while the overlay is on (F3 close, N remake).
     pub fn refresh(&mut self, world: &World, humidity: &Humidity) {
+        self.refresh_with(world, humidity, None);
+    }
+
+    pub fn refresh_with(
+        &mut self,
+        world: &World,
+        humidity: &Humidity,
+        landscape: Option<&LandscapeBodyStore>,
+    ) {
         if self.mark.is_some() {
-            self.now = Some(BudgetSnap::capture(world, humidity));
+            self.now = Some(BudgetSnap::capture_with(world, humidity, landscape));
         }
     }
 
     /// Rescan when enough ticks have passed (overlay on only).
     pub fn sample_if_due(&mut self, world: &World, humidity: &Humidity) {
+        self.sample_if_due_with(world, humidity, None);
+    }
+
+    pub fn sample_if_due_with(
+        &mut self,
+        world: &World,
+        humidity: &Humidity,
+        landscape: Option<&LandscapeBodyStore>,
+    ) {
         if self.mark.is_none() {
             return;
         }
@@ -250,7 +304,7 @@ impl BudgetLedger {
             Some(n) => world.tick.saturating_sub(n.tick) >= self.period,
         };
         if due {
-            self.now = Some(BudgetSnap::capture(world, humidity));
+            self.now = Some(BudgetSnap::capture_with(world, humidity, landscape));
         }
     }
 }
@@ -430,6 +484,7 @@ mod tests {
     use crate::cell::Cell;
     use crate::grid::World;
     use crate::humidity::Humidity;
+    use crate::landscape_body::{LandscapeBody, LandscapeBodyStore};
     use crate::rules::tick;
     use wk_material::MaterialId;
 
@@ -655,5 +710,33 @@ mod tests {
             -200,
             "Air→Stone must tag the sat that vanished with the material"
         );
+    }
+
+    #[test]
+    fn snap_counts_in_flight_landscape_body() {
+        let w = World::new(1);
+        let h = empty_h();
+        let mut lime = Cell::solid(MaterialId::Limestone);
+        lime.pore = 40;
+        lime.sat.0 = 12;
+        let mut store = LandscapeBodyStore::new();
+        store.bodies.push(LandscapeBody {
+            id: 1,
+            cells: vec![(0, 0, lime)],
+            cargo: vec![],
+            ox: 0,
+            oy: 0,
+            fall_streak: 0,
+            stuck_ticks: 0,
+        });
+        let s = BudgetSnap::capture_with(&w, &h, Some(&store));
+        assert_eq!(s.body_water, 12);
+        assert_eq!(s.body_mineral, crate::mineral::cell_mineral(lime) as i64);
+        assert_eq!(s.mineral_total(), s.body_mineral);
+        assert_eq!(s.tracked(), 12.0);
+        let grid_only = BudgetSnap::capture(&w, &h);
+        assert_eq!(grid_only.body_mineral, 0);
+        assert_eq!(grid_only.body_water, 0);
+        assert_eq!(grid_only.mineral_total(), 0);
     }
 }
