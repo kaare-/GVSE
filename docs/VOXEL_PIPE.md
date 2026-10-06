@@ -345,8 +345,9 @@ Also tightened after the highland-lake play watch:
 - `concentrate_hot_mouth` used to ignore `add_sat`'s shortfall when sky H
   and cavity steam both refused the boiled lip water. It now parks
   orphan liquid, then banks expand-scaled `pipe_res`.
-- Steam-side `park_or_restore_vapour` / `evict_steam_seat` no longer drop
-  shortfalls on full neighbour seats (ghost steam column / residual).
+- Steam-side `park_or_restore_vapour` / `evict_steam_seat` pack leftover
+  onto existing steam seats and an unbounded ghost column
+  (`bank_remaining_vapour`) instead of dropping after 64 full seats.
 
 Those were real destroy bugs but intermittent — they do not explain a
 ~25 m free-surface drop with a flat HUD `sat` total (that still reads as

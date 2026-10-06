@@ -189,20 +189,20 @@ pub fn park_orphan_or_keep(
     return 0;
   }
   let Some(mut c) = world.get_cell(keep_gx, keep_gy) else {
-    crate::budget::note_unplaced_water(left);
-    return left;
+    return crate::steam::bank_remaining_vapour(world, park_gx, park_gy, left);
   };
   let room = (u8::MAX - c.sat.0) as u32;
   let put = room.min(left);
   if put == 0 {
-    crate::budget::note_unplaced_water(left);
-    return left;
+    return crate::steam::bank_remaining_vapour(world, keep_gx, keep_gy, left);
   }
   c.sat = Sat(c.sat.0 + put as u8);
   world.set_cell(keep_gx, keep_gy, c);
   let still = left - put;
-  crate::budget::note_unplaced_water(still);
-  still
+  if still == 0 {
+    return 0;
+  }
+  crate::steam::bank_remaining_vapour(world, keep_gx, keep_gy, still)
 }
 
 /// Pour displaced water back into the world.
@@ -333,7 +333,6 @@ pub fn deposit_shifted_cells(
     .map(|&(x, y)| (world.wrap_x(x), y))
     .filter(|p| !blocked.contains(p))
     .collect();
-  let mut leftover = Vec::new();
 
   while let Some(item) = shifted.pop() {
     // Preferred (vacated) slots first — they are guaranteed-sized for the swap.
@@ -351,10 +350,20 @@ pub fn deposit_shifted_cells(
     if let Some((x, y)) = find_open_near(world, item.from, blocked) {
       place_soft(world, x, y, item.cell);
     } else {
-      leftover.push(item);
+      // No Air seat: keep carbonate as load and park pore water so a
+      // shove never deletes either store. The grain is consumed.
+      crate::mineral::emit_from_dissolved_rock(world, item.from.0, item.from.1, item.cell);
+      if item.cell.sat.0 > 0 {
+        let _ = crate::steam::bank_remaining_vapour(
+          world,
+          item.from.0,
+          item.from.1,
+          item.cell.sat.0 as u32,
+        );
+      }
     }
   }
-  leftover
+  Vec::new()
 }
 
 /// Write a loose cell into an Air slot, keeping any free water that was there.
@@ -491,6 +500,28 @@ mod tests {
       crate::cave_humidity::cave_humidity_at(&w, 5, 3) > 0
         || w.get_cell(5, 3).unwrap().sat.0 > 0,
       "units must land as sat or cave humidity"
+    );
+  }
+
+  #[test]
+  fn park_orphan_or_keep_banks_when_keep_is_full() {
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 3..8 {
+      for y in 1..6 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let mut full = Cell::air();
+    full.sat = Sat(255);
+    w.set_cell(5, 2, full);
+    w.set_cell(5, 3, Cell::solid(MaterialId::Stone));
+    let before = crate::audit::sat_totals(&w).cell_total;
+    let left = park_orphan_or_keep(&mut w, 5, 3, 5, 2, 50);
+    assert_eq!(left, 0, "full keep must bank leftover as steam, not drop it");
+    assert_eq!(
+      crate::audit::sat_totals(&w).cell_total,
+      before + 50
     );
   }
 

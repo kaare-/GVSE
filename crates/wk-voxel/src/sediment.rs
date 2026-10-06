@@ -252,7 +252,9 @@ fn sink_toward_bed(world: &mut World, gx: i32, gy: i32, amount: u16) -> u16 {
 /// contract as mineral sinter spill.
 fn push_water_up(world: &mut World, gx: i32, gy: i32, spill: u8) {
     let left = crate::displace::park_orphan_water(world, gx, gy, spill as u32);
-    crate::budget::note_unplaced_water(left);
+    if left > 0 {
+        crate::steam::bank_remaining_vapour(world, gx, gy, left);
+    }
 }
 
 /// Entrain fines where water moves, settle them where it slows.

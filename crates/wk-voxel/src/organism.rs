@@ -2166,7 +2166,9 @@ impl OrganismStore {
                     let rejected = sat.saturating_sub(accepted);
                     if rejected > 0 {
                         let left = crate::displace::park_orphan_water(world, gx, gy, rejected);
-                        crate::budget::note_unplaced_water(left);
+                        if left > 0 {
+                            crate::steam::bank_remaining_vapour(world, gx, gy, left);
+                        }
                     }
                 }
             }
@@ -2174,7 +2176,9 @@ impl OrganismStore {
                 for (gx, gy, sat) in transpired {
                     if sat > 0 {
                         let left = crate::displace::park_orphan_water(world, gx, gy, sat as u32);
-                        crate::budget::note_unplaced_water(left);
+                        if left > 0 {
+                            crate::steam::bank_remaining_vapour(world, gx, gy, left);
+                        }
                     }
                 }
             }

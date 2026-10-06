@@ -405,6 +405,11 @@ fn lift_cave_humidity_off_pool(
     // a pool seat — inspector / physics both treat that as wrong).
     if left > 0 {
         let unparked = crate::displace::park_orphan_water(world, gx, gy, left as u32);
+        let unparked = if unparked > 0 {
+            crate::steam::bank_remaining_vapour(world, gx, gy, unparked)
+        } else {
+            0
+        };
         left = unparked.min(255) as u8;
     }
     let moved = hum.saturating_sub(left);

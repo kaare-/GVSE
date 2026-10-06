@@ -278,6 +278,7 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
         // pre-dissolve cell matters — one already widened toward full aperture
         // has released most of its mineral incrementally.
         let was = world.get_cell(gx, gy);
+        let _scope = crate::budget::MineralLedgerScope::enter();
         world.set_cell(gx, gy, cell);
         if let Some(prev) = was {
             crate::mineral::emit_from_dissolved_rock(world, gx, gy, prev);
@@ -301,5 +302,52 @@ mod unit {
         assert!(!pore_is_wet(cell, &hydro, 200));
         let air = Cell::water();
         assert!(!pore_is_wet(air, &hydro, 200));
+    }
+
+    #[test]
+    fn karst_convert_is_mineral_credit_and_load_flat() {
+        use crate::audit::mineral_total;
+        use crate::budget::{BudgetLedger, BudgetProbe};
+        use crate::humidity::Humidity;
+        use crate::mineral::dissolved_at;
+        use crate::chunk::ChunkCoord;
+
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            w.set_cell(x, 2, Cell::solid(MaterialId::Stone));
+        }
+        let mut wet = Cell::solid(MaterialId::Limestone);
+        wet.sat = Sat(water_capacity_cell(wet, &w.hydro));
+        w.set_cell(3, 1, wet);
+        let before = mineral_total(&w);
+        let remaining = crate::mineral::cell_mineral(wet) as i64;
+        let h = Humidity::with_world_bounds(4, 0, 0, 32, 32);
+        let mut led = BudgetLedger::default();
+        led.enable(&w, &h);
+        apply_karst_dissolution(
+            &mut w,
+            &KarstConfig {
+                prob_per_wet_neighbour: 1.0,
+                min_wet_neighbour_sat: 200,
+                seed_salt: 9,
+                period_ticks: 1,
+                pore_scale: 1.0,
+                stone_scale: 1.0,
+            },
+        );
+        assert_eq!(w.get_cell(3, 1).unwrap().material, MaterialId::Air);
+        assert_eq!(
+            mineral_total(&w),
+            before,
+            "karst convert must emit remaining carbonate as load"
+        );
+        assert_eq!(dissolved_at(&w, 3, 1) as i64, remaining);
+        let p = BudgetProbe::snapshot();
+        assert_eq!(p.mineral_bare, 0, "convert sits inside the ledger scope");
+        assert_eq!(p.mineral_credit, -remaining);
+        led.disable();
     }
 }
