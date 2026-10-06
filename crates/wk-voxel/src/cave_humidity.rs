@@ -128,7 +128,6 @@ thread_local! {
     static CAVE_HAZE_MEMO: RefCell<Option<CaveHazeMemo>> = const { RefCell::new(None) };
 }
 
-
 /// Free-water / standing pool — vapour wash must stop at the surface.
 #[inline]
 fn is_free_water_seat(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
@@ -222,7 +221,10 @@ pub fn cave_humidity_haze_wash(world: &World) -> Vec<CaveHumidityHazeSample> {
                 if !visited.insert((nx, ny)) {
                     continue;
                 }
-                if world.get_cell(nx, ny).is_some_and(|n| is_cave_humidity_void(world, nx, ny, n)) {
+                if world
+                    .get_cell(nx, ny)
+                    .is_some_and(|n| is_cave_humidity_void(world, nx, ny, n))
+                {
                     queue.push((nx, ny));
                 }
             }
@@ -260,7 +262,16 @@ pub fn cave_humidity_haze_wash(world: &World) -> Vec<CaveHumidityHazeSample> {
     let mut seats: FxHashSet<(i32, i32)> = tile_mass.keys().copied().collect();
     let occupied: Vec<(i32, i32)> = seats.iter().copied().collect();
     for (hx, hy) in occupied {
-        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+        for (dx, dy) in [
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (1, 1),
+        ] {
             seats.insert((hx + dx, hy + dy));
         }
     }
@@ -346,10 +357,12 @@ fn lift_cave_humidity_off_pool(
     // ambient reading on the water itself.
     if crate::steam::air_void_open_to_sky(world, gx, gy) {
         let t_c = temp.at_cell(gx, gy);
+        // Integer sat units, same as evap / pipe / plants. `.round()` on
+        // `try_add_at_temp` took one extra cave_h unit the sky never stored
+        // when the cold cap left 0.1–0.9 room (overlay `UNEXPL-W`).
         let accepted = humidity
-            .try_add_at_temp(gx, gy, left as f32, t_c)
-            .round()
-            .clamp(0.0, 255.0) as u8;
+            .try_add_units_at_temp(gx, gy, left as u32, t_c)
+            .min(u8::MAX as u32) as u8;
         if accepted > 0 {
             left = left.saturating_sub(accepted);
         }
@@ -407,11 +420,7 @@ fn lift_cave_humidity_off_pool(
 ///
 /// Pool scrub runs every tick so full-water Air never keeps a stale
 /// `cave_humidity` reading between cadences (inspector bug).
-pub fn apply_cave_humidity(
-    world: &mut World,
-    temp: &Temperature,
-    humidity: &mut Humidity,
-) {
+pub fn apply_cave_humidity(world: &mut World, temp: &Temperature, humidity: &mut Humidity) {
     if world.cave_humidity.is_empty() {
         return;
     }
@@ -477,9 +486,8 @@ pub fn apply_cave_humidity(
         if crate::steam::air_void_open_to_sky(world, gx, gy) {
             let t_c = temp.at_cell(gx, gy);
             let accepted = humidity
-                .try_add_at_temp(gx, gy, hum as f32, t_c)
-                .round()
-                .clamp(0.0, 255.0) as u8;
+                .try_add_units_at_temp(gx, gy, hum as u32, t_c)
+                .min(u8::MAX as u32) as u8;
             if accepted > 0 {
                 let _ = take_cave_humidity(world, gx, gy, accepted);
             }
@@ -580,24 +588,20 @@ mod tests {
         sealed_pocket(&mut w);
         assert!(!crate::steam::air_void_open_to_sky(&w, 4, 2));
         let _ = try_add_cave_humidity(&mut w, 4, 2, 200);
-        let before = cave_humidity_total(&w)
-            + w.get_cell(4, 2).map(|c| c.sat.0 as u64).unwrap_or(0);
+        let before =
+            cave_humidity_total(&w) + w.get_cell(4, 2).map(|c| c.sat.0 as u64).unwrap_or(0);
         let cool = hot_fill(&w, 0.0);
         let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         w.tick = CAVE_HUMIDITY_EVERY;
         apply_cave_humidity(&mut w, &cool, &mut h);
-        let after = cave_humidity_total(&w)
-            + w.get_cell(4, 2).map(|c| c.sat.0 as u64).unwrap_or(0);
+        let after = cave_humidity_total(&w) + w.get_cell(4, 2).map(|c| c.sat.0 as u64).unwrap_or(0);
         assert_eq!(before, after, "recondense is mass-flat");
         let cap = Humidity::saturation_cell_sat_at_temp(0.0).floor() as u8;
         assert!(
             cave_humidity_at(&w, 4, 2) <= cap,
             "surplus above cool capacity must drip"
         );
-        assert!(
-            w.get_cell(4, 2).unwrap().sat.0 > 0,
-            "dripped into Air sat"
-        );
+        assert!(w.get_cell(4, 2).unwrap().sat.0 > 0, "dripped into Air sat");
         assert_eq!(h.total_mass(), 0.0, "sealed seat does not touch sky H");
     }
 
@@ -614,8 +618,77 @@ mod tests {
         let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         w.tick = CAVE_HUMIDITY_EVERY;
         apply_cave_humidity(&mut w, &warm, &mut h);
-        assert_eq!(cave_humidity_at(&w, 4, 2), 0, "open seats leave cave_humidity");
+        assert_eq!(
+            cave_humidity_at(&w, 4, 2),
+            0,
+            "open seats leave cave_humidity"
+        );
         assert!(h.total_mass() > 0.0, "mass moves into sky Humidity");
+    }
+
+    #[test]
+    fn open_vent_cold_handoff_does_not_round_up_past_vapour() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..32 {
+            w.set_cell(4, y, Cell::air());
+        }
+        let _ = try_add_cave_humidity(&mut w, 4, 2, 80);
+        let cold = hot_fill(&w, 3.0);
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let cap = Humidity::saturation_mass_at_temp(3.0);
+        let _ = h.try_add_at_temp(4, 2, cap - 0.6, 3.0);
+        let sat_of = |world: &World| world.get_cell(4, 2).map(|c| c.sat.0 as f64).unwrap_or(0.0);
+        let before = cave_humidity_total(&w) as f64 + h.total_mass() as f64 + sat_of(&w);
+        w.tick = CAVE_HUMIDITY_EVERY;
+        apply_cave_humidity(&mut w, &cold, &mut h);
+        let after = cave_humidity_total(&w) as f64 + h.total_mass() as f64 + sat_of(&w);
+        assert!(
+            (after - before).abs() < 1e-3,
+            "cold cave→H must not round sat up past vapour (before={before} after={after})"
+        );
+    }
+
+    #[test]
+    fn flooded_pool_cold_handoff_does_not_round_up_past_vapour() {
+        let mut w = World::new(47);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            for y in 0..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for x in 1..8 {
+            let mut lake = Cell::air();
+            lake.sat = Sat(255);
+            w.set_cell(x, 3, lake);
+        }
+        w.set_cell(1, 4, Cell::air());
+        w.set_cell(1, 5, Cell::air());
+        for y in 6..10 {
+            w.set_cell(1, y, Cell::air());
+        }
+        assert!(crate::steam::air_void_open_to_sky(&w, 4, 3));
+        let mut map = FxHashMap::default();
+        map.insert((4, 3), 40);
+        replace_cave_humidity(&mut w, map);
+        let mut hum = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let cap = Humidity::saturation_mass_at_temp(3.0);
+        let _ = hum.try_add_at_temp(4, 3, cap - 0.6, 3.0);
+        let temp = hot_fill(&w, 3.0);
+        let before = crate::audit::sat_totals(&w).cell_total as f64 + f64::from(hum.total_mass());
+        w.tick = 1;
+        apply_cave_humidity(&mut w, &temp, &mut hum);
+        let after = crate::audit::sat_totals(&w).cell_total as f64 + f64::from(hum.total_mass());
+        assert!(
+            (after - before).abs() < 1e-3,
+            "cold pool cave→H must not round sat up past vapour (before={before} after={after})"
+        );
+        assert_eq!(
+            cave_humidity_at(&w, 4, 3),
+            0,
+            "open flooded water must not keep cave_humidity"
+        );
     }
 
     #[test]
@@ -631,7 +704,7 @@ mod tests {
         assert_eq!(w.get_cell(4, 2).unwrap().sat.0, 0);
     }
 
-        #[test]
+    #[test]
     fn sealed_pocket_washes_soft_white_haze() {
         let mut w = World::new(1);
         sealed_pocket(&mut w);
@@ -713,7 +786,7 @@ mod tests {
         w.set_cell(4, 3, Cell::air());
         w.set_cell(4, 4, Cell::air());
         w.set_cell(4, 5, Cell::solid(MaterialId::Stone)); // roof
-        // Seed stale pool vapour directly — try_add refuses free-water seats.
+                                                          // Seed stale pool vapour directly — try_add refuses free-water seats.
         let mut map = FxHashMap::default();
         map.insert((4, 2), 80);
         replace_cave_humidity(&mut w, map);
@@ -726,7 +799,8 @@ mod tests {
         // sat_totals.cell_total already folds cave_humidity — don't add it twice.
         let after = crate::audit::sat_totals(&w).cell_total;
         assert_eq!(
-            after, before,
+            after,
+            before,
             "pool drip must relocate vapour, not delete it (cave_h {} → {}, cell {})",
             cave_humidity_total(&w),
             before,
@@ -821,5 +895,4 @@ mod tests {
         assert_eq!(cave_humidity_at(&w, 4, 2), 0);
         assert!(cave_humidity_at(&w, 4, 3) > 0);
     }
-
 }
