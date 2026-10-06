@@ -1205,14 +1205,19 @@ pub(crate) fn bank_remaining_vapour(world: &mut World, gx: i32, gy: i32, mut uni
     if units == 0 {
         return 0;
     }
+    let gx = world.wrap_x(gx);
     let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
     for (x, y) in keys {
         if units == 0 {
             break;
         }
+        // Evict / brick just cleared this seat — do not restack it.
+        if x == gx && y == gy {
+            continue;
+        }
         units = place_steam_units(world, x, y, units);
     }
-    let mut dy = 0i32;
+    let mut dy = 1i32;
     while units > 0 && dy < 4096 {
         units = place_steam_units(world, gx, gy + dy, units);
         dy += 1;
