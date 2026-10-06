@@ -1858,13 +1858,22 @@ fn impact_shatter(
           // free water was below in the cell it came from — halving the sat
           // here used to silently destroy water.
           let freed = below.sat.0;
+          // Keep `cur.pore`. `Cell::default()` is pore=128, which mints
+          // or deletes carbonate on limestone / LooseLimestone debris.
           world.set_cell(
             gx,
             yy - 1,
             Cell {
               material: debris,
               sat: cur.sat,
-              ..Cell::default()
+              flags: {
+                let mut f = cur.flags;
+                f.clear(CellFlags::MOBILE_ROCK);
+                f.clear(CellFlags::ROCK_BODY_TAG);
+                f
+              },
+              _pad: cur._pad,
+              pore: cur.pore,
             },
           );
           world.set_cell(
@@ -3890,29 +3899,38 @@ mod tests {
   #[test]
   fn limestone_blob_shatters_on_bedrock_impact() {
     let mut w = World::new(9);
+    let mut lime = Cell::solid(MaterialId::Limestone);
+    lime.pore = 40;
     for x in 4..7 {
       for y in 8..11 {
-        w.set_cell(x, y, Cell::solid(MaterialId::Limestone));
+        w.set_cell(x, y, lime);
       }
     }
     for x in 3..=7 {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
+    let before = crate::audit::mineral_total(&w);
     let cfg = CompetentFallConfig {
       max_passes: 16,
       min_impact_fall_cells: 1,
       ..CompetentFallConfig::default()
     };
     apply_competent_fall_regions(&mut w, &[], &cfg, false);
-    let loose: u32 = (4..7)
+    let debris: Vec<Cell> = (4..7)
       .flat_map(|x| (1..=10).map(move |y| (x, y)))
-      .filter(|&(x, y)| {
-        w.get_cell(x, y)
-          .map(|c| c.material == MaterialId::LooseLimestone)
-          .unwrap_or(false)
-      })
-      .count() as u32;
-    assert!(loose > 0, "limestone impact must spawn LooseLimestone (loose={loose})");
+      .filter_map(|(x, y)| w.get_cell(x, y))
+      .filter(|c| c.material == MaterialId::LooseLimestone)
+      .collect();
+    assert!(!debris.is_empty(), "limestone impact must spawn LooseLimestone");
+    assert!(
+      debris.iter().all(|c| c.pore == 40),
+      "shatter must keep the limestone pore, not Cell::default() 128"
+    );
+    assert_eq!(
+      crate::audit::mineral_total(&w),
+      before,
+      "limestone shatter must stay on the carbonate ledger"
+    );
   }
 
   #[test]

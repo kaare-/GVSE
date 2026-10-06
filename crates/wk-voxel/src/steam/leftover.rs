@@ -1924,16 +1924,21 @@ pub(super) fn leftover_erode_planned_route(world: &mut World) {
     }
 }
 
-/// Gravel / loose rock on the pin: cement to conglomerate when the
-/// water carries carbonate, wear toward sand when already open, else
-/// scour the pore. Silicate weld to stone stays on the hot-pore pulse.
+/// Gravel / loose rock / carbonate rubble on the pin: cement when the
+/// water carries load, wear gravel toward sand when already open, else
+/// scour the pore. LooseLimestone is on the mineral ledger — scour
+/// emits the pore step (`scour_grain_pore`). Silicate weld to stone
+/// stays on the hot-pore pulse.
 pub(super) fn leftover_pulse_loose_channel(world: &mut World, gx: i32, gy: i32) {
     let Some(cell) = world.get_cell(gx, gy) else {
         return;
     };
     if !matches!(
         cell.material,
-        MaterialId::Gravel | MaterialId::LooseRock | MaterialId::Sand
+        MaterialId::Gravel
+            | MaterialId::LooseRock
+            | MaterialId::Sand
+            | MaterialId::LooseLimestone
     ) {
         return;
     }
@@ -1963,11 +1968,7 @@ pub(super) fn leftover_pulse_loose_channel(world: &mut World, gx: i32, gy: i32) 
         }
         return;
     }
-    if cell.material != MaterialId::Air && cell.pore < 240 {
-        let mut g = cell;
-        g.pore = g.pore.saturating_add(1);
-        world.set_cell(gx, gy, g);
-    }
+    let _ = scour_grain_pore(world, gx, gy, 240);
 }
 
 pub(super) struct LeftoverStrawGuard;

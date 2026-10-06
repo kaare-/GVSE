@@ -4732,6 +4732,25 @@ mod tests {
     }
 
     #[test]
+    fn leftover_pulse_loose_limestone_keeps_mineral() {
+        let mut w = World::new(47);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut loose = Cell::solid(MaterialId::LooseLimestone);
+        loose.pore = 40;
+        loose.sat = Sat(20);
+        w.set_cell(4, 2, loose);
+        let before = crate::audit::mineral_total(&w);
+        leftover_pulse_loose_channel(&mut w, 4, 2);
+        assert_eq!(w.get_cell(4, 2).unwrap().pore, 41);
+        assert_eq!(crate::mineral::dissolved_at(&w, 4, 2), 1);
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "leftover chimney scour on LooseLimestone must emit the pore step"
+        );
+    }
+
+    #[test]
     fn assault_widen_limestone_keeps_mineral_total() {
         let mut w = World::new(41);
         w.ensure_chunk(ChunkCoord::new(0, 0));
