@@ -125,6 +125,10 @@ Steam **cadence** scrub/park wrote sat onto Ice/Snow (capacity 0).
 surface). Park paths now respect `water_capacity_cell`; excess ice still
 relocates laterally (mass-flat).
 
+After that fix: 5k ≈ −0.02/t; 10k ≈ **−2.08/t** with a cliff after ~5k.
+Post-fix 10k isolation: `OFF=cadence|steam|cond|evap` all ≈ 0 — residual is
+still a cadence × snow × evap interaction (not the ice-sat park). Next hunt.
+
 ### Geyser / pipe mass audit (destroy vs design)
 
 Checked after the highland-lake watch. **No smoking-gun path that
