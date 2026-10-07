@@ -1824,6 +1824,33 @@ mod tests {
     }
 
     #[test]
+    fn wet_film_frost_credits_film_sat_on_budget() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let film = 80u8;
+        w.set_cell(
+            2,
+            2,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(film),
+                ..Cell::air()
+            },
+        );
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig::default();
+        let paid =
+            deposit_condensate_on_surface(&mut w, 2, 12, 255.0, Some(&temp), Some(&cfg));
+        assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Ice);
+        assert_eq!(
+            paid, (u8::MAX - film) as f32,
+            "frost humidity pay must credit the film, got {paid}"
+        );
+    }
+
+    #[test]
     fn underpaid_cold_precip_does_not_mint_snow_cell() {
         // Climatic droplet_sat=64 used to seat Snow then thaw to FULL (+191).
         let mut w = World::new(3);
