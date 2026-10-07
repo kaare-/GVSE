@@ -20,36 +20,34 @@ Companion docs: [`VOXEL_WATER.md`](VOXEL_WATER.md) (B overlay / leftover),
 
 ---
 
-## Phase 0 — Mass budgets hold *(current)*
+## Phase 0 — Mass budgets hold *(done 2026-10-07)*
 
 **Goal:** Overnight / long headless soaks show TRACKED and min.tot rates
 near flat with `park=0`, `clip=0`, `clamp=0`. Short soaks are necessary
 but not sufficient (50k-tick soak can reopen a −3/t water term after a
 flat 120-tick run).
 
-**Done recently**
+**Done**
 
 - Park leftover banked; karst convert credited.
 - Overlay body / crush dest salvage (#348).
 - Headless BudgetSnap harness + Xvfb scripts (#349).
 - Sandstone/Conglomerate cement emit on crush/shatter (`write_debris_cell`).
+- Wet-film snow/frost credit; lateral ice/snow relocate; no vapour-sat
+  park on Ice/Snow; alpine film-park skip (#351).
 
-**In flight**
+**Exit (met)** — headless 50k on tip `0d7b6a6` / `#351`:
 
-- UNEXPL-W ~−3/t on 50k-tick headless soak (mineral ~flat at +0.13/t).
-
-**Exit criteria** (2026-10-07)
-
-| Signal | Gate |
-|--------|------|
-| Headless 50k+ ticks, default stamp | **tight bar**: `\|rate W\|` and `\|rate M\|` **&lt; 0.5/t** |
-| `park` / `clip` / `clamp` | stay 0 |
-| Organisms | **off** for this gate; turn on only for the Phase 5 bio rewrite |
-| GUI overnight | optional after headless is green; subagent-owned |
+| Signal | Result |
+|--------|--------|
+| `\|TRACKED\|/t` | **0.03** (d=−1465) |
+| min.tot `/t` | **+0.12** (d=+5827) |
+| `park` | **0** |
+| wall | ~66 min |
 
 ---
 
-## Phase 1 — Performance for larger worlds & long soaks
+## Phase 1 — Performance for larger worlds & long soaks *(current)*
 
 **Goal:** Tick cost stays playable as map size and soak age grow.
 Buildup (dissolved maps, steam/pipe ledgers, dirty sets, landscape
@@ -185,6 +183,7 @@ before coding.
 |------|--------|----------|
 | 2026-10-07 | Phase 0 rate eps | Tight: `\|rate W\|` and `\|rate M\|` &lt; **0.5/t** on 50k+ headless |
 | 2026-10-07 | Phase 0 organisms | **Off** until Phase 5 bio rewrite |
+| 2026-10-07 | Phase 0 closed | 50k headless: TRACKED **0.03/t**, min **+0.12/t**, park=0 (#351) |
 | 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
 | 2026-10-07 | UW / ocean vents | Lake underwater springs **and** seafloor ocean-column vents |
