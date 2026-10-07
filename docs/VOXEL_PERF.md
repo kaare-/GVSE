@@ -40,9 +40,11 @@ unless noted (`perf_profile_demo_and_stress` / `perf_profile_sky_height`):
 Demo parallel A/B (0 plants): FPS OFF 20.1 / ON 19.3; full_feel OFF 73.6 / ON 64.4.
 Demo + plants: +48 ≈ 21.0 ms, +256 ≈ 25.1 ms (org share ≤3%).
 
-### Size sweep after settle Air-dest + dirty-clear win
+### Size sweep after settle Air-dest (dirty-clear experiment)
 
-Same harness on seep tip + this win (`perf_profile_demo_and_stress`):
+Same harness on seep tip + Air-dest trim (`perf_profile_demo_and_stress`).
+Figures include a multi-pass `clear_all_dirty` that was later reverted — see
+§4; re-profile for the shipped Air-trim-only settle path:
 
 | Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
 |-------|-------------:|---------:|--------:|--------:|-------:|-------:|
@@ -167,37 +169,42 @@ Tip after bodies win → after seam runs (warm 40 / measure 200):
 **4.77 → 0.73 ms/call**. Seepage bucket **−1.6 ms/tick** on demo (−35%); wall
 **−3.7 ms** (~40 → ~48 sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
 
-### 4. Settle Air destinations + multi-pass dirty clear
+### 4. Settle Air destinations (keep seepage dirty)
 
 Re-profile after seam-apply: settle still **~5.3 ms/tick** on demo (docs’
 ~5.5–7.4 band). `settle_air_probe` showed the sticky-loose plan was **~71%
 non-Air** — seepage pore dirty inside `has_loose` chunks. Fall and repose only
-pull into Air, so those solid visits were pure waste. Multi-pass re-plans also
-rebuilt that wet-pore halo via `plan_active` every pass.
+pull into Air, so those solid visits were pure waste.
 
 **Change** (in `settle_loose_grains_regions_ex` only):
 
 - Trim each settle scan to **Air destinations** (sparse bitset).
-- After snapshotting the initial Air mask, `clear_all_dirty` so re-plans see
-  only fall/repose writes (not the seepage halo).
-- Repose unions wake Air seats ∪ fall writes so a freefall elsewhere cannot
-  drop cliff seats for that pass; clear again after each successful pass.
+- Multi-pass re-plans use sticky-loose + Air-dest (`settle_scan_regions`) so
+  wet-pore cells are not walked ×N.
+- Do **not** `clear_all_dirty` inside settle: that wiped seepage pore dirty
+  that next tick’s flow/seepage (and lake-bed / beach / well wakes) need.
+  Filter the scan mask; leave global dirty for the wetting wake.
 
 No weather / condensation / lottery / `live_surface_y` changes.
 
 ### Before → after settle Air-dest win (`perf_profile_sky_height`, same host)
 
-Tip after seam-apply → after Air-dest + dirty clear (warm 40 / measure 200):
+Tip after seam-apply → after Air-dest trim (warm 40 / measure 200). Numbers
+below include a brief dirty-clear experiment that was reverted for seepage
+correctness; expect settle closer to the Air-trim-only band than the cleared
+re-plan extreme:
 
 | Stamp | wall | seepage | settle | bodies | physics |
 |-------|-----:|--------:|-------:|-------:|--------:|
 | short sky before | 19.5 | 3.21 | 3.87 | 1.71 | 13.5 |
-| short sky after | 16.3 | 3.25 | 0.53 | 1.81 | 10.1 |
+| short sky after (Air-trim+clear*) | 16.3 | 3.25 | 0.53 | 1.81 | 10.1 |
 | tall/demo before | 21.3 | 2.93 | 5.29 | 2.14 | 13.8 |
-| tall/demo after | 16.8 | 2.87 | 0.76 | 2.24 | 9.1 |
+| tall/demo after (Air-trim+clear*) | 16.8 | 2.87 | 0.76 | 2.24 | 9.1 |
 
-Settle **−4.5 ms/tick** on demo stamp (−86%); wall **−4.5 ms** (~47 → ~59
-sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
+\*dirty-clear inside multi-pass settle broke lake-bed / beach / well soak
+tests; shipped path keeps Air-dest trim without clearing seepage dirty.
+Air-trim alone still drops the ~71% non-Air visits. Re-profile after the
+revert when hunting the next settle leftover.
 
 ## Out of scope / next
 

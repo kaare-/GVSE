@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use wk_material::{HydroOverrides, MaterialId};
 
-use crate::active::{clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk};
+use crate::active::{partition_checkerboard, plan_active, ActiveChunk};
 use crate::cell::{
     falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity_cell, Cell, CellFlags, Sat,
@@ -1012,12 +1012,35 @@ pub fn settle_loose_grains_regions(
 /// After [`rise_and_soak_buoyant_litter`], tick settles with
 /// `allow_buoyancy = false` so Organic does not one-cell bob through
 /// wet Air for dozens of passes (FPS spike).
+/// Keep only regions whose chunk may hold loose material (sticky
+/// [`Chunk::has_loose`]). Occupancy is the source of truth.
+fn keep_loose_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
+    if active.is_empty() {
+        return Vec::new();
+    }
+    active
+        .iter()
+        .copied()
+        .filter(|ac| {
+            world
+                .chunks
+                .get(&ac.coord)
+                .map(|c| c.has_loose)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 /// Fall and repose are destination-Air pulls. Seepage leaves wet-pore dirty
 /// on `has_loose` chunks; sticky-loose filtering keeps the chunk, but settle
 /// still walked those solid cells (demo probe: ~71% of the loose plan).
 ///
 /// Rebuild each region as a sparse Air-only bitset. Dense wakes become sparse
 /// Air seats; chunks with no planned Air drop out.
+///
+/// Do **not** `clear_all_dirty` here to shrink re-plans: seepage pore dirty
+/// must survive settle for the next tick's flow/seepage wake (lake-bed soak,
+/// beach drain, confined wells). Filter the scan mask instead.
 fn keep_air_dest_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
     if active.is_empty() {
         return Vec::new();
@@ -1046,39 +1069,9 @@ fn keep_air_dest_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChu
     out
 }
 
-/// OR sparse Air masks per chunk. Dense inputs stay dense.
-fn union_air_regions(a: &[ActiveChunk], b: &[ActiveChunk]) -> Vec<ActiveChunk> {
-    if a.is_empty() {
-        return b.to_vec();
-    }
-    if b.is_empty() {
-        return a.to_vec();
-    }
-    let mut map: HashMap<ChunkCoord, ActiveChunk> = HashMap::with_capacity(a.len() + b.len());
-    for ac in a.iter().chain(b.iter()).copied() {
-        map.entry(ac.coord)
-            .and_modify(|dst| {
-                if ac.is_dense() || dst.is_dense() {
-                    let rect = crate::chunk::Rect {
-                        x0: dst.rect.x0.min(ac.rect.x0),
-                        y0: dst.rect.y0.min(ac.rect.y0),
-                        x1: dst.rect.x1.max(ac.rect.x1),
-                        y1: dst.rect.y1.max(ac.rect.y1),
-                    };
-                    *dst = ActiveChunk::new(ac.coord, rect);
-                } else {
-                    let mut bits = dst.bits;
-                    bits.or_assign(ac.bits);
-                    if let Some(rect) = bits.bbox() {
-                        *dst = ActiveChunk::with_bits(ac.coord, rect, bits);
-                    }
-                }
-            })
-            .or_insert(ac);
-    }
-    let mut out: Vec<ActiveChunk> = map.into_values().collect();
-    out.sort_by(|x, y| x.coord.cy.cmp(&y.coord.cy).then(x.coord.cx.cmp(&y.coord.cx)));
-    out
+/// Sticky-loose chunks, then Air destinations only (settle scan mask).
+fn settle_scan_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
+    keep_air_dest_regions(world, &keep_loose_regions(world, active))
 }
 
 pub fn settle_loose_grains_regions_ex(
@@ -1090,12 +1083,9 @@ pub fn settle_loose_grains_regions_ex(
 ) {
     // Caller usually pre-filters sticky-loose; Air trim still applies so
     // seepage pore dirty inside sand/shore chunks is not re-walked ×N.
+    // Leave global dirty intact — multi-pass re-plans filter via
+    // [`settle_scan_regions`] instead of clearing the wet-pore halo.
     let mut cur: Vec<ActiveChunk> = keep_air_dest_regions(world, initial);
-    // Scan mask is in `cur`. Drop leftover seepage/flow dirty so multi-pass
-    // plan_active rebuilds only fall/repose writes — not the wet-pore halo.
-    // Punch / bodies / failure use their own wakes (or the pre-flow geotech
-    // snapshot), so this dirty is not needed after settle.
-    clear_all_dirty(world);
     for settle_i in 0..max_passes {
         if cur.is_empty() {
             break;
@@ -1110,10 +1100,18 @@ pub fn settle_loose_grains_regions_ex(
                 moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy, settle_i);
             }
         }
-        // Fall writes land in dirty; wake Air seats live in `cur` (dirty was
-        // cleared). Union so a freefall elsewhere cannot drop cliff seats.
-        let fall_air = keep_air_dest_regions(world, &plan_active(world));
-        let repose_src = union_air_regions(&cur, &fall_air);
+        // Re-plan is global dirty, which on a wet world is dominated by pore
+        // seepage in limestone / stone chunks. Repose can only move loose
+        // grains into Air, so sticky-loose + Air-dest — otherwise every
+        // groundwater tick dragged wet pores through the repose scan.
+        // Prefer fall writes when present; else keep `cur` so a freefall
+        // elsewhere cannot drop cliff Air seats for this pass.
+        let after_fall = settle_scan_regions(world, &plan_active(world));
+        let repose_src = if after_fall.is_empty() {
+            cur.clone()
+        } else {
+            after_fall
+        };
         let repose_passes = partition_checkerboard(&repose_src);
         for pass in &repose_passes {
             moved += apply_grain_repose_regions(world, pass, rooted);
@@ -1121,14 +1119,11 @@ pub fn settle_loose_grains_regions_ex(
         if moved == 0 {
             break;
         }
-        // Next fall follows settle writes only (Air destinations).
-        let next = keep_air_dest_regions(world, &plan_active(world));
+        // Same sticky-loose + Air-dest filter as the repose re-plan above.
+        let next = settle_scan_regions(world, &plan_active(world));
         if next.is_empty() {
             break;
         }
-        // Snapshot owns the next scan; clear so later passes do not union
-        // every prior write this tick into plan_active.
-        clear_all_dirty(world);
         cur = next;
     }
 }
