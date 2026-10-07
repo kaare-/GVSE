@@ -9045,6 +9045,40 @@ fn dry_seam_costs_nothing_but_a_wet_one_still_couples() {
 }
 
 #[test]
+fn seam_apply_skips_quiet_full_pore_face() {
+    // Deep accumulate no-ops both-at-capacity pore↔pore faces. The apply band
+    // must not still emit those columns (lake-bed leftover); a column with
+    // room must keep coupling.
+    let mut w = World::new(97);
+    let lo = ChunkCoord::new(0, 0);
+    let hi = ChunkCoord::new(0, 1);
+    fill_chunk_saturated_stone(&mut w, lo);
+    fill_chunk_saturated_stone(&mut w, hi);
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 2)] {
+        fill_chunk_saturated_stone(&mut w, ChunkCoord::new(dx, dy));
+    }
+    wake_pore_weep_into_air(&mut w);
+    assert!(
+        super::seepage::seam_seepage_regions(&w).is_empty(),
+        "quiet full↔full pore face must not enter the apply band"
+    );
+    let mut dryish = Cell::solid(MaterialId::Stone);
+    dryish.sat = Sat(1);
+    w.set_cell(4, CHUNK_CELLS_H as i32 - 1, dryish);
+    let regions = super::seepage::seam_seepage_regions(&w);
+    assert!(
+        !regions.is_empty(),
+        "under-full face cell must still couple"
+    );
+    // ±1 halo so a full neighbour can still feed the under-full column.
+    let widest = regions.iter().map(|a| a.rect.x1 - a.rect.x0 + 1).max().unwrap();
+    assert!(
+        (1..=3).contains(&widest),
+        "under-full column ±1 halo, got widest={widest} {regions:?}"
+    );
+}
+
+#[test]
 fn pore_sat_does_not_shelf_across_vertical_chunk_seam() {
     // Fully buried stone column across y=63|64 with standing water above.
     // Pore water must keep crossing the seam — no permanent sat step that
