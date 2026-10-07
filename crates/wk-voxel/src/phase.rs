@@ -60,10 +60,11 @@ pub struct PhaseConfig {
     /// is a whole cell (`255`): thaw yields `Air+FULL`, so a cheaper seat
     /// mints water. Shortfall below freeze → hold, not liquid rain.
     pub min_budget_to_snow: f32,
-    /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
-    /// top is culled to empty Air (removed, not melted — melting would
-    /// replace an ice tower with a water tower). Beyond the cap, cold
-    /// precip is held (not dumped as pore-soaking rain).
+    /// Cap on Ice+Snow cells stacked in one column for **new** freeze /
+    /// snow seating. Existing towers are not peeled to Air — that deleted
+    /// 255 TRACKED per cell (slow UNEXPL-W), and banking peel into steam
+    /// or humidity made alpine recondense→refreeze worse. Beyond the cap,
+    /// cold precip is held (not dumped as pore-soaking rain).
     pub max_ice_cells_per_column: u8,
     /// Lateral search radius (columns) when seating new snow. Prefers
     /// thinner packs so peaks don't monopolize every flake.
@@ -100,7 +101,9 @@ pub struct PhaseConfig {
     /// Cold wet-sand / hillside-ice / snow spill onto ice (app wires
     /// [`crate::rules::apply_cold_avalanche`] when this is on).
     pub enable_cold_avalanche: bool,
-    /// Cull Ice+Snow stacks taller than [`Self::max_ice_cells_per_column`].
+    /// Legacy switch for column peel. Peel is a no-op (mass-flat); the
+    /// cap is enforced at seating / freeze. Kept so soak `OFF=cull` still
+    /// compiles and Tab can leave the knob alone.
     pub enable_cull: bool,
     /// Cold precip settles as Snow (when off, cold columns get liquid rain).
     pub enable_snow_precip: bool,
@@ -830,31 +833,12 @@ fn break_overloaded_ice(world: &mut World, gx: i32, cfg: &PhaseConfig) {
     }
 }
 
-/// Count Ice+Snow in the column and remove excess from the top.
-fn cull_frozen_column(world: &mut World, gx: i32, max_cells: u8) {
-    let Some((y0, y1)) = y_bounds(world) else {
-        return;
-    };
-    let max_cells = max_cells as usize;
-    let mut frozen_ys: Vec<i32> = Vec::new();
-    for y in y0..=y1 {
-        let Some(cell) = world.get_cell(gx, y) else {
-            continue;
-        };
-        if is_frozen_solid(cell.material) {
-            frozen_ys.push(y);
-        }
-    }
-    if frozen_ys.len() <= max_cells {
-        return;
-    }
-    // Highest Y first — peel the top of the tower.
-    frozen_ys.sort_unstable_by(|a, b| b.cmp(a));
-    let excess = frozen_ys.len() - max_cells;
-    for &y in frozen_ys.iter().take(excess) {
-        world.set_cell(gx, y, Cell::air());
-    }
-}
+/// Was: peel excess Ice/Snow to empty Air. That destroyed thaw yield.
+///
+/// Height is now enforced only when seating snow / freezing new cells
+/// ([`max_ice_cells_per_column`]). Keeping this hook so `enable_cull`
+/// call sites stay stable.
+fn cull_frozen_column(_world: &mut World, _gx: i32, _max_cells: u8) {}
 
 fn open_sky_above(world: &World, gx: i32, gy: i32) -> bool {
     match world.get_cell(gx, gy + 1) {
@@ -1330,28 +1314,39 @@ mod tests {
     }
 
     #[test]
-    fn ice_column_budget_culls_runaway_tower() {
+    fn ice_column_budget_does_not_destroy_tall_tower() {
+        // Peel-to-Air was a silent UNEXPL-W; steam/H banks recondensed
+        // into another peel cycle. Cap is seating/freeze only.
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
-        for y in 1..20 {
+        let stacked = 19i32;
+        for y in 1..=stacked {
             w.set_cell(1, y, Cell::solid(MaterialId::Ice));
         }
+        let before = (stacked as i64) * (u8::MAX as i64);
         let temp = cold_temp(16, 32, -5.0);
         let cfg = PhaseConfig {
             max_ice_cells_per_column: 4,
+            enable_thaw: false,
+            enable_freeze: false,
+            enable_slush: false,
             ..PhaseConfig::default()
         };
         apply_phase(&mut w, &temp, &cfg);
-        let mut ice = 0;
-        for y in 0..20 {
-            if w.get_cell(1, y).unwrap().material == MaterialId::Ice {
+        let mut ice = 0i64;
+        for y in 0..32 {
+            if w.get_cell(1, y).is_some_and(|c| c.material == MaterialId::Ice) {
                 ice += 1;
             }
         }
-        assert_eq!(ice, 4, "excess ice must be culled, not melted");
-        assert_eq!(w.get_cell(1, 19).unwrap().material, MaterialId::Air);
-        assert!(w.get_cell(1, 19).unwrap().sat.is_empty());
+        assert_eq!(ice, stacked as i64, "phase must not peel existing ice");
+        let after_steam: i64 = w.steam.values().map(|&v| v as i64).sum();
+        assert_eq!(
+            ice * (u8::MAX as i64) + after_steam,
+            before,
+            "tall ice TRACKED must stay flat across phase"
+        );
     }
 
     #[test]
