@@ -53,7 +53,7 @@ use crate::humidity::{humidity_diffuse_due, Humidity};
 use crate::landscape_body::{apply_landscape_fall, LandscapeBodyStore};
 use crate::organism::{OrganismStepOutcome, OrganismStore};
 use crate::parallel::set_parallel_enabled;
-use crate::phase::{apply_phase_with_humidity, PhaseConfig};
+use crate::phase::{apply_phase, PhaseConfig};
 use crate::pore_ice::apply_pore_ice;
 use crate::cave_humidity::apply_cave_humidity;
 use crate::steam::{apply_leftover_motor, apply_steam_cadence, SteamConfig};
@@ -519,7 +519,7 @@ pub fn step_world(
     }
     {
         let t0 = profile.then(Instant::now);
-        apply_phase_with_humidity(world, temperature, cfg.phase, Some(humidity));
+        apply_phase(world, temperature, cfg.phase);
         apply_pore_ice(world, temperature, cfg.phase.freeze_point_c);
         apply_cave_humidity(world, temperature, humidity);
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {

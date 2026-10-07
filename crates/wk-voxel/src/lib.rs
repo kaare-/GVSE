@@ -172,8 +172,7 @@ pub use pipe::{
     PIPE_STROKE_DEFAULT,
 };
 pub use phase::{
-    apply_freeze, apply_phase, apply_phase_with_humidity, deposit_condensate_on_surface,
-    deposit_precip_on_surface,
+    apply_freeze, apply_phase, deposit_condensate_on_surface, deposit_precip_on_surface,
     ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig, PRECIP_IN_AIR_MIN,
 };
 pub use plant::{

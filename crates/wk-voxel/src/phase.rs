@@ -28,7 +28,6 @@ use wk_material::MaterialId;
 use crate::cell::{is_grain, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
-use crate::humidity::Humidity;
 use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
 use crate::worldgen::live_surface_at;
@@ -146,18 +145,6 @@ impl Default for PhaseConfig {
 /// Full phase pass: cull → break unsupported → break overloaded thin ice →
 /// water-on-ice / slush → thaw → freeze.
 pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
-    apply_phase_with_humidity(world, temp, cfg, None);
-}
-
-/// [`apply_phase`] with sky humidity so culled Ice/Snow thaw yield can
-/// return to the atmosphere instead of alpine steam (which recondenses
-/// and refreezes into another cull cycle).
-pub fn apply_phase_with_humidity(
-    world: &mut World,
-    temp: &Temperature,
-    cfg: &PhaseConfig,
-    mut humidity: Option<&mut Humidity>,
-) {
     if !cfg.enabled {
         return;
     }
@@ -175,12 +162,7 @@ pub fn apply_phase_with_humidity(
             continue;
         }
         if cfg.enable_cull {
-            cull_frozen_column(
-                world,
-                gx,
-                cfg.max_ice_cells_per_column,
-                humidity.as_deref_mut(),
-            );
+            cull_frozen_column(world, gx, cfg.max_ice_cells_per_column);
         }
         if cfg.enable_break_unsupported {
             break_unsupported_frozen(world, gx, cfg);
@@ -851,15 +833,9 @@ fn break_overloaded_ice(world: &mut World, gx: i32, cfg: &PhaseConfig) {
 
 /// Count Ice+Snow in the column and peel excess from the top.
 ///
-/// Aesthetic height cap only — thaw yield (`255` per cell) returns to
-/// sky humidity when provided, else steam. Prefer humidity: alpine steam
-/// recondenses on the peel and refreezes into another cull cycle.
-fn cull_frozen_column(
-    world: &mut World,
-    gx: i32,
-    max_cells: u8,
-    mut humidity: Option<&mut Humidity>,
-) {
+/// Aesthetic height cap only — thaw yield (`255` per cell) is banked as
+/// steam so the B overlay does not see a silent destroy.
+fn cull_frozen_column(world: &mut World, gx: i32, max_cells: u8) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
     };
@@ -881,13 +857,9 @@ fn cull_frozen_column(
     let excess = frozen_ys.len() - max_cells;
     for &y in frozen_ys.iter().take(excess) {
         world.set_cell(gx, y, Cell::air());
-        let mut left = u8::MAX as f32;
-        if let Some(h) = humidity.as_deref_mut() {
-            left -= h.try_add(gx, y, left);
-        }
-        if left > 0.5 {
-            let _ = crate::steam::bank_remaining_vapour(world, gx, y, left.round() as u32);
-        }
+        // Skip the vacated seat (bank_remaining_vapour ignores seed);
+        // climb a ghost column / pack existing steam so TRACKED stays flat.
+        let _ = crate::steam::bank_remaining_vapour(world, gx, y, u8::MAX as u32);
     }
 }
 
@@ -1390,10 +1362,11 @@ mod tests {
     }
 
     #[test]
-    fn cull_banks_thaw_yield_into_humidity() {
+    fn cull_banks_thaw_yield_as_steam() {
         // Pre-fix: peel to Air deleted 255 TRACKED per excess cell.
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Tall enough for steam ghost climb above the peel.
         for cy in 0..4 {
             w.ensure_chunk(ChunkCoord::new(0, cy));
         }
@@ -1404,14 +1377,13 @@ mod tests {
         }
         let cap = 4usize;
         let before_ice = (stacked as i64) * (u8::MAX as i64);
-        let mut humidity = Humidity::new(4);
-        let before_h = humidity.total_mass();
+        let before_steam: i64 = w.steam.values().map(|&v| v as i64).sum();
         let temp = cold_temp(16, 32, -5.0);
         let cfg = PhaseConfig {
             max_ice_cells_per_column: cap as u8,
             ..PhaseConfig::default()
         };
-        apply_phase_with_humidity(&mut w, &temp, &cfg, Some(&mut humidity));
+        apply_phase(&mut w, &temp, &cfg);
         let mut ice = 0i64;
         for y in 0..32 {
             if w.get_cell(1, y).is_some_and(|c| c.material == MaterialId::Ice) {
@@ -1420,16 +1392,17 @@ mod tests {
         }
         assert_eq!(ice, cap as i64, "tower must peel to the cap");
         let after_ice = ice * (u8::MAX as i64);
-        let d_ice = after_ice - before_ice;
-        let d_h = humidity.total_mass() - before_h;
         let after_steam: i64 = w.steam.values().map(|&v| v as i64).sum();
-        assert!(
-            (d_ice as f32 + d_h + after_steam as f32).abs() < 1.0,
-            "culled thaw yield must bank to H/steam (d_ice={d_ice} d_h={d_h} steam={after_steam})"
+        let d_ice = after_ice - before_ice;
+        let d_steam = after_steam - before_steam;
+        assert_eq!(
+            d_ice + d_steam,
+            0,
+            "culled thaw yield must bank as steam (d_ice={d_ice} d_steam={d_steam})"
         );
         assert!(
-            d_h > 0.0,
-            "expected humidity credit for peeled cells, d_h={d_h}"
+            d_steam > 0,
+            "expected steam bank for peeled cells, steam={after_steam}"
         );
     }
 
