@@ -2721,11 +2721,21 @@ fn reverse_seep_chain(
 
 /// Sticky conduit (Phase 2): once leftover pins a chimney skin / open
 /// throat, reverse-seep prefers that pipe over a bare twin step that is
-/// only slightly more upward. Beats the rock vertical nudge (`dy * 50`)
-/// and sand wander, but not a true discharge vent (~50k). Deliberately
-/// skips packed vadose on the pin — a blanket route boost emptied the
-/// wet hill out the mouth before the water table could park.
+/// only slightly more upward. Beats the rock vertical nudge
+/// ([`REVERSE_SEEP_VERT_ROCK`]) and sand wander, but not a true discharge
+/// vent (~50k). Deliberately skips packed vadose on the pin — a blanket
+/// route boost emptied the wet hill out the mouth before the water table
+/// could park.
 const REVERSE_SEEP_ROUTE_STICKY: i32 = 8_000;
+
+/// Phase 2 mild vertical soften for reverse-seep neighbour scoring.
+///
+/// Was rock `×50` / vent `×80`. An aggressive cut (`×12` / `×20`) let
+/// side-lake near-ties beat the climb and emptied straw/park soaks.
+/// These keep a clear up-tiebreak on identical rock while letting a
+/// one-pore lateral throat compete with a bare upward twin.
+const REVERSE_SEEP_VERT_ROCK: i32 = 32;
+const REVERSE_SEEP_VERT_VENT: i32 = 48;
 
 /// Score one reverse-seep neighbour. Higher = easier path.
 ///
@@ -2773,7 +2783,7 @@ fn reverse_seep_path_score(
     }
     let mut score = if vent {
         // Voids and water-filled voids / lakes — the actual outlet.
-        50_000 + dst.sat.0 as i32 * 8 + room as i32 + dy.max(0) * 80
+        50_000 + dst.sat.0 as i32 * 8 + room as i32 + dy.max(0) * REVERSE_SEEP_VERT_VENT
     } else {
         let perm = permeability_cell(dst, &world.hydro) as i32;
         let mut s = perm * perm / 16 + perm * 10;
@@ -2793,7 +2803,7 @@ fn reverse_seep_path_score(
             s += 3_500;
         }
         let room_score = if room > 0 { room as i32 } else { 64 };
-        s + room_score * 2 + dy.max(0) * 50
+        s + room_score * 2 + dy.max(0) * REVERSE_SEEP_VERT_ROCK
     };
     // Sticky only on the live pipe (loose / sinter / open lumen), not
     // every pin cell — blanket boost dumped the boiler to sky.
@@ -4338,6 +4348,61 @@ mod tests {
             "packed vadose on the pin must not get sticky boost"
         );
         LEFTOVER_MEMO.with(|slot| *slot.borrow_mut() = LeftoverMemo::default());
+    }
+
+    #[test]
+    fn reverse_seep_path_score_up_still_beats_identical_lateral() {
+        // Climb gate for the Phase 2 mild dy soften: identical rock must
+        // still prefer the upward twin so straw/park soaks do not wander.
+        let mut w = World::new(304);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut rock = Cell::solid(MaterialId::Limestone);
+        rock.sat = Sat(20);
+        rock.pore = 180;
+        w.set_cell(5, 3, rock);
+        w.set_cell(4, 4, rock);
+        let lateral = reverse_seep_path_score(&w, rock, 5, 3, 0).unwrap().0;
+        let up = reverse_seep_path_score(&w, rock, 4, 4, 1).unwrap().0;
+        assert!(
+            up > lateral,
+            "identical upward twin must still beat lateral ({up} vs {lateral})"
+        );
+        assert_eq!(
+            up - lateral,
+            REVERSE_SEEP_VERT_ROCK,
+            "up-vs-lateral margin is exactly the rock dy knob"
+        );
+    }
+
+    #[test]
+    fn reverse_seep_path_score_lateral_one_pore_beats_bare_up() {
+        // Mild soften: +1 pore (+40) beats bare up (dy×32); old dy×50 would
+        // still prefer the upward twin. Pin perm + capacity so pore does not
+        // also swing permeability / room and hide the knob.
+        let mut w = World::new(305);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.hydro.set_permeability(MaterialId::Limestone, 100);
+        w.hydro.set_porosity(MaterialId::Limestone, 80);
+        let mut lateral = Cell::solid(MaterialId::Limestone);
+        lateral.sat = Sat(20);
+        lateral.pore = 181;
+        let mut up = Cell::solid(MaterialId::Limestone);
+        up.sat = Sat(20);
+        up.pore = 180;
+        w.set_cell(5, 3, lateral);
+        w.set_cell(4, 4, up);
+        let lat_s = reverse_seep_path_score(&w, lateral, 5, 3, 0).unwrap().0;
+        let up_s = reverse_seep_path_score(&w, up, 4, 4, 1).unwrap().0;
+        assert!(
+            lat_s > up_s,
+            "one-pore lateral throat must beat bare upward twin ({lat_s} vs {up_s})"
+        );
+        // +1 pore = +40. Old dy×50 would flip this; mild dy×32 must not.
+        assert_eq!(
+            lat_s - up_s,
+            40 - REVERSE_SEEP_VERT_ROCK,
+            "margin is pore(+40) − rock dy knob (old ×50 would flip)"
+        );
     }
 
     #[test]
