@@ -191,7 +191,10 @@ pub fn park_orphan_or_keep(
   let Some(mut c) = world.get_cell(keep_gx, keep_gy) else {
     return crate::steam::bank_remaining_vapour(world, park_gx, park_gy, left);
   };
-  let room = (u8::MAX - c.sat.0) as u32;
+  // Respect material capacity — Ice/Snow must not absorb a keep film
+  // (thaw would wipe that sat and drop TRACKED).
+  let cap = crate::cell::water_capacity_cell(c, &world.hydro);
+  let room = cap.saturating_sub(c.sat.0) as u32;
   let put = room.min(left);
   if put == 0 {
     return crate::steam::bank_remaining_vapour(world, keep_gx, keep_gy, left);

@@ -16,8 +16,8 @@
 //! - `GVSE_SOAK_TICKS` — soak length for short (default 120) and long (default 50_000)
 //! - `GVSE_BUDGET_PERIOD` — sample every N ticks (default 60)
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
-//! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `karst`, `competent`,
-//!   `phase`, `cull`, `failure`
+//! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `leftover`, `cadence`,
+//!   `karst`, `competent`, `phase`, `cull`, `failure`
 
 use wk_voxel::{
     stamp_world, step_world, BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig,
@@ -194,6 +194,13 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         steam.enabled = false;
         steam.enable_pipe = false;
         steam.enable_leftover_field = false;
+    }
+    if soak_off("leftover") {
+        steam.enable_leftover_field = false;
+    }
+    if soak_off("cadence") {
+        // Cadence boil/flood/escape is period-gated; park it far away.
+        steam.period_ticks = u64::MAX / 4;
     }
     let climate = ClimateConfig::default();
     let carbon_cfg = CarbonConfig::default();
