@@ -1078,14 +1078,25 @@ fn build_components(
   };
   let mut unscanned: Vec<(i32, i32)> = Vec::new();
   let mut capped = false;
-  // Untagged terrain that is already asleep must not be re-absorbed into a
-  // neighbour's flood. Solidity writes clear settled via wake_around; until
-  // then the cell is immobile. Tagged (mobile) bodies still flood by tag.
-  let tag0_floodable = |world: &World, pending: &HashSet<(i32, i32)>, seed_tag: u8, nx: i32, ny: i32, n: &Cell, material: MaterialId| -> bool {
+  // Untagged *seated* terrain that is already asleep must not be re-absorbed
+  // into a neighbour's flood — that was the strata re-flood treadmill.
+  // Airborne seeds (sky islands / peels) still flood through settled cells:
+  // a partial fall can leave settled remnants welded to seated debris, and
+  // refusing them trapped leftovers in the sky. Tagged bodies flood by tag.
+  let tag0_floodable = |world: &World,
+                        pending: &HashSet<(i32, i32)>,
+                        seed_tag: u8,
+                        seed_airborne: bool,
+                        nx: i32,
+                        ny: i32,
+                        n: &Cell,
+                        material: MaterialId|
+   -> bool {
     if !flood_compatible(seed_tag, n, material) {
       return false;
     }
     if seed_tag == 0
+      && !seed_airborne
       && (world.competent_is_settled(nx, ny) || pending.contains(&(nx, ny)))
     {
       return false;
@@ -1154,6 +1165,9 @@ fn build_components(
           }
         let material = cell.material;
         let seed_tag = cell.rock_body_tag();
+        // `below_void` already computed for pass ordering — airborne seeds
+        // must flood through settled cells (see tag0_floodable).
+        let seed_airborne = below_void;
         let mut queue = VecDeque::new();
         let mut cells: Vec<(i32, i32, Cell)> = Vec::new();
         queue.push_back((gx, gy));
@@ -1182,7 +1196,16 @@ fn build_components(
             }
             match world.get_cell(nx, ny) {
               Some(n)
-                if tag0_floodable(world, &settle_pending, seed_tag, nx, ny, &n, material) =>
+                if tag0_floodable(
+                  world,
+                  &settle_pending,
+                  seed_tag,
+                  seed_airborne,
+                  nx,
+                  ny,
+                  &n,
+                  material,
+                ) =>
               {
                 queue.push_back((nx, ny))
               }
@@ -1213,13 +1236,12 @@ fn build_components(
           }
           if pushed.is_empty() {
             // True continuous strata (or peel rejected). Sleep the untagged
-            // *gather* so later topology passes / ticks do not re-flood the
-            // same hillside — that was ~8k flood cells/tick on the demo
-            // stamp from strata bailouts alone. Do **not** sleep the
-            // finish-mark remainder: an overhang past the gather cap must
-            // stay eligible for a later seed. Tagged oversize keeps the
-            // visit-only walk (mobile identity must stay exclusive).
-            if seed_tag == 0 {
+            // *seated* gather so later topology passes / ticks do not re-flood
+            // the same hillside — that was ~8k flood cells/tick on the demo
+            // stamp from strata bailouts alone. Do **not** sleep airborne
+            // oversize gathers or the finish-mark remainder (overhang past
+            // the cap must stay eligible). Tagged oversize: visit-only.
+            if seed_tag == 0 && !seed_airborne {
               for &(x, y, _) in &cells {
                 settle.push((x, y));
                 settle_pending.insert((x, y));
@@ -1238,6 +1260,7 @@ fn build_components(
                       world,
                       &settle_pending,
                       seed_tag,
+                      seed_airborne,
                       nx,
                       ny,
                       &n,
