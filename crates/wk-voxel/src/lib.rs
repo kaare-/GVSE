@@ -66,7 +66,8 @@ pub use blueprint::{
     BODY_MUTATION_MAX_EDITS, BODY_MUTATION_MAX_MODULES,
 };
 pub use budget::{
-    BudgetDelta, BudgetLedger, BudgetSnap, BUDGET_SAMPLE_PERIOD, BUDGET_UNEXPLAINED_EPS,
+    BudgetDelta, BudgetLedger, BudgetProbe, BudgetSnap, BUDGET_SAMPLE_PERIOD,
+    BUDGET_UNEXPLAINED_EPS,
 };
 pub use carbon::{
     gate_algae_photo, gate_plant_photo, step_carbon_budget, CarbonBudget, CarbonConfig,

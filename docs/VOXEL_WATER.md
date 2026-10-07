@@ -68,6 +68,26 @@ red (`UNEXPL-W`) with no named cheat (F3 paint / R / load remake),
 then chase a real destroy path. Same numbers as
 `sat_totals` + ice/snow thaw yield + humidity.
 
+While `B` is on the overlay also prints **rate /tick** and **probe-W /
+probe-M**. Those are not extra stores — they classify writes since the
+mark so the next hunt is not a guess:
+
+- `probe-W swap` — `set_cell` sat/ice change when the **material**
+  changed (gravity/evap keep the material and stay 0 here).
+- `probe-W park` — discarded `park_orphan` remainder (should stay ~0
+  after leftover is banked as cavity steam).
+- `probe-W clamp` / `rej` — humidity OOB drop / refused add.
+- `probe-M bare` — carbonate `set_cell` outside widen / scour / precip
+  / emit / karst convert (the Cell::default() pore-reset class).
+- `probe-M credit` — those ledger APIs **and** karst Lime→Air convert
+  (should pair with `min.load`).
+- `probe-M clip` — `add_dissolved` remainder after neighbour spill.
+
+If `UNEXPL-W` is ~−8/t and `swap`/`park`/`clamp` are ~0, the leak is
+same-material sat (evap without H, or H bookkeeping). If `bare`
+matches `UNEXPL-M`, hunt the `set_cell` that is not going through
+`mineral.rs` / karst convert.
+
 ### Geyser / pipe mass audit (destroy vs design)
 
 Checked after the highland-lake watch. **No smoking-gun path that
@@ -79,11 +99,11 @@ soak tests.
 Real destroy holes that *were* still open (intermittent / fractional —
 not a bathtub-ring motor):
 
-- `park_or_restore_vapour` — liquid park + local steam restore, then a
-  partial sat top-up that dropped the remainder when the neighbourhood
-  was full.
-- `evict_steam_seat` / `scrub_invalid_steam_seats` — one-shot
-  `add_steam` ignored shortfall on already-hot seats.
+- `park_or_restore_vapour` / `evict_steam_seat` — used to drop leftover
+  after a 64-cell ghost steam column. Remainder is now packed onto
+  existing seats, then an unbounded ghost column (`bank_remaining_vapour`).
+- `park_orphan_or_keep` leftover — same bank, so geyser sinter / overflow
+  no longer deletes packed water.
 - `concentrate_hot_mouth` — ignored `add_sat` shortfall after H / steam
   refuse (now parks, then banks `pipe_res`).
 

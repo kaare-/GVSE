@@ -345,10 +345,7 @@ impl World {
     #[inline]
     pub fn competent_set_settled(&mut self, gx: i32, gy: i32) {
         let (coord, lx, ly) = Self::split(self.wrap_x(gx), gy);
-        self.competent_settled
-            .entry(coord)
-            .or_default()
-            .set(lx, ly);
+        self.competent_settled.entry(coord).or_default().set(lx, ly);
     }
 
     /// Wake every settled cell inside a world-space rectangle (inclusive).
@@ -462,6 +459,7 @@ impl World {
             let chunk = unsafe { &mut *(ptr as *mut Chunk) };
             let prev = chunk.get(lx, ly);
             chunk.set(lx, ly, cell);
+            crate::budget::note_set_cell(prev, cell);
             self.note_sky_topo(gx, gy, prev.material, cell.material);
             if prev.material == wk_material::MaterialId::Air
                 && cell.material != wk_material::MaterialId::Air
@@ -477,10 +475,14 @@ impl World {
             self.invalidate_chunk_cache();
         }
         let prev = self.chunks.get(&coord).map(|c| c.get(lx, ly));
-        let chunk = self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord));
+        let chunk = self
+            .chunks
+            .entry(coord)
+            .or_insert_with(|| Chunk::new(coord));
         chunk.set(lx, ly, cell);
         Self::remember_chunk_ptr(self.chunk_cache_id.0, coord, chunk);
         if let Some(prev) = prev {
+            crate::budget::note_set_cell(prev, cell);
             self.note_sky_topo(gx, gy, prev.material, cell.material);
             if prev.material == wk_material::MaterialId::Air
                 && cell.material != wk_material::MaterialId::Air
@@ -605,7 +607,9 @@ impl World {
         if !self.chunks.contains_key(&coord) {
             self.invalidate_chunk_cache();
         }
-        self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord))
+        self.chunks
+            .entry(coord)
+            .or_insert_with(|| Chunk::new(coord))
     }
 }
 

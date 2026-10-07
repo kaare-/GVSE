@@ -2159,6 +2159,11 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], mut moves: Vec<(i
           .or_else(|| sources.first().copied())
           .unwrap_or((0, 0));
         let still = crate::displace::park_orphan_water(world, seed.0, seed.1, leftover);
+        let still = if still > 0 {
+          crate::steam::bank_remaining_vapour(world, seed.0, seed.1, still)
+        } else {
+          0
+        };
         debug_assert_eq!(
           still, 0,
           "competent roll could not redeposit {still}/{displaced_water} water; vacated={vacated:?}"

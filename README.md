@@ -47,7 +47,7 @@ Toolchain is pinned in `rust-toolchain.toml` (1.83). License: `LICENSE-MIT`.
 - **C / E / K** — condensation (rain / snow) / evaporation / karst
 - **H / V / T** — humidity / wind / temperature overlays
 - **U** — ground saturation · **M** mycelium · **G** geotech (shear → σᵥ → wet → off)
-- **B** — mass-budget ledger (Δ stores vs a mark) · **N** remake the mark while B is on
+- **B** — mass-budget ledger (Δ stores vs a mark; rate + named probes) · **N** remake the mark while B is on
 - **I** — phase-change master (freeze / thaw / snow) · **O** — step creatures
 - **F1** — HUD chrome · **F2** creature editor (`W` = seaweed) · **F3** terrain · **F4** list
 - **F5 / F9** — save / load · **F6** — glossary

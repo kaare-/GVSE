@@ -5,11 +5,15 @@
 //! rain/evap/freeze should keep `tracked` (cells + humidity + ice/snow)
 //! near-flat; leftover after store-to-store moves is the unexplained term.
 
+use std::cell::Cell as StdCell;
+
 use wk_material::MaterialId;
 
 use crate::audit::{mineral_total, sat_totals};
+use crate::cell::Cell;
 use crate::grid::World;
 use crate::humidity::Humidity;
+use crate::mineral::cell_mineral;
 use crate::pipe::pipe_mass_sat;
 
 /// Default sample cadence while the overlay is on (ticks).
@@ -212,11 +216,15 @@ impl BudgetLedger {
         let s = BudgetSnap::capture(world, humidity);
         self.mark = Some(s);
         self.now = Some(s);
+        probe_reset();
+        probe_set_on(true);
     }
 
     pub fn disable(&mut self) {
         self.mark = None;
         self.now = None;
+        probe_set_on(false);
+        probe_reset();
     }
 
     pub fn remake_mark(&mut self) {
@@ -244,6 +252,175 @@ impl BudgetLedger {
         if due {
             self.now = Some(BudgetSnap::capture(world, humidity));
         }
+    }
+}
+
+/// Named drop / write probes while the B overlay is on.
+///
+/// Store deltas (`TRACKED`, `min.tot`) stay the leftover. These counters
+/// say *which class of write* produced it so the next hunt is not a guess.
+/// Gated on the overlay — play FPS is unchanged with `B` off.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BudgetProbe {
+    /// `set_cell` sat/ice change when **material** changed (moves that
+    /// keep the material are ignored — gravity / evap / seepage).
+    pub water_swap: i64,
+    /// `park_orphan_*` leftover the caller discarded.
+    pub water_park: i64,
+    /// Humidity `try_add` refused because the tile is outside bounds.
+    pub water_hum_rej: i64,
+    /// `Humidity::clamp_to_bounds` dropped vapour.
+    pub water_clamp: i64,
+    /// `set_cell` carbonate delta **outside** widen / scour / precip / emit.
+    pub mineral_bare: i64,
+    /// Same delta **inside** those ledger APIs (should be paired with load).
+    pub mineral_credit: i64,
+    /// `add_dissolved` remainder after neighbour spill (clipped load).
+    pub mineral_clip: i64,
+}
+
+impl BudgetProbe {
+    pub fn snapshot() -> Self {
+        PROBE.with(|p| p.get())
+    }
+
+    pub fn is_quiet(self) -> bool {
+        self.water_swap == 0
+            && self.water_park == 0
+            && self.water_hum_rej == 0
+            && self.water_clamp == 0
+            && self.mineral_bare == 0
+            && self.mineral_credit == 0
+            && self.mineral_clip == 0
+    }
+}
+
+thread_local! {
+    static PROBE_ON: StdCell<bool> = const { StdCell::new(false) };
+    static PROBE: StdCell<BudgetProbe> = const { StdCell::new(BudgetProbe {
+        water_swap: 0,
+        water_park: 0,
+        water_hum_rej: 0,
+        water_clamp: 0,
+        mineral_bare: 0,
+        mineral_credit: 0,
+        mineral_clip: 0,
+    }) };
+    static MINERAL_SCOPE: StdCell<u32> = const { StdCell::new(0) };
+}
+
+fn probe_set_on(on: bool) {
+    PROBE_ON.with(|c| c.set(on));
+}
+
+fn probe_reset() {
+    PROBE.with(|p| p.set(BudgetProbe::default()));
+    MINERAL_SCOPE.with(|s| s.set(0));
+}
+
+#[inline]
+fn probe_on() -> bool {
+    PROBE_ON.with(|c| c.get())
+}
+
+fn overlay_water_units(cell: Cell) -> i64 {
+    match cell.material {
+        MaterialId::Ice | MaterialId::Snow => u8::MAX as i64,
+        _ => cell.sat.0 as i64,
+    }
+}
+
+/// Called from [`World::set_cell`](crate::grid::World::set_cell) when `B` is on.
+#[inline]
+pub fn note_set_cell(prev: Cell, next: Cell) {
+    if !probe_on() {
+        return;
+    }
+    if prev.material != next.material {
+        let d = overlay_water_units(next) - overlay_water_units(prev);
+        if d != 0 {
+            PROBE.with(|p| {
+                let mut v = p.get();
+                v.water_swap += d;
+                p.set(v);
+            });
+        }
+    }
+    let dm = cell_mineral(next) as i64 - cell_mineral(prev) as i64;
+    if dm == 0 {
+        return;
+    }
+    let credited = MINERAL_SCOPE.with(|s| s.get() > 0);
+    PROBE.with(|p| {
+        let mut v = p.get();
+        if credited {
+            v.mineral_credit += dm;
+        } else {
+            v.mineral_bare += dm;
+        }
+        p.set(v);
+    });
+}
+
+/// Discarded `park_orphan` remainder — a real water drop.
+pub fn note_unplaced_water(units: u32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_park += units as i64;
+        p.set(v);
+    });
+}
+
+pub fn note_water_hum_rej(mass: f32) {
+    if mass <= 0.0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_hum_rej += mass.round() as i64;
+        p.set(v);
+    });
+}
+
+pub fn note_water_clamp(mass: f32) {
+    if mass <= 0.0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_clamp += mass.round() as i64;
+        p.set(v);
+    });
+}
+
+pub fn note_mineral_clip(units: u16) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.mineral_clip += units as i64;
+        p.set(v);
+    });
+}
+
+/// RAII: `set_cell` carbonate deltas inside widen / scour / precip / emit
+/// count as `mineral_credit`, not `mineral_bare`.
+pub struct MineralLedgerScope;
+
+impl MineralLedgerScope {
+    pub fn enter() -> Self {
+        MINERAL_SCOPE.with(|s| s.set(s.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for MineralLedgerScope {
+    fn drop(&mut self) {
+        MINERAL_SCOPE.with(|s| s.set(s.get().saturating_sub(1)));
     }
 }
 
@@ -405,5 +582,78 @@ mod tests {
         assert_eq!(led.delta().unwrap().d_free, u8::MAX as i64);
         led.disable();
         assert!(!led.is_on());
+    }
+
+    #[test]
+    fn probe_ignores_writes_when_overlay_off() {
+        let mut w = World::new(1);
+        let mut lime = Cell::solid(MaterialId::Limestone);
+        lime.pore = 40;
+        w.set_cell(0, 0, lime);
+        lime.pore = 128;
+        w.set_cell(0, 0, lime);
+        let p = BudgetProbe::snapshot();
+        assert_eq!(p.mineral_bare, 0);
+        assert!(p.is_quiet());
+    }
+
+    #[test]
+    fn probe_tags_bare_limestone_pore_reset() {
+        let mut w = World::new(1);
+        let h = empty_h();
+        let mut led = BudgetLedger::default();
+        let mut lime = Cell::solid(MaterialId::Limestone);
+        lime.pore = 40;
+        w.set_cell(0, 0, lime);
+        led.enable(&w, &h);
+        lime.pore = 128;
+        w.set_cell(0, 0, lime);
+        let p = BudgetProbe::snapshot();
+        assert_eq!(p.mineral_bare, (255 - 128) - (255 - 40));
+        assert_eq!(p.mineral_credit, 0);
+        led.disable();
+        assert!(BudgetProbe::snapshot().is_quiet());
+    }
+
+    #[test]
+    fn probe_credits_mineral_ledger_scope() {
+        let mut w = World::new(1);
+        let h = empty_h();
+        let mut led = BudgetLedger::default();
+        let mut lime = Cell::solid(MaterialId::Limestone);
+        lime.pore = 40;
+        w.set_cell(0, 0, lime);
+        led.enable(&w, &h);
+        {
+            let _g = MineralLedgerScope::enter();
+            lime.pore = 41;
+            w.set_cell(0, 0, lime);
+        }
+        let p = BudgetProbe::snapshot();
+        assert_eq!(p.mineral_bare, 0);
+        assert_eq!(p.mineral_credit, -1);
+    }
+
+    #[test]
+    fn probe_water_swap_on_material_change_not_same_mat_sat() {
+        let mut w = World::new(1);
+        let h = empty_h();
+        let mut led = BudgetLedger::default();
+        w.set_cell(0, 0, Cell::water());
+        led.enable(&w, &h);
+        let mut film = Cell::air();
+        film.sat.0 = 200;
+        w.set_cell(0, 0, film);
+        assert_eq!(
+            BudgetProbe::snapshot().water_swap,
+            0,
+            "Air sat drop is evap/flow, not a material swap"
+        );
+        w.set_cell(0, 0, Cell::solid(MaterialId::Stone));
+        assert_eq!(
+            BudgetProbe::snapshot().water_swap,
+            -200,
+            "Air→Stone must tag the sat that vanished with the material"
+        );
     }
 }
