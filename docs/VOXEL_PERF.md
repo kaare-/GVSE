@@ -18,17 +18,31 @@ slower on this dirty width).
 
 ## Wall / physics (0 plants)
 
+Phase 0 close (before Phase 1 surgical wins):
+
 | Stamp | wall ms/tick | ~sim-FPS | physics | parallel A/B |
 |-------|-------------:|---------:|--------:|--------------|
 | short sky | 27.4 | ~36 | 19.8 | — |
 | demo | 33.0 | ~30 | 23.6 | FPS OFF 32.4 / ON 34.1; full_feel OFF 119 / ON 117 |
 | stress | 56.2 | ~18 | 40.7 | — |
 
-Demo + plants: +48 ≈ 34.0 ms, +256 ≈ 32.8 ms (org share ≤2%).
+### Size sweep after settle + bodies + seam-apply win
+
+Same host, warm 40 / measure 200, `PerfConfig` FPS defaults, parallel **OFF**
+unless noted (`perf_profile_demo_and_stress` / `perf_profile_sky_height`):
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 19.3 | ~52 | 13.4 | 3.15 | 3.90 | 1.70 |
+| demo | 21.4 | ~47 | 13.9 | 2.89 | 5.48 | 2.16 |
+| stress (2048×1064) | 34.0 | ~29 | 21.2 | 4.78 | 6.27 | 4.76 |
+
+Demo parallel A/B (0 plants): FPS OFF 20.1 / ON 19.3; full_feel OFF 73.6 / ON 64.4.
+Demo + plants: +48 ≈ 21.0 ms, +256 ≈ 25.1 ms (org share ≤3%).
 
 ## Hottest physics sub-passes (demo 0 plants)
 
-Baseline at Phase 0 close (before this branch’s surgical wins):
+Baseline at Phase 0 close (before Phase 1 surgical wins):
 
 | Pass | ms/tick | Share of wall |
 |------|--------:|--------------:|
@@ -39,11 +53,15 @@ Baseline at Phase 0 close (before this branch’s surgical wins):
 | plan+clear dirty | 0.69 | 2% |
 | water flow | 0.53 | 2% |
 
-Frame shell (outside physics): humidity.advect ~1.85, evap ~1.72, steam ~1.12,
-temperature ~1.04 amortized, flow erosion ~1.03. Condensation ~0.28 — **do not**
-coarsen weather / lottery before these CA tails shrink.
+Re-profile after settle + bodies (#353), before seam-apply win — demo hotspots
+were **settle ~7.4**, **seepage ~4.4**, bodies ~2.1 (docs had guessed seepage ~3.9 /
+settle ~5.5; settle was noisier on this host).
 
-Active plan (demo): ~16 regions / ~2460 cells per flow substep; avg ~7.6
+Frame shell (outside physics): humidity.advect ~1.7, steam ~1.1, temperature
+amortized ~0.9, evap ~0.7. Condensation ~0.22 — **do not** coarsen weather /
+lottery before these CA tails shrink.
+
+Active plan (demo): ~16 regions / ~2470 cells per flow substep; avg ~7.2
 substeps/tick with quiet early-out.
 
 ## Surgical wins (this branch)
@@ -101,9 +119,45 @@ Tip after settle win → after strata sleep (warm 40 / measure 200):
 Bodies **−5.2 ms/tick** on demo stamp (−67%); wall **−5.2 ms** (~37 → ~45
 sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
 
+### 3. Seepage seam apply (skip full↔full + run bands)
+
+Re-profile after #353: seepage ~4.4 ms/tick on demo. `seepage_split_probe`
+showed **seam_coupling ~2.5 ms/call** (hottest seepage component). On a warmed
+demo world every wet seam band was full-width 64, and ~56% of face columns were
+quiet pore↔pore **both at capacity** — the accumulate walk no-ops those faces,
+but `seam_coupled_span` still emitted a min..=max rect over them. HashMap-merging
+runs by x also re-filled dry gaps; merging a middle chunk’s top+bottom strips
+could balloon y to full height.
+
+**Change** (apply band only — wake still visits every wet column for downward
+fronts):
+
+- `seam_coupled_runs`: emit contiguous x-runs of face columns that can still
+  transfer; skip both-at-capacity pore↔pore (same gate as deep accumulate).
+- ±1 x halo so a full neighbour still owns the +x face into a column with room.
+- One `ActiveChunk` per run (no HashMap min/max merge).
+
+No weather / condensation / `live_surface_y` / cadence changes.
+
+### Before → after seam-apply win (`perf_profile_sky_height`, same host)
+
+Tip after bodies win → after seam runs (warm 40 / measure 200):
+
+| Stamp | wall | seepage | settle | bodies | physics |
+|-------|-----:|--------:|-------:|-------:|--------:|
+| short sky before | 20.5 | 4.87 | 3.72 | 1.59 | 14.9 |
+| short sky after | 19.2 | 3.15 | 3.84 | 1.70 | 13.4 |
+| tall/demo before | 24.7 | 4.42 | 7.45 | 2.14 | 17.5 |
+| tall/demo after | 21.0 | 2.85 | 5.31 | 2.11 | 13.6 |
+
+`seepage_split_probe` seam_coupling: demo **2.47 → 0.35 ms/call**; stress
+**4.77 → 0.73 ms/call**. Seepage bucket **−1.6 ms/tick** on demo (−35%); wall
+**−3.7 ms** (~40 → ~48 sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
+
 ## Out of scope / next
 
 - Coarsening weather / skipping condensation lottery / changing `live_surface_y`
 - Enabling rayon by default (still slower on narrow dirty)
-- Next CA tails once re-profiled: seepage (~3.9), settle (~5.5), humidity.advect
-  / steam / temperature amortized — not body flood budgets
+- Next CA tails once re-profiled: settle (~5.5), seepage wakes (lake-bed / seam
+  wake / weep — still ~4 ms/call combined), humidity.advect / steam /
+  temperature amortized — not body flood budgets
