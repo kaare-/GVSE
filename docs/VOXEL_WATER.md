@@ -108,6 +108,23 @@ delta as load.
 Prefer headless soaks over overnight GUI runs for leftover hunts —
 see [`VOXEL_BUDGET_SOAK.md`](VOXEL_BUDGET_SOAK.md).
 
+### Alpine ice / steam cadence (tall packs)
+
+After wet-film snow credit, 10k TRACKED was still red. Isolation:
+
+| `GVSE_SOAK_OFF` | 5k `/t` |
+|--|--|
+| (baseline, no-op cull) | −0.78 |
+| `steam` / `cadence` | **≈ −0.02** |
+| `leftover` | −0.69 |
+
+Steam **cadence** scrub/park wrote sat onto Ice/Snow (capacity 0).
+`sat_totals` counted that film as pore, but thaw replaces the cell with
+`Cell::water()` and deletes it — slow UNEXPL-W that grew with tall packs
+(no-op cull worse than peel-delete; lateral relocate spread the contact
+surface). Park paths now respect `water_capacity_cell`; excess ice still
+relocates laterally (mass-flat).
+
 ### Geyser / pipe mass audit (destroy vs design)
 
 Checked after the highland-lake watch. **No smoking-gun path that
