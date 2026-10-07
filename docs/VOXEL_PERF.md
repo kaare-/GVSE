@@ -40,6 +40,19 @@ unless noted (`perf_profile_demo_and_stress` / `perf_profile_sky_height`):
 Demo parallel A/B (0 plants): FPS OFF 20.1 / ON 19.3; full_feel OFF 73.6 / ON 64.4.
 Demo + plants: +48 ≈ 21.0 ms, +256 ≈ 25.1 ms (org share ≤3%).
 
+### Size sweep after settle Air-dest + dirty-clear win
+
+Same harness on seep tip + this win (`perf_profile_demo_and_stress`):
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 16.3 | ~61 | 10.1 | 3.26 | 0.53 | 1.80 |
+| demo | 17.2 | ~58 | 9.3 | 2.93 | 0.78 | 2.26 |
+| stress (2048×1064) | 27.2 | ~37 | 14.2 | 4.93 | 0.36 | 3.86 |
+
+Demo parallel A/B (0 plants): FPS OFF 17.0 / ON 16.9; full_feel OFF 33.0 / ON 30.1.
+Demo + plants: +48 ≈ 17.3 ms, +256 ≈ 18.2 ms (org share ≤3%).
+
 ## Hottest physics sub-passes (demo 0 plants)
 
 Baseline at Phase 0 close (before Phase 1 surgical wins):
@@ -154,10 +167,42 @@ Tip after bodies win → after seam runs (warm 40 / measure 200):
 **4.77 → 0.73 ms/call**. Seepage bucket **−1.6 ms/tick** on demo (−35%); wall
 **−3.7 ms** (~40 → ~48 sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
 
+### 4. Settle Air destinations + multi-pass dirty clear
+
+Re-profile after seam-apply: settle still **~5.3 ms/tick** on demo (docs’
+~5.5–7.4 band). `settle_air_probe` showed the sticky-loose plan was **~71%
+non-Air** — seepage pore dirty inside `has_loose` chunks. Fall and repose only
+pull into Air, so those solid visits were pure waste. Multi-pass re-plans also
+rebuilt that wet-pore halo via `plan_active` every pass.
+
+**Change** (in `settle_loose_grains_regions_ex` only):
+
+- Trim each settle scan to **Air destinations** (sparse bitset).
+- After snapshotting the initial Air mask, `clear_all_dirty` so re-plans see
+  only fall/repose writes (not the seepage halo).
+- Repose unions wake Air seats ∪ fall writes so a freefall elsewhere cannot
+  drop cliff seats for that pass; clear again after each successful pass.
+
+No weather / condensation / lottery / `live_surface_y` changes.
+
+### Before → after settle Air-dest win (`perf_profile_sky_height`, same host)
+
+Tip after seam-apply → after Air-dest + dirty clear (warm 40 / measure 200):
+
+| Stamp | wall | seepage | settle | bodies | physics |
+|-------|-----:|--------:|-------:|-------:|--------:|
+| short sky before | 19.5 | 3.21 | 3.87 | 1.71 | 13.5 |
+| short sky after | 16.3 | 3.25 | 0.53 | 1.81 | 11.0 |
+| tall/demo before | 21.3 | 2.93 | 5.29 | 2.14 | 13.8 |
+| tall/demo after | 16.8 | 2.87 | 0.76 | 2.24 | 9.8 |
+
+Settle **−4.5 ms/tick** on demo stamp (−86%); wall **−4.5 ms** (~47 → ~59
+sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
+
 ## Out of scope / next
 
 - Coarsening weather / skipping condensation lottery / changing `live_surface_y`
 - Enabling rayon by default (still slower on narrow dirty)
-- Next CA tails once re-profiled: settle (~5.5), seepage wakes (lake-bed / seam
-  wake / weep — still ~4 ms/call combined), humidity.advect / steam /
-  temperature amortized — not body flood budgets
+- Next CA tails once re-profiled: seepage wakes (lake-bed / seam wake / weep),
+  humidity.advect / steam / temperature amortized, rock bodies — settle is
+  no longer the top CA cost

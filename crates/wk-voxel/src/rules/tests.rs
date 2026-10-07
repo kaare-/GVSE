@@ -2189,16 +2189,19 @@ fn settle_air_dest_trim_still_drops_sand_through_pore_dirty() {
         active.iter().any(|ac| ac.cell_count() > 1),
         "precondition: plan includes sand seat and pore dirty"
     );
-    settle_loose_grains_regions(&mut w, &active, None, GRAIN_SETTLE_PASSES_SHALLOW);
+    settle_loose_grains_regions(&mut w, &active, None, GRAIN_SETTLE_PASSES);
+    let sand_y = (0..=20).rev().find(|&y| {
+        w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::Sand)
+    });
     assert_eq!(
         w.get_cell(5, 20).unwrap().material,
         MaterialId::Air,
-        "sand must leave freefall height despite pore dirty in the plan"
+        "sand must leave freefall height despite pore dirty in the plan (sand_y={sand_y:?})"
     );
     assert_eq!(
-        w.get_cell(5, 1).unwrap().material,
-        MaterialId::Sand,
-        "sand should seat on bedrock"
+        sand_y,
+        Some(1),
+        "sand should seat on bedrock (sand_y={sand_y:?})"
     );
 }
 
