@@ -1068,7 +1068,11 @@ pub fn settle_loose_grains_regions_ex(
         if moved == 0 {
             break;
         }
-        let next = plan_active(world);
+        // Same sticky-loose filter as the repose re-plan above. Global dirty
+        // after seepage is mostly wet pores in stone / limestone; walking that
+        // halo on every settle pass (×8 shallow / ×64 deep) was the leftover
+        // that kept "settle grains" near rock-bodies cost on rainy demos.
+        let next = keep_loose_regions(world, &plan_active(world));
         if next.is_empty() {
             break;
         }
