@@ -493,6 +493,26 @@ Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
 - Shore / cascade suite (`impermeable_shore_*`, `continuous_rain_on_*`)
 - Grain repose: `sand_cliff_slides_diagonally`, `loose_rock_holds_single_step`, `snow_avalanches_off_cliff_but_not_into_water`, `sand_pile_flattens_over_ticks`
 
+
+## Phase 3 — ice revisit (roadmap)
+
+Owner closed Phase 2 (2026-10-07). Goal: **brittle solid** look, not
+powder-throughflow. Water does not carry temperature today — standing
+warm water on ice cannot melt it; geyser discharge in sub-zero air cools
+too fast for the same reason.
+
+### Options (owner pick)
+
+| # | Approach | Scope | Notes |
+|---|----------|-------|-------|
+| 1 | Contact melt | Medium | Tile heat under/beside water melts Ice; no per-sat T |
+| 2 | Water carries T | Large | Sparse or cell T on free water; unlocks melt + geyser cool |
+| 3 | Brittle first | Small–medium | Block seepage/throughflow through Ice; competent lids; powder look gone |
+| 4 | Hybrid | 3 then 1 | Ship look fix now; contact melt; defer full water-T |
+
+Hard no’s until agreed: no weather coarsen / lottery skip / `live_surface_y`
+change; keep TRACKED mass-flat; no wholesale rustfmt of `phase.rs`.
+
 ## Ice / snow / phase (milestones 1–3)
 
 Module: `wk-voxel::phase` (`apply_phase`, `deposit_precip_on_surface`).
