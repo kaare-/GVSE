@@ -38,16 +38,14 @@ flat 120-tick run).
 
 - UNEXPL-W ~−3/t on 50k-tick headless soak (mineral ~flat at +0.13/t).
 
-**Exit criteria (proposed — confirm)**
+**Exit criteria** (2026-10-07)
 
 | Signal | Gate |
 |--------|------|
-| Headless 50k+ ticks, default stamp | `\|rate W\|` and `\|rate M\|` under agreed eps |
+| Headless 50k+ ticks, default stamp | **tight bar**: `\|rate W\|` and `\|rate M\|` **&lt; 0.5/t** |
 | `park` / `clip` / `clamp` | stay 0 |
-| GUI overnight optional | only after headless is green; subagent-owned |
-
-Open: exact eps (e.g. `< 0.5/t` vs `< 1/t`), whether plant/organism
-passes must be on for the gate.
+| Organisms | **off** for this gate; turn on only for the Phase 5 bio rewrite |
+| GUI overnight | optional after headless is green; subagent-owned |
 
 ---
 
@@ -57,6 +55,13 @@ passes must be on for the gate.
 Buildup (dissolved maps, steam/pipe ledgers, dirty sets, landscape
 bodies) must not produce the “fresh world fine → morning at 5 FPS” shape.
 
+**Targets** (2026-10-07)
+
+- At least **30 FPS** playable; raise the bar as we test.
+- Grow world size until diminishing returns, then discuss next levers.
+- Stretch aim: **~5 km+** horizontal at **~1064** world height — may be
+  unrealistic; treat as aspiration, not a Phase-1 exit requirement.
+
 **Likely levers** (see also `VOXEL_PARALLEL.md`)
 
 - Active-set / dirty discipline under long soak.
@@ -64,10 +69,11 @@ bodies) must not produce the “fresh world fine → morning at 5 FPS” shape.
 - Wider maps: chunk streaming / ring already sketched in `WORLDGEN.md`.
 - Profile before coarsening weather or skipping lottery.
 
-**Exit criteria (proposed)**
+**Exit criteria**
 
 - Profiled demo + larger stamp: ms/tick and memory vs soak age documented.
 - No intentional mass-budget regressions (re-run short + mid headless).
+- Stop when returns flatten; owner discussion before heroic further cuts.
 
 ---
 
@@ -75,20 +81,25 @@ bodies) must not produce the “fresh world fine → morning at 5 FPS” shape.
 
 **Goal:** Feel local and readable; less glitchy route churn.
 
-**Owner notes (to refine)**
+**Owner notes** (2026-10-07)
 
-- Changes routes too often.
-- Walking to the surface feels a little **global-knowledge-ish**.
+- Changes routes too often — needs testing and tuning.
+- Walking to the surface feels a little **global-knowledge-ish** → prefer
+  **local pressure / pathfinding only**, plus hard limits as needed
+  (max horizontal seek / connected-void). Tune in play.
 - Prefers **vertical** a bit too much.
-- Should open **underwater hot springs**, not only aerial vents.
+- Open **underwater hot springs** into standing lake water **and**
+  **seafloor vents** into the ocean column.
 
 **Scope guard:** mass-flat mouth / park / sinter paths already chased;
 this pass is behaviour and presentation, not reopening destroy holes.
+Side note for later: geyser water cooling too fast in sub-zero air is
+tied to water not carrying temperature (see Phase 3).
 
-**Exit criteria (proposed)**
+**Exit criteria**
 
 - Headless leftover rates still hold near vents.
-- Playtest / Xvfb: fewer route flips; visible UW hot-spring behaviour.
+- Playtest / Xvfb: fewer route flips; visible lake UW springs + seafloor vents.
 
 ---
 
@@ -97,16 +108,19 @@ this pass is behaviour and presentation, not reopening destroy holes.
 **Goal:** Ice is an old material with quirks. Treat as a concentrated
 pass, not drive-by tweaks.
 
-**Owner notes**
+**Owner notes** (2026-10-07)
 
-- Behaves as a **semisolid powder** that lets water run through —
-  looks strange sometimes.
-- Needs coherent rules for powder vs solid, throughflow, melt/freeze
-  presentation.
+- Direction: toward a **brittle solid**, not powder-throughflow as the
+  default look.
+- Biggest suspect: **water particles don’t carry temperature**, so
+  standing water on ice can’t really melt it. May need a larger rewrite;
+  **discuss when we get here**, don’t pre-commit the design.
+- Related: geyser discharge cooling too fast in mostly sub-zero climates
+  (same missing water-T bookkeeping).
 
-**Exit criteria (proposed)**
+**Exit criteria**
 
-- Written ice model in docs + tests for throughflow / melt / load.
+- Agreed ice model in docs + tests after the design discussion.
 - Visual soak (Xvfb or playtest) accepted as “reads as ice”.
 
 ---
@@ -121,9 +135,12 @@ May include ring width / ceiling / streaming follow-ups from
 
 ## Phase 5 — Biological system upgrade *(major)*
 
-**Goal:** Big organism/ecology pass. **Requires its own scoping doc**
-before implementation (genome/bodyplan, plants/fungi/creatures,
-caps, perf).
+**Goal:** Big organism/ecology pass. Lots of **fundamental changes** to
+the system we have — not a thin skin. **Requires its own major planning
+session** and scoping doc before implementation.
+
+Headless soaks for this phase turn **organisms on** (Phase 0 gate stays
+organisms-off).
 
 Do not start coding until a Phase-5 scope PR exists with acceptance
 tests and soak hooks.
@@ -155,25 +172,29 @@ no sim-mass regressions from lighting-only work.
 
 ## Phase 8 — Server / client *(huge)*
 
-**Goal:** Split sim presentation from ownership. Evaluate whether the
-way we show the sim to the user can be upgraded. Heavy work and
-testing; own architecture note before coding.
+**Goal:** Split sim presentation from ownership. Review alternatives;
+prefer a **production-compatible client** that can pass **Apple and/or
+Steam** inspection. Heavy work and testing; own architecture note
+before coding.
 
 ---
 
-## Decision log (fill as answers land)
+## Decision log
 
 | When | Topic | Decision |
 |------|--------|----------|
-| | Phase 0 rate eps | |
-| | Phase 0 organisms on/off for gate | |
-| | Target playable map size for Phase 1/4 | |
-| | Geyser “local knowledge” rule | |
-| | Ice throughflow: keep / restrict / rewrite | |
-| | Phase 5 scope owner doc | |
-| | Client tech preference (Phase 8) | |
+| 2026-10-07 | Phase 0 rate eps | Tight: `\|rate W\|` and `\|rate M\|` &lt; **0.5/t** on 50k+ headless |
+| 2026-10-07 | Phase 0 organisms | **Off** until Phase 5 bio rewrite |
+| 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
+| 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
+| 2026-10-07 | UW / ocean vents | Lake underwater springs **and** seafloor ocean-column vents |
+| 2026-10-07 | Ice direction | Toward **brittle solid**; water-T rewrite likely; discuss at Phase 3 |
+| 2026-10-07 | Phase 5 bio | Fundamental look + fundamental changes; own major planning session |
+| 2026-10-07 | Phase 8 client | Review alts; production path for Apple/Steam inspection |
 
-## Clarifications still needed
+## Clarifications later
 
-See the agent chat for the live question list. Answers get copied into
-the decision log above.
+- Exact Phase-1 “diminishing returns” stop rule (ms/tick vs world cells).
+- Ice water-temperature design options when Phase 3 starts.
+- Phase-5 scoping agenda (plants/fungi vs creatures first — open until planning session).
+- Phase-8 shortlist of client stacks when that review starts.
