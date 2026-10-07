@@ -67,29 +67,24 @@ shell left for later / Phase 4.
 
 ---
 
-## Phase 2 — Geysers / hydrothermal tighten *(current)*
+## Phase 2 — Geysers / hydrothermal tighten *(code done 2026-10-07; visual confirm pending)*
 
 **Goal:** Feel local and readable; less glitchy route churn.
 
-**Owner notes** (2026-10-07)
+**Done**
 
-- Changes routes too often — needs testing and tuning.
-- Walking to the surface feels a little **global-knowledge-ish** → prefer
-  **local pressure / pathfinding only**, plus hard limits as needed
-  (max horizontal seek / connected-void). Tune in play.
-- Prefers **vertical** a bit too much.
-- Open **underwater hot springs** into standing lake water **and**
-  **seafloor vents** into the ocean column.
+- Sticky conduit + local mouth seek (`LEFTOVER_PLAN_MAX_HORIZ=48`) (#357).
+- Leftover lake UW / seafloor mouths (#358).
+- Mild reverse-seep vertical soften (rock×32 / vent×48) (#359).
+- Short budget soak near vents: `park=0`.
 
-**Scope guard:** mass-flat mouth / park / sinter paths already chased;
-this pass is behaviour and presentation, not reopening destroy holes.
-Side note for later: geyser water cooling too fast in sub-zero air is
-tied to water not carrying temperature (see Phase 3).
+**Pending**
 
-**Exit criteria**
+- Xvfb / playtest eyes on route flip rate and visible UW / seafloor vents
+  (subagent in flight). Owner may close Phase 2 after that glance.
 
-- Headless leftover rates still hold near vents.
-- Playtest / Xvfb: fewer route flips; visible lake UW springs + seafloor vents.
+**Scope guard:** mass-flat mouth / park / sinter already audited. Cooling
+too fast in sub-zero air stays Phase 3 (water-T).
 
 ---
 
@@ -179,6 +174,7 @@ before coding.
 | 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |
+| 2026-10-07 | Phase 2 code | Sticky/local (#357), UW mouths (#358), mild vert (#359); Xvfb confirm pending |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
 | 2026-10-07 | UW / ocean vents | Lake underwater springs **and** seafloor ocean-column vents |
 | 2026-10-07 | Ice direction | Toward **brittle solid**; water-T rewrite likely; discuss at Phase 3 |
