@@ -389,7 +389,7 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         let Some(hi_chunk) = world.chunks.get(&above) else {
             continue;
         };
-        // Same occupancy as [`seam_coupled_span`]: a dry/dry pair has
+        // Same occupancy as [`seam_coupled_runs`]: a dry/dry pair has
         // nothing to couple. Walking every loaded cy pair was leftover
         // on a tall sky (272 chunks, most seams empty).
         if !lo_chunk.has_wet_pores
@@ -477,52 +477,54 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
 /// shelved at y=63|64 for thousands of ticks while the row above keeps
 /// equalising horizontally.
 pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
-    use std::collections::HashMap;
     let ch = CHUNK_CELLS_H as i32;
     let depth_lo = SEAM_SEEPAGE_DEPTH_LO.min(ch);
     let depth_hi = SEAM_SEEPAGE_DEPTH_HI.min(ch);
-    let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
+    let y0_lo = (ch - depth_lo).max(0) as u8;
+    let y1_lo = (ch - 1) as u8;
+    let y1_hi = (depth_hi - 1).min(ch - 1) as u8;
+    // One ActiveChunk per transferable run (not a HashMap merge). Merging
+    // runs by min/max x re-filled dry gaps between shore columns, and merging
+    // a middle chunk's top+bottom strips ballooned the rect to full height.
+    let mut out: Vec<ActiveChunk> = Vec::new();
     let coords: Vec<_> = world.chunks.keys().copied().collect();
     for coord in coords {
         let above = ChunkCoord::new(coord.cx, coord.cy + 1);
         if !world.chunks.contains_key(&above) {
             continue;
         }
-        // Only the columns that are actually coupled across the face need the
-        // band. Emitting it for every chunk pair at full width made this the
-        // most expensive pass in the simulation (17 ms/call on the stress
-        // world) while most seams are dry sky or dry rock with nothing to move.
-        let Some(span) = seam_coupled_span(world, coord, above) else {
-            continue;
-        };
-        let strip_lo = Rect {
-            x0: span.0,
-            y0: (ch - depth_lo).max(0) as u8,
-            x1: span.1,
-            y1: (ch - 1) as u8,
-        };
-        let strip_hi = Rect {
-            x0: span.0,
-            y0: 0,
-            x1: span.1,
-            y1: (depth_hi - 1).min(ch - 1) as u8,
-        };
-        map.entry(coord)
-            .and_modify(|r| *r = merge_seam_rect(*r, strip_lo))
-            .or_insert(strip_lo);
-        map.entry(above)
-            .and_modify(|r| *r = merge_seam_rect(*r, strip_hi))
-            .or_insert(strip_hi);
+        // Only columns that can still transfer across the face. Emitting a
+        // min..=max span over every wet column (including quiet full↔full
+        // pore pairs the accumulate walk skips) made seam coupling the
+        // hottest seepage call on rainy demos.
+        for (x0, x1) in seam_coupled_runs(world, coord, above) {
+            out.push(ActiveChunk::new(
+                coord,
+                Rect {
+                    x0,
+                    y0: y0_lo,
+                    x1,
+                    y1: y1_lo,
+                },
+            ));
+            out.push(ActiveChunk::new(
+                above,
+                Rect {
+                    x0,
+                    y0: 0,
+                    x1,
+                    y1: y1_hi,
+                },
+            ));
+        }
     }
-    let mut out: Vec<ActiveChunk> = map
-        .into_iter()
-        .map(|(coord, rect)| ActiveChunk::new(coord, rect))
-        .collect();
     out.sort_by(|a, b| {
         a.coord
             .cy
             .cmp(&b.coord.cy)
             .then(a.coord.cx.cmp(&b.coord.cx))
+            .then(a.rect.x0.cmp(&b.rect.x0))
+            .then(a.rect.y0.cmp(&b.rect.y0))
     });
     out
 }
@@ -571,51 +573,105 @@ fn quiet_saturated_crust_pair(lo: &Chunk, hi: &Chunk) -> bool {
         && !hi.has_unsaturated_pores
 }
 
-/// Local `x` span of the columns where water could actually cross this seam,
-/// or `None` when the face is inert.
+/// Contiguous local-`x` runs where the seam face can still transfer.
 ///
-/// Deliberately more permissive than the per-column predicate in
-/// [`wake_vertical_chunk_seam_pores`]: it asks only that both sides can hold
-/// or pass water and that one of them has some, so it can never exclude a
-/// column that the wake would have coupled.
-fn seam_coupled_span(world: &World, lower: ChunkCoord, upper: ChunkCoord) -> Option<(u8, u8)> {
+/// Empty when the face is inert. Unlike the wake scan (which must visit every
+/// wet column so downward fronts stay dirty), the apply band skips pore↔pore
+/// columns that are **both at capacity** — the accumulate walk no-ops those
+/// faces, and a min..=max span over them was leftover on lake beds.
+fn seam_coupled_runs(world: &World, lower: ChunkCoord, upper: ChunkCoord) -> Vec<(u8, u8)> {
     let ch = CHUNK_CELLS_H as i32;
     let cw = CHUNK_CELLS_W as usize;
-    let lo_chunk = world.chunks.get(&lower)?;
-    let hi_chunk = world.chunks.get(&upper)?;
+    let Some(lo_chunk) = world.chunks.get(&lower) else {
+        return Vec::new();
+    };
+    let Some(hi_chunk) = world.chunks.get(&upper) else {
+        return Vec::new();
+    };
     // Sticky occupancy: a seam with no water on either side has nothing to do.
     let any_water = lo_chunk.has_wet_pores
         || lo_chunk.has_wet_air
         || hi_chunk.has_wet_pores
         || hi_chunk.has_wet_air;
     if !any_water {
-        return None;
+        return Vec::new();
     }
     // Quiet sealed aquifers: both sides full, no Air — pore↔pore across the
     // face cannot move. Sticky `has_unsaturated_pores` is cleared by weep /
     // lake-bed occupancy refresh; until then we keep coupling.
     if quiet_saturated_crust_pair(lo_chunk, hi_chunk) {
-        return None;
+        return Vec::new();
     }
     let hydro = world.hydro;
-    let mut lo_x: Option<usize> = None;
-    let mut hi_x = 0usize;
+    // Mark face columns that can transfer, then inflate ±1 so a quiet-full
+    // neighbour still owns the +x face into a column with room (accumulate
+    // never looks −x). Interior full↔full lake bed stays excluded.
+    let mut live = [false; CHUNK_CELLS_W];
     for lx in 0..cw {
         let lo = lo_chunk.get(lx, (ch - 1) as usize);
         let hi = hi_chunk.get(lx, 0);
-        let lo_open = is_porous_cell(lo, &hydro) || lo.material == MaterialId::Air;
-        let hi_open = is_porous_cell(hi, &hydro) || hi.material == MaterialId::Air;
-        if !(lo_open && hi_open) {
-            continue;
-        }
-        if lo.sat.0 == 0 && hi.sat.0 == 0 {
-            continue;
-        }
-        lo_x = Some(lo_x.unwrap_or(lx));
-        hi_x = lx;
+        live[lx] = seam_face_can_transfer(lo, hi, &hydro);
     }
-    let lo_x = lo_x?;
-    Some((lo_x as u8, hi_x as u8))
+    let mut include = live;
+    for lx in 0..cw {
+        if !live[lx] {
+            continue;
+        }
+        if lx > 0 {
+            include[lx - 1] = true;
+        }
+        if lx + 1 < cw {
+            include[lx + 1] = true;
+        }
+    }
+    let mut runs: Vec<(u8, u8)> = Vec::new();
+    let mut run_lo: Option<usize> = None;
+    let mut run_hi = 0usize;
+    let flush = |runs: &mut Vec<(u8, u8)>, run_lo: &mut Option<usize>, run_hi: usize| {
+        if let Some(x0) = run_lo.take() {
+            runs.push((x0 as u8, run_hi as u8));
+        }
+    };
+    for (lx, on) in include.iter().enumerate() {
+        if !on {
+            flush(&mut runs, &mut run_lo, run_hi);
+            continue;
+        }
+        match run_lo {
+            None => {
+                run_lo = Some(lx);
+                run_hi = lx;
+            }
+            Some(_) => run_hi = lx,
+        }
+    }
+    flush(&mut runs, &mut run_lo, run_hi);
+    runs
+}
+
+/// True when this seam-face column can still move water (apply band).
+///
+/// Air faces stay live for infiltration / weep. Quiet full↔full pore pairs
+/// match the deep accumulate skip — no room either way.
+fn seam_face_can_transfer(lo: Cell, hi: Cell, hydro: &HydroOverrides) -> bool {
+    let lo_pore = is_porous_cell(lo, hydro);
+    let hi_pore = is_porous_cell(hi, hydro);
+    let lo_air = lo.material == MaterialId::Air;
+    let hi_air = hi.material == MaterialId::Air;
+    if !(lo_pore || lo_air) || !(hi_pore || hi_air) {
+        return false;
+    }
+    if lo.sat.0 == 0 && hi.sat.0 == 0 {
+        return false;
+    }
+    if lo_pore && hi_pore {
+        let lo_cap = water_capacity_cell(lo, hydro);
+        let hi_cap = water_capacity_cell(hi, hydro);
+        if lo_cap > 0 && hi_cap > 0 && lo.sat.0 >= lo_cap && hi.sat.0 >= hi_cap {
+            return false;
+        }
+    }
+    true
 }
 
 /// True when a diagonal face is a genuine shortcut through tighter material —
@@ -662,15 +718,6 @@ fn diagonal_is_a_shortcut(
         .unwrap_or(0)
         .max(corner_v.map(|c| permeability_cell(c, hydro)).unwrap_or(0));
     ends > corners
-}
-
-fn merge_seam_rect(a: Rect, b: Rect) -> Rect {
-    Rect {
-        x0: a.x0.min(b.x0),
-        y0: a.y0.min(b.y0),
-        x1: a.x1.max(b.x1),
-        y1: a.y1.max(b.y1),
-    }
 }
 
 /// Cross-seam pore coupling every tick (not cadence-gated).
