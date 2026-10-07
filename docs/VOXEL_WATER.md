@@ -126,8 +126,17 @@ surface). Park paths now respect `water_capacity_cell`; excess ice still
 relocates laterally (mass-flat).
 
 After that fix: 5k ≈ −0.02/t; 10k ≈ **−2.08/t** with a cliff after ~5k.
-Post-fix 10k isolation: `OFF=cadence|steam|cond|evap` all ≈ 0 — residual is
-still a cadence × snow × evap interaction (not the ice-sat park). Next hunt.
+Post-fix 10k isolation: `OFF=cadence|steam|cond|evap` all ≈ 0 — residual was
+a cadence × snow × evap interaction (not the ice-sat park).
+
+**Root cause (post-5k cliff):** cadence `scrub_invalid_steam_seats` /
+`recondense_cool` → `park_or_restore_vapour` / `park_orphan_water` seeded
+thin liquid films on dry Air whose first solid below (or above) is Ice/Snow
+— including mid-air above the pack. Orphan surface films evaporate hard;
+condensation / frost then closes a destroy loop once alpine packs thicken
+(~5k). Fix: `is_alpine_film_park_seat` refuses those seats (standing lakes
+on ice still accept); leftover stays steam. Remeasure: 5k ≈ **−0.02/t**;
+10k ≈ **−0.06/t** (was −2.08/t); `park=0`; mineral flat.
 
 ### Geyser / pipe mass audit (destroy vs design)
 
