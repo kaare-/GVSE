@@ -67,7 +67,7 @@ shell left for later / Phase 4.
 
 ---
 
-## Phase 2 — Geysers / hydrothermal tighten *(code done 2026-10-07; visual confirm pending)*
+## Phase 2 — Geysers / hydrothermal tighten *(code done 2026-10-07; Xvfb glance done)*
 
 **Goal:** Feel local and readable; less glitchy route churn.
 
@@ -77,11 +77,16 @@ shell left for later / Phase 4.
 - Leftover lake UW / seafloor mouths (#358).
 - Mild reverse-seep vertical soften (rock×32 / vent×48) (#359).
 - Short budget soak near vents: `park=0`.
+- Xvfb soak (~tick 1122): pipe HUD claimed (`P=4+24/3041`); overlay
+  straws look like thin stable verticals on a vent hill — no obvious
+  route thrash in stills. UW mouth plumes not clear in those pans
+  (surface/vent hill + pipe band showed). Artifacts:
+  `/opt/cursor/artifacts/phase2-geyser-vent-soak-late.png`.
 
-**Pending**
+**Owner fork**
 
-- Xvfb / playtest eyes on route flip rate and visible UW / seafloor vents
-  (subagent in flight). Owner may close Phase 2 after that glance.
+- Close Phase 2 → Phase 3 ice, **or** one more Xvfb pan for lake/seafloor
+  mouths before closing.
 
 **Scope guard:** mass-flat mouth / park / sinter already audited. Cooling
 too fast in sub-zero air stays Phase 3 (water-T).
@@ -174,7 +179,8 @@ before coding.
 | 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |
-| 2026-10-07 | Phase 2 code | Sticky/local (#357), UW mouths (#358), mild vert (#359); Xvfb confirm pending |
+| 2026-10-07 | Phase 2 code | Sticky/local (#357), UW mouths (#358), mild vert (#359) |
+| 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
 | 2026-10-07 | UW / ocean vents | Lake underwater springs **and** seafloor ocean-column vents |
 | 2026-10-07 | Ice direction | Toward **brittle solid**; water-T rewrite likely; discuss at Phase 3 |
