@@ -558,7 +558,8 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
         _pad: 0,
         pore: roof.pore,
     };
-    world.set_cell(gx, gy - 1, debris);
+    // Sandstone/Conglomerate → sand/gravel must emit cement as load.
+    crate::mineral::write_debris_cell(world, gx, gy - 1, roof, debris);
     world.set_cell(gx, gy, vacated);
     // Cream rides in `_pad`; strain / lineage / sugar maps are coordinate-keyed
     // and must follow the debris or the drop invents orphan red dots on `M`.

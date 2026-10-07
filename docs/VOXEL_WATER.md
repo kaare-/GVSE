@@ -98,6 +98,16 @@ tiny dest spec then overwrote the cell, deleting dest carbonate.
 Crushed dest is now `take_soft` (or load if no seat). Landscape stamp
 lifts crushable dest the same way.
 
+After that fix, headless soaks still showed `UNEXPL-M` ~−6…9/t with
+`park=0` / `land=0`. Isolation: `GVSE_SOAK_OFF=competent` → flat;
+karst alone stays flat. The leftover was **Sandstone / Conglomerate →
+Sand / Gravel** in crush / shatter / roof peel: insoluble debris drops
+`cell_mineral` to 0 without emit. `write_debris_cell` emits the cement
+delta as load.
+
+Prefer headless soaks over overnight GUI runs for leftover hunts —
+see [`VOXEL_BUDGET_SOAK.md`](VOXEL_BUDGET_SOAK.md).
+
 ### Geyser / pipe mass audit (destroy vs design)
 
 Checked after the highland-lake watch. **No smoking-gun path that

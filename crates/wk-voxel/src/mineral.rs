@@ -276,6 +276,23 @@ pub fn emit_from_dissolved_rock(world: &mut World, gx: i32, gy: i32, was: Cell) 
     add_dissolved(world, gx, gy, remaining);
 }
 
+/// Write a mechanical debris conversion and emit any carbonate the new
+/// material cannot hold on the ledger.
+///
+/// Limestone → LooseLimestone keeps `cell_mineral` (same pore). Sandstone /
+/// Conglomerate → Sand / Gravel must not delete the cement: the insoluble
+/// debris has `cell_mineral == 0`, so the delta becomes dissolved load.
+/// Without this, every crush / shatter / roof peel of cemented clastics was
+/// an UNEXPL-M sink (~dest carbonate never becoming load).
+pub fn write_debris_cell(world: &mut World, gx: i32, gy: i32, was: Cell, debris: Cell) {
+    let _scope = crate::budget::MineralLedgerScope::enter();
+    let lost = cell_mineral(was).saturating_sub(cell_mineral(debris));
+    world.set_cell(gx, gy, debris);
+    if lost > 0 {
+        add_dissolved(world, gx, gy, lost);
+    }
+}
+
 /// Widen a soluble cell's aperture by the water passing through it.
 ///
 /// This is the self-amplifying half of vein formation: throughput opens the
