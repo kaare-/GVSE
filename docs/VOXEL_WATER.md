@@ -562,7 +562,9 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
   under snow into ice (snow-on-ice pack).
 - Rate limits: freeze / thaw / slush / break per column per tick.
-- **Max Ice+Snow cells / column** — excess culled to empty Air (not melted).
+- **Max Ice+Snow cells / column** — excess relocates laterally onto
+  thinner cold neighbours (mass-flat). Peel-to-Air / steam / H banks
+  were named aesthetic sinks that worsened alpine 10k TRACKED.
 
 Cold snap: Tab → Base temp below 0°C (keep `C` drizzle on). Warm snap: raise
 base temp above freeze point.
