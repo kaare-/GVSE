@@ -98,6 +98,9 @@ tiny dest spec then overwrote the cell, deleting dest carbonate.
 Crushed dest is now `take_soft` (or load if no seat). Landscape stamp
 lifts crushable dest the same way.
 
+Prefer headless soaks over overnight GUI runs for leftover hunts —
+see [`VOXEL_BUDGET_SOAK.md`](VOXEL_BUDGET_SOAK.md).
+
 ### Geyser / pipe mass audit (destroy vs design)
 
 Checked after the highland-lake watch. **No smoking-gun path that
