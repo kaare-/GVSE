@@ -56,8 +56,17 @@ pass re-walked that water halo.
 settle pass (same gate as repose). No weather / condensation / `live_surface_y`
 changes.
 
-Re-measure settle + wall on the same harness after the fix; expect settle down
-with mass unchanged (short `budget_soak` guard).
+### Before → after (`perf_profile_sky_height`, same host)
+
+| Stamp | wall | settle | bodies | physics |
+|-------|-----:|-------:|-------:|--------:|
+| short sky before | 27.4 | 4.65 | 5.68 | 19.8 |
+| short sky after | 25.3 | 4.00 | 5.57 | 18.7 |
+| tall/demo before | 32.7 | 6.97 | 8.51 | 23.2 |
+| tall/demo after | 30.5 | 5.46 | 8.09 | 21.2 |
+
+Settle **−1.5 ms/tick** on demo stamp (−22%); wall **−2.2 ms** (~30 → ~33
+sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
 
 ## Out of scope for this cut
 
