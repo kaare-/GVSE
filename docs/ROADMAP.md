@@ -48,35 +48,26 @@ flat 120-tick run).
 
 ---
 
-## Phase 1 — Performance for larger worlds & long soaks *(current)*
+## Phase 1 — Performance for larger worlds & long soaks *(done 2026-10-07)*
 
 **Goal:** Tick cost stays playable as map size and soak age grow.
 Buildup (dissolved maps, steam/pipe ledgers, dirty sets, landscape
 bodies) must not produce the “fresh world fine → morning at 5 FPS” shape.
 
-**Targets** (2026-10-07)
+**Done**
 
-- At least **30 FPS** playable; raise the bar as we test.
-- Grow world size until diminishing returns, then discuss next levers.
-- Stretch aim: **~5 km+** horizontal at **~1064** world height — may be
-  unrealistic; treat as aspiration, not a Phase-1 exit requirement.
+- Settle sticky-loose dirty (#353); rock-body strata flood sleep (#353).
+- Seam seepage full↔full skip (#354).
+- Grain settle Air-destination trim (#355); stress **~37 FPS** on 2048×1064.
+- Baselines + diminishing-returns notes in [`VOXEL_PERF.md`](VOXEL_PERF.md).
 
-**Likely levers** (see also `VOXEL_PARALLEL.md`)
-
-- Active-set / dirty discipline under long soak.
-- Container growth (`dissolved`, steam, leftover pins, level-vacated).
-- Wider maps: chunk streaming / ring already sketched in `WORLDGEN.md`.
-- Profile before coarsening weather or skipping lottery.
-
-**Exit criteria**
-
-- Profiled demo + larger stamp: ms/tick and memory vs soak age documented.
-- No intentional mass-budget regressions (re-run short + mid headless).
-- Stop when returns flatten; owner discussion before heroic further cuts.
+**Exit (met)** — owner closed Phase 1 (2026-10-07): ≥30 FPS on stress stamp;
+no further CA dirty trims without weather coarsen. Stretch 5 km+ and field
+shell left for later / Phase 4.
 
 ---
 
-## Phase 2 — Geysers / hydrothermal tighten
+## Phase 2 — Geysers / hydrothermal tighten *(current)*
 
 **Goal:** Feel local and readable; less glitchy route churn.
 
@@ -187,6 +178,7 @@ before coding.
 | 2026-10-07 | Phase 0 closed | 50k headless: TRACKED **0.03/t**, min **+0.12/t**, park=0 (#351) |
 | 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
+| 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
 | 2026-10-07 | UW / ocean vents | Lake underwater springs **and** seafloor ocean-column vents |
 | 2026-10-07 | Ice direction | Toward **brittle solid**; water-T rewrite likely; discuss at Phase 3 |
@@ -195,7 +187,7 @@ before coding.
 
 ## Clarifications later
 
-- Exact Phase-1 “diminishing returns” stop rule (ms/tick vs world cells).
+- Phase-1 stretch width / field-shell cuts deferred to Phase 4 (or revisit).
 - Ice water-temperature design options when Phase 3 starts.
 - Phase-5 scoping agenda (plants/fungi vs creatures first — open until planning session).
 - Phase-8 shortlist of client stacks when that review starts.
