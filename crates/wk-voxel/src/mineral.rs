@@ -1026,6 +1026,7 @@ pub fn settle_and_precip_standing_load(world: &mut World) {
 /// [`crate::audit::mineral_total`] counts, so occluding anything else would
 /// consume load without the solid gaining it.
 fn occlude_pore(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
+    let _scope = crate::budget::MineralLedgerScope::enter();
     let Some(cell) = world.get_cell(gx, gy) else {
         return 0;
     };

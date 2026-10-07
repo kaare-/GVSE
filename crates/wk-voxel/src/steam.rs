@@ -698,11 +698,7 @@ pub fn evict_steam_seat(world: &mut World, gx: i32, gy: i32) {
         }
         left = place_steam_units(world, x, y, left);
     }
-    let mut dy = 1i32;
-    while left > 0 && dy < 64 {
-        left = place_steam_units(world, gx, gy + dy, left);
-        dy += 1;
-    }
+    bank_remaining_vapour(world, gx, gy, left);
 }
 
 /// Relocate steam sitting on rock / missing cells (mass-flat).
@@ -1202,6 +1198,34 @@ fn place_steam_units(world: &mut World, gx: i32, gy: i32, mut units: u32) -> u32
     units
 }
 
+/// Last-resort bank for leftover liquid / vapour. Packs existing steam
+/// seats, then climbs a ghost column. Only notes a drop if even that
+/// fills (every seat at 255 for thousands of cells).
+pub(crate) fn bank_remaining_vapour(world: &mut World, gx: i32, gy: i32, mut units: u32) -> u32 {
+    if units == 0 {
+        return 0;
+    }
+    let gx = world.wrap_x(gx);
+    let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    for (x, y) in keys {
+        if units == 0 {
+            break;
+        }
+        // Evict / brick just cleared this seat — do not restack it.
+        if x == gx && y == gy {
+            continue;
+        }
+        units = place_steam_units(world, x, y, units);
+    }
+    let mut dy = 1i32;
+    while units > 0 && dy < 4096 {
+        units = place_steam_units(world, gx, gy + dy, units);
+        dy += 1;
+    }
+    crate::budget::note_unplaced_water(units);
+    units
+}
+
 /// Park leftover thermal mass. Anything that cannot seat as liquid is
 /// restored as steam (same `cell_total`) so flood / recondense never
 /// delete water.
@@ -1245,14 +1269,10 @@ fn park_or_restore_vapour(world: &mut World, gx: i32, gy: i32, units: u32) {
     if left == 0 {
         return;
     }
-    // Neighbourhood full: climb a ghost steam column. `add_steam` does not
-    // enforce MAX_STEAM_CELLS, so this stays mass-flat even under a flood.
-    let mut dy = 1i32;
-    while left > 0 && dy < 64 {
-        left = place_steam_units(world, gx, gy + dy, left);
-        dy += 1;
-    }
-    crate::budget::note_unplaced_water(left);
+    // Neighbourhood full: pack existing seats, then a ghost column.
+    // `add_steam` does not enforce MAX_STEAM_CELLS, so this stays mass-flat
+    // even when the first 64 ghost cells are already hot.
+    bank_remaining_vapour(world, gx, gy, left);
 }
 
 /// Prefer injecting boiled steam into void Air above / beside the source.
@@ -3296,13 +3316,17 @@ fn burst_grain_tube(
         from_y,
         steam_at(world, from_x, from_y).min(200),
     );
+    let _scope = crate::budget::MineralLedgerScope::enter();
     if !bank_burst_solid(world, from_x, from_y, tx, ty, cell) {
+        drop(_scope);
         if moved > 0 {
             add_steam(world, from_x, from_y, moved);
         }
         return false;
     }
     // Dissolved load stays with the water that remains in the opened tube.
+    // Debris relocate / emit + this Air write share one ledger scope so a
+    // soluble lid is credit, not bare leftover.
     let mut air = Cell::air();
     air.sat = Sat(cell.sat.0);
     world.set_cell(tx, ty, air);
@@ -3720,6 +3744,34 @@ mod tests {
             "evict must not drop steam when neighbour seats are full"
         );
         assert_eq!(steam_at(&w, 4, 3), 0);
+    }
+
+    #[test]
+    fn park_or_restore_past_full_ghost_column_is_mass_flat() {
+        // A 64-cell ghost climb used to `note_unplaced_water` and drop the
+        // rest once those seats were already at 255.
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        for dy in 0..64 {
+            add_steam(&mut w, 4, 3 + dy, 255);
+        }
+        let before = sat_totals(&w).cell_total;
+        park_or_restore_vapour(&mut w, 4, 3, 80);
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before + 80,
+            "full ghost column must bank leftover vapour, not drop it"
+        );
+        assert_eq!(
+            crate::budget::BudgetProbe::snapshot().water_park,
+            0,
+            "overlay off: park probe stays quiet"
+        );
     }
 
     #[test]
