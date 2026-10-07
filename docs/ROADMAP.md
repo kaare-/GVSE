@@ -102,12 +102,22 @@ a water-T rewrite.
 
 **Design locked** (2026-10-07 owner): **option 2 — free water carries
 temperature.** Sparse ledger (not `Cell` widen). Also addresses geyser
-discharge cooling in sub-zero air. Brittle look can follow once melt works.
-See [`VOXEL_WATER.md`](VOXEL_WATER.md) § Phase 3.
+discharge cooling in sub-zero air. See [`VOXEL_WATER.md`](VOXEL_WATER.md) § Phase 3.
+
+**Done (option 2 slices A–C)**
+
+- Sparse `World.water_temp` + mix/clear (gravity + mouth).
+- Phase film-on-ice / contact melt reads free-water T.
+- Mouth stamps hot water_temp; soft cool after thermal step.
+
+**Still open**
+
+- Brittle-solid look (block throughflow / powder) — optional follow-up.
+- Xvfb / playtest “reads as ice” acceptance.
 
 **Exit criteria**
 
-- Agreed ice model in docs + tests after the design discussion.
+- Agreed ice model in docs + tests (option 2 A–C met).
 - Visual soak (Xvfb or playtest) accepted as “reads as ice”.
 
 ---
