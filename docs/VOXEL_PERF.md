@@ -28,6 +28,8 @@ Demo + plants: +48 ≈ 34.0 ms, +256 ≈ 32.8 ms (org share ≤2%).
 
 ## Hottest physics sub-passes (demo 0 plants)
 
+Baseline at Phase 0 close (before this branch’s surgical wins):
+
 | Pass | ms/tick | Share of wall |
 |------|--------:|--------------:|
 | rock bodies | 8.49 | 26% |
@@ -44,19 +46,18 @@ coarsen weather / lottery before these CA tails shrink.
 Active plan (demo): ~16 regions / ~2460 cells per flow substep; avg ~7.6
 substeps/tick with quiet early-out.
 
-## Surgical win (this branch)
+## Surgical wins (this branch)
 
-**Hotspot chosen:** settle grains (#2). Multi-pass
-`settle_loose_grains_regions_ex` already filtered sticky-`has_loose` for the
-*repose* re-plan, but assigned the next fall pass from unfiltered
+### 1. Settle grains (sticky-loose dirty)
+
+Multi-pass `settle_loose_grains_regions_ex` already filtered sticky-`has_loose`
+for the *repose* re-plan, but assigned the next fall pass from unfiltered
 `plan_active` — so after seepage dirtied stone/limestone pores, every settle
 pass re-walked that water halo.
 
 **Change:** `cur = keep_loose_regions(world, &plan_active(world))` after each
 settle pass (same gate as repose). No weather / condensation / `live_surface_y`
 changes.
-
-### Before → after (`perf_profile_sky_height`, same host)
 
 | Stamp | wall | settle | bodies | physics |
 |-------|-----:|-------:|-------:|--------:|
@@ -65,12 +66,43 @@ changes.
 | tall/demo before | 32.7 | 6.97 | 8.51 | 23.2 |
 | tall/demo after | 30.5 | 5.46 | 8.09 | 21.2 |
 
-Settle **−1.5 ms/tick** on demo stamp (−22%); wall **−2.2 ms** (~30 → ~33
+Settle **−1.5 ms/tick** on demo stamp (−22%); wall **−2.2 ms**.
+
+### 2. Rock bodies (sleep seated strata floods)
+
+After settle, rock bodies remained #1 (~7.9 ms/tick on this host). Probe on the
+demo stamp showed ~10k `flood_cells`/tick with ~80% from `FLOOD_GATHER_CAP`
+strata bailouts: empty hang after a 2048-cell gather never slept the cells, so
+every topology pass re-flooded the same hillside.
+
+**Change** (in `build_components`):
+
+- On untagged seated strata bailout with empty hang: settle the gather (and
+  same-pass `settle_pending`) so later passes/ticks skip those seeds.
+- Seated tag-0 floods refuse settled / pending neighbours (stops re-absorbing
+  the hillside).
+- Airborne seeds still flood through settled cells (sky-island peels must not
+  leave hung leftovers welded to seated debris).
+
+No weather / condensation / `live_surface_y` / mass-ledger changes.
+
+### Before → after bodies win (`perf_profile_sky_height`, same host)
+
+Tip after settle win → after strata sleep (warm 40 / measure 200):
+
+| Stamp | wall | settle | bodies | physics |
+|-------|-----:|-------:|-------:|--------:|
+| short sky before | 23.3 | 3.68 | 5.35 | 16.7 |
+| short sky after | 20.9 | 4.07 | 2.11 | 14.1 |
+| tall/demo before | 27.2 | 5.17 | 7.87 | 19.2 |
+| tall/demo after | 22.0 | 5.49 | 2.63 | 14.2 |
+
+Bodies **−5.2 ms/tick** on demo stamp (−67%); wall **−5.2 ms** (~37 → ~45
 sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
 
-## Out of scope for this cut
+## Out of scope / next
 
 - Coarsening weather / skipping condensation lottery / changing `live_surface_y`
 - Enabling rayon by default (still slower on narrow dirty)
-- Rock bodies (#1) — next candidate once settle is re-profiled; wake/flood
-  budgets already exist
+- Next CA tails once re-profiled: seepage (~3.9), settle (~5.5), humidity.advect
+  / steam / temperature amortized — not body flood budgets
