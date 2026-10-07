@@ -61,9 +61,10 @@ pub struct PhaseConfig {
     /// mints water. Shortfall below freeze → hold, not liquid rain.
     pub min_budget_to_snow: f32,
     /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
-    /// top is culled to empty Air (removed, not melted — melting would
-    /// replace an ice tower with a water tower). Beyond the cap, cold
-    /// precip is held (not dumped as pore-soaking rain).
+    /// top is peeled to empty Air and the thaw yield is banked as steam
+    /// (not melted in place — melting would replace an ice tower with a
+    /// water tower; not deleted — that was a slow UNEXPL-W). Beyond the
+    /// cap, cold precip is held (not dumped as pore-soaking rain).
     pub max_ice_cells_per_column: u8,
     /// Lateral search radius (columns) when seating new snow. Prefers
     /// thinner packs so peaks don't monopolize every flake.
@@ -830,7 +831,10 @@ fn break_overloaded_ice(world: &mut World, gx: i32, cfg: &PhaseConfig) {
     }
 }
 
-/// Count Ice+Snow in the column and remove excess from the top.
+/// Count Ice+Snow in the column and peel excess from the top.
+///
+/// Aesthetic height cap only — thaw yield (`255` per cell) is banked as
+/// steam so the B overlay does not see a silent destroy.
 fn cull_frozen_column(world: &mut World, gx: i32, max_cells: u8) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
@@ -853,6 +857,9 @@ fn cull_frozen_column(world: &mut World, gx: i32, max_cells: u8) {
     let excess = frozen_ys.len() - max_cells;
     for &y in frozen_ys.iter().take(excess) {
         world.set_cell(gx, y, Cell::air());
+        // Skip the vacated seat (bank_remaining_vapour ignores seed);
+        // climb a ghost column / pack existing steam so TRACKED stays flat.
+        let _ = crate::steam::bank_remaining_vapour(world, gx, y, u8::MAX as u32);
     }
 }
 
@@ -1352,6 +1359,51 @@ mod tests {
         assert_eq!(ice, 4, "excess ice must be culled, not melted");
         assert_eq!(w.get_cell(1, 19).unwrap().material, MaterialId::Air);
         assert!(w.get_cell(1, 19).unwrap().sat.is_empty());
+    }
+
+    #[test]
+    fn cull_banks_thaw_yield_as_steam() {
+        // Pre-fix: peel to Air deleted 255 TRACKED per excess cell.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Tall enough for steam ghost climb above the peel.
+        for cy in 0..4 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
+        let stacked = 19usize;
+        for y in 1..=stacked as i32 {
+            w.set_cell(1, y, Cell::solid(MaterialId::Ice));
+        }
+        let cap = 4usize;
+        let before_ice = (stacked as i64) * (u8::MAX as i64);
+        let before_steam: i64 = w.steam.values().map(|&v| v as i64).sum();
+        let temp = cold_temp(16, 32, -5.0);
+        let cfg = PhaseConfig {
+            max_ice_cells_per_column: cap as u8,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        let mut ice = 0i64;
+        for y in 0..32 {
+            if w.get_cell(1, y).is_some_and(|c| c.material == MaterialId::Ice) {
+                ice += 1;
+            }
+        }
+        assert_eq!(ice, cap as i64, "tower must peel to the cap");
+        let after_ice = ice * (u8::MAX as i64);
+        let after_steam: i64 = w.steam.values().map(|&v| v as i64).sum();
+        let d_ice = after_ice - before_ice;
+        let d_steam = after_steam - before_steam;
+        assert_eq!(
+            d_ice + d_steam,
+            0,
+            "culled thaw yield must bank as steam (d_ice={d_ice} d_steam={d_steam})"
+        );
+        assert!(
+            d_steam > 0,
+            "expected steam bank for peeled cells, steam={after_steam}"
+        );
     }
 
     #[test]
