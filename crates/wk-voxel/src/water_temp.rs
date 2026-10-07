@@ -1,14 +1,23 @@
-//! Sparse free-water temperature ledger (Phase 3 slice A).
+//! Sparse free-water temperature ledger (Phase 3).
 //!
 //! `World.water_temp` stores °C for **Air sat only**. Absent key ⇒ inherit
 //! the coarse tile via [`Temperature::at_cell`]. Heat-only: never invents
 //! or moves `sat`. Mix on free-water transfers; clear when `sat → 0`.
 //! Pore-water T is deferred.
+//!
+//! Slice C: leftover mouth dumps **always** stamp hot free-water T (same-tile
+//! inherit must not stay sparse), then soft-cool toward tile/air so skin
+//! couple cannot instantly wipe sub-zero discharge.
 
 use wk_material::MaterialId;
 
 use crate::grid::World;
 use crate::temperature::Temperature;
+
+/// Soft cool rate toward tile ambient per cool pass (≪ skin couple quench).
+pub const WATER_TEMP_SOFT_COOL_RATE: f32 = 0.06;
+/// Drop sparse key when within this many °C of ambient (back to inherit).
+const WATER_TEMP_COOL_CLEAR_EPS: f32 = 0.75;
 
 /// Effective free-water temperature at `(gx, gy)`.
 ///
@@ -106,6 +115,101 @@ pub fn mix_water_temp_on_transfer(
     };
     set_water_temp(world, to_x, to.1, mixed);
     clear_water_temp_if_dry(world, from_x, from.1);
+}
+
+/// Leftover / reverse-seep mouth dump into Air: always stamp free-water T.
+///
+/// Same-tile pore→Air dumps would otherwise stay sparse (donor inherit ==
+/// dest inherit) and then track the skin-cooled tile instantly. Heat-only.
+pub fn mix_mouth_water_temp_on_transfer(
+    world: &mut World,
+    temp: &Temperature,
+    from: (i32, i32),
+    to: (i32, i32),
+    moved: u8,
+    donor_sat_before: u8,
+) {
+    if moved == 0 || donor_sat_before == 0 {
+        return;
+    }
+    let to_x = world.wrap_x(to.0);
+    let from_x = world.wrap_x(from.0);
+    let Some(dest) = world.get_cell(to_x, to.1) else {
+        return;
+    };
+    if dest.material != MaterialId::Air {
+        clear_water_temp_if_dry(world, from_x, from.1);
+        return;
+    }
+    let dest_sat_after = dest.sat.0;
+    if dest_sat_after == 0 {
+        clear_water_temp(world, to_x, to.1);
+        clear_water_temp_if_dry(world, from_x, from.1);
+        return;
+    }
+    let dest_sat_before = dest_sat_after.saturating_sub(moved);
+    // Capture donor before any clear — pore seats use hot tile inherit.
+    let donor_t = water_temp_at(world, temp, from_x, from.1);
+    let dest_t = if dest_sat_before == 0 {
+        // Empty seat: arriving parcel defines T (ignore cold tile inherit).
+        donor_t
+    } else if world.water_temp.contains_key(&(to_x, to.1)) {
+        water_temp_at(world, temp, to_x, to.1)
+    } else {
+        // Standing cold film already there — mix parcel into inherit.
+        temp.at_cell(to_x, to.1)
+    };
+    let mixed = if dest_sat_before == 0 {
+        donor_t
+    } else {
+        let w_d = dest_sat_before as f32;
+        let w_m = moved as f32;
+        (dest_t * w_d + donor_t * w_m) / (w_d + w_m)
+    };
+    // Always write — no same-tile sparse skip (Slice C).
+    set_water_temp(world, to_x, to.1, mixed);
+    clear_water_temp_if_dry(world, from_x, from.1);
+}
+
+/// Ease explicit free-water T toward the cell's tile ambient (soft cool).
+///
+/// Runs after the coarse thermal step so ambient already includes air↔water
+/// skin couple. Rate ≪ skin quench — hot mouth discharge stays warm enough
+/// to matter in sub-zero air. Heat-only; clears dry / near-ambient keys.
+pub fn cool_water_temp_toward_ambient(
+    world: &mut World,
+    temp: &Temperature,
+    rate: f32,
+) {
+    if world.water_temp.is_empty() {
+        return;
+    }
+    let a = rate.clamp(0.0, 1.0);
+    if a < 1e-6 {
+        return;
+    }
+    let keys: Vec<(i32, i32)> = world.water_temp.keys().copied().collect();
+    for (gx, gy) in keys {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            world.water_temp.remove(&(gx, gy));
+            continue;
+        };
+        if cell.material != MaterialId::Air || cell.sat.0 == 0 {
+            world.water_temp.remove(&(gx, gy));
+            continue;
+        }
+        let Some(&t) = world.water_temp.get(&(gx, gy)) else {
+            continue;
+        };
+        // Ambient = tile (skin-coupled for watery surfaces). Soft toward it.
+        let ambient = temp.at_cell(gx, gy);
+        let next = t + (ambient - t) * a;
+        if (next - ambient).abs() < WATER_TEMP_COOL_CLEAR_EPS {
+            world.water_temp.remove(&(gx, gy));
+        } else {
+            world.water_temp.insert((gx, gy), next);
+        }
+    }
 }
 
 /// Test / debug: number of explicit free-water T keys.
@@ -250,5 +354,110 @@ mod tests {
         assert_eq!(water_temp_len(&w), 1);
         clear_water_temp(&mut w, 1, 1);
         assert_eq!(water_temp_len(&w), 0);
+    }
+
+    #[test]
+    fn mouth_dump_stamps_hot_same_tile_vs_mix_skip() {
+        // Pore→Air in one coarse tile: ordinary mix stays sparse; mouth must stamp.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut pore = Cell::solid(wk_material::MaterialId::Limestone);
+        pore.sat = Sat(120);
+        w.set_cell(4, 1, pore);
+        w.set_cell(4, 2, Cell::air());
+
+        let mut temp = cold_field(-18.0);
+        let (hx, hy) = temp.tile_of(4, 1);
+        assert_eq!(
+            temp.tile_of(4, 2),
+            (hx, hy),
+            "fixture must share one thermal tile"
+        );
+        temp.set_tile_c(hx, hy, 95.0);
+
+        let tracked0 = sat_totals(&w).cell_total;
+        let moved = 80u8;
+        let donor_before = 120u8;
+
+        // Sat write (same sequence reverse_push uses before the helper).
+        let mut src = w.get_cell(4, 1).unwrap();
+        src.sat = Sat(donor_before - moved);
+        w.set_cell(4, 1, src);
+        let mut dst = w.get_cell(4, 2).unwrap();
+        dst.sat = Sat(moved);
+        w.set_cell(4, 2, dst);
+
+        // Ordinary mix stays sparse (same inherit).
+        mix_water_temp_on_transfer(&mut w, &temp, (4, 1), (4, 2), moved, donor_before);
+        assert!(
+            !w.water_temp.contains_key(&(4, 2)),
+            "baseline mix must stay sparse on same-tile inherit"
+        );
+
+        // Mouth helper always stamps while the seat still reads hot.
+        mix_mouth_water_temp_on_transfer(&mut w, &temp, (4, 1), (4, 2), moved, donor_before);
+        assert_eq!(sat_totals(&w).cell_total, tracked0);
+        assert!(
+            w.water_temp.contains_key(&(4, 2)),
+            "mouth dump must stamp explicit water_temp"
+        );
+        // Skin couple snaps the shared tile cold; sparse free-water keeps heat.
+        temp.set_tile_c(hx, hy, -18.0);
+        let t_water = water_temp_at(&w, &temp, 4, 2);
+        let t_tile = temp.at_cell(4, 2);
+        assert!(
+            (t_water - t_tile).abs() > 40.0,
+            "hot mouth stamp ({t_water}) must ≠ cold tile ({t_tile})"
+        );
+        assert!(t_water > 50.0, "stamped discharge must stay hot, got {t_water}");
+    }
+
+    #[test]
+    fn soft_cool_retains_hot_vs_cold_tile() {
+        // Skin couple would snap the tile; soft cool only eases water_temp.
+        let mut w = World::new(6);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut film = Cell::air();
+        film.sat = Sat(200);
+        w.set_cell(3, 3, film);
+        set_water_temp(&mut w, 3, 3, 90.0);
+
+        let temp = cold_field(-20.0);
+        let tracked0 = sat_totals(&w).cell_total;
+        let t0 = water_temp_at(&w, &temp, 3, 3);
+        for _ in 0..8 {
+            cool_water_temp_toward_ambient(&mut w, &temp, WATER_TEMP_SOFT_COOL_RATE);
+        }
+        assert_eq!(sat_totals(&w).cell_total, tracked0, "soft cool is heat-only");
+        let t1 = water_temp_at(&w, &temp, 3, 3);
+        let t_tile = temp.at_cell(3, 3);
+        assert!(
+            t1 < t0 - 1.0,
+            "soft cool must ease toward ambient ({t0} → {t1})"
+        );
+        assert!(
+            (t1 - t_tile).abs() > 30.0,
+            "after soft cool, discharge ({t1}) must still ≠ cold tile ({t_tile})"
+        );
+        assert!(
+            w.water_temp.contains_key(&(3, 3)),
+            "explicit key must survive early soft cool (not instant wipe)"
+        );
+    }
+
+    #[test]
+    fn soft_cool_clears_near_ambient() {
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut film = Cell::air();
+        film.sat = Sat(100);
+        w.set_cell(2, 2, film);
+        let temp = cold_field(-5.0);
+        set_water_temp(&mut w, 2, 2, -4.5);
+        cool_water_temp_toward_ambient(&mut w, &temp, 0.5);
+        assert!(
+            !w.water_temp.contains_key(&(2, 2)),
+            "near-ambient free water must drop back to inherit"
+        );
     }
 }

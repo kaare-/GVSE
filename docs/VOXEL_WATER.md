@@ -497,9 +497,10 @@ Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
 ## Phase 3 — ice revisit (roadmap)
 
 Owner closed Phase 2 (2026-10-07). Goal: **brittle solid** look, not
-powder-throughflow. Slice B: free-water `water_temp` drives film-on-ice /
-contact melt (warm film in a cold tile melts). Slice C still open: geyser
-discharge in sub-zero air cools too fast without soft mouth cool.
+powder-throughflow. Slices A–C landed: free-water `water_temp` drives
+film-on-ice melt; leftover mouths stamp hot discharge and soft-cool so
+sub-zero skin couple cannot instantly wipe it. Sticky / local / UW mouths
+unchanged.
 
 ### Locked: option 2 — free water carries temperature (2026-10-07)
 
@@ -512,12 +513,13 @@ clear when `sat→0`.
 |-------|--------|------|
 | A | Sparse map + helpers; seed/mix on one path (mouth or gravity) | **Landed** (2026-10-07): `World.water_temp` + `water_temp::{get/set/clear/mix}`; wired on leftover mouth dump (`reverse_push` → Air) and gravity Air→Air when ledger non-empty. Hot dump retains T ≠ cold tile; heat-only (TRACKED flat). |
 | B | Phase reads water_temp for film-on-ice / contact melt | **Landed** (2026-10-07): `water_on_ice_and_slush` + `frozen_contact_is_warm` use `water_temp_at` for free-water seats; warm film over ice in cold tile melts; film sat unchanged (ice→FULL thaw only). |
-| C | Mouth writes hot water_temp; soft cool vs instant skin wipe | Sub-zero discharge stays warm enough to matter |
+| C | Mouth writes hot water_temp; soft cool vs instant skin wipe | **Landed** (2026-10-07): `mix_mouth_water_temp_on_transfer` always stamps on leftover/`reverse_push` → Air (same-tile inherit no longer stays sparse); `cool_water_temp_toward_ambient` after thermal step (`WATER_TEMP_SOFT_COOL_RATE`); hot mouth retains vs cold tile after soft cool; heat-only. Sticky/local/UW mouths untouched. |
 
 Hard no’s: no weather coarsen / lottery skip / `live_surface_y` change;
-TRACKED mass-flat; no wholesale rustfmt of `phase.rs`; pore-water T deferred.
+TRACKED mass-flat; no wholesale rustfmt of `phase.rs`; pore-water T deferred;
+short budget soak near vents stays `park=0`.
 
-**Slice A API** (`wk_voxel::water_temp`): `water_temp_at` (absent ⇒ `Temperature::at_cell`), `set_water_temp`, `clear_water_temp` / `clear_water_temp_if_dry`, `mix_water_temp_on_transfer` (after sat writes; Air dest only).
+**Slice A/C API** (`wk_voxel::water_temp`): `water_temp_at` (absent ⇒ `Temperature::at_cell`), `set_water_temp`, `clear_water_temp` / `clear_water_temp_if_dry`, `mix_water_temp_on_transfer` (gravity Air→Air; may stay sparse), `mix_mouth_water_temp_on_transfer` (mouth always stamps), `cool_water_temp_toward_ambient` (soft cool toward tile after skin couple).
 
 ## Ice / snow / phase (milestones 1–3)
 

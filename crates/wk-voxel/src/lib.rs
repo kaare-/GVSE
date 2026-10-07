@@ -128,8 +128,9 @@ pub use geotech_map::{
 };
 pub use grid::{ChunkMap, World};
 pub use water_temp::{
-    clear_water_temp, clear_water_temp_if_dry, mix_water_temp_on_transfer, set_water_temp,
-    water_temp_at, water_temp_len,
+    clear_water_temp, clear_water_temp_if_dry, cool_water_temp_toward_ambient,
+    mix_mouth_water_temp_on_transfer, mix_water_temp_on_transfer, set_water_temp, water_temp_at,
+    water_temp_len, WATER_TEMP_SOFT_COOL_RATE,
 };
 pub use landscape_body::{
     apply_landscape_fall, detach_landscape_bodies, detach_landscape_bodies_with, force_stamp_all,

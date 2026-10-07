@@ -3077,10 +3077,11 @@ fn reverse_push_pore_water_inner(
         return (0, None, false);
     }
     carry_with_water(world, (gx, gy), (tx, ty), actually_moved, before);
-    // Phase 3 slice A: free Air sat carries sparse water_temp. Mouth /
-    // weather-lake dumps land here; pore dests are skipped inside the helper.
+    // Phase 3 slice C: leftover mouth / weather-lake dumps into Air always
+    // stamp hot free-water T (same-tile inherit must not stay sparse). Pore
+    // dests are skipped inside the helper. Soft cool is world_step / thermal.
     if fit > 0 {
-        crate::water_temp::mix_water_temp_on_transfer(
+        crate::water_temp::mix_mouth_water_temp_on_transfer(
             world,
             temp,
             (gx, gy),
@@ -4666,6 +4667,86 @@ mod tests {
                 "hot reverse seep must warm the destination tile ({before_dest} → {after_dest})"
             );
         }
+    }
+
+    #[test]
+    fn reverse_push_mouth_retains_hot_water_temp_vs_cold_tile() {
+        // Phase 3 slice C: open-sky mouth dump stamps free-water T; soft cool
+        // eases toward ambient without an instant skin wipe.
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 2..8 {
+            for y in 0..6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        // Hot wet throat under open Air mouth (sky column).
+        w.set_cell(4, 2, {
+            let mut c = Cell::solid(MaterialId::Limestone);
+            c.sat = Sat(200);
+            c.pore = 200;
+            c
+        });
+        w.set_cell(4, 3, Cell::air());
+        for y in 4..14 {
+            w.set_cell(4, y, Cell::air());
+        }
+        assert!(
+            air_void_open_to_sky(&w, 4, 3),
+            "fixture mouth must be open to sky"
+        );
+
+        let mut temp = temp_fill(&w, -20.0);
+        let (shx, shy) = temp.tile_of(4, 2);
+        temp.set_tile_c(shx, shy, 110.0);
+        // Dest Air may share the tile — that is the same-tile wipe case.
+        let tracked0 = sat_totals(&w).cell_total;
+        let (moved, dest) = reverse_push_pore_water_to(&mut w, &mut temp, 4, 2, 120);
+        assert!(moved > 0, "mouth reverse-push must discharge");
+        let (mx, my) = dest.expect("mouth dest");
+        assert_eq!(
+            w.get_cell(mx, my).map(|c| c.material),
+            Some(MaterialId::Air),
+            "discharge must land in Air"
+        );
+        assert!(
+            w.get_cell(mx, my).map(|c| c.sat.0).unwrap_or(0) > 0,
+            "mouth Air must hold sat"
+        );
+        assert_eq!(sat_totals(&w).cell_total, tracked0, "mouth dump mass-flat");
+
+        // Snap mouth tile cold (skin couple wipe of the coarse field).
+        let (dhx, dhy) = temp.tile_of(mx, my);
+        temp.set_tile_c(dhx, dhy, -20.0);
+        let t_water = crate::water_temp::water_temp_at(&w, &temp, mx, my);
+        let t_tile = temp.at_cell(mx, my);
+        assert!(
+            w.water_temp.contains_key(&(mx, my)),
+            "mouth must stamp explicit water_temp (same-tile must not stay sparse)"
+        );
+        assert!(
+            (t_water - t_tile).abs() > 30.0,
+            "hot mouth water_temp ({t_water}) must ≠ cold tile ({t_tile})"
+        );
+
+        let before_cool = t_water;
+        for _ in 0..6 {
+            crate::water_temp::cool_water_temp_toward_ambient(
+                &mut w,
+                &temp,
+                crate::water_temp::WATER_TEMP_SOFT_COOL_RATE,
+            );
+        }
+        assert_eq!(sat_totals(&w).cell_total, tracked0, "soft cool heat-only");
+        let after_cool = crate::water_temp::water_temp_at(&w, &temp, mx, my);
+        assert!(
+            after_cool < before_cool - 0.5,
+            "soft cool must ease ({before_cool} → {after_cool})"
+        );
+        assert!(
+            (after_cool - t_tile).abs() > 20.0,
+            "after soft cool, discharge ({after_cool}) must still retain vs cold tile ({t_tile})"
+        );
     }
 
     #[test]
