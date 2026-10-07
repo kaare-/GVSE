@@ -186,6 +186,7 @@ before coding.
 | 2026-10-07 | Phase 0 organisms | **Off** until Phase 5 bio rewrite |
 | 2026-10-07 | Phase 0 closed | 50k headless: TRACKED **0.03/t**, min **+0.12/t**, park=0 (#351) |
 | 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
+| 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
 | 2026-10-07 | UW / ocean vents | Lake underwater springs **and** seafloor ocean-column vents |
 | 2026-10-07 | Ice direction | Toward **brittle solid**; water-T rewrite likely; discuss at Phase 3 |

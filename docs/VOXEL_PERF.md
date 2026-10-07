@@ -40,6 +40,21 @@ unless noted (`perf_profile_demo_and_stress` / `perf_profile_sky_height`):
 Demo parallel A/B (0 plants): FPS OFF 20.1 / ON 19.3; full_feel OFF 73.6 / ON 64.4.
 Demo + plants: +48 ≈ 21.0 ms, +256 ≈ 25.1 ms (org share ≤3%).
 
+### Size sweep after settle Air-dest (dirty-clear experiment)
+
+Same harness on seep tip + Air-dest trim (`perf_profile_demo_and_stress`).
+Figures include a multi-pass `clear_all_dirty` that was later reverted — see
+§4; re-profile for the shipped Air-trim-only settle path:
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 16.3 | ~61 | 10.1 | 3.26 | 0.53 | 1.80 |
+| demo | 17.2 | ~58 | 9.3 | 2.93 | 0.78 | 2.26 |
+| stress (2048×1064) | 27.2 | ~37 | 14.2 | 4.93 | 0.36 | 3.86 |
+
+Demo parallel A/B (0 plants): FPS OFF 17.0 / ON 16.9; full_feel OFF 33.0 / ON 30.1.
+Demo + plants: +48 ≈ 17.3 ms, +256 ≈ 18.2 ms (org share ≤3%).
+
 ## Hottest physics sub-passes (demo 0 plants)
 
 Baseline at Phase 0 close (before Phase 1 surgical wins):
@@ -154,10 +169,86 @@ Tip after bodies win → after seam runs (warm 40 / measure 200):
 **4.77 → 0.73 ms/call**. Seepage bucket **−1.6 ms/tick** on demo (−35%); wall
 **−3.7 ms** (~40 → ~48 sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
 
+### 4. Settle Air destinations (keep seepage dirty)
+
+Re-profile after seam-apply: settle still **~5.3 ms/tick** on demo (docs’
+~5.5–7.4 band). `settle_air_probe` showed the sticky-loose plan was **~71%
+non-Air** — seepage pore dirty inside `has_loose` chunks. Fall and repose only
+pull into Air, so those solid visits were pure waste.
+
+**Change** (in `settle_loose_grains_regions_ex` only):
+
+- Trim each settle scan to **Air destinations** (sparse bitset).
+- Multi-pass re-plans use sticky-loose + Air-dest (`settle_scan_regions`) so
+  wet-pore cells are not walked ×N.
+- Do **not** `clear_all_dirty` inside settle: that wiped seepage pore dirty
+  that next tick’s flow/seepage (and lake-bed / beach / well wakes) need.
+  Filter the scan mask; leave global dirty for the wetting wake.
+
+No weather / condensation / lottery / `live_surface_y` changes.
+
+### Before → after settle Air-dest win (`perf_profile_sky_height`, same host)
+
+Tip after seam-apply → after Air-dest trim (warm 40 / measure 200). Numbers
+below include a brief dirty-clear experiment that was reverted for seepage
+correctness; expect settle closer to the Air-trim-only band than the cleared
+re-plan extreme:
+
+| Stamp | wall | seepage | settle | bodies | physics |
+|-------|-----:|--------:|-------:|-------:|--------:|
+| short sky before | 19.5 | 3.21 | 3.87 | 1.71 | 13.5 |
+| short sky after (Air-trim+clear*) | 16.3 | 3.25 | 0.53 | 1.81 | 10.1 |
+| tall/demo before | 21.3 | 2.93 | 5.29 | 2.14 | 13.8 |
+| tall/demo after (Air-trim+clear*) | 16.8 | 2.87 | 0.76 | 2.24 | 9.1 |
+
+\*dirty-clear inside multi-pass settle broke lake-bed / beach / well soak
+tests; shipped path keeps Air-dest trim without clearing seepage dirty.
+Air-trim alone still drops the ~71% non-Air visits. Re-profile after the
+revert when hunting the next settle leftover.
+
+## Re-profile after settle2 (Phase 1 gate)
+
+Same host / harness (`perf_profile_sky_height` for short+demo;
+`perf_profile_demo_and_stress` for stress), settle2 tip, 0 plants:
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 16.3 | ~61 | 10.1 | 3.27 | 0.53 | 1.80 |
+| demo | 17.3 | ~58 | 9.4 | 2.92 | 0.79 | 2.28 |
+| stress (2048×1064) | 27.3 | ~37 | 14.2 | 4.94 | 0.36 | 3.84 |
+
+**Phase 1 stress ≥30 FPS is met** (~37 sim-FPS on 2048×1064). No further
+code cut on this tip: no clear surgical win ≥1 ms on demo or stress without
+weather coarsen / condensation lottery / `live_surface_y`.
+
+### New top hotspots (ms/tick)
+
+| Rank | Demo | Stress |
+|-----:|------|--------|
+| 1 | seepage **2.92** | seepage **4.94** |
+| 2 | rock bodies **2.28** | rock bodies **3.84** |
+| 3 | humidity.advect **1.99** | humidity.advect **3.34** |
+
+`seepage_split_probe` (per seepage call, cadence `SEEPAGE_EVERY=5`): demo
+seam_wake ~2.1, lake-bed ~1.1, weep ~1.1, deep ~0.9, seam_couple ~0.36;
+stress seam_wake ~4.0, weep ~1.9, lake-bed ~1.5, deep ~1.6. Half-cutting
+seam_wake amortizes ≪1 ms/tick. Bodies already strata-slept; leftover is
+real topology. Advect / steam (~1.2) / temp amortized (~1.0–2.1) are field
+shell — Phase 2 / owner discussion, not another CA dirty trim.
+
+### Next candidates (diminishing-returns discussion)
+
+1. Seepage wakes (seam / lake-bed / weep) — occupancy already heavy; next
+   cuts risk wetting regressions or cadence games.
+2. Rock bodies leftover (~2–4 ms) — floating / hang / failure interplay.
+3. Humidity.advect / steam / temperature — parallelize or restructure fields
+   ([`VOXEL_PARALLEL.md`](VOXEL_PARALLEL.md) Phase 2); do **not** coarsen
+   weather or skip lottery first.
+4. Grow map width past 2048 toward stretch 5 km+ and re-measure wall vs cells
+   before more surgical CA work.
+
 ## Out of scope / next
 
 - Coarsening weather / skipping condensation lottery / changing `live_surface_y`
 - Enabling rayon by default (still slower on narrow dirty)
-- Next CA tails once re-profiled: settle (~5.5), seepage wakes (lake-bed / seam
-  wake / weep — still ~4 ms/call combined), humidity.advect / steam /
-  temperature amortized — not body flood budgets
+- Owner discussion on the candidates above before another Phase 1 CA pass
