@@ -2181,7 +2181,7 @@ fn settle_air_dest_trim_still_drops_sand_through_pore_dirty() {
     // Wet stone pores — same chunk, not Air destinations.
     for y in 2..10 {
         let mut stone = Cell::solid(MaterialId::Stone);
-        stone.sat = Sat::new(80);
+        stone.sat = Sat(80);
         w.set_cell(8, y, stone);
     }
     let active = plan_active(&w);
