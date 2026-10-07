@@ -1440,6 +1440,11 @@ fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32)
         if steam == 0 {
             continue;
         }
+        // Thin films on / under Ice/Snow are the cadence × snow × evap
+        // cliff seat — keep vapour rather than seeding an orphan film.
+        if crate::displace::is_alpine_film_park_seat(world, gx, gy, cell.sat.0) {
+            continue;
+        }
         let room = u8::MAX.saturating_sub(cell.sat.0);
         let put = steam.min(room);
         if put == 0 {
@@ -3826,6 +3831,34 @@ mod tests {
             sat_totals(&w).cell_total,
             before,
             "scrub under ice must stay mass-flat"
+        );
+    }
+
+    #[test]
+    fn scrub_open_steam_above_ice_does_not_seed_film() {
+        // Open-sky scrub→park on a dry ice lid seeded orphan films that
+        // fed the post-5k cadence × snow × evap TRACKED cliff.
+        let mut w = World::new(7);
+        for cy in 0..3 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 2..7 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Ice));
+            w.set_cell(x, 2, Cell::air());
+        }
+        add_steam(&mut w, 4, 2, 90);
+        let before = sat_totals(&w).cell_total;
+        scrub_invalid_steam_seats(&mut w, MAX_STEAM_CELLS);
+        assert_eq!(
+            w.get_cell(4, 2).unwrap().sat.0,
+            0,
+            "scrub must not park a thin film on ice"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "open scrub above ice must stay mass-flat (steam bank)"
         );
     }
 
