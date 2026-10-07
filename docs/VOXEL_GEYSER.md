@@ -71,16 +71,16 @@ mass-destroy hunts (mouth / park / sinter already audited).
 
 | Work item | Intent |
 |-----------|--------|
-| Route stickiness | Less churn — prefer sticky conduit / mouth once chosen; damp flip rate |
-| Local seek only | No global surface knowledge; hard max horizontal / connected-void radius |
-| Vertical bias | Soften “always up” scoring so lateral throats compete |
-| Lake UW springs | Open hot vents into standing lake water (not only sky mouths) |
-| Seafloor vents | Same for ocean column beds |
+| Route stickiness | **Done** (#357) — sticky conduit / mouth; damp flip rate |
+| Local seek only | **Done** (#357) — `LEFTOVER_PLAN_MAX_HORIZ = 48`; no far-horizon mouth hunt |
+| Vertical bias | **Done** (mild) — reverse-seep rock `dy×32` / vent `dy×48` (was ×50 / ×80). Aggressive ×12 / ×20 emptied straw/park; leftover `plan_step_cost` climb-first + conduit `+3000` up stay intentional |
+| Lake UW springs | **Done** (#358) — weather lake mouths |
+| Seafloor vents | **Done** (#358) — seafloor columns as leftover mouths |
 | Gates | Short budget soak near vents stays `park=0`; Xvfb playtest for route flips |
 
 Cooling-too-fast in sub-zero air stays Phase 3 (water-T). Hooks: `steam.rs`
 `leftover_*_route`, reverse-seep path score, discharge vent helpers; tests
-already cover `reverse_push_underwater_vent_deposits_load`.
+cover sticky / local / UW mouths + `reverse_seep_path_score_*` vertical soften.
 
 ---
 
