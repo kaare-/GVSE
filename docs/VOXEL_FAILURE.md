@@ -321,6 +321,7 @@ occupies, so the swapped-out volume always has room.
 | Free water (`sat` on `Air`) | `take_free_water` / `deposit_free_water` | Rock in a lake must raise the level, not drink it |
 | Loose cells (sand, soil, clay, gravel, loose rock, snow, litter) | `take_soft_cell` / `deposit_shifted_cells` | A slab ploughing a bank must shove it aside, not delete it |
 | Crushed dest spec (limestone → LooseLimestone) | `crush_spec_at` then `take_soft_cell` | A boulder rolling onto a pebble must lift the rubble, not delete dest carbonate |
+| Crushed cemented clastic (Sandstone → Sand) | `write_debris_cell` | Debris is insoluble; cement must become dissolved load or UNEXPL-M |
 
 Deposits prefer the vacated volume, then search outward **biased upward** —
 material shoved by a sinking rock heaps up beside and above it, and grain

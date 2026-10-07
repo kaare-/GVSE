@@ -151,10 +151,22 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
     eprintln!("read{flags}");
 }
 
+fn soak_off(flag: &str) -> bool {
+    std::env::var("GVSE_SOAK_OFF")
+        .ok()
+        .map(|s| s.split(',').any(|p| p.trim() == flag))
+        .unwrap_or(false)
+}
+
 fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, BudgetProbe) {
     let mut s = stamped_demo();
     let perf = PerfConfig::default();
-    let failure = FailureConfig::default();
+    let mut failure = FailureConfig::default();
+    if soak_off("failure") {
+        failure.enable_roof_collapse = false;
+        failure.enable_shear_weaken = false;
+        failure.enable_compaction = false;
+    }
     let evap = EvapConfig::default();
     let cond = CondensationConfig {
         top_y: s.params.sky_ceiling_y - 2,
@@ -168,12 +180,20 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     let karst = KarstConfig::default();
     let cloud = CloudConfig::default();
     let phase = PhaseConfig::default();
-    let steam = SteamConfig::default();
+    let mut steam = SteamConfig::default();
+    if soak_off("steam") {
+        steam.enabled = false;
+        steam.enable_pipe = false;
+        steam.enable_leftover_field = false;
+    }
     let climate = ClimateConfig::default();
     let carbon_cfg = CarbonConfig::default();
     let grain = GrainConfig::default();
     let fungi = FungiConfig::default();
-    let competent = CompetentFallConfig::default();
+    let mut competent = CompetentFallConfig::default();
+    if soak_off("competent") {
+        competent.enable = false;
+    }
 
     let cfg = WorldStepConfig {
         perf: &perf,
@@ -193,9 +213,9 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         humidity_diffusion_alpha: 0.15,
         sea_level_y: s.params.sea_level_y,
         sky_ceiling_y: s.params.sky_ceiling_y,
-        evap_on: true,
-        cond_rain_on: true,
-        karst_on: true,
+        evap_on: !soak_off("evap"),
+        cond_rain_on: !soak_off("cond"),
+        karst_on: !soak_off("karst"),
         organisms_on: false,
     };
 

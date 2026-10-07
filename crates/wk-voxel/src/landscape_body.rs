@@ -507,19 +507,12 @@ pub fn step_landscape_bodies(
           }
           match world.get_cell(world.wrap_x(x), y - 1) {
             Some(b) if b.material != MaterialId::Air && b.material.is_solid() => {
-              let loose = if c.material == MaterialId::Limestone {
-                MaterialId::LooseLimestone
-              } else {
-                MaterialId::LooseRock
+              let loose = crate::failure::roof_collapse_debris(c.material);
+              let next = Cell {
+                material: loose,
+                ..c
               };
-              world.set_cell(
-                x,
-                y,
-                Cell {
-                  material: loose,
-                  ..c
-                },
-              );
+              crate::mineral::write_debris_cell(world, x, y, c, next);
               shattered += 1;
             }
             _ => {}

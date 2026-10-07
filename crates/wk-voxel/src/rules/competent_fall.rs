@@ -288,7 +288,8 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
     };
     next.flags.clear(CellFlags::MOBILE_ROCK);
     next.clear_rock_body_tag();
-    world.set_cell(cx, cy, next);
+    // Sandstone/Conglomerate → sand/gravel must emit cement as load.
+    crate::mineral::write_debris_cell(world, cx, cy, cur, next);
     world.touch_dirty(cx, cy);
     crushed += 1;
     for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
@@ -1860,22 +1861,20 @@ fn impact_shatter(
           let freed = below.sat.0;
           // Keep `cur.pore`. `Cell::default()` is pore=128, which mints
           // or deletes carbonate on limestone / LooseLimestone debris.
-          world.set_cell(
-            gx,
-            yy - 1,
-            Cell {
-              material: debris,
-              sat: cur.sat,
-              flags: {
-                let mut f = cur.flags;
-                f.clear(CellFlags::MOBILE_ROCK);
-                f.clear(CellFlags::ROCK_BODY_TAG);
-                f
-              },
-              _pad: cur._pad,
-              pore: cur.pore,
+          // Clastic shatter must emit cement (Sandstone→Sand) as load.
+          let drop = Cell {
+            material: debris,
+            sat: cur.sat,
+            flags: {
+              let mut f = cur.flags;
+              f.clear(CellFlags::MOBILE_ROCK);
+              f.clear(CellFlags::ROCK_BODY_TAG);
+              f
             },
-          );
+            _pad: cur._pad,
+            pore: cur.pore,
+          };
+          crate::mineral::write_debris_cell(world, gx, yy - 1, cur, drop);
           world.set_cell(
             gx,
             yy,
@@ -1889,22 +1888,19 @@ fn impact_shatter(
           break;
         }
       }
-      world.set_cell(
-        gx,
-        yy,
-        Cell {
-          material: debris,
-          sat: cur.sat,
-          flags: {
-            let mut f = cur.flags;
-            f.clear(CellFlags::MOBILE_ROCK);
-            f.clear(CellFlags::ROCK_BODY_TAG);
-            f
-          },
-          _pad: cur._pad,
-          pore: cur.pore,
+      let in_place = Cell {
+        material: debris,
+        sat: cur.sat,
+        flags: {
+          let mut f = cur.flags;
+          f.clear(CellFlags::MOBILE_ROCK);
+          f.clear(CellFlags::ROCK_BODY_TAG);
+          f
         },
-      );
+        _pad: cur._pad,
+        pore: cur.pore,
+      };
+      crate::mineral::write_debris_cell(world, gx, yy, cur, in_place);
       applied += 1;
       if yy <= comp.min_y {
         break;
@@ -3146,15 +3142,12 @@ fn fracture_thin_necks(world: &mut World, comp: &Component) -> u32 {
     return 0;
   };
   let debris = roof_collapse_debris(cell.material);
-  world.set_cell(
-    gx,
-    gy,
-    Cell {
-      material: debris,
-      sat: cell.sat,
-      ..cell
-    },
-  );
+  let next = Cell {
+    material: debris,
+    sat: cell.sat,
+    ..cell
+  };
+  crate::mineral::write_debris_cell(world, gx, gy, cell, next);
   world.touch_dirty(gx, gy);
   1
 }
@@ -4334,6 +4327,39 @@ mod tests {
       w.get_cell(6, 1).map(|c| c.material),
       Some(MaterialId::Stone),
       "mover occupies the crushed dest"
+    );
+  }
+
+  #[test]
+  fn crush_sandstone_emits_cement_as_load() {
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    stamp_blob(&mut w, 2, 1, 4, 4);
+    let mut ss = Cell::solid(MaterialId::Sandstone);
+    ss.pore = 40;
+    w.set_cell(6, 1, ss);
+    let before = crate::audit::mineral_total(&w);
+    let cement = crate::mineral::cell_mineral(ss);
+    assert!(cement > 0, "sandstone cement is on the mineral ledger");
+    let crushed = crush_spec_at(&mut w, 6, 1);
+    assert!(crushed > 0, "1-cell sandstone must crush");
+    assert_eq!(
+      w.get_cell(6, 1).map(|c| c.material),
+      Some(MaterialId::Sand),
+      "sandstone debris is sand"
+    );
+    assert_eq!(
+      crate::audit::mineral_total(&w),
+      before,
+      "Sandstone→Sand must emit cement as load, not delete it"
+    );
+    assert_eq!(
+      crate::mineral::dissolved_at(&w, 6, 1),
+      cement,
+      "cement must land as dissolved load at the crush seat"
     );
   }
 
