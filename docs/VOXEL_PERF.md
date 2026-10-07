@@ -81,8 +81,9 @@ every topology pass re-flooded the same hillside.
   same-pass `settle_pending`) so later passes/ticks skip those seeds.
 - Seated tag-0 floods refuse settled / pending neighbours (stops re-absorbing
   the hillside).
-- Airborne seeds still flood through settled cells (sky-island peels must not
-  leave hung leftovers welded to seated debris).
+- Sleep only when the gather is **not** `cell_set_floating` (sky islands
+  must stay eligible to peel). Soft-bed hung shards wake; tagged
+  partial-support cantilevers hang-peel so leftovers finish falling.
 
 No weather / condensation / `live_surface_y` / mass-ledger changes.
 
