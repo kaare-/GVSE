@@ -5,7 +5,7 @@
 //! that is not the retired humidity-bank overlay.
 
 use macroquad::prelude::*;
-use wk_voxel::{BudgetLedger, BudgetProbe, Humidity, World};
+use wk_voxel::{BudgetLedger, BudgetProbe, Humidity, LandscapeBodyStore, World};
 
 const LINE_H: f32 = 15.0;
 const PAD: f32 = 8.0;
@@ -23,24 +23,30 @@ impl BudgetHud {
         self.ledger.is_on()
     }
 
-    pub fn toggle(&mut self, world: &World, humidity: &Humidity) {
+    pub fn toggle(&mut self, world: &World, humidity: &Humidity, landscape: &LandscapeBodyStore) {
         if self.ledger.is_on() {
             self.ledger.disable();
             self.cheats.clear();
             self.last_event.clear();
         } else {
-            self.ledger.enable(world, humidity);
+            self.ledger.enable_with(world, humidity, Some(landscape));
             self.cheats.clear();
             self.last_event = format!("mark t={}", world.tick);
         }
     }
 
     /// Regen / load / `N` — pin a new mark on the current inventory.
-    pub fn remake(&mut self, world: &World, humidity: &Humidity, why: &str) {
+    pub fn remake(
+        &mut self,
+        world: &World,
+        humidity: &Humidity,
+        landscape: &LandscapeBodyStore,
+        why: &str,
+    ) {
         if !self.ledger.is_on() {
             return;
         }
-        self.ledger.enable(world, humidity);
+        self.ledger.enable_with(world, humidity, Some(landscape));
         self.cheats.clear();
         self.last_event = format!("{why} t={}", world.tick);
     }
@@ -54,12 +60,23 @@ impl BudgetHud {
         }
     }
 
-    pub fn sample_if_due(&mut self, world: &World, humidity: &Humidity) {
-        self.ledger.sample_if_due(world, humidity);
+    pub fn sample_if_due(
+        &mut self,
+        world: &World,
+        humidity: &Humidity,
+        landscape: &LandscapeBodyStore,
+    ) {
+        self.ledger
+            .sample_if_due_with(world, humidity, Some(landscape));
     }
 
-    pub fn refresh(&mut self, world: &World, humidity: &Humidity) {
-        self.ledger.refresh(world, humidity);
+    pub fn refresh(
+        &mut self,
+        world: &World,
+        humidity: &Humidity,
+        landscape: &LandscapeBodyStore,
+    ) {
+        self.ledger.refresh_with(world, humidity, Some(landscape));
     }
 
     pub fn draw(&self) {
@@ -129,6 +146,7 @@ impl BudgetHud {
             row_i("steam", mark.steam, now.steam, d.d_steam),
             row_i("cave_h", mark.cave_h, now.cave_h, d.d_cave),
             row_i("pipe", mark.pipe, now.pipe, d.d_pipe),
+            row_i("body", mark.body_water, now.body_water, d.d_body),
             row_f(
                 "hum",
                 f64::from(mark.humidity),
@@ -157,6 +175,12 @@ impl BudgetHud {
                 d.d_min_load,
             ),
             row_i(
+                "min.body",
+                mark.body_mineral,
+                now.body_mineral,
+                d.d_min_body,
+            ),
+            row_i(
                 "min.tot",
                 mark.mineral_total(),
                 now.mineral_total(),
@@ -170,6 +194,7 @@ impl BudgetHud {
             "TRACKED leftover = mint/cull/OOB (or uncredited sink)".into(),
             "W: swap=mat-change sat  park=dropped orphan  clamp=H OOB".into(),
             "M: bare=set_cell outside ledger APIs  credit=widen/scour".into(),
+            "body=in-flight landscape slab (off-grid rock + sat)".into(),
             "SOAK=free→pore  EVAP=cell→hum  RAIN=hum→free/ice".into(),
         ];
 

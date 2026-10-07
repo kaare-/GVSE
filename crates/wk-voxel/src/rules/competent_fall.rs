@@ -2110,17 +2110,19 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], mut moves: Vec<(i
         displaced_water += take_free_water(world, *tx, *ty);
       } else if is_competent_rock(dst.material) && can_crush_spec(world, *tx, *ty, mover_n) {
         crush_spec_at(world, *tx, *ty);
-        // The body is about to overwrite this cell, so bank its pore water for
-        // redeposit and take it out of the cell in the same step — leaving it
-        // in place would either destroy it on the overwrite or, once banked,
-        // duplicate it.
-        if let Some(mut crushed) = world.get_cell(*tx, *ty) {
-          if crushed.sat.0 > 0 {
-            displaced_water += pore_water_of(&crushed);
-            crushed.sat = Sat(0);
-            world.set_cell(*tx, *ty, crushed);
+        // Crush turns dest into loose debris; the body still overwrites this
+        // cell. Lift the rubble (and its pore water) like any other soft dest
+        // — leaving it in place lets the write delete dest carbonate.
+        if let Some(taken) = take_soft_cell(world, *tx, *ty, is_roll_displaceable) {
+          shifted.push(taken);
+        } else if let Some(left) = world.get_cell(*tx, *ty) {
+          if crate::mineral::cell_mineral(left) > 0 {
+            crate::mineral::emit_from_dissolved_rock(world, *tx, *ty, left);
           }
+          displaced_water += pore_water_of(&left);
+          world.set_cell(*tx, *ty, Cell::air());
         }
+        displaced_water += take_free_water(world, *tx, *ty);
       }
     }
   }
@@ -4291,6 +4293,47 @@ mod tests {
       w.get_cell(9, 4).map(|c| c.material),
       Some(MaterialId::LooseRock),
       "crushed spec becomes LooseRock"
+    );
+  }
+
+  #[test]
+  fn write_roll_cells_crush_keeps_dest_carbonate() {
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // 4×4 stone boulder (16 cells) next to a 1-cell limestone spec.
+    stamp_blob(&mut w, 2, 1, 4, 4);
+    let mut lime = Cell::solid(MaterialId::Limestone);
+    lime.pore = 40;
+    w.set_cell(6, 1, lime);
+    let before = crate::audit::mineral_total(&w);
+    let mut sources = Vec::new();
+    let mut moves = Vec::new();
+    for x in 2..6 {
+      for y in 1..5 {
+        let c = w.get_cell(x, y).unwrap();
+        sources.push((x, y));
+        moves.push((x + 1, y, c));
+      }
+    }
+    write_roll_cells(&mut w, &sources, moves);
+    assert_eq!(
+      crate::audit::mineral_total(&w),
+      before,
+      "crush-overwrite must lift dest limestone, not delete it"
+    );
+    let loose = count_mat(&w, MaterialId::LooseLimestone, 0, 16, 0, 10);
+    let load: u32 = w.dissolved.values().copied().map(u32::from).sum();
+    assert!(
+      loose > 0 || load >= u32::from(crate::mineral::cell_mineral(lime)),
+      "dest carbonate must reappear as LooseLimestone or load (loose={loose} load={load})"
+    );
+    assert_eq!(
+      w.get_cell(6, 1).map(|c| c.material),
+      Some(MaterialId::Stone),
+      "mover occupies the crushed dest"
     );
   }
 

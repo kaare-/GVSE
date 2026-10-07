@@ -320,6 +320,7 @@ occupies, so the swapped-out volume always has room.
 |---|---|---|
 | Free water (`sat` on `Air`) | `take_free_water` / `deposit_free_water` | Rock in a lake must raise the level, not drink it |
 | Loose cells (sand, soil, clay, gravel, loose rock, snow, litter) | `take_soft_cell` / `deposit_shifted_cells` | A slab ploughing a bank must shove it aside, not delete it |
+| Crushed dest spec (limestone → LooseLimestone) | `crush_spec_at` then `take_soft_cell` | A boulder rolling onto a pebble must lift the rubble, not delete dest carbonate |
 
 Deposits prefer the vacated volume, then search outward **biased upward** —
 material shoved by a sinking rock heaps up beside and above it, and grain
@@ -334,9 +335,10 @@ Guarded by `rock_dropped_in_lake_displaces_water_instead_of_eating_it`,
 `rock_sliding_through_wet_sand_conserves_water`,
 `landscape_slab_dropped_in_lake_displaces_water`,
 `falling_rock_shifts_sand_instead_of_eating_it`,
-`rolling_rock_shifts_mixed_loose_materials`, and
-`landscape_slab_shifts_loose_beds_instead_of_eating_them` — the last one caught
-a slab deleting 250 cells of loose bed per drop.
+`rolling_rock_shifts_mixed_loose_materials`,
+`landscape_slab_shifts_loose_beds_instead_of_eating_them`, and
+`write_roll_cells_crush_keeps_dest_carbonate` — the last one caught a
+boulder deleting dest limestone after `crush_spec_at`.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
