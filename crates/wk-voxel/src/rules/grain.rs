@@ -1012,25 +1012,6 @@ pub fn settle_loose_grains_regions(
 /// After [`rise_and_soak_buoyant_litter`], tick settles with
 /// `allow_buoyancy = false` so Organic does not one-cell bob through
 /// wet Air for dozens of passes (FPS spike).
-/// Keep only regions whose chunk may hold loose material (sticky
-/// [`Chunk::has_loose`]). Occupancy is the source of truth.
-fn keep_loose_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
-    if active.is_empty() {
-        return Vec::new();
-    }
-    active
-        .iter()
-        .copied()
-        .filter(|ac| {
-            world
-                .chunks
-                .get(&ac.coord)
-                .map(|c| c.has_loose)
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
 /// Fall and repose are destination-Air pulls. Seepage leaves wet-pore dirty
 /// on `has_loose` chunks; sticky-loose filtering keeps the chunk, but settle
 /// still walked those solid cells (demo probe: ~71% of the loose plan).
