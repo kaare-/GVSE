@@ -2172,6 +2172,37 @@ fn settle_loose_grains_drops_organic_without_full_tick() {
 }
 
 #[test]
+fn settle_air_dest_trim_still_drops_sand_through_pore_dirty() {
+    // Seepage dirties wet pores inside has_loose chunks. Settle must still
+    // seat freefall sand when the active plan is dominated by those solids
+    // (Air-dest trim drops non-Air visits before fall/repose).
+    let mut w = setup_column_world();
+    w.set_cell(5, 20, Cell::solid(MaterialId::Sand));
+    // Wet stone pores — same chunk, not Air destinations.
+    for y in 2..10 {
+        let mut stone = Cell::solid(MaterialId::Stone);
+        stone.sat = Sat::new(80);
+        w.set_cell(8, y, stone);
+    }
+    let active = plan_active(&w);
+    assert!(
+        active.iter().any(|ac| ac.cell_count() > 1),
+        "precondition: plan includes sand seat and pore dirty"
+    );
+    settle_loose_grains_regions(&mut w, &active, None, GRAIN_SETTLE_PASSES_SHALLOW);
+    assert_eq!(
+        w.get_cell(5, 20).unwrap().material,
+        MaterialId::Air,
+        "sand must leave freefall height despite pore dirty in the plan"
+    );
+    assert_eq!(
+        w.get_cell(5, 1).unwrap().material,
+        MaterialId::Sand,
+        "sand should seat on bedrock"
+    );
+}
+
+#[test]
 fn underwater_sand_repose_does_not_leave_dry_air() {
     // Sand on an underwater ledge slides into an empty pocket beside
     // standing water. Vacated cell must become water (not sky-flash Air).

@@ -11,7 +11,9 @@ use crate::cell::{
     falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity_cell, Cell, CellFlags, Sat,
 };
-use crate::chunk::{Chunk, ChunkCoord, STANDING_AIR_SAT, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{
+    Chunk, ChunkCoord, DirtyBits, STANDING_AIR_SAT, CHUNK_CELLS_H, CHUNK_CELLS_W,
+};
 use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
 use crate::grid::World;
 use crate::parallel::{
@@ -1029,6 +1031,45 @@ fn keep_loose_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk>
         .collect()
 }
 
+/// Fall and repose are destination-Air pulls. Seepage leaves wet-pore dirty
+/// on `has_loose` chunks; sticky-loose filtering keeps the chunk, but settle
+/// still walked those solid cells (demo probe: ~71% of the loose plan).
+///
+/// Rebuild each region as a sparse Air-only bitset. Dense wakes become sparse
+/// Air seats; chunks with no planned Air drop out.
+fn keep_air_dest_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
+    if active.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(active.len());
+    for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        let mut bits = DirtyBits::empty();
+        let mut any = false;
+        ac.for_each_cell(|x, y| {
+            if chunk.get(x as usize, y as usize).material == MaterialId::Air {
+                bits.set(x, y);
+                any = true;
+            }
+        });
+        if !any {
+            continue;
+        }
+        let Some(rect) = bits.bbox() else {
+            continue;
+        };
+        out.push(ActiveChunk::with_bits(ac.coord, rect, bits));
+    }
+    out
+}
+
+/// Sticky-loose chunks, then Air destinations only (settle scan mask).
+fn settle_scan_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
+    keep_air_dest_regions(world, &keep_loose_regions(world, active))
+}
+
 pub fn settle_loose_grains_regions_ex(
     world: &mut World,
     initial: &[ActiveChunk],
@@ -1036,7 +1077,9 @@ pub fn settle_loose_grains_regions_ex(
     max_passes: u32,
     allow_buoyancy: bool,
 ) {
-    let mut cur: Vec<ActiveChunk> = initial.to_vec();
+    // Caller usually pre-filters sticky-loose; Air trim still applies so
+    // seepage pore dirty inside sand/shore chunks is not re-walked ×N.
+    let mut cur: Vec<ActiveChunk> = keep_air_dest_regions(world, initial);
     for settle_i in 0..max_passes {
         if cur.is_empty() {
             break;
@@ -1053,9 +1096,9 @@ pub fn settle_loose_grains_regions_ex(
         }
         // Re-plan is global dirty, which on a wet world is dominated by pore
         // seepage in limestone / stone chunks. Repose can only move loose
-        // grains, so filter to sticky-loose chunks — otherwise every
-        // groundwater tick dragged the whole halo through the repose scan.
-        let after_fall = keep_loose_regions(world, &plan_active(world));
+        // grains into Air, so sticky-loose + Air-dest — otherwise every
+        // groundwater tick dragged wet pores through the repose scan.
+        let after_fall = settle_scan_regions(world, &plan_active(world));
         let repose_src = if after_fall.is_empty() {
             cur.clone()
         } else {
@@ -1068,11 +1111,8 @@ pub fn settle_loose_grains_regions_ex(
         if moved == 0 {
             break;
         }
-        // Same sticky-loose filter as the repose re-plan above. Global dirty
-        // after seepage is mostly wet pores in stone / limestone; walking that
-        // halo on every settle pass (×8 shallow / ×64 deep) was the leftover
-        // that kept "settle grains" near rock-bodies cost on rainy demos.
-        let next = keep_loose_regions(world, &plan_active(world));
+        // Same sticky-loose + Air-dest filter as the repose re-plan above.
+        let next = settle_scan_regions(world, &plan_active(world));
         if next.is_empty() {
             break;
         }
