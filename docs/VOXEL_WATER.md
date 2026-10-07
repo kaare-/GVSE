@@ -510,12 +510,14 @@ clear when `sat→0`.
 
 | Slice | Scope | Exit |
 |-------|--------|------|
-| A | Sparse map + helpers; seed/mix on one path (mouth or gravity) | Hot dump cell T ≠ cold tile; TRACKED flat |
+| A | Sparse map + helpers; seed/mix on one path (mouth or gravity) | **Landed** (2026-10-07): `World.water_temp` + `water_temp::{get/set/clear/mix}`; wired on leftover mouth dump (`reverse_push` → Air) and gravity Air→Air when ledger non-empty. Hot dump retains T ≠ cold tile; heat-only (TRACKED flat). |
 | B | Phase reads water_temp for film-on-ice / contact melt | Warm film over ice in cold tile melts; mass-flat |
 | C | Mouth writes hot water_temp; soft cool vs instant skin wipe | Sub-zero discharge stays warm enough to matter |
 
 Hard no’s: no weather coarsen / lottery skip / `live_surface_y` change;
 TRACKED mass-flat; no wholesale rustfmt of `phase.rs`; pore-water T deferred.
+
+**Slice A API** (`wk_voxel::water_temp`): `water_temp_at` (absent ⇒ `Temperature::at_cell`), `set_water_temp`, `clear_water_temp` / `clear_water_temp_if_dry`, `mix_water_temp_on_transfer` (after sat writes; Air dest only).
 
 ## Ice / snow / phase (milestones 1–3)
 

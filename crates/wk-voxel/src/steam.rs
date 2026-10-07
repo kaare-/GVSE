@@ -3077,6 +3077,18 @@ fn reverse_push_pore_water_inner(
         return (0, None, false);
     }
     carry_with_water(world, (gx, gy), (tx, ty), actually_moved, before);
+    // Phase 3 slice A: free Air sat carries sparse water_temp. Mouth /
+    // weather-lake dumps land here; pore dests are skipped inside the helper.
+    if fit > 0 {
+        crate::water_temp::mix_water_temp_on_transfer(
+            world,
+            temp,
+            (gx, gy),
+            (tx, ty),
+            fit,
+            before,
+        );
+    }
     if LEFTOVER_STRAW.with(|f| f.get()) {
         leftover_boost_route_heat(world, temp, gx, gy, tx, ty, actually_moved);
     } else {
