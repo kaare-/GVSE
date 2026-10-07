@@ -17,7 +17,7 @@
 //! - `GVSE_BUDGET_PERIOD` — sample every N ticks (default 60)
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
 //! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `karst`, `competent`,
-//!   `phase`, `failure`
+//!   `phase`, `cull`, `failure`
 
 use wk_voxel::{
     stamp_world, step_world, BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig,
@@ -115,13 +115,14 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         now.body_mineral
     );
     eprintln!(
-        "stores d free={:+} pore={:+} steam={:+} cave_h={:+} pipe={:+} hum={:+.0} snow={:+} body={:+}",
+        "stores d free={:+} pore={:+} steam={:+} cave_h={:+} pipe={:+} hum={:+.0} ice={:+} snow={:+} body={:+}",
         d.d_free,
         d.d_pore,
         d.d_steam,
         d.d_cave,
         d.d_pipe,
         d.d_humidity,
+        d.d_ice,
         d.d_snow,
         d.d_body
     );
@@ -184,6 +185,9 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     let mut phase = PhaseConfig::default();
     if soak_off("phase") {
         phase.enabled = false;
+    }
+    if soak_off("cull") {
+        phase.enable_cull = false;
     }
     let mut steam = SteamConfig::default();
     if soak_off("steam") {

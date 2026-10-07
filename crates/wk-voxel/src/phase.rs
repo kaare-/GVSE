@@ -534,11 +534,13 @@ fn rests_on_solid_or_pack(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Place one Snow cell on the free surface under `start_y`.
-/// Returns sat-equivalent mass consumed (`255`) or `None` if no seat.
+/// Returns humidity/budget mass consumed, or `None` if no seat.
 ///
 /// Snow is a solid lid on rock / sand / pack. A wet Air film on solid
-/// ground becomes Snow (it is not pushed into pores). Deep water gets
-/// snow seated in the empty Air above the free surface.
+/// ground becomes Snow (it is not pushed into pores) — the film sat is
+/// credited into the flake so callers drain only the shortfall
+/// (`255 − film`). Deep water gets snow seated in the empty Air above
+/// the free surface (full `255`).
 ///
 /// Plant shoot modules (Stem / Nucleus / leaf) are draw overlays — they do
 /// not lift this seat, so snow piles on the ground, not on the canopy.
@@ -593,6 +595,21 @@ fn deposit_ice_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f3
     deposit_frozen_lid_on_surface(world, gx, start_y, ice_cell())
 }
 
+/// Seat a frozen lid on Air. Any free-water film already in the cell
+/// becomes part of the Ice/Snow thaw yield — return only the humidity
+/// shortfall so wet-ground snow/frost stays B-overlay mass-flat.
+fn seat_frozen_lid_on_air(world: &mut World, gx: i32, gy: i32, lid: Cell) -> f32 {
+    let Some(air) = world.get_cell(gx, gy) else {
+        return 0.0;
+    };
+    if air.material != MaterialId::Air {
+        return 0.0;
+    }
+    let film = f32::from(air.sat.0);
+    world.set_cell(gx, gy, lid);
+    (u8::MAX as f32 - film).max(0.0)
+}
+
 fn deposit_frozen_lid_on_surface(
     world: &mut World,
     gx: i32,
@@ -609,26 +626,25 @@ fn deposit_frozen_lid_on_surface(
             continue;
         };
         if cell.material != MaterialId::Air {
-            // Solid / pack — seat in the Air cell directly above (film ok).
+            // Solid / pack — seat in the Air cell directly above (film ok;
+            // film sat credits the flake — see [`seat_frozen_lid_on_air`]).
             if let Some(above) = world.get_cell(jx, y + 1) {
                 if above.material == MaterialId::Air {
-                    world.set_cell(jx, y + 1, lid);
-                    return Some(u8::MAX as f32);
+                    return Some(seat_frozen_lid_on_air(world, jx, y + 1, lid));
                 }
             }
             return None;
         }
         if !cell.sat.is_empty() {
-            // Puddle on solid / pack → become frozen lid (no soak).
+            // Puddle on solid / pack → become frozen lid (no soak). Film
+            // sat is the flake's first payment; humidity covers the rest.
             if rests_on_solid_or_pack(world, jx, y) {
-                world.set_cell(jx, y, lid);
-                return Some(u8::MAX as f32);
+                return Some(seat_frozen_lid_on_air(world, jx, y, lid));
             }
             // Standing water body — seat lid in empty air above.
             if let Some(ay) = last_empty_air_y {
                 if ay == y + 1 {
-                    world.set_cell(jx, ay, lid);
-                    return Some(u8::MAX as f32);
+                    return Some(seat_frozen_lid_on_air(world, jx, ay, lid));
                 }
             }
             return None;
@@ -1773,6 +1789,38 @@ mod tests {
         let landed = deposit_precip_on_surface(&mut w, 2, 10, 255.0, Some(&temp), Some(&cfg));
         assert!(landed > 0.0);
         assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Snow);
+    }
+
+    #[test]
+    fn wet_film_snow_credits_film_sat_on_budget() {
+        // Wet-ground snow used to charge humidity a full 255 while also
+        // deleting the film sat → UNEXPL-W of `film` per flake.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let film = 100u8;
+        w.set_cell(
+            2,
+            2,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(film),
+                ..Cell::air()
+            },
+        );
+        let temp = cold_temp(16, 16, -6.0);
+        let cfg = PhaseConfig::default();
+        let landed = deposit_precip_on_surface(&mut w, 2, 10, 255.0, Some(&temp), Some(&cfg));
+        assert_eq!(
+            w.get_cell(2, 2).unwrap().material,
+            MaterialId::Snow,
+            "film on solid must become snow"
+        );
+        assert_eq!(
+            landed, (u8::MAX - film) as f32,
+            "humidity pays only the flake shortfall, got {landed}"
+        );
     }
 
     #[test]
