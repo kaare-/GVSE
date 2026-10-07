@@ -100,15 +100,10 @@ a water-T rewrite.
 - Related: geyser discharge cooling too fast in mostly sub-zero climates
   (same missing water-T bookkeeping).
 
-**Design options** (pick / mix — see [`VOXEL_WATER.md`](VOXEL_WATER.md) § Phase 3)
-
-1. **Contact melt without water-T** — air/rock tile heat melts ice under
-   standing water / warm film by adjacency; mass-flat.
-2. **Carry temperature on free water** — sat cells or sparse map hold T;
-   larger rewrite; also helps geyser discharge cooling.
-3. **Brittle mechanics first** — stop throughflow / powder look (block
-   seepage through Ice, competent-ish lids) before any T rewrite.
-4. **Hybrid** — (3) now + thin (1); defer (2) to a later spike.
+**Design locked** (2026-10-07 owner): **option 2 — free water carries
+temperature.** Sparse ledger (not `Cell` widen). Also addresses geyser
+discharge cooling in sub-zero air. Brittle look can follow once melt works.
+See [`VOXEL_WATER.md`](VOXEL_WATER.md) § Phase 3.
 
 **Exit criteria**
 
@@ -182,6 +177,7 @@ before coding.
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |
 | 2026-10-07 | Phase 2 code | Sticky/local (#357), UW mouths (#358), mild vert (#359) |
+| 2026-10-07 | Phase 3 ice option | **2 — water carries T** (sparse free-water ledger; melt + geyser cool) |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
@@ -193,6 +189,6 @@ before coding.
 ## Clarifications later
 
 - Phase-1 stretch width / field-shell cuts deferred to Phase 4 (or revisit).
-- Phase 3 ice: pick design option 1–4 (contact melt / water-T / brittle-first / hybrid).
+- Phase 3 ice option 2 slices: A sparse map spike → B melt on ice → C geyser mouth cool.
 - Phase-5 scoping agenda (plants/fungi vs creatures first — open until planning session).
 - Phase-8 shortlist of client stacks when that review starts.

@@ -501,17 +501,21 @@ powder-throughflow. Water does not carry temperature today — standing
 warm water on ice cannot melt it; geyser discharge in sub-zero air cools
 too fast for the same reason.
 
-### Options (owner pick)
+### Locked: option 2 — free water carries temperature (2026-10-07)
 
-| # | Approach | Scope | Notes |
-|---|----------|-------|-------|
-| 1 | Contact melt | Medium | Tile heat under/beside water melts Ice; no per-sat T |
-| 2 | Water carries T | Large | Sparse or cell T on free water; unlocks melt + geyser cool |
-| 3 | Brittle first | Small–medium | Block seepage/throughflow through Ice; competent lids; powder look gone |
-| 4 | Hybrid | 3 then 1 | Ship look fix now; contact melt; defer full water-T |
+Sparse `World.water_temp` (or equivalent) for **free Air sat only** — do
+**not** widen `Cell`. Absent key ⇒ inherit tile `Temperature::at_cell`.
+Heat-only (never touch TRACKED / `sat_totals`). Mix on sat transfer;
+clear when `sat→0`.
 
-Hard no’s until agreed: no weather coarsen / lottery skip / `live_surface_y`
-change; keep TRACKED mass-flat; no wholesale rustfmt of `phase.rs`.
+| Slice | Scope | Exit |
+|-------|--------|------|
+| A | Sparse map + helpers; seed/mix on one path (mouth or gravity) | Hot dump cell T ≠ cold tile; TRACKED flat |
+| B | Phase reads water_temp for film-on-ice / contact melt | Warm film over ice in cold tile melts; mass-flat |
+| C | Mouth writes hot water_temp; soft cool vs instant skin wipe | Sub-zero discharge stays warm enough to matter |
+
+Hard no’s: no weather coarsen / lottery skip / `live_surface_y` change;
+TRACKED mass-flat; no wholesale rustfmt of `phase.rs`; pore-water T deferred.
 
 ## Ice / snow / phase (milestones 1–3)
 
