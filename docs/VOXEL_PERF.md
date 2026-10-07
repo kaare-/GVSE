@@ -199,10 +199,49 @@ Tip after seam-apply → after Air-dest + dirty clear (warm 40 / measure 200):
 Settle **−4.5 ms/tick** on demo stamp (−86%); wall **−4.5 ms** (~47 → ~59
 sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
 
+## Re-profile after settle2 (Phase 1 gate)
+
+Same host / harness (`perf_profile_sky_height` for short+demo;
+`perf_profile_demo_and_stress` for stress), settle2 tip, 0 plants:
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 16.3 | ~61 | 10.1 | 3.27 | 0.53 | 1.80 |
+| demo | 17.3 | ~58 | 9.4 | 2.92 | 0.79 | 2.28 |
+| stress (2048×1064) | 27.3 | ~37 | 14.2 | 4.94 | 0.36 | 3.84 |
+
+**Phase 1 stress ≥30 FPS is met** (~37 sim-FPS on 2048×1064). No further
+code cut on this tip: no clear surgical win ≥1 ms on demo or stress without
+weather coarsen / condensation lottery / `live_surface_y`.
+
+### New top hotspots (ms/tick)
+
+| Rank | Demo | Stress |
+|-----:|------|--------|
+| 1 | seepage **2.92** | seepage **4.94** |
+| 2 | rock bodies **2.28** | rock bodies **3.84** |
+| 3 | humidity.advect **1.99** | humidity.advect **3.34** |
+
+`seepage_split_probe` (per seepage call, cadence `SEEPAGE_EVERY=5`): demo
+seam_wake ~2.1, lake-bed ~1.1, weep ~1.1, deep ~0.9, seam_couple ~0.36;
+stress seam_wake ~4.0, weep ~1.9, lake-bed ~1.5, deep ~1.6. Half-cutting
+seam_wake amortizes ≪1 ms/tick. Bodies already strata-slept; leftover is
+real topology. Advect / steam (~1.2) / temp amortized (~1.0–2.1) are field
+shell — Phase 2 / owner discussion, not another CA dirty trim.
+
+### Next candidates (diminishing-returns discussion)
+
+1. Seepage wakes (seam / lake-bed / weep) — occupancy already heavy; next
+   cuts risk wetting regressions or cadence games.
+2. Rock bodies leftover (~2–4 ms) — floating / hang / failure interplay.
+3. Humidity.advect / steam / temperature — parallelize or restructure fields
+   ([`VOXEL_PARALLEL.md`](VOXEL_PARALLEL.md) Phase 2); do **not** coarsen
+   weather or skip lottery first.
+4. Grow map width past 2048 toward stretch 5 km+ and re-measure wall vs cells
+   before more surgical CA work.
+
 ## Out of scope / next
 
 - Coarsening weather / skipping condensation lottery / changing `live_surface_y`
 - Enabling rayon by default (still slower on narrow dirty)
-- Next CA tails once re-profiled: seepage wakes (lake-bed / seam wake / weep),
-  humidity.advect / steam / temperature amortized, rock bodies — settle is
-  no longer the top CA cost
+- Owner discussion on the candidates above before another Phase 1 CA pass
