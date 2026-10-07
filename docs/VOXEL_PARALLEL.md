@@ -50,6 +50,7 @@ creature count):
 3. Gate: only invest where a pass is roughly ≥10–15% of frame time.
 
 Harness notes live in `crates/wk-voxel/tests/perf_profile.rs`.
+Phase 1 stamp baselines and hottest-pass tables: [`VOXEL_PERF.md`](VOXEL_PERF.md).
 
 ## Phase 1 — Easy wins (same pattern as seepage)
 

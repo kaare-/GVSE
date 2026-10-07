@@ -5,7 +5,8 @@ Mass budget confidence is the entry ticket for everything after Phase 0.
 
 Companion docs: [`VOXEL_WATER.md`](VOXEL_WATER.md) (B overlay / leftover),
 [`VOXEL_BUDGET_SOAK.md`](VOXEL_BUDGET_SOAK.md) (headless / Xvfb soaks),
-[`VOXEL_PARALLEL.md`](VOXEL_PARALLEL.md) (threading), [`WORLDGEN.md`](WORLDGEN.md)
+[`VOXEL_PARALLEL.md`](VOXEL_PARALLEL.md) (threading), [`VOXEL_PERF.md`](VOXEL_PERF.md)
+(Phase 1 profile baselines), [`WORLDGEN.md`](WORLDGEN.md)
 (world size / streaming), organism docs under [`organism/`](organism/).
 
 ## Operating loop (already running)
