@@ -606,7 +606,13 @@ fn cluster_needs_hang_peel(
   }
   // Slope toes and ball chains already split; hang-peel when morphological open
   // leaves most of the cluster static (cavern roof / hill arch shells).
-  welded_cells * 2 < set.len()
+  if welded_cells * 2 < set.len() {
+    return true;
+  }
+  // Partial support: some faces air-below, some on a bed — peel the hang.
+  // Without this, a tagged <384 cantilever on one sand foothold refuses as a
+  // whole body and re-settles forever (large floating island leftovers).
+  !piece_seated_on_solid(world, set) && !cell_set_floating(world, set)
 }
 
 fn hang_horizontal_closure(
@@ -1078,15 +1084,14 @@ fn build_components(
   };
   let mut unscanned: Vec<(i32, i32)> = Vec::new();
   let mut capped = false;
-  // Untagged *seated* terrain that is already asleep must not be re-absorbed
-  // into a neighbour's flood — that was the strata re-flood treadmill.
-  // Airborne seeds (sky islands / peels) still flood through settled cells:
-  // a partial fall can leave settled remnants welded to seated debris, and
-  // refusing them trapped leftovers in the sky. Tagged bodies flood by tag.
+  // Untagged terrain that is already asleep must not be re-absorbed into a
+  // neighbour's flood. Solidity writes clear settled via wake_around; until
+  // then the cell is immobile. Tagged bodies still flood by tag. Sky leftovers
+  // wrongly slept are re-awoken by `wake_floating_competent` — not by flooding
+  // through settled rock (that froze limestone slope disks into one body).
   let tag0_floodable = |world: &World,
                         pending: &HashSet<(i32, i32)>,
                         seed_tag: u8,
-                        seed_airborne: bool,
                         nx: i32,
                         ny: i32,
                         n: &Cell,
@@ -1096,7 +1101,6 @@ fn build_components(
       return false;
     }
     if seed_tag == 0
-      && !seed_airborne
       && (world.competent_is_settled(nx, ny) || pending.contains(&(nx, ny)))
     {
       return false;
@@ -1165,9 +1169,6 @@ fn build_components(
           }
         let material = cell.material;
         let seed_tag = cell.rock_body_tag();
-        // `below_void` already computed for pass ordering — airborne seeds
-        // must flood through settled cells (see tag0_floodable).
-        let seed_airborne = below_void;
         let mut queue = VecDeque::new();
         let mut cells: Vec<(i32, i32, Cell)> = Vec::new();
         queue.push_back((gx, gy));
@@ -1196,16 +1197,7 @@ fn build_components(
             }
             match world.get_cell(nx, ny) {
               Some(n)
-                if tag0_floodable(
-                  world,
-                  &settle_pending,
-                  seed_tag,
-                  seed_airborne,
-                  nx,
-                  ny,
-                  &n,
-                  material,
-                ) =>
+                if tag0_floodable(world, &settle_pending, seed_tag, nx, ny, &n, material) =>
               {
                 queue.push_back((nx, ny))
               }
@@ -1238,13 +1230,17 @@ fn build_components(
             // True continuous strata (or peel rejected). Sleep the untagged
             // *seated* gather so later topology passes / ticks do not re-flood
             // the same hillside — that was ~8k flood cells/tick on the demo
-            // stamp from strata bailouts alone. Do **not** sleep airborne
-            // oversize gathers or the finish-mark remainder (overhang past
-            // the cap must stay eligible). Tagged oversize: visit-only.
-            if seed_tag == 0 && !seed_airborne {
-              for &(x, y, _) in &cells {
-                settle.push((x, y));
-                settle_pending.insert((x, y));
+            // stamp from strata bailouts alone. Do **not** sleep a floating
+            // gather (`cell_set_floating`); void-below alone is wrong (slope
+            // lips also have air under a face). Finish-mark remainder stays
+            // eligible. Tagged oversize: visit-only.
+            if seed_tag == 0 {
+              let set = cells_to_set(&cells);
+              if !cell_set_floating(world, &set) {
+                for &(x, y, _) in &cells {
+                  settle.push((x, y));
+                  settle_pending.insert((x, y));
+                }
               }
             }
             while let Some((cx, cy)) = queue.pop_front() {
@@ -1260,7 +1256,6 @@ fn build_components(
                       world,
                       &settle_pending,
                       seed_tag,
-                      seed_airborne,
                       nx,
                       ny,
                       &n,
@@ -2624,9 +2619,11 @@ pub fn wake_competent_bodies_regions(world: &mut World, regions: &[ActiveChunk])
   }
 }
 
-/// Flood a settled air-below seed. If the connected mass never sits on
-/// foreign solid, it is a sky island that was slept by a bad peel — wake it.
-/// A real overhang floods into seated hill rock and returns `None`.
+/// Flood a settled air-below seed. If the connected mass never sits on a
+/// *hard* foreign seat, it is a sky peel leftover — wake it. Soft beds
+/// (`LooseRock` / sand) do not count: impact debris under a hung shard used
+/// to mark the whole flood seated so mid-air staircases slept forever.
+/// A real overhang still reaches bedrock / competent foreign rock → `None`.
 fn unsupported_settled_floater_cluster(
   world: &World,
   gx: i32,
@@ -2653,7 +2650,9 @@ fn unsupported_settled_floater_cluster(
     cluster.push((cx, cy));
     if !seated {
       match world.get_cell(cx, cy - 1) {
-        Some(b) if !body_passable_at(world, cx, cy - 1, &b) => {
+        Some(b)
+          if !body_passable_at(world, cx, cy - 1, &b) && !is_roll_displaceable(b.material) =>
+        {
           if !(is_competent_rock(b.material) && flood_compatible(seed_tag, &b, material)) {
             seated = true;
           }
