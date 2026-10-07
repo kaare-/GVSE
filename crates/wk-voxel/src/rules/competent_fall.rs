@@ -1061,6 +1061,10 @@ fn build_components(
   let mut out: Vec<Component> = Vec::new();
   let mut hanging_count = 0usize;
   let mut settle: Vec<(i32, i32)> = Vec::new();
+  // Same-pass sleep for untagged strata bailouts. `settle` only applies after
+  // this function returns, so without this a second cliff seed in the same
+  // build re-flooded the hillside that the first bailout already rejected.
+  let mut settle_pending: HashSet<(i32, i32)> = HashSet::default();
   // Seeds that fail the movability gate. Only slept at the end if no
   // successful flood absorbed them — inserting into `visited` here would
   // punch holes in bodies whose edge seed comes later in scan order.
@@ -1074,6 +1078,20 @@ fn build_components(
   };
   let mut unscanned: Vec<(i32, i32)> = Vec::new();
   let mut capped = false;
+  // Untagged terrain that is already asleep must not be re-absorbed into a
+  // neighbour's flood. Solidity writes clear settled via wake_around; until
+  // then the cell is immobile. Tagged (mobile) bodies still flood by tag.
+  let tag0_floodable = |world: &World, pending: &HashSet<(i32, i32)>, seed_tag: u8, nx: i32, ny: i32, n: &Cell, material: MaterialId| -> bool {
+    if !flood_compatible(seed_tag, n, material) {
+      return false;
+    }
+    if seed_tag == 0
+      && (world.competent_is_settled(nx, ny) || pending.contains(&(nx, ny)))
+    {
+      return false;
+    }
+    true
+  };
   for void_pass in [true, false] {
     for ac in active {
       if capped {
@@ -1110,7 +1128,7 @@ fn build_components(
           }
           // Sleeping rock: already evaluated and immobile, and nothing near it
           // has been written since. Cheapest possible rejection.
-          if world.competent_is_settled(gx, gy) {
+          if world.competent_is_settled(gx, gy) || settle_pending.contains(&(gx, gy)) {
             continue;
           }
           probe::bump(&probe::seed_candidates);
@@ -1163,7 +1181,11 @@ fn build_components(
               continue;
             }
             match world.get_cell(nx, ny) {
-              Some(n) if flood_compatible(seed_tag, &n, material) => queue.push_back((nx, ny)),
+              Some(n)
+                if tag0_floodable(world, &settle_pending, seed_tag, nx, ny, &n, material) =>
+              {
+                queue.push_back((nx, ny))
+              }
               _ => {
                 visited.remove(&(nx, ny));
               }
@@ -1190,7 +1212,19 @@ fn build_components(
             }
           }
           if pushed.is_empty() {
-            // True continuous strata (or peel rejected) — finish marking.
+            // True continuous strata (or peel rejected). Sleep the untagged
+            // *gather* so later topology passes / ticks do not re-flood the
+            // same hillside — that was ~8k flood cells/tick on the demo
+            // stamp from strata bailouts alone. Do **not** sleep the
+            // finish-mark remainder: an overhang past the gather cap must
+            // stay eligible for a later seed. Tagged oversize keeps the
+            // visit-only walk (mobile identity must stay exclusive).
+            if seed_tag == 0 {
+              for &(x, y, _) in &cells {
+                settle.push((x, y));
+                settle_pending.insert((x, y));
+              }
+            }
             while let Some((cx, cy)) = queue.pop_front() {
               for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
                 let nx = world.wrap_x(cx + dx);
@@ -1199,7 +1233,17 @@ fn build_components(
                   continue;
                 }
                 match world.get_cell(nx, ny) {
-                  Some(n) if flood_compatible(seed_tag, &n, material) => {
+                  Some(n)
+                    if tag0_floodable(
+                      world,
+                      &settle_pending,
+                      seed_tag,
+                      nx,
+                      ny,
+                      &n,
+                      material,
+                    ) =>
+                  {
                     queue.push_back((nx, ny))
                   }
                   _ => {
