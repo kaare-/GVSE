@@ -192,9 +192,9 @@ Tip after seam-apply → after Air-dest + dirty clear (warm 40 / measure 200):
 | Stamp | wall | seepage | settle | bodies | physics |
 |-------|-----:|--------:|-------:|-------:|--------:|
 | short sky before | 19.5 | 3.21 | 3.87 | 1.71 | 13.5 |
-| short sky after | 16.3 | 3.25 | 0.53 | 1.81 | 11.0 |
+| short sky after | 16.3 | 3.25 | 0.53 | 1.81 | 10.1 |
 | tall/demo before | 21.3 | 2.93 | 5.29 | 2.14 | 13.8 |
-| tall/demo after | 16.8 | 2.87 | 0.76 | 2.24 | 9.8 |
+| tall/demo after | 16.8 | 2.87 | 0.76 | 2.24 | 9.1 |
 
 Settle **−4.5 ms/tick** on demo stamp (−86%); wall **−4.5 ms** (~47 → ~59
 sim-FPS). Short `budget_soak`: TRACKED **0.00/t**, park=0.
