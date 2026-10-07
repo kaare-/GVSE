@@ -4,6 +4,8 @@
 `cave_humidity` / pressurized cavity humidity (`steam` wire)). Play leftover
 pressure is the cell-resolution **steam pipe** ([`VOXEL_PIPE.md`](VOXEL_PIPE.md)),
 including the P4 episodic jet. Open hot water is accelerated evap into sky H.
+**Roadmap Phase 2 *(current)*** — behaviour tighten (local routes, less
+vertical bias, lake UW springs + seafloor vents). See below.
 **Crate:** `wk-voxel`. App: `wk-voxel-app`.
 **Goal:** native **upward** landscape builder (hot springs → geysers →
 sinter pipes/hills) that balances existing **downhill** erosion, without a
@@ -59,6 +61,26 @@ karst opens conduits that feed confined rise
 - No frost heave (P5) until P1–P4 are proven and someone asks.
 - Do not skip the condensation lottery to “make steam.”
 - Do not apply the contact dry-pore skip on the deep seepage pass.
+
+---
+
+## Roadmap Phase 2 — tighten (2026-10-07)
+
+Owner closed Phase 1 (≥30 FPS stress). This pass is **feel / locality**, not
+mass-destroy hunts (mouth / park / sinter already audited).
+
+| Work item | Intent |
+|-----------|--------|
+| Route stickiness | Less churn — prefer sticky conduit / mouth once chosen; damp flip rate |
+| Local seek only | No global surface knowledge; hard max horizontal / connected-void radius |
+| Vertical bias | Soften “always up” scoring so lateral throats compete |
+| Lake UW springs | Open hot vents into standing lake water (not only sky mouths) |
+| Seafloor vents | Same for ocean column beds |
+| Gates | Short budget soak near vents stays `park=0`; Xvfb playtest for route flips |
+
+Cooling-too-fast in sub-zero air stays Phase 3 (water-T). Hooks: `steam.rs`
+`leftover_*_route`, reverse-seep path score, discharge vent helpers; tests
+already cover `reverse_push_underwater_vent_deposits_load`.
 
 ---
 
