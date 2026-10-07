@@ -2719,6 +2719,14 @@ fn reverse_seep_chain(
     total
 }
 
+/// Sticky conduit (Phase 2): once leftover pins a chimney skin / open
+/// throat, reverse-seep prefers that pipe over a bare twin step that is
+/// only slightly more upward. Beats the rock vertical nudge (`dy * 50`)
+/// and sand wander, but not a true discharge vent (~50k). Deliberately
+/// skips packed vadose on the pin — a blanket route boost emptied the
+/// wet hill out the mouth before the water table could park.
+const REVERSE_SEEP_ROUTE_STICKY: i32 = 8_000;
+
 /// Score one reverse-seep neighbour. Higher = easier path.
 ///
 /// Order we want: discharge voids (sky / standing water) ≫ loose grains ≫
@@ -2727,6 +2735,9 @@ fn reverse_seep_chain(
 /// the same way aperture growth channelizes. Linear `perm × 8` treated a
 /// slightly open limestone and a sand lens as near-ties, so flow wandered
 /// and never lined a pipe.
+///
+/// Phase 2: a live leftover route gets a sticky boost so the mouth /
+/// conduit does not flip every pulse.
 fn reverse_seep_path_score(
     world: &World,
     dst: Cell,
@@ -2760,7 +2771,7 @@ fn reverse_seep_path_score(
             return None;
         }
     }
-    let score = if vent {
+    let mut score = if vent {
         // Voids and water-filled voids / lakes — the actual outlet.
         50_000 + dst.sat.0 as i32 * 8 + room as i32 + dy.max(0) * 80
     } else {
@@ -2784,6 +2795,14 @@ fn reverse_seep_path_score(
         let room_score = if room > 0 { room as i32 } else { 64 };
         s + room_score * 2 + dy.max(0) * 50
     };
+    // Sticky only on the live pipe (loose / sinter / open lumen), not
+    // every pin cell — blanket boost dumped the boiler to sky.
+    if !vent
+        && leftover_on_route(world, tx, ty)
+        && (leftover_is_chimney_skin(dst.material) || dst.pore > 160)
+    {
+        score += REVERSE_SEEP_ROUTE_STICKY;
+    }
     Some((score, vent && room == 0))
 }
 
@@ -4274,6 +4293,51 @@ mod tests {
             pipe_s > sand_s,
             "a forming sinter pipe must keep the route over sand ({pipe_s} vs {sand_s})"
         );
+    }
+
+    #[test]
+    fn reverse_seep_path_score_sticky_route_beats_bare_up() {
+        let mut w = World::new(303);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Chimney skin on the pin vs identical open limestone above.
+        let mut pipe = Cell::solid(MaterialId::Gravel);
+        pipe.sat = Sat(20);
+        pipe.pore = 200;
+        let mut bare = Cell::solid(MaterialId::Limestone);
+        bare.sat = Sat(20);
+        bare.pore = 180;
+        w.set_cell(5, 3, pipe);
+        w.set_cell(4, 4, bare);
+        LEFTOVER_MEMO.with(|slot| {
+            let mut memo = slot.borrow_mut();
+            *memo = LeftoverMemo::default();
+            memo.world_id = w.chunk_cache_id.get();
+            memo.route_set.insert((5, 3));
+        });
+        let sticky = reverse_seep_path_score(&w, pipe, 5, 3, 0).unwrap().0;
+        let bare_up = reverse_seep_path_score(&w, bare, 4, 4, 1).unwrap().0;
+        assert!(
+            sticky > bare_up,
+            "on-route chimney skin must beat bare upward twin ({sticky} vs {bare_up})"
+        );
+        // Packed vadose on the pin must not get the sticky boost.
+        let mut vadose = Cell::solid(MaterialId::Stone);
+        vadose.sat = Sat(4);
+        vadose.pore = 40;
+        w.set_cell(5, 4, vadose);
+        LEFTOVER_MEMO.with(|slot| {
+            slot.borrow_mut().route_set.insert((5, 4));
+        });
+        let vadose_s = reverse_seep_path_score(&w, vadose, 5, 4, 1).unwrap().0;
+        let vadose_off = {
+            LEFTOVER_MEMO.with(|slot| slot.borrow_mut().route_set.remove(&(5, 4)));
+            reverse_seep_path_score(&w, vadose, 5, 4, 1).unwrap().0
+        };
+        assert_eq!(
+            vadose_s, vadose_off,
+            "packed vadose on the pin must not get sticky boost"
+        );
+        LEFTOVER_MEMO.with(|slot| *slot.borrow_mut() = LeftoverMemo::default());
     }
 
     #[test]

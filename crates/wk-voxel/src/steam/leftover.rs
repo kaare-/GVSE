@@ -96,6 +96,32 @@ pub(super) const LEFTOVER_GROW_RADIUS: i32 = 4;
 /// spend this on a 20-cell halo.
 pub(super) const LEFTOVER_PLAN_CELLS: usize = 16384;
 
+/// Hard max horizontal seek from plan seeds (Phase 2 locality). No
+/// global surface walk — mouths beyond this wrapped Δx are ignored.
+pub(super) const LEFTOVER_PLAN_MAX_HORIZ: i32 = 48;
+
+/// Wrapped horizontal distance (cells) between two world-x values.
+pub(super) fn leftover_horiz_dist(world: &World, a: i32, b: i32) -> i32 {
+    let a = world.wrap_x(a);
+    let b = world.wrap_x(b);
+    let d = (a - b).abs();
+    match world.wrap_width {
+        Some(w) if w > 0 => d.min(w - d),
+        _ => d,
+    }
+}
+
+/// True when `(nx, _)` is within [`LEFTOVER_PLAN_MAX_HORIZ`] of any seed.
+pub(super) fn leftover_plan_within_horiz(
+    world: &World,
+    seeds: &[(i32, i32)],
+    nx: i32,
+) -> bool {
+    seeds
+        .iter()
+        .any(|&(sx, _)| leftover_horiz_dist(world, sx, nx) <= LEFTOVER_PLAN_MAX_HORIZ)
+}
+
 /// Faint P-overlay floor for the planned pin. Visible magenta, not the
 /// banned hidden 0.02 pack. Used when leftover head has not charged the
 /// cell yet.
@@ -650,6 +676,10 @@ pub(super) fn leftover_plan_mouths_from_seeds(
         for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
             let nx = world.wrap_x(gx + dx);
             let ny = gy + dy;
+            // Phase 2: hard local seek — no far-horizon mouth hunt.
+            if !leftover_plan_within_horiz(world, seeds, nx) {
+                continue;
+            }
             let Some(n) = world.get_cell(nx, ny) else {
                 continue;
             };
@@ -672,6 +702,12 @@ pub(super) fn leftover_plan_mouths_from_seeds(
                     || leftover_touches_weather_lake(world, nx, ny)
                 {
                     rank = rank.saturating_add(6_000);
+                }
+                // Sticky mouth: prefer the live pin / route over a fresh flip.
+                if memo.route_set.contains(&(nx, ny))
+                    || memo.pin_path.last().copied() == Some((nx, ny))
+                {
+                    rank = rank.saturating_sub(5_000);
                 }
                 if rank < goals.get(&(nx, ny)).copied().unwrap_or(u32::MAX) {
                     goals.insert((nx, ny), rank);
@@ -2712,6 +2748,75 @@ mod tests {
     use crate::audit::{mineral_total, sat_totals};
     use crate::chunk::ChunkCoord;
     use crate::humidity::Humidity;
+
+    #[test]
+    fn leftover_plan_horiz_locality_caps_far_seek() {
+        let mut w = World::new(401);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        w.wrap_width = Some(128);
+        let seeds = [(10, 4)];
+        assert!(leftover_plan_within_horiz(&w, &seeds, 10 + LEFTOVER_PLAN_MAX_HORIZ));
+        assert!(!leftover_plan_within_horiz(
+            &w,
+            &seeds,
+            10 + LEFTOVER_PLAN_MAX_HORIZ + 1
+        ));
+        // Toroidal wrap: x=120 is 18 cells west of seed 10 on a 128-wide ring.
+        assert!(leftover_plan_within_horiz(&w, &seeds, 120));
+        assert_eq!(leftover_horiz_dist(&w, 10, 120), 18);
+    }
+
+    #[test]
+    fn leftover_plan_mouths_ignore_far_horizon_sky() {
+        // Local gravel chimney to sky at x=6; a far crest at x=90 must not
+        // win under Phase 2 horizontal locality.
+        let mut w = World::new(402);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        w.wrap_width = Some(128);
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 4..9 {
+            for y in 1..4 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        let mut gravel = Cell::solid(MaterialId::Gravel);
+        gravel.pore = 200;
+        for y in 4..20 {
+            w.set_cell(6, y, gravel);
+        }
+        for y in 20..24 {
+            w.set_cell(6, y, Cell::air());
+        }
+        // Far high sky column — old absolute-Y ranking would prefer this.
+        for y in 4..40 {
+            w.set_cell(90, y, gravel);
+        }
+        for y in 40..46 {
+            w.set_cell(90, y, Cell::air());
+        }
+        let mut memo = LeftoverMemo::default();
+        memo.world_id = w.chunk_cache_id.get();
+        for x in 4..9 {
+            for y in 1..4 {
+                memo.zone.insert((x, y));
+            }
+        }
+        memo.heads.insert((6, 2), 2_000);
+        let path = leftover_plan_mouths_from_seeds(&w, &memo, &[(6, 3)], false)
+            .expect("local mouth plan");
+        assert!(
+            path.iter().all(|&(x, _)| leftover_horiz_dist(&w, 6, x) <= LEFTOVER_PLAN_MAX_HORIZ),
+            "planned path must stay local, got {path:?}"
+        );
+        assert!(
+            !path.iter().any(|&(x, _)| x == 90),
+            "far crest must not be the leftover mouth ({path:?})"
+        );
+    }
 
     #[test]
     fn open_sky_steam_does_not_paint_puffs_on_the_humidity_field() {
