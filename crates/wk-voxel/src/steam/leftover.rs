@@ -1120,28 +1120,15 @@ pub(super) fn leftover_is_weather_lake(world: &World, gx: i32, gy: i32, cell: Ce
         && (crate::rules::is_standing_water(world, gx, gy) || cell.sat.0 > STEAM_VOID_SAT_MAX)
 }
 
-/// True dump: open sky or an unconfined weather U / ocean.
+/// True dump: open sky, unconfined weather U / ocean, or a non-boiler
+/// standing lake / seafloor column (Phase 2 UW spring mouth).
 ///
-/// Roofed standing water is a path hop even when a side shaft reaches
-/// weather. Rain over an open mouth is a dump — leftover heat stops
-/// there instead of punching through the sheet.
+/// Water-filled **boilers** stay a path hop — overflow and head-drop
+/// wait for weather relief. Rain or leftover spray that wets an open
+/// mouth must still dump here (not punch through the sheet looking for
+/// dry sky). Same weather-vs-boiler gate as [`leftover_is_weather_relief`].
 pub(super) fn leftover_is_surface_mouth(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
-    if cell.material != MaterialId::Air {
-        return false;
-    }
-    // Unroofed Air is weather. The 48-up probe is enough — a 192-cell
-    // vessel BFS here was leftover's soak tax on every zone-rim sky cell.
-    if !void_is_confined(world, gx, gy) {
-        return true;
-    }
-    if vessel_is_boiler(world, gx, gy) {
-        return false;
-    }
-    let wet = crate::rules::is_standing_water(world, gx, gy) || cell.sat.0 > STEAM_VOID_SAT_MAX;
-    if wet {
-        return false;
-    }
-    air_void_open_to_sky(world, gx, gy)
+    leftover_is_weather_relief(world, gx, gy, cell)
 }
 
 /// Open sky / unroofed air — not a weather lake at the hill foot.
@@ -2815,6 +2802,216 @@ mod tests {
         assert!(
             !path.iter().any(|&(x, _)| x == 90),
             "far crest must not be the leftover mouth ({path:?})"
+        );
+    }
+
+    #[test]
+    fn leftover_surface_mouth_accepts_weather_lake_and_seafloor() {
+        // Phase 2: standing weather water is a leftover mouth (UW spring /
+        // seafloor). Flooded boilers stay path hops.
+        let mut w = World::new(403);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        // Floor + walls only — leave open sky above weather columns.
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..6 {
+            w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(23, y, Cell::solid(MaterialId::Bedrock));
+        }
+        // Open U lake — weather, not boiler.
+        for x in 2..6 {
+            for y in 1..5 {
+                let mut lake = Cell::air();
+                lake.sat = Sat(255);
+                w.set_cell(x, y, lake);
+            }
+            for y in 5..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let lake = w.get_cell(3, 2).unwrap();
+        assert!(!vessel_is_boiler(&w, 3, 2));
+        assert!(
+            leftover_is_surface_mouth(&w, 3, 2, lake),
+            "weather lake bed must be a leftover mouth"
+        );
+        assert!(leftover_is_weather_lake(&w, 3, 2, lake));
+
+        // Deep seafloor column under open sky (ocean bed).
+        for y in 1..8 {
+            let mut ocean = Cell::air();
+            ocean.sat = Sat(255);
+            w.set_cell(10, y, ocean);
+        }
+        for y in 8..14 {
+            w.set_cell(10, y, Cell::air());
+        }
+        let bed = w.get_cell(10, 1).unwrap();
+        assert!(
+            leftover_is_surface_mouth(&w, 10, 1, bed),
+            "seafloor standing water must be a leftover mouth"
+        );
+
+        // Roofed standing water that still opens sideways to weather —
+        // old wet-reject treated this as a path hop; Phase 2 dumps here.
+        for x in 12..15 {
+            for y in 1..4 {
+                let mut lane = Cell::air();
+                lane.sat = Sat(255);
+                w.set_cell(x, y, lane);
+            }
+            w.set_cell(x, 4, Cell::solid(MaterialId::Stone));
+        }
+        for y in 1..10 {
+            w.set_cell(15, y, Cell::air());
+        }
+        let under_lid = w.get_cell(13, 2).unwrap();
+        assert!(void_is_confined(&w, 13, 2), "stone lid roofs the lane");
+        assert!(!vessel_is_boiler(&w, 13, 2), "side shaft keeps weather");
+        assert!(
+            leftover_is_surface_mouth(&w, 13, 2, under_lid),
+            "weather-connected UW lane must be a leftover mouth"
+        );
+
+        // Fully sealed flooded pocket — boiler hop, not a mouth.
+        for x in 16..21 {
+            for y in 1..5 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 17..20 {
+            let mut pool = Cell::air();
+            pool.sat = Sat(255);
+            w.set_cell(x, 2, pool);
+        }
+        let boiler = w.get_cell(18, 2).unwrap();
+        assert!(vessel_is_boiler(&w, 18, 2));
+        assert!(
+            !leftover_is_surface_mouth(&w, 18, 2, boiler),
+            "flooded boiler must stay a path hop"
+        );
+    }
+
+    #[test]
+    fn leftover_plans_local_seafloor_mouth_when_no_sky_chimney() {
+        // Hot packed bed under a local ocean column: no gravel crest —
+        // the pin must terminate in the seafloor / lake cells.
+        let mut w = World::new(404);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 0..14 {
+            for y in 0..10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 4..10 {
+            for y in 1..4 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        // Ocean column above the bed — the only weather relief.
+        for x in 1..4 {
+            for y in 1..6 {
+                let mut lake = Cell::air();
+                lake.sat = Sat(255);
+                w.set_cell(x, y, lake);
+            }
+            for y in 6..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut memo = LeftoverMemo::default();
+        memo.world_id = w.chunk_cache_id.get();
+        for x in 4..10 {
+            for y in 1..4 {
+                memo.zone.insert((x, y));
+            }
+        }
+        memo.heads.insert((4, 2), 2_000);
+        let path = leftover_plan_mouths_from_seeds(&w, &memo, &[(4, 2)], false)
+            .expect("seafloor mouth plan");
+        let mouth = *path.last().expect("mouth");
+        let mouth_cell = w.get_cell(mouth.0, mouth.1).unwrap();
+        assert!(
+            leftover_is_surface_mouth(&w, mouth.0, mouth.1, mouth_cell)
+                || leftover_is_weather_lake(&w, mouth.0, mouth.1, mouth_cell)
+                || leftover_touches_weather_lake(&w, mouth.0, mouth.1),
+            "plan must end at the lake / seafloor mouth, got {path:?}"
+        );
+        assert!(
+            path.iter().any(|&(x, y)| {
+                w.get_cell(x, y)
+                    .is_some_and(|c| leftover_is_weather_lake(&w, x, y, c))
+            }),
+            "path must reach standing ocean water ({path:?})"
+        );
+    }
+
+    #[test]
+    fn leftover_uw_lake_spring_discharge_is_mass_flat() {
+        // Short lateral path from hot packed rock into a full weather lake:
+        // straw must overflow the standing mouth without inventing park.
+        let mut w = World::new(405);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::solid(MaterialId::Stone);
+        let cap = water_capacity_cell(wet, &w.hydro).max(1);
+        wet.sat = Sat(cap);
+        for x in 0..12 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 5..10 {
+            for y in 1..4 {
+                w.set_cell(x, y, wet);
+            }
+        }
+        for x in 1..5 {
+            for y in 1..4 {
+                let mut lake = Cell::air();
+                lake.sat = Sat(255);
+                w.set_cell(x, y, lake);
+            }
+            for y in 4..9 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let lake = w.get_cell(4, 2).unwrap();
+        assert!(leftover_is_surface_mouth(&w, 4, 2, lake));
+        let water0 = sat_totals(&w).cell_total;
+        let src0: u32 = (1..4).map(|y| w.get_cell(5, y).unwrap().sat.0 as u32).sum();
+        let mut hot = temp_fill(&w, 20.0);
+        for x in 5..10 {
+            for y in 1..4 {
+                let (hx, hy) = hot.tile_of(x, y);
+                hot.set_tile_c(hx, hy, 122.0);
+            }
+        }
+        let cfg = SteamConfig {
+            enable_pore_boil: true,
+            enable_escape: false,
+            phase_expansion_drive: 192,
+            boil_point_c: 100.0,
+            reverse_seep_hops: 8,
+            ..SteamConfig::default()
+        };
+        for t in 1..=16 {
+            w.tick = t;
+            apply_steam(&mut w, &mut hot, &cfg);
+        }
+        let src1: u32 = (1..4).map(|y| w.get_cell(5, y).unwrap().sat.0 as u32).sum();
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            water0,
+            "UW lake spring is mass-flat"
+        );
+        assert!(
+            src1 < src0,
+            "leftover must discharge into the UW lake mouth (src {src0}→{src1})"
         );
     }
 
