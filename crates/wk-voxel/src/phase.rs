@@ -60,10 +60,12 @@ pub struct PhaseConfig {
     /// is a whole cell (`255`): thaw yields `Air+FULL`, so a cheaper seat
     /// mints water. Shortfall below freeze → hold, not liquid rain.
     pub min_budget_to_snow: f32,
-    /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
-    /// top is culled to empty Air (removed, not melted — melting would
-    /// replace an ice tower with a water tower). Beyond the cap, cold
-    /// precip is held (not dumped as pore-soaking rain).
+    /// Cap on Ice+Snow cells stacked in one column. New freeze / snow
+    /// seating refuse past the cap; existing excess is relocated
+    /// laterally onto thinner cold columns (mass-flat). Peel-to-Air
+    /// deleted TRACKED; steam/H banks recondensed into another cull
+    /// cycle. Beyond the cap with no lateral seat, cold precip is held
+    /// (not dumped as pore-soaking rain).
     pub max_ice_cells_per_column: u8,
     /// Lateral search radius (columns) when seating new snow. Prefers
     /// thinner packs so peaks don't monopolize every flake.
@@ -100,7 +102,8 @@ pub struct PhaseConfig {
     /// Cold wet-sand / hillside-ice / snow spill onto ice (app wires
     /// [`crate::rules::apply_cold_avalanche`] when this is on).
     pub enable_cold_avalanche: bool,
-    /// Cull Ice+Snow stacks taller than [`Self::max_ice_cells_per_column`].
+    /// Relocate Ice/Snow stacks taller than [`Self::max_ice_cells_per_column`]
+    /// onto thinner cold neighbours (mass-flat). Soak `OFF=cull` disables.
     pub enable_cull: bool,
     /// Cold precip settles as Snow (when off, cold columns get liquid rain).
     pub enable_snow_precip: bool,
@@ -161,7 +164,7 @@ pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
             continue;
         }
         if cfg.enable_cull {
-            cull_frozen_column(world, gx, cfg.max_ice_cells_per_column);
+            cull_frozen_column(world, gx, temp, cfg);
         }
         if cfg.enable_break_unsupported {
             break_unsupported_frozen(world, gx, cfg);
@@ -534,11 +537,13 @@ fn rests_on_solid_or_pack(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Place one Snow cell on the free surface under `start_y`.
-/// Returns sat-equivalent mass consumed (`255`) or `None` if no seat.
+/// Returns humidity/budget mass consumed, or `None` if no seat.
 ///
 /// Snow is a solid lid on rock / sand / pack. A wet Air film on solid
-/// ground becomes Snow (it is not pushed into pores). Deep water gets
-/// snow seated in the empty Air above the free surface.
+/// ground becomes Snow (it is not pushed into pores) — the film sat is
+/// credited into the flake so callers drain only the shortfall
+/// (`255 − film`). Deep water gets snow seated in the empty Air above
+/// the free surface (full `255`).
 ///
 /// Plant shoot modules (Stem / Nucleus / leaf) are draw overlays — they do
 /// not lift this seat, so snow piles on the ground, not on the canopy.
@@ -593,6 +598,21 @@ fn deposit_ice_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f3
     deposit_frozen_lid_on_surface(world, gx, start_y, ice_cell())
 }
 
+/// Seat a frozen lid on Air. Any free-water film already in the cell
+/// becomes part of the Ice/Snow thaw yield — return only the humidity
+/// shortfall so wet-ground snow/frost stays B-overlay mass-flat.
+fn seat_frozen_lid_on_air(world: &mut World, gx: i32, gy: i32, lid: Cell) -> f32 {
+    let Some(air) = world.get_cell(gx, gy) else {
+        return 0.0;
+    };
+    if air.material != MaterialId::Air {
+        return 0.0;
+    }
+    let film = f32::from(air.sat.0);
+    world.set_cell(gx, gy, lid);
+    (u8::MAX as f32 - film).max(0.0)
+}
+
 fn deposit_frozen_lid_on_surface(
     world: &mut World,
     gx: i32,
@@ -609,26 +629,25 @@ fn deposit_frozen_lid_on_surface(
             continue;
         };
         if cell.material != MaterialId::Air {
-            // Solid / pack — seat in the Air cell directly above (film ok).
+            // Solid / pack — seat in the Air cell directly above (film ok;
+            // film sat credits the flake — see [`seat_frozen_lid_on_air`]).
             if let Some(above) = world.get_cell(jx, y + 1) {
                 if above.material == MaterialId::Air {
-                    world.set_cell(jx, y + 1, lid);
-                    return Some(u8::MAX as f32);
+                    return Some(seat_frozen_lid_on_air(world, jx, y + 1, lid));
                 }
             }
             return None;
         }
         if !cell.sat.is_empty() {
-            // Puddle on solid / pack → become frozen lid (no soak).
+            // Puddle on solid / pack → become frozen lid (no soak). Film
+            // sat is the flake's first payment; humidity covers the rest.
             if rests_on_solid_or_pack(world, jx, y) {
-                world.set_cell(jx, y, lid);
-                return Some(u8::MAX as f32);
+                return Some(seat_frozen_lid_on_air(world, jx, y, lid));
             }
             // Standing water body — seat lid in empty air above.
             if let Some(ay) = last_empty_air_y {
                 if ay == y + 1 {
-                    world.set_cell(jx, ay, lid);
-                    return Some(u8::MAX as f32);
+                    return Some(seat_frozen_lid_on_air(world, jx, ay, lid));
                 }
             }
             return None;
@@ -814,30 +833,137 @@ fn break_overloaded_ice(world: &mut World, gx: i32, cfg: &PhaseConfig) {
     }
 }
 
-/// Count Ice+Snow in the column and remove excess from the top.
-fn cull_frozen_column(world: &mut World, gx: i32, max_cells: u8) {
+/// Move excess Ice/Snow from a tall column onto thinner cold neighbours.
+///
+/// Peel-to-Air deleted 255 TRACKED per cell. Banking that yield as steam
+/// or humidity closed the unit ledger but alpine recondense→refreeze
+/// worsened 10k soaks. Relocating keeps thaw yield in Ice/Snow form so
+/// TRACKED stays flat and towers cannot grow into the steam-path sink
+/// tall packs enable.
+///
+/// Seats only on **empty** Air above solid/pack — never on a wet film
+/// (that would destroy free sat). If no neighbour has room under the
+/// cap, the excess stays put.
+fn cull_frozen_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
     };
-    let max_cells = max_cells as usize;
-    let mut frozen_ys: Vec<i32> = Vec::new();
+    let max_cells = cfg.max_ice_cells_per_column as usize;
+    let mut frozen_ys: Vec<(i32, MaterialId)> = Vec::new();
     for y in y0..=y1 {
         let Some(cell) = world.get_cell(gx, y) else {
             continue;
         };
         if is_frozen_solid(cell.material) {
-            frozen_ys.push(y);
+            frozen_ys.push((y, cell.material));
         }
     }
     if frozen_ys.len() <= max_cells {
         return;
     }
     // Highest Y first — peel the top of the tower.
-    frozen_ys.sort_unstable_by(|a, b| b.cmp(a));
+    frozen_ys.sort_unstable_by(|a, b| b.0.cmp(&a.0));
     let excess = frozen_ys.len() - max_cells;
-    for &y in frozen_ys.iter().take(excess) {
-        world.set_cell(gx, y, Cell::air());
+    let radius = cfg.snow_spread_radius.max(0);
+    let freeze = cfg.freeze_point_c;
+    for &(y, mat) in frozen_ys.iter().take(excess) {
+        let lid = if mat == MaterialId::Snow {
+            snow_cell()
+        } else {
+            ice_cell()
+        };
+        let mut candidates = cull_relocate_candidates(world, gx, temp, freeze, max_cells, radius);
+        if candidates.is_empty() {
+            // No thinner cold seat — leave the tower (mass-flat hold).
+            break;
+        }
+        // Thinnest pack first, then closest.
+        candidates.sort_by_key(|&(_, pack, dist)| (pack, dist));
+        let mut moved = false;
+        for &(tx, _, _) in &candidates {
+            let start_y = y.max(
+                live_surface_at(world, temp.seed, tx, temp.sea_level_y, temp.width_cols) + 2,
+            );
+            if seat_relocated_frozen(world, tx, start_y, lid) {
+                world.set_cell(gx, y, Cell::air());
+                moved = true;
+                break;
+            }
+        }
+        if !moved {
+            break;
+        }
     }
+}
+
+/// Cold neighbours with pack headroom under the column cap.
+fn cull_relocate_candidates(
+    world: &World,
+    gx: i32,
+    temp: &Temperature,
+    freeze: f32,
+    max_cells: usize,
+    radius: i32,
+) -> Vec<(i32, usize, i32)> {
+    let mut out: Vec<(i32, usize, i32)> = Vec::new();
+    for dx in -radius..=radius {
+        if dx == 0 {
+            continue;
+        }
+        let cx = world.wrap_x(gx + dx);
+        let sample_y = ground_sample_y(world, cx);
+        if temp.at_cell_packed(cx, sample_y) > freeze {
+            continue;
+        }
+        let pack = frozen_count_in_column(world, cx);
+        if pack >= max_cells {
+            continue;
+        }
+        out.push((cx, pack, dx.abs()));
+    }
+    out
+}
+
+/// Seat a relocated Ice/Snow lid on empty Air only (no wet-film absorb).
+fn seat_relocated_frozen(world: &mut World, gx: i32, start_y: i32, lid: Cell) -> bool {
+    let jx = world.wrap_x(gx);
+    let mut y = start_y;
+    let mut last_empty_air_y: Option<i32> = None;
+    for _ in 0..512 {
+        let Some(cell) = world.get_cell(jx, y) else {
+            last_empty_air_y = None;
+            y -= 1;
+            continue;
+        };
+        if cell.material != MaterialId::Air {
+            if let Some(above_y) = last_empty_air_y {
+                if above_y == y + 1 {
+                    world.set_cell(jx, above_y, lid);
+                    return true;
+                }
+            }
+            if let Some(above) = world.get_cell(jx, y + 1) {
+                if above.material == MaterialId::Air && above.sat.is_empty() {
+                    world.set_cell(jx, y + 1, lid);
+                    return true;
+                }
+            }
+            return false;
+        }
+        if !cell.sat.is_empty() {
+            // Wet film / puddle — do not overwrite free sat with a move.
+            if let Some(ay) = last_empty_air_y {
+                if ay == y + 1 {
+                    world.set_cell(jx, ay, lid);
+                    return true;
+                }
+            }
+            return false;
+        }
+        last_empty_air_y = Some(y);
+        y -= 1;
+    }
+    false
 }
 
 fn open_sky_above(world: &World, gx: i32, gy: i32) -> bool {
@@ -1314,28 +1440,111 @@ mod tests {
     }
 
     #[test]
-    fn ice_column_budget_culls_runaway_tower() {
+    fn ice_column_budget_relocates_excess_laterally() {
+        // Peel-to-Air / steam / H banks all worsened 10k soaks. Excess
+        // must move onto a thinner cold neighbour, TRACKED-flat.
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
-        for y in 1..20 {
+        // Two cold neighbours so excess (3) fits under the cap on each.
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        let stacked = 7i32;
+        let cap = 4i32;
+        for y in 1..=stacked {
             w.set_cell(1, y, Cell::solid(MaterialId::Ice));
         }
+        let before = (stacked as i64) * (u8::MAX as i64);
         let temp = cold_temp(16, 32, -5.0);
         let cfg = PhaseConfig {
-            max_ice_cells_per_column: 4,
+            max_ice_cells_per_column: cap as u8,
+            snow_spread_radius: 3,
+            enable_thaw: false,
+            enable_freeze: false,
+            enable_slush: false,
+            period_ticks: 1,
             ..PhaseConfig::default()
         };
         apply_phase(&mut w, &temp, &cfg);
-        let mut ice = 0;
-        for y in 0..20 {
-            if w.get_cell(1, y).unwrap().material == MaterialId::Ice {
-                ice += 1;
+        let mut src = 0i64;
+        let mut dst = 0i64;
+        for y in 0..32 {
+            if w.get_cell(1, y).is_some_and(|c| c.material == MaterialId::Ice) {
+                src += 1;
+            }
+            for gx in 2..=3 {
+                if w.get_cell(gx, y).is_some_and(|c| c.material == MaterialId::Ice) {
+                    dst += 1;
+                }
             }
         }
-        assert_eq!(ice, 4, "excess ice must be culled, not melted");
-        assert_eq!(w.get_cell(1, 19).unwrap().material, MaterialId::Air);
-        assert!(w.get_cell(1, 19).unwrap().sat.is_empty());
+        assert_eq!(src, cap as i64, "source must peel down to the cap");
+        assert_eq!(dst, stacked as i64 - cap as i64, "excess must seat on neighbours");
+        let after_steam: i64 = w.steam.values().map(|&v| v as i64).sum();
+        assert_eq!(
+            (src + dst) * (u8::MAX as i64) + after_steam,
+            before,
+            "relocated ice TRACKED must stay flat"
+        );
+    }
+
+    #[test]
+    fn ice_column_budget_holds_when_neighbours_full() {
+        // No lateral room → leave the tower (never destroy / bank).
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let cap = 4i32;
+        for gx in 1..=5 {
+            w.set_cell(gx, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=cap {
+                w.set_cell(gx, y, Cell::solid(MaterialId::Ice));
+            }
+        }
+        // Over-cap only on column 3.
+        for y in (cap + 1)..=(cap + 3) {
+            w.set_cell(3, y, Cell::solid(MaterialId::Ice));
+        }
+        let before_ice = {
+            let mut n = 0i64;
+            for gx in 1..=5 {
+                for y in 0..16 {
+                    if w.get_cell(gx, y).is_some_and(|c| c.material == MaterialId::Ice) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let temp = cold_temp(16, 32, -5.0);
+        let cfg = PhaseConfig {
+            max_ice_cells_per_column: cap as u8,
+            snow_spread_radius: 2,
+            enable_thaw: false,
+            enable_freeze: false,
+            enable_slush: false,
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        let mut after_ice = 0i64;
+        let mut src = 0i64;
+        for gx in 1..=5 {
+            for y in 0..16 {
+                if w.get_cell(gx, y).is_some_and(|c| c.material == MaterialId::Ice) {
+                    after_ice += 1;
+                    if gx == 3 {
+                        src += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(after_ice, before_ice, "hold must not destroy ice");
+        assert_eq!(src, (cap + 3) as i64, "over-cap tower stays when neighbours full");
+        assert_eq!(
+            w.steam.values().map(|&v| v as i64).sum::<i64>(),
+            0,
+            "hold must not bank peel as steam"
+        );
     }
 
     #[test]
@@ -1773,6 +1982,65 @@ mod tests {
         let landed = deposit_precip_on_surface(&mut w, 2, 10, 255.0, Some(&temp), Some(&cfg));
         assert!(landed > 0.0);
         assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Snow);
+    }
+
+    #[test]
+    fn wet_film_snow_credits_film_sat_on_budget() {
+        // Wet-ground snow used to charge humidity a full 255 while also
+        // deleting the film sat → UNEXPL-W of `film` per flake.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let film = 100u8;
+        w.set_cell(
+            2,
+            2,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(film),
+                ..Cell::air()
+            },
+        );
+        let temp = cold_temp(16, 16, -6.0);
+        let cfg = PhaseConfig::default();
+        let landed = deposit_precip_on_surface(&mut w, 2, 10, 255.0, Some(&temp), Some(&cfg));
+        assert_eq!(
+            w.get_cell(2, 2).unwrap().material,
+            MaterialId::Snow,
+            "film on solid must become snow"
+        );
+        assert_eq!(
+            landed, (u8::MAX - film) as f32,
+            "humidity pays only the flake shortfall, got {landed}"
+        );
+    }
+
+    #[test]
+    fn wet_film_frost_credits_film_sat_on_budget() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let film = 80u8;
+        w.set_cell(
+            2,
+            2,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(film),
+                ..Cell::air()
+            },
+        );
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig::default();
+        let paid =
+            deposit_condensate_on_surface(&mut w, 2, 12, 255.0, Some(&temp), Some(&cfg));
+        assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Ice);
+        assert_eq!(
+            paid, (u8::MAX - film) as f32,
+            "frost humidity pay must credit the film, got {paid}"
+        );
     }
 
     #[test]

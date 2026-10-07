@@ -108,6 +108,36 @@ delta as load.
 Prefer headless soaks over overnight GUI runs for leftover hunts —
 see [`VOXEL_BUDGET_SOAK.md`](VOXEL_BUDGET_SOAK.md).
 
+### Alpine ice / steam cadence (tall packs)
+
+After wet-film snow credit, 10k TRACKED was still red. Isolation:
+
+| `GVSE_SOAK_OFF` | 5k `/t` |
+|--|--|
+| (baseline, no-op cull) | −0.78 |
+| `steam` / `cadence` | **≈ −0.02** |
+| `leftover` | −0.69 |
+
+Steam **cadence** scrub/park wrote sat onto Ice/Snow (capacity 0).
+`sat_totals` counted that film as pore, but thaw replaces the cell with
+`Cell::water()` and deletes it — slow UNEXPL-W that grew with tall packs
+(no-op cull worse than peel-delete; lateral relocate spread the contact
+surface). Park paths now respect `water_capacity_cell`; excess ice still
+relocates laterally (mass-flat).
+
+After that fix: 5k ≈ −0.02/t; 10k ≈ **−2.08/t** with a cliff after ~5k.
+Post-fix 10k isolation: `OFF=cadence|steam|cond|evap` all ≈ 0 — residual was
+a cadence × snow × evap interaction (not the ice-sat park).
+
+**Root cause (post-5k cliff):** cadence `scrub_invalid_steam_seats` /
+`recondense_cool` → `park_or_restore_vapour` / `park_orphan_water` seeded
+thin liquid films on dry Air whose first solid below (or above) is Ice/Snow
+— including mid-air above the pack. Orphan surface films evaporate hard;
+condensation / frost then closes a destroy loop once alpine packs thicken
+(~5k). Fix: `is_alpine_film_park_seat` refuses those seats (standing lakes
+on ice still accept); leftover stays steam. Remeasure: 5k ≈ **−0.02/t**;
+10k ≈ **−0.06/t** (was −2.08/t); `park=0`; mineral flat.
+
 ### Geyser / pipe mass audit (destroy vs design)
 
 Checked after the highland-lake watch. **No smoking-gun path that
@@ -562,7 +592,9 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
   under snow into ice (snow-on-ice pack).
 - Rate limits: freeze / thaw / slush / break per column per tick.
-- **Max Ice+Snow cells / column** — excess culled to empty Air (not melted).
+- **Max Ice+Snow cells / column** — excess relocates laterally onto
+  thinner cold neighbours (mass-flat). Peel-to-Air / steam / H banks
+  were named aesthetic sinks that worsened alpine 10k TRACKED.
 
 Cold snap: Tab → Base temp below 0°C (keep `C` drizzle on). Warm snap: raise
 base temp above freeze point.

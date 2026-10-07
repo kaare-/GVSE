@@ -1257,8 +1257,13 @@ fn park_or_restore_vapour(world: &mut World, gx: i32, gy: i32, units: u32) {
     if left == 0 {
         return;
     }
+    // Only real water hosts. Ice/Snow/Bedrock have capacity 0 — writing
+    // sat there used to hide mass in `sat_totals` pore until thaw replaced
+    // the cell with `Cell::water()` and deleted the illicit film (tall
+    // alpine packs made scrub→park-on-ice→thaw a slow UNEXPL-W).
     if let Some(mut c) = world.get_cell(gx, gy) {
-        let room = u8::MAX.saturating_sub(c.sat.0) as u32;
+        let cap = water_capacity_cell(c, &world.hydro);
+        let room = cap.saturating_sub(c.sat.0) as u32;
         let put = room.min(left);
         if put > 0 {
             c.sat = Sat(c.sat.0 + put as u8);
@@ -1433,6 +1438,11 @@ fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32)
         }
         let steam = steam_at(world, gx, gy);
         if steam == 0 {
+            continue;
+        }
+        // Thin films on / under Ice/Snow are the cadence × snow × evap
+        // cliff seat — keep vapour rather than seeding an orphan film.
+        if crate::displace::is_alpine_film_park_seat(world, gx, gy, cell.sat.0) {
             continue;
         }
         let room = u8::MAX.saturating_sub(cell.sat.0);
@@ -3771,6 +3781,84 @@ mod tests {
             crate::budget::BudgetProbe::snapshot().water_park,
             0,
             "overlay off: park probe stays quiet"
+        );
+    }
+
+    #[test]
+    fn park_or_restore_does_not_hide_sat_on_ice() {
+        // Cadence scrub of a steam seat that froze used to write sat onto
+        // Ice (capacity 0). TRACKED counts ice as 255 thaw yield and ignores
+        // ice.sat; thaw → `Cell::water()` then deleted the film (UNEXPL-W
+        // that grew with tall alpine packs).
+        let mut w = World::new(7);
+        for cy in 0..3 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(4, 1, Cell::solid(MaterialId::Ice));
+        let before = sat_totals(&w).cell_total;
+        park_or_restore_vapour(&mut w, 4, 1, 80);
+        let ice = w.get_cell(4, 1).unwrap();
+        assert_eq!(ice.material, MaterialId::Ice);
+        assert_eq!(ice.sat.0, 0, "ice must not absorb parked vapour as sat");
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before + 80,
+            "parked mass must stay as steam/liquid, not illicit ice sat"
+        );
+    }
+
+    #[test]
+    fn scrub_steam_under_new_ice_stays_tracked_flat() {
+        let mut w = World::new(7);
+        for cy in 0..3 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::air());
+        add_steam(&mut w, 3, 1, 120);
+        let before = sat_totals(&w).cell_total;
+        // Freeze the seat — scrub must relocate vapour, not film the ice.
+        w.set_cell(3, 1, Cell::solid(MaterialId::Ice));
+        scrub_invalid_steam_seats(&mut w, MAX_STEAM_CELLS);
+        assert_eq!(steam_at(&w, 3, 1), 0, "ice is not a steam seat");
+        assert_eq!(
+            w.get_cell(3, 1).unwrap().sat.0,
+            0,
+            "scrub must not leave sat on ice"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "scrub under ice must stay mass-flat"
+        );
+    }
+
+    #[test]
+    fn scrub_open_steam_above_ice_does_not_seed_film() {
+        // Open-sky scrub→park on a dry ice lid seeded orphan films that
+        // fed the post-5k cadence × snow × evap TRACKED cliff.
+        let mut w = World::new(7);
+        for cy in 0..3 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 2..7 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Ice));
+            w.set_cell(x, 2, Cell::air());
+        }
+        add_steam(&mut w, 4, 2, 90);
+        let before = sat_totals(&w).cell_total;
+        scrub_invalid_steam_seats(&mut w, MAX_STEAM_CELLS);
+        assert_eq!(
+            w.get_cell(4, 2).unwrap().sat.0,
+            0,
+            "scrub must not park a thin film on ice"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            before,
+            "open scrub above ice must stay mass-flat (steam bank)"
         );
     }
 

@@ -18,11 +18,49 @@ use std::collections::VecDeque;
 use wk_material::MaterialId;
 
 use crate::cell::{water_capacity_cell, Cell, Sat};
+use crate::chunk::STANDING_AIR_SAT;
 use crate::fasthash::FxHashSet as HashSet;
 use crate::grid::World;
 
 /// Cells visited when searching for somewhere to put displaced water.
 pub const WATER_SPREAD_MAX_VISIT: usize = 4096;
+
+#[inline]
+fn is_frozen_lid(mat: MaterialId) -> bool {
+  matches!(mat, MaterialId::Ice | MaterialId::Snow)
+}
+
+/// Air that would become an alpine Ice/Snow film and is not already a
+/// standing lake. Steam cadence scrub/park seeding here feeds the
+/// cadence × snow × evap TRACKED cliff (orphan films evaporate hard, then
+/// condensation / frost cycles destroy mass).
+///
+/// Matches Air whose first solid below is Ice/Snow (including mid-air
+/// above the pack — gravity drops that film onto the lid), or whose
+/// first solid above is Ice/Snow. Standing water on ice is a real lake
+/// and stays a valid park seat.
+pub(crate) fn is_alpine_film_park_seat(world: &World, x: i32, y: i32, sat: u8) -> bool {
+  if sat >= STANDING_AIR_SAT {
+    return false;
+  }
+  // First non-Air below — ice/snow pack (or mid-air above it).
+  for dy in 1..24 {
+    match world.get_cell(x, y - dy) {
+      Some(c) if c.material == MaterialId::Air => continue,
+      Some(c) if is_frozen_lid(c.material) => return true,
+      _ => break,
+    }
+  }
+  // First non-Air above — buried under an ice/snow lid.
+  for dy in 1..24 {
+    match world.get_cell(x, y + dy) {
+      Some(c) if c.material == MaterialId::Air => continue,
+      Some(c) if is_frozen_lid(c.material) => return true,
+      _ => break,
+    }
+  }
+  false
+}
 
 /// Remove and return the free water in a cell (0 when dry or not `Air`).
 #[inline]
@@ -90,6 +128,10 @@ pub fn park_orphan_water(world: &mut World, gx: i32, gy: i32, mut units: u32) ->
     if c.material != MaterialId::Air {
       continue;
     }
+    // Do not seed thin films on / under Ice/Snow (steam cadence cliff).
+    if is_alpine_film_park_seat(world, gx, y, c.sat.0) {
+      continue;
+    }
     let room = (u8::MAX - c.sat.0) as u32;
     let put = room.min(units);
     if put > 0 {
@@ -119,6 +161,9 @@ pub fn park_orphan_water(world: &mut World, gx: i32, gy: i32, mut units: u32) ->
       let Some(mut c) = world.get_cell(x, y) else {
         continue;
       };
+      if c.material == MaterialId::Air && is_alpine_film_park_seat(world, x, y, c.sat.0) {
+        continue;
+      }
       let cap = water_capacity_cell(c, &world.hydro) as u32;
       if cap == 0 {
         continue;
@@ -149,10 +194,14 @@ pub fn park_orphan_water(world: &mut World, gx: i32, gy: i32, mut units: u32) ->
       }
       let x = world.wrap_x(gx + dx);
       let y = gy + dy;
-      if !world
-        .get_cell(x, y)
-        .is_some_and(|c| c.material == MaterialId::Air)
-      {
+      let Some(c) = world.get_cell(x, y) else {
+        continue;
+      };
+      if c.material != MaterialId::Air {
+        continue;
+      }
+      // Same alpine skip: cave-H on a dry ice lid is another film seed.
+      if is_alpine_film_park_seat(world, x, y, c.sat.0) {
         continue;
       }
       while units > 0 {
@@ -191,7 +240,10 @@ pub fn park_orphan_or_keep(
   let Some(mut c) = world.get_cell(keep_gx, keep_gy) else {
     return crate::steam::bank_remaining_vapour(world, park_gx, park_gy, left);
   };
-  let room = (u8::MAX - c.sat.0) as u32;
+  // Respect material capacity — Ice/Snow must not absorb a keep film
+  // (thaw would wipe that sat and drop TRACKED).
+  let cap = crate::cell::water_capacity_cell(c, &world.hydro);
+  let room = cap.saturating_sub(c.sat.0) as u32;
   let put = room.min(left);
   if put == 0 {
     return crate::steam::bank_remaining_vapour(world, keep_gx, keep_gy, left);
@@ -500,6 +552,60 @@ mod tests {
       crate::cave_humidity::cave_humidity_at(&w, 5, 3) > 0
         || w.get_cell(5, 3).unwrap().sat.0 > 0,
       "units must land as sat or cave humidity"
+    );
+  }
+
+  #[test]
+  fn park_orphan_refuses_thin_film_on_ice() {
+    // Steam cadence scrub→park used to wet dry Air on Ice/Snow. Those
+    // orphan films evaporate hard and feed the post-5k TRACKED cliff.
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    // Wall the −x side so lateral park cannot spill into unset Air.
+    for y in 0..5 {
+      w.set_cell(3, y, Cell::solid(MaterialId::Stone));
+    }
+    w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(4, 1, Cell::solid(MaterialId::Ice));
+    w.set_cell(4, 2, Cell::air()); // dry film seat on ice
+    w.set_cell(4, 3, Cell::air()); // mid-air above pack — also refused
+    w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(5, 2, Cell::air()); // stone-backed seat OK
+    let left = park_orphan_water(&mut w, 4, 2, 80);
+    assert_eq!(
+      w.get_cell(4, 2).unwrap().sat.0,
+      0,
+      "must not seed a thin film on ice"
+    );
+    assert_eq!(
+      w.get_cell(4, 3).unwrap().sat.0,
+      0,
+      "must not park mid-air above an ice pack"
+    );
+    assert_eq!(left, 0, "mass must park on a non-alpine seat or cave-H");
+    assert!(
+      w.get_cell(5, 2).unwrap().sat.0 > 0
+        || crate::cave_humidity::cave_humidity_at(&w, 5, 2) > 0,
+      "units must land on the stone-backed neighbour"
+    );
+  }
+
+  #[test]
+  fn park_orphan_may_top_up_standing_water_on_ice() {
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(4, 1, Cell::solid(MaterialId::Ice));
+    let mut lake = Cell::air();
+    lake.sat = Sat(200); // >= STANDING_AIR_SAT
+    w.set_cell(4, 2, lake);
+    let left = park_orphan_water(&mut w, 4, 2, 40);
+    assert_eq!(left, 0);
+    assert_eq!(
+      w.get_cell(4, 2).unwrap().sat.0,
+      240,
+      "standing lake on ice remains a valid park seat"
     );
   }
 
