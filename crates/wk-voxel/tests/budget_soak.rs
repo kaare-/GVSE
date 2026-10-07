@@ -13,9 +13,11 @@
 //! ```
 //!
 //! Env:
-//! - `GVSE_SOAK_TICKS` — long soak length (default 50_000)
+//! - `GVSE_SOAK_TICKS` — soak length for short (default 120) and long (default 50_000)
 //! - `GVSE_BUDGET_PERIOD` — sample every N ticks (default 60)
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
+//! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `karst`, `competent`,
+//!   `phase`, `failure`
 
 use wk_voxel::{
     stamp_world, step_world, BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig,
@@ -179,7 +181,10 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     };
     let karst = KarstConfig::default();
     let cloud = CloudConfig::default();
-    let phase = PhaseConfig::default();
+    let mut phase = PhaseConfig::default();
+    if soak_off("phase") {
+        phase.enabled = false;
+    }
     let mut steam = SteamConfig::default();
     if soak_off("steam") {
         steam.enabled = false;
@@ -280,13 +285,21 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
 fn short_budget_soak() {
     let warm = env_u64("GVSE_BUDGET_WARM", 20);
     let period = env_u64("GVSE_BUDGET_PERIOD", 30);
-    let (d_min, d_tracked, probe) = run_soak(120, warm, period, "short");
+    let ticks = env_u64("GVSE_SOAK_TICKS", 120);
+    let off = std::env::var("GVSE_SOAK_OFF").unwrap_or_default();
+    let label = if off.is_empty() {
+        format!("short/{ticks}")
+    } else {
+        format!("short/{ticks}/OFF={off}")
+    };
+    let (d_min, d_tracked, probe) = run_soak(ticks, warm, period, &label);
     assert_eq!(probe.water_park, 0, "park leftover must stay closed");
     assert_eq!(probe.water_clamp, 0, "humidity clamp must stay closed");
     assert_eq!(probe.mineral_clip, 0, "dissolved clip must stay closed");
-    // Absolute leftover over 120 ticks is noisy; rates are the signal.
+    // Absolute leftover over short windows is noisy; rates are the signal.
     eprintln!(
-        "short soak summary: d_tracked={d_tracked} d_min={d_min} park={}",
+        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={}",
+        d_tracked as f64 / ticks.max(1) as f64,
         probe.water_park
     );
 }
