@@ -497,9 +497,9 @@ Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
 ## Phase 3 — ice revisit (roadmap)
 
 Owner closed Phase 2 (2026-10-07). Goal: **brittle solid** look, not
-powder-throughflow. Water does not carry temperature today — standing
-warm water on ice cannot melt it; geyser discharge in sub-zero air cools
-too fast for the same reason.
+powder-throughflow. Slice B: free-water `water_temp` drives film-on-ice /
+contact melt (warm film in a cold tile melts). Slice C still open: geyser
+discharge in sub-zero air cools too fast without soft mouth cool.
 
 ### Locked: option 2 — free water carries temperature (2026-10-07)
 
@@ -511,7 +511,7 @@ clear when `sat→0`.
 | Slice | Scope | Exit |
 |-------|--------|------|
 | A | Sparse map + helpers; seed/mix on one path (mouth or gravity) | **Landed** (2026-10-07): `World.water_temp` + `water_temp::{get/set/clear/mix}`; wired on leftover mouth dump (`reverse_push` → Air) and gravity Air→Air when ledger non-empty. Hot dump retains T ≠ cold tile; heat-only (TRACKED flat). |
-| B | Phase reads water_temp for film-on-ice / contact melt | Warm film over ice in cold tile melts; mass-flat |
+| B | Phase reads water_temp for film-on-ice / contact melt | **Landed** (2026-10-07): `water_on_ice_and_slush` + `frozen_contact_is_warm` use `water_temp_at` for free-water seats; warm film over ice in cold tile melts; film sat unchanged (ice→FULL thaw only). |
 | C | Mouth writes hot water_temp; soft cool vs instant skin wipe | Sub-zero discharge stays warm enough to matter |
 
 Hard no’s: no weather coarsen / lottery skip / `live_surface_y` change;
@@ -545,8 +545,10 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   a warm lake still melt) → `Air+FULL`. Columns with frozen cells probe
   deeper for the phase gate so buried ice under thick lakes still runs.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
-  sheet — that lofted ice into the rain). Melts the ice when **warm** only
-  (cold ponded rain no longer melts sheets — that churned ice towers).
+  sheet — that lofted ice into the rain). Melts the ice when the film's
+  free-water T is **warm** (`water_temp_at`, else tile inherit) — including
+  hot free water in a cold tile (Phase 3 slice B). Cold ponded rain (tile
+  inherit ≤ freeze) no longer melts sheets — that churned ice towers.
 - **Ice lid × evaporation:** intentional. Evap only runs on wet Air with
   **Air** above it (`dry_above_max`). An Ice/Snow sheet blocks that, so a
   capped lake loses far less mass and the humidity pump dries out — a
