@@ -2812,10 +2812,13 @@ mod tests {
         let mut w = World::new(403);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.ensure_chunk(ChunkCoord::new(1, 0));
+        // Floor + walls only — leave open sky above weather columns.
         for x in 0..24 {
-            for y in 0..12 {
-                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
-            }
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..6 {
+            w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(23, y, Cell::solid(MaterialId::Bedrock));
         }
         // Open U lake — weather, not boiler.
         for x in 2..6 {
@@ -2824,7 +2827,7 @@ mod tests {
                 lake.sat = Sat(255);
                 w.set_cell(x, y, lake);
             }
-            for y in 5..10 {
+            for y in 5..12 {
                 w.set_cell(x, y, Cell::air());
             }
         }
@@ -2861,7 +2864,7 @@ mod tests {
             }
             w.set_cell(x, 4, Cell::solid(MaterialId::Stone));
         }
-        for y in 1..8 {
+        for y in 1..10 {
             w.set_cell(15, y, Cell::air());
         }
         let under_lid = w.get_cell(13, 2).unwrap();
@@ -2873,11 +2876,15 @@ mod tests {
         );
 
         // Fully sealed flooded pocket — boiler hop, not a mouth.
+        for x in 16..21 {
+            for y in 1..5 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
         for x in 17..20 {
             let mut pool = Cell::air();
             pool.sat = Sat(255);
             w.set_cell(x, 2, pool);
-            w.set_cell(x, 3, Cell::solid(MaterialId::Bedrock));
         }
         let boiler = w.get_cell(18, 2).unwrap();
         assert!(vessel_is_boiler(&w, 18, 2));
