@@ -1210,10 +1210,12 @@ impl Temperature {
                         // Lighter inertia weight than surface skin — water
                         // stack capacity is already large; full inertia left
                         // mid-lake nearly frozen in place across soaks.
-                        let relax = (cfg.sky_relax * 0.35
+                        // Owner −30 °C soak: lid chill alone left mid-lake
+                        // stuck near −5; slightly stronger climate pull.
+                        let relax = (cfg.sky_relax * 0.55
                             / (1.0
-                                + props.capacity.max(0.05) * cfg.inertia_scale * 0.2))
-                            .clamp(0.002, 0.06);
+                                + props.capacity.max(0.05) * cfg.inertia_scale * 0.15))
+                            .clamp(0.004, 0.10);
                         t + (target - t) * relax
                     } else {
                         // Overburden from the live rock surface, every step.
@@ -1557,6 +1559,52 @@ impl Temperature {
             let na = ta + (teq - ta) * a;
             self.write_tile_temp(hx, hy, tw, nw, dense, bounds, slab_w);
             self.write_tile_temp(hx, air_hy, ta, na, dense, bounds, slab_w);
+            // Ice lids kill free-water buoyancy (ice tiles report
+            // free_water≈0), so cold skin never sank into the column —
+            // deep lake stayed "still" while the lid thrash-froze.
+            // Quench free-water tiles under a cold watery/ice surface.
+            self.quench_free_water_under_skin(
+                hx, hy, nw, rate * quench, dense, bounds, slab_w,
+            );
+        }
+    }
+
+    /// Pull buried free-water tiles toward a cold open-water / ice skin.
+    fn quench_free_water_under_skin(
+        &mut self,
+        hx: i32,
+        skin_hy: i32,
+        skin_t: f32,
+        rate: f32,
+        dense: bool,
+        bounds: Option<TileBounds>,
+        slab_w: usize,
+    ) {
+        let rate = rate.clamp(0.0, 0.55);
+        if rate < 1e-5 {
+            return;
+        }
+        for d in 1..=8 {
+            let hy = skin_hy - d;
+            let Some(props) = self.props_cache.get(&(hx, hy)).copied() else {
+                break;
+            };
+            if props.free_water < 0.5 {
+                // Hit rock / dry buried — stop. Air gaps are rare under a lake.
+                if matches!(props.layer, TileLayer::Air) {
+                    continue;
+                }
+                break;
+            }
+            let t0 = self.read_tile_temp(hx, hy, dense, bounds, slab_w);
+            if t0 <= skin_t + 0.35 {
+                continue;
+            }
+            // Depth falloff: near-skin tiles quench harder.
+            let depth_k = (1.0 - 0.08 * (d as f32 - 1.0)).clamp(0.35, 1.0);
+            let a = (rate * 0.65 * depth_k).clamp(0.0, 0.45);
+            let n0 = t0 + (skin_t - t0) * a;
+            self.write_tile_temp(hx, hy, t0, n0, dense, bounds, slab_w);
         }
     }
 
@@ -3598,6 +3646,68 @@ mod tests {
         assert!(
             water1 > water0 + 2.0,
             "hot rock must warm the pond ({water0:.1} → {water1:.1})"
+        );
+    }
+
+    #[test]
+    fn ice_lid_chills_deep_free_water_column() {
+        // Owner: −30 °C air, ice lid, deep lake still near −5 — buoyancy
+        // skipped ice tiles (free_water≈0) so skin chill never sank.
+        let sea: i32 = 40;
+        let bed: i32 = 4;
+        let mut world = World::new(17);
+        for y in 0..=sea + 8 {
+            world.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+        }
+        for x in 0..8 {
+            for y in 0..=bed {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in (bed + 1)..sea {
+                world.set_cell(x, y, Cell::water());
+            }
+            world.set_cell(x, sea, Cell::solid(MaterialId::Ice));
+            world.set_cell(x, sea + 1, Cell::air());
+        }
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 16, 80, 1, 16, sea, false);
+        t.fill_initial(0);
+        let tc = t.tile_cols.max(1);
+        let skin_hy = sea.div_euclid(tc);
+        let deep_hy = ((bed + sea) / 2).div_euclid(tc);
+        let hx = 1i32;
+        for v in t.cells.values_mut() {
+            *v = -2.0;
+        }
+        t.cells.insert((hx, skin_hy), -2.0);
+        t.cells.insert((hx, deep_hy), 8.0);
+        for d in 1..=4 {
+            t.cells.insert((hx, skin_hy + d), -30.0);
+        }
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.geothermal_relax = 0.0;
+        t.config.geothermal_flux_c = 0.0;
+        t.config.near_surface_couple = 0.0;
+        t.config.water_rock_couple = 0.0;
+        t.config.pore_water_couple = 0.0;
+        t.config.water_convect_bias = 0.0;
+        t.config.air_water_skin_couple = 0.4;
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 16, 80);
+        let deep0 = t.at_tile(hx, deep_hy);
+        for i in 0..10 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let deep1 = t.at_tile(hx, deep_hy);
+        assert!(
+            deep1 < deep0 - 1.5,
+            "cold ice lid must chill deep free water (before={deep0:.1} after={deep1:.1})"
         );
     }
 
