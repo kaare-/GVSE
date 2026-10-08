@@ -171,6 +171,21 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   neighbour’s ice bottom (empty air / shore do not block). Heat quench
   retuned milder after owner “dumping heat” note.
 
+**Xvfb sheet tip** (2026-10-08, `#370` tip)
+
+- Stills: `/opt/cursor/artifacts/phase3-sheet-03-lid-fresh.png` …
+  `09-final.png`. Agent framing again weak for lid geometry; owner
+  playtest remains the gate.
+
+**Decision list** (2026-10-08 evening Oslo cycle)
+
+1. **Merge stack `#365`→`#370`?** All CI-green, ready, CLEAN. Bottom-up
+   onto `park-bank`. Agent cannot enable GitHub auto-merge from here.
+2. **Phase 3 exit?** Accept “reads as ice” after sheet-lock + lid-chill
+   playtest, or list remaining lid/heat issues.
+3. **Phase 4 start?** Only after (2). Goal: re-profile + larger worlds
+   (see below). No Phase 4 code until you close Phase 3.
+
 **Still open**
 
 - Owner playtest gate on tip `#370`: “reads as ice” / no lake lid pulse /
