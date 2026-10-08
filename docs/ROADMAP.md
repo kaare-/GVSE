@@ -167,14 +167,15 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 
 **Landed (ice sheet lock)** (2026-10-08 playtest)
 
-- Under-lid freeze waits for lid-level neighbours (ice/snow/shore) so
-  columns cannot finger ahead of the sheet. Heat quench retuned milder
-  after owner “dumping heat” note.
+- Under-lid freeze may not deepen more than one cell past a wet
+  neighbour’s ice bottom (empty air / shore do not block). Heat quench
+  retuned milder after owner “dumping heat” note.
 
 **Still open**
 
-- Owner playtest gate: “reads as ice” / no lake lid pulse / deep lake
-  cools when `base_temp` dropped with overburden off.
+- Owner playtest gate on tip `#370`: “reads as ice” / no lake lid pulse /
+  sheet (not fingers) / deep lake cools under hard cold without vacuum.
+  Stack `#365`–`#370` is CI-green and ready to merge bottom-up.
 
 **Exit criteria**
 
