@@ -1932,7 +1932,8 @@ mod tests {
             3,
             Cell {
                 material: MaterialId::Air,
-                sat: Sat(80),
+                // Mist below min_sat_to_freeze — stays a film (no seal).
+                sat: Sat(32),
                 flags: Default::default(),
                 _pad: 0,
                 pore: 128,
@@ -1946,7 +1947,7 @@ mod tests {
             "supported ice must not swap upward into rain"
         );
         assert_eq!(w.get_cell(1, 3).unwrap().material, MaterialId::Air);
-        assert_eq!(w.get_cell(1, 3).unwrap().sat.0, 80);
+        assert_eq!(w.get_cell(1, 3).unwrap().sat.0, 32);
     }
 
     #[test]
@@ -1962,10 +1963,15 @@ mod tests {
         assert_eq!(
             w.get_cell(1, 2).unwrap().material,
             MaterialId::Ice,
-            "cold rain on ice must stay a film — not melt→refreeze churn"
+            "cold rain must not melt the sheet"
         );
-        assert_eq!(w.get_cell(1, 3).unwrap().material, MaterialId::Air);
-        assert!(w.get_cell(1, 3).unwrap().sat.is_full());
+        // Cold ponded film seals into the lid (no permanent water stripe /
+        // melt→refreeze churn). Mist below min_sat stays free Air.
+        assert_eq!(
+            w.get_cell(1, 3).unwrap().material,
+            MaterialId::Ice,
+            "cold full film on ice seals into the lid"
+        );
     }
 
     #[test]
@@ -3317,7 +3323,7 @@ mod tests {
             tracked0,
             "lid pulse fix must stay TRACKED-flat"
         );
-        // Film stayed on the lid — ice did not pop through it.
+        // Lid sealed / stayed — ice did not pop through a water stripe.
         let ice_top = ice_top_ys.last().copied().unwrap();
         assert_eq!(
             w.get_cell(7, ice_top).map(|c| c.material),
@@ -3326,8 +3332,8 @@ mod tests {
         let above = w.get_cell(7, ice_top + 1).unwrap();
         assert_eq!(above.material, MaterialId::Air);
         assert!(
-            above.sat.is_empty() || above.sat.is_full(),
-            "sky or ponded film on ice, not a mid-pack stripe (sat={})",
+            above.sat.is_empty() || above.sat.0 < 64,
+            "sky or mist above lid, not a mid-pack water stripe (sat={})",
             above.sat.0
         );
     }
