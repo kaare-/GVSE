@@ -1132,21 +1132,65 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
     }
 }
 
-/// Under-lid freeze only when both left/right lid-level cells are ice,
-/// snow, or solid shore — so a column cannot finger ahead of the sheet.
+/// Under-lid freeze may not race a column deeper than wet neighbours.
+///
+/// Empty air / missing cells / solid shore do not block. A wet neighbour
+/// without ice only blocks once this column's pack is already thicker
+/// than one cell (first under-lid seal still runs so edge lids do not
+/// leave a permanent water stripe).
 fn under_lid_sheet_supported(world: &World, gx: i32, y: i32) -> bool {
     let lid_y = y + 1;
+    let my_pack = contiguous_frozen_above(world, gx, y);
     for dx in [-1, 1] {
         let nx = world.wrap_x(gx + dx);
         match world.get_cell(nx, lid_y) {
+            None => {}
             Some(c) if is_frozen_solid(c.material) => {}
             Some(c) if c.material.is_solid() => {}
-            // Wet / empty neighbour at the current lid bottom — wait for
-            // the sheet to catch up before thickening this column.
-            _ => return false,
+            Some(c) if c.material == MaterialId::Air && c.sat.is_empty() => {}
+            Some(_) => {
+                // Wet neighbour at the current lid bottom.
+                match lowest_frozen_y(world, nx) {
+                    Some(nl) if y < nl - 1 => return false,
+                    None if my_pack > 1 => return false,
+                    _ => {}
+                }
+            }
         }
     }
     true
+}
+
+fn contiguous_frozen_above(world: &World, gx: i32, y: i32) -> i32 {
+    let mut n = 0i32;
+    let mut yy = y + 1;
+    for _ in 0..64 {
+        match world.get_cell(gx, yy) {
+            Some(c) if is_frozen_solid(c.material) => {
+                n += 1;
+                yy += 1;
+            }
+            _ => break,
+        }
+    }
+    n
+}
+
+fn lowest_frozen_y(world: &World, gx: i32) -> Option<i32> {
+    let Some((y0, y1)) = y_bounds(world) else {
+        return None;
+    };
+    let mut lowest = None;
+    for y in y0..=y1 {
+        if world
+            .get_cell(gx, y)
+            .is_some_and(|c| is_frozen_solid(c.material))
+        {
+            lowest = Some(y);
+            break;
+        }
+    }
+    lowest
 }
 
 /// True when Ice/Snow sits below `gy` with free water in between.
