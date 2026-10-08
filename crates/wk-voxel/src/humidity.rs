@@ -1213,9 +1213,14 @@ impl Humidity {
         wind: &crate::wind::Wind,
         world: &crate::grid::World,
     ) {
+        let probe = crate::budget::BudgetProbe::is_recording();
+        let before = if probe { self.total_mass() } else { 0.0 };
         if let Some(b) = self.bounds {
             if self.use_dense_slab(b) {
                 self.advect_with_surface_slab(vx, vy, wind, world, b);
+                if probe {
+                    crate::budget::note_hum_advect_delta(self.total_mass() - before);
+                }
                 return;
             }
         }
@@ -1224,6 +1229,9 @@ impl Humidity {
         self.advect_inner(vx, vy, Some((wind, world, &free_air)));
         self.wind_mix(wind.mix_strength(vx, vy), Some((wind, world, &free_air)));
         self.apply_orographic_lift(wind, Some(world));
+        if probe {
+            crate::budget::note_hum_advect_delta(self.total_mass() - before);
+        }
     }
 
     /// One pack of the bound box, then flux / buried-lift / mix / oro

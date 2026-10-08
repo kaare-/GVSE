@@ -56,10 +56,17 @@ Headless `short_budget_soak` on the Phase 3 ice tip showed TRACKED
 Flake humidity debit probes clean (`under=0`). Seat path ruled out
 (`phase::airborne_snow_seat_over_steam_stays_tracked_flat`).
 
-**Root cause:** humidity advect dual-axis flux donated from one snap with
-`|vx|+|vy|>1`; apply clamped the debit while neighbours kept the credit.
-Snow pack strengthens near-crest wind so the overshoot shows in soaks.
-Fix: joint leave scale in `Humidity::flux_both_into` / `flux_both`
-(after successful hops). Kill switch remains `GVSE_SOAK_OFF=snow`.
+**Not the 5k mint:** dual-axis humidity flux over-donate when
+`|vx|+capped|vy|>1` was real (unit-repro + joint leave scale in
+`flux_both_into` / `flux_both`) but a 5k remeasure after the fix is still
+TRACKED `+130.86/t` (identical stores to pre-fix baseline). Keep the
+conservation fix; it is not the snow soak leftover.
+
+**Still open (store split):** with `OFF=phase`, paid≈Δsnow yet TRACKED
+`+111/t` — mint is post-seat coupling. Relative to `OFF=snow`, the leftover
+lines up with **extra humidity** (~mint-sized) plus free/pore retained as
+if evap slowed; not steam scrub (`OFF=steam` still +). Next: `hum_adv`
+probe on B-overlay / soak, orphan-film / H re-injection after flakes.
+Kill switch: `GVSE_SOAK_OFF=snow`.
 - Automerge when CI green once GitHub auto-merge is available to the agent; until then mark ready and note merge wait.
 - Hard problems: verify headless and/or Xvfb before asking to merge.

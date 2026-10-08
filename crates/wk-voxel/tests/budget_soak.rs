@@ -132,8 +132,8 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         d.d_min_solid, d.d_min_load, d.d_min_body, d.d_min_total
     );
     eprintln!(
-        "probe-W swap={:+} park={:+} rej={:+} clamp={:+}",
-        p.water_swap, p.water_park, p.water_hum_rej, p.water_clamp
+        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0}",
+        p.water_swap, p.water_park, p.water_hum_rej, p.water_clamp, p.water_hum_advect
     );
     eprintln!(
         "probe-M bare={:+} credit={:+} clip={:+}",
