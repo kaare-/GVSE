@@ -278,8 +278,8 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 
 - **Settle:** After seepage, every tick runs `wake_unsupported_grains` + `wake_unstable_slopes` then multi-pass fall and multi-pass repose (up to `GRAIN_SETTLE_PASSES`), then litter-centric `rise_buoyant_litter` + `soak_floating_litter` (only Snow/Ice/Organic cells — not a full-grid × height scan). Fall alone left Organic/sand as vertical cliff faces; repose now keeps avalanching until the pile is flat (max_step ≈ 0). Sand **and Soil** may repose through thin atmospheric haze (`sat ≤ GRAIN_REPOSE_HAZE_MAX`), walk sideways off ledges into open air, **and** avalanche into standing lake water (`sat ≥ GRAIN_REPOSE_LAKE_MIN`) so submerged banks are not frozen cliffs. Mid shore film (`HAZE_MAX+1 .. LAKE_MIN-1`) still blocks sand (fleck cycle); Soil may still sprawl through land mid-film so humid cliffs do not freeze. Repose uses a Moore-neighbour chunk ptr map (serial) so slides across chunk seams actually write — a pull-only `cy+1` map used to silently no-op one face of large F3 blobs. **Snow / Ice / Organic** float only on **grounded** full standing water; suspended mid-air full-sat is not a seat. Submerged buoyant litter rises through the column; floating Organic soaks from deeper lake water (surface stays full).
 - **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), Organic litter / Soil≈0 (sprawl instead of towers), LooseRock / LooseLimestone≥1 (short stairs). Wet grains (except Clay) loosen one step. **Clay** is pore-wetness gated: dry powder ≈ sand (max_step 0), semi-wet plastic holds steeper faces (max_step 2), near-saturated mud flows again (max_step 0). Dense grains (**including Soil**) and **submerged / waterlogged Organic** treat standing lake water as avalancheable relief (gentler UW banks); sand mid shore film stays refused. **Surface Organic** (rafts / beach litter with open air above) sprawls through land haze/film and floats on full standing water — it refuses lake / underwater film seats (no surface crawl into the lake). Snow avalanches on land, not into standing water. Underwater, dense grains sliding into lake water swap the seat (vacated cell stays wet); collapsing into empty/haze bubbles steals neighbour standing water (no sky-flash on the slope face).
-- **Fall:** Sand / Gravel / Clay / Soil / LooseRock / LooseLimestone sink through Air (any sat). **Snow and Organic** fall through empty Air *and* haze; they float only on **full** standing water (`sat == 255`) so unsupported pack does not hang mid-air and phase cannot melt→refreeze a misty seat into a ±1-cell pump. **Ice** is a brittle solid: thin sheets still drop through land haze (pump fix); **thick** Ice (`≥ ice_carry_thickness` contiguous via `ice_column_thickness`) refuses soft-pack haze fall. Ice **floes** on full grounded lake water **and** on haze/film over a full lake cell (ocean free surface) — not litter freefall into the column. Full water seats also **pull submerged** Snow/Ice/Organic upward (buoyancy) so a refilled lake surface cannot trap a “glitch line” of litter below a floating raft. **Ice** stops under the free-surface film (ponded rain stays on the lid) — popping through that film froze a water stripe through the pack. Organic/Snow still occupy the surface cell as rafts. Float “grounded column” walks treat partial-sat water and missing lower chunks as still bedded (so soak drawdown / checkerboard halos cannot make Organic freefall through the ocean). Grain settle runs fall on the full active set (not checkerboard) for the same reason. **Dense grains punch through floating litter rafts** (Organic/Snow/Ice on water cannot carry Soil/Sand/LooseRock piles — cargo swaps down through the raft then sinks). **Wind / stream drift** (`drift_floating_organic` / `sail_plants_on_wind_rafts`) shoves floating Organic sideways from local climate wind **and** local stream push (per column / per bound raft — still-lake mats must not zero out river current). Taller piles and living plant sails raise the chance. Loose litter may tear apart or wash over cascade lips; **living roots bind** the plant’s full root-span of columns into one raft so trees sail with the mat (dispersal). Only plants with a holdfast in/on floating Organic translate — submerged or free plants are not hitchhiked when litter slides past. Destination must stay on a float seat with freeboard Air (never into the water column), except thin unbound film may wash onto an empty lip when current is strong. **Soak → waterlog → sink:** floating Organic fills pores from the lake (`soak_floating_litter`); once saturated a slow counter ([`CellFlags::WATERLOGGED`]) eventually lets the mat sink through standing water instead of floating forever.
-- Ice is not a repose grain and not flow-erodible; **thin** hillside glaze can still peel in the cold-avalanche pass; **thick** packs (`≥ ice_carry_thickness`) stay solid.
+- **Fall:** Sand / Gravel / Clay / Soil / LooseRock / LooseLimestone sink through Air (any sat). **Snow and Organic** fall through empty Air *and* haze; they float only on **full** standing water (`sat == 255`) so unsupported pack does not hang mid-air and phase cannot melt→refreeze a misty seat into a ±1-cell pump. **Ice** is a brittle solid: thin sheets still drop through land haze (pump fix); **thick** Ice (`≥ ice_carry_thickness` contiguous via `ice_column_thickness`) refuses soft-pack haze fall. Ice **floes** on full grounded lake water **and** on haze/film over a full lake cell (ocean free surface) — not litter freefall into the column. Full water seats also **pull submerged** Snow/Ice/Organic upward (buoyancy) so a refilled lake surface cannot trap a “glitch line” of litter below a floating raft. **Ice** stops under the free-surface film **and** under more Ice/Snow (ponded rain and under-lid water stay put) — popping through either froze a water stripe through the pack. Organic/Snow still occupy the surface cell as rafts. Float “grounded column” walks treat partial-sat water and missing lower chunks as still bedded (so soak drawdown / checkerboard halos cannot make Organic freefall through the ocean). Grain settle runs fall on the full active set (not checkerboard) for the same reason. **Dense grains punch through floating litter rafts** (Organic/Snow/Ice on water cannot carry Soil/Sand/LooseRock piles — cargo swaps down through the raft then sinks). **Wind / stream drift** (`drift_floating_organic` / `sail_plants_on_wind_rafts`) shoves floating Organic sideways from local climate wind **and** local stream push (per column / per bound raft — still-lake mats must not zero out river current). Taller piles and living plant sails raise the chance. Loose litter may tear apart or wash over cascade lips; **living roots bind** the plant’s full root-span of columns into one raft so trees sail with the mat (dispersal). Only plants with a holdfast in/on floating Organic translate — submerged or free plants are not hitchhiked when litter slides past. Destination must stay on a float seat with freeboard Air (never into the water column), except thin unbound film may wash onto an empty lip when current is strong. **Soak → waterlog → sink:** floating Organic fills pores from the lake (`soak_floating_litter`); once saturated a slow counter ([`CellFlags::WATERLOGGED`]) eventually lets the mat sink through standing water instead of floating forever.
+- Ice is not a repose grain and not flow-erodible; **thin** hillside glaze can still peel in the cold-avalanche pass **inland**; glaze that **touches standing lake water** does not peel (shore Ice/Water/Ice teeth). **Thick** packs (`≥ ice_carry_thickness`) stay solid.
 
 ### Flow erosion + deposition (`apply_flow_erosion`)
 
@@ -527,7 +527,7 @@ thick lids solid / load-bearing. Column hardcap relaxed (melt via
 |-------|--------|--------|
 | Fall / cold peel | Thick Ice not soft-pack; thin sheets may break / peel | Thick (`≥ ice_carry_thickness` via `ice_column_thickness`) refuses haze soft-fall + hillside cold-peel; thin still fragile |
 | Load break | Keep `ice_carry_thickness` — thin fails under debris, thick carries | Unchanged |
-| Float | Floes on full water; coherent sheet feel (not litter freefall through haze into the column) | Ice floe on full lake **and** haze/film over full lake; rise buoyancy kept **except** Ice does not pop through the free-surface film (lid pump) |
+| Float | Floes on full water; coherent sheet feel (not litter freefall through haze into the column) | Ice floe on full lake **and** haze/film over full lake; rise kept **except** Ice does not pop through free-surface film **or** under-pack Ice/Snow gaps; cold film seals; shore lip does not peel |
 | Column budget | Raise / disable `max_ice_cells_per_column` cull; thicken freely | Default `max_ice=64`, `enable_cull=false` |
 | Partial freeze | Wet-air pockets (e.g. sat≈251) through/around ice lids | **Landed**: bank yield on `Cell.sat`; `min_sat_to_freeze` default **64**; thaw restores sat (no mint); BudgetSnap credits stored yield; frost/snow still pay full cell |
 
@@ -557,21 +557,27 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   tile froze warm film and contact thaw peeled it the same period. Full
   cells bank `255`; near-full pockets lock into the lid. Mist below the
   floor stays free Air. **Cold lids thicken downward** one cell / tick
-  into wet Air under Ice/Snow.
-  Open-surface freeze is skipped only when Ice/Snow sits **under a
+  into wet Air under Ice/Snow, and **upward through a cold free-surface
+  film** sitting on Ice/Snow (owner −0.8 °C water stripe through the
+  pack). Open-surface freeze is skipped only when Ice/Snow sits **under a
   free-water gap** in the same column (submerged flake / shore pump) —
-  not merely because frozen cells exist deeper (that blocked whole cold
-  lakes after any bed flake). Contiguous lids still thicken downward.
-- **Thaw:** top-of-stack Ice/Snow when cell `temp > freeze_point_c`, **or**
-  when air/free-water **contact** is warm (albedo-cold snow/ice packs on
-  a warm lake still melt) → Air with the banked yield (`sat == 0` legacy
-  paint ⇒ `FULL`). Columns with frozen cells probe deeper for the phase
-  gate so buried ice under thick lakes still runs.
+  not merely because frozen cells exist deeper, and **not** because the
+  cell below is already Ice (that left ponded rain liquid forever).
+  Contiguous lids still thicken downward. **Hysteresis:** freeze at
+  `≤ freeze_point_c`; thaw needs `> freeze_point_c + thaw_hysteresis_c`
+  (default **0.75 °C**) so shore water near 0 °C does not straddle.
+- **Thaw:** top-of-stack Ice/Snow when cell `temp > freeze_point_c +
+  thaw_hysteresis_c`, **or** when air/free-water **contact** is above that
+  thaw point (albedo-cold snow/ice packs on a warm lake still melt) → Air
+  with the banked yield (`sat == 0` legacy paint ⇒ `FULL`). Columns with
+  frozen cells probe deeper for the phase gate so buried ice under thick
+  lakes still runs.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
-  sheet — that lofted ice into the rain). Melts the ice when the film's
-  free-water T is **warm** (`water_temp_at`, else tile inherit) — including
-  hot free water in a cold tile (Phase 3 slice B). Cold ponded rain (tile
-  inherit ≤ freeze) no longer melts sheets — that churned ice towers.
+  sheet — that lofted ice into the rain). **Warm** film (`> thaw point`)
+  melts the sheet; **cold** film (`≤ freeze_point`) freezes into the lid.
+  Cascade / diagonal dump will not peel a film seated on Ice/Snow (that
+  drained the lid at the shore). Hot free water in a cold tile still
+  melts (Phase 3 slice B).
 - **Ice lid × evaporation:** intentional. Evap only runs on wet Air with
   **Air** above it (`dry_above_max`). An Ice/Snow sheet blocks that, so a
   capped lake loses far less mass and the humidity pump dries out — a

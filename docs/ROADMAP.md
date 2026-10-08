@@ -133,7 +133,10 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 
 **Landed (lake ice lid pulse)**
 - Freeze gates on `water_temp_at` (not tile alone); Ice buoyancy does not
-  pop through the free-surface film (film stays on the lid).
+  pop through the free-surface film **or** under-pack gaps.
+- Freeze/thaw **hysteresis** (`thaw_hysteresis_c` default 0.75 °C).
+- Cold film on ice **seals** into the lid; cascade will not peel lid film;
+  thin hillside ice does not peel at a waterline.
 
 **Landed (brittle solid pass)**
 
