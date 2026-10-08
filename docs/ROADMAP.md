@@ -131,6 +131,10 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   (legacy `sat==0` ⇒ 255). Near-full wet-air pockets under/around lids
   freeze mass-flat instead of pulsing as free Air through ice.
 
+**In progress (lake ice line pulse)**
+- Freeze gates on `water_temp_at` (not tile alone) so warm free water in a
+  cold night tile cannot freeze↔thaw pulse against contact melt.
+
 **Landed (brittle solid pass)**
 
 - Thick Ice (`ice_column_thickness ≥ ice_carry_thickness`) refuses haze

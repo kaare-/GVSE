@@ -550,12 +550,14 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   ignores night air, eases toward a geothermal profile, and slowly leaks
   heat upward by diffusion. Snow albedo still shades solar.
 - **Freeze:** standing free-surface / under-lid wet Air
-  (`sat ≥ min_sat_to_freeze`, default **64**) when
-  `temp ≤ freeze_point_c` → `Ice` with **banked thaw yield** on
-  `Cell.sat` (frozen condensate / porous ice). Full cells bank `255`;
-  near-full pockets (e.g. sat 251) lock into the lid instead of pulsing
-  as wet Air through ice. Mist below the floor stays free Air. **Cold
-  lids thicken downward** one cell / tick into wet Air under Ice/Snow.
+  (`sat ≥ min_sat_to_freeze`, default **64**) when **free-water T**
+  (`water_temp_at`, else tile) `≤ freeze_point_c` → `Ice` with **banked
+  thaw yield** on `Cell.sat` (frozen condensate / porous ice). Gating on
+  water T (not tile alone) stops the lake-lid pulse where a cold night
+  tile froze warm film and contact thaw peeled it the same period. Full
+  cells bank `255`; near-full pockets lock into the lid. Mist below the
+  floor stays free Air. **Cold lids thicken downward** one cell / tick
+  into wet Air under Ice/Snow.
   Open-surface freeze is skipped only when Ice/Snow sits **under a
   free-water gap** in the same column (submerged flake / shore pump) —
   not merely because frozen cells exist deeper (that blocked whole cold
