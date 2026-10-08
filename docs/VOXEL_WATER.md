@@ -515,6 +515,20 @@ clear when `sat→0`.
 | B | Phase reads water_temp for film-on-ice / contact melt | **Landed** (2026-10-07): `water_on_ice_and_slush` + `frozen_contact_is_warm` use `water_temp_at` for free-water seats; warm film over ice in cold tile melts; film sat unchanged (ice→FULL thaw only). |
 | C | Mouth writes hot water_temp; soft cool vs instant skin wipe | **Landed** (2026-10-07): `mix_mouth_water_temp_on_transfer` always stamps on leftover/`reverse_push` → Air (same-tile inherit no longer stays sparse); `cool_water_temp_toward_ambient` after thermal step (`WATER_TEMP_SOFT_COOL_RATE`); hot mouth retains vs cold tile after soft cool; heat-only. Sticky/local/UW mouths untouched. |
 
+
+### Brittle solid (2026-10-08)
+
+Owner: more solid look — **ocean ice**, not powder. Thin lids fragile;
+thick lids solid / load-bearing. Column hardcap relaxed (melt via
+`water_temp` replaces peel-to-Air tower budget).
+
+| Lever | Intent |
+|-------|--------|
+| Fall / cold peel | Thick Ice not soft-pack; thin sheets may break / peel |
+| Load break | Keep `ice_carry_thickness` — thin fails under debris, thick carries |
+| Float | Floes on full water; coherent sheet feel (not litter freefall through haze into the column) |
+| Column budget | Raise / disable `max_ice_cells_per_column` cull; thicken freely |
+
 Hard no’s: no weather coarsen / lottery skip / `live_surface_y` change;
 TRACKED mass-flat; no wholesale rustfmt of `phase.rs`; pore-water T deferred;
 short budget soak near vents stays `park=0`.
@@ -622,7 +636,7 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
   under snow into ice (snow-on-ice pack).
 - Rate limits: freeze / thaw / slush / break per column per tick.
-- **Max Ice+Snow cells / column** — excess relocates laterally onto
+- **Max Ice+Snow cells / column** — Phase 3 brittle: hardcap relaxed; excess relocates laterally onto
   thinner cold neighbours (mass-flat). Peel-to-Air / steam / H banks
   were named aesthetic sinks that worsened alpine 10k TRACKED.
 
