@@ -121,6 +121,9 @@ Acceptance sketches (tests / HUD, not photoreal):
   colder free water (`couple_free_water_buoyancy`) — full columns do not
   move cells, so flow bias alone cannot overturn stratification.
 - Deep free-water tiles use water capacity (not rock geothermal).
+- Buried free-water / ice tiles **must not hold `t` forever** — they get a
+  capacity-damped climate relax (no rock geo). Holding `t` after skipping
+  geothermal left deep-lake hotspots when `base_temp` was dumped cold.
 - Geothermal overburden is **rock surface only** — standing water does
   not count as crust cover (avoids painting lakes as a static hot bed).
 - Diffuse is gated at free-water ↔ rock faces so cliff geo isotherms are
