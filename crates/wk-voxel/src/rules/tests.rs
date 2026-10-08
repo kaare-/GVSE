@@ -1106,6 +1106,53 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
 }
 
 #[test]
+fn ice_lid_does_not_rise_through_surface_film() {
+    // Ponded rain on a lid must stay on ice. Buoyancy used to swap the
+    // ice up through the film (water under ice) — freeze then sandwiched.
+    let mut w = setup_column_world();
+    w.set_cell(3, 1, Cell::water());
+    w.set_cell(3, 2, Cell::solid(MaterialId::Ice));
+    w.set_cell(3, 3, Cell::water());
+    let tracked0 = crate::audit::sat_totals(&w).cell_total;
+    apply_grain_fall(&mut w);
+    rise_buoyant_litter(&mut w);
+    assert_eq!(
+        w.get_cell(3, 2).unwrap().material,
+        MaterialId::Ice,
+        "lid must not pop through the film"
+    );
+    assert_eq!(w.get_cell(3, 3).unwrap().material, MaterialId::Air);
+    assert!(w.get_cell(3, 3).unwrap().sat.is_full());
+    assert_eq!(
+        crate::audit::sat_totals(&w).cell_total,
+        tracked0,
+        "film-on-ice seat is mass-flat"
+    );
+}
+
+#[test]
+fn submerged_ice_rises_under_free_surface_film() {
+    let mut w = setup_column_world();
+    w.set_cell(3, 1, Cell::water());
+    w.set_cell(3, 2, Cell::solid(MaterialId::Ice)); // submerged flake
+    w.set_cell(3, 3, Cell::water());
+    w.set_cell(3, 4, Cell::water());
+    rise_buoyant_litter(&mut w);
+    assert_eq!(
+        w.get_cell(3, 3).unwrap().material,
+        MaterialId::Ice,
+        "submerged ice must rise to just below the surface film"
+    );
+    assert_eq!(w.get_cell(3, 4).unwrap().material, MaterialId::Air);
+    assert!(w.get_cell(3, 4).unwrap().sat.is_full());
+    assert_ne!(
+        w.get_cell(3, 2).map(|c| c.material),
+        Some(MaterialId::Ice),
+        "flake must leave the deep seat"
+    );
+}
+
+#[test]
 fn ice_floe_holds_on_haze_over_full_lake() {
     let mut w = setup_column_world();
     // Ocean column: full water under a surface film, ice floe on the film.

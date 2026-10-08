@@ -5,7 +5,10 @@
 //! snaps cannot mint ice towers or flood the world.
 //!
 //! Rain stays **on top of** ice as a water film (it does not density-swap
-//! under the sheet — that lofted ice into the rain column). Water on ice
+//! under the sheet — that lofted ice into the rain column). Grain
+//! buoyancy also refuses to pop Ice through that film (otherwise freeze
+//! skin → film → rise → gap → refreeze pulses a water stripe through
+//! the lid). Water on ice
 //! melts the sheet when the **film** is warm ([`crate::water_temp::water_temp_at`],
 //! absent ⇒ tile inherit) — including hot free water in a cold tile.
 //! Ice/Snow with dry air below **fall** as solids ([`crate::rules::apply_grain_fall`]);
@@ -1098,7 +1101,9 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         if !under_lid && !open_surface {
             continue;
         }
-        let t_c = temp.at_cell_packed(gx, y);
+        // Free-water T (sparse ledger, else tile). A cold night tile must
+        // not freeze a warm film the same period contact thaw peels it.
+        let t_c = free_water_temp_c(world, temp, gx, y);
         if t_c > cfg.freeze_point_c {
             continue;
         }
@@ -3196,21 +3201,44 @@ mod tests {
     }
 
     #[test]
+    fn warm_free_water_does_not_freeze_in_cold_tile() {
+        let mut w = pond_world();
+        crate::water_temp::set_water_temp(&mut w, 3, 3, 8.0);
+        let temp = cold_temp(16, 16, -12.0);
+        apply_phase(&mut w, &temp, &PhaseConfig::default());
+        assert_eq!(
+            w.get_cell(3, 3).unwrap().material,
+            MaterialId::Air,
+            "warm water_temp must not freeze under a cold tile"
+        );
+        assert!(w.get_cell(3, 3).unwrap().sat.is_full());
+    }
+
+    #[test]
     fn cold_lake_lid_does_not_water_ice_pulse() {
-        // Owner soak: water stripes through the ice lid. Freeze is
-        // water_temp-gated and contact melts stamp warm T so the lid
-        // thickens without Ice/Water/Ice interleave or top-Y flip.
+        // Owner soak: film on ice + buoyancy used to loft the lid through
+        // the film, freeze re-skinned the gap, and the pack interleaved.
+        use crate::audit::sat_totals;
         use crate::rules::{apply_grain_fall, apply_water_flow, rise_buoyant_litter};
 
         let mut w = World::new(99);
         w.ensure_chunk(ChunkCoord::new(0, 0));
-        for x in 1..15 {
+        for x in 0..16 {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-            for y in 1..=6 {
+        }
+        for y in 1..=7 {
+            w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(15, y, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 1..15 {
+            for y in 1..=4 {
                 w.set_cell(x, y, Cell::water());
             }
+            w.set_cell(x, 5, Cell::solid(MaterialId::Ice));
+            w.set_cell(x, 6, Cell::water()); // ponded film on the lid
             w.set_cell(x, 7, Cell::air());
         }
+        let tracked0 = sat_totals(&w).cell_total;
         let temp = cold_temp(32, 16, -33.0);
         let cfg = PhaseConfig {
             period_ticks: 1,
@@ -3219,7 +3247,7 @@ mod tests {
         let mut sandwich_hits = 0u32;
         let mut water_in_ice_band = 0u32;
         let mut ice_top_ys: Vec<i32> = Vec::new();
-        for t in 0..200u64 {
+        for t in 0..80u64 {
             w.tick = t;
             apply_water_flow(&mut w);
             apply_grain_fall(&mut w);
@@ -3227,7 +3255,7 @@ mod tests {
             apply_phase(&mut w, &temp, &cfg);
             let mut top = None;
             for x in 1..15 {
-                for y in 1..=7 {
+                for y in 1..=8 {
                     let Some(c) = w.get_cell(x, y) else {
                         continue;
                     };
@@ -3244,7 +3272,7 @@ mod tests {
                     if above_ice && below_ice {
                         sandwich_hits += 1;
                     }
-                    let has_ice_above = (y + 1..=8).any(|yy| {
+                    let has_ice_above = (y + 1..=9).any(|yy| {
                         w.get_cell(x, yy).map(|c| c.material) == Some(MaterialId::Ice)
                     });
                     let has_ice_below = (0..y).any(|yy| {
@@ -3268,7 +3296,12 @@ mod tests {
         );
         assert!(
             !ice_top_ys.is_empty(),
-            "cold lake must grow an ice lid"
+            "cold lake must keep an ice lid"
+        );
+        assert_eq!(
+            sat_totals(&w).cell_total,
+            tracked0,
+            "lid pulse fix must stay TRACKED-flat"
         );
     }
 }

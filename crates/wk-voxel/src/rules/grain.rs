@@ -606,6 +606,33 @@ fn lake_under_film_ptrs(
     false
 }
 
+/// True when wet Air at `(gx, gy)` is the open free-surface film (sky or
+/// empty/partial Air above) — not under-lid water and not mid-column.
+///
+/// Ice buoyancy must not swap into this cell: ponded rain stays **on**
+/// the lid. Rising through it left a water gap that freeze re-skinned
+/// (horizontal ice↔water pulse).
+fn ice_dest_is_free_surface_film_world(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy + 1) {
+        None => true,
+        Some(up) if up.material == MaterialId::Air && !up.sat.is_full() => true,
+        _ => false,
+    }
+}
+
+fn ice_dest_is_free_surface_film_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    match unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy + 1) } {
+        None => true,
+        Some(up) if up.material == MaterialId::Air && !up.sat.is_full() => true,
+        _ => false,
+    }
+}
+
 /// Ice floe seat: full grounded lake **or** haze/film over full lake water
 /// (ocean free surface). Avoids soft-pack freefall into the column while
 /// land mist (haze over rock, no full water below) still drops thin ice.
@@ -1372,6 +1399,14 @@ pub fn apply_grain_fall_regions_ex(
                         continue;
                     }
                     if !floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
+                        continue;
+                    }
+                    // Ice lids: do not pop through the free-surface film
+                    // (ponded rain stays on ice). Submerged ice still
+                    // rises through deeper full water.
+                    if below.material == MaterialId::Ice
+                        && ice_dest_is_free_surface_film_ptrs(ptrs, wrap_width, gx, gy)
+                    {
                         continue;
                     }
                     unsafe {
@@ -2538,6 +2573,14 @@ fn rise_buoyant_litter_list(world: &mut World, litter: &mut [(i32, i32)]) {
                 break;
             }
             if !float_seat(world, above, gx, y) {
+                break;
+            }
+            // Ice must not loft through the free-surface film (lid pump:
+            // freeze skin → film on ice → rise → gap → refreeze). Organic
+            // / Snow still occupy the surface cell as rafts.
+            if here.material == MaterialId::Ice
+                && ice_dest_is_free_surface_film_world(world, gx, y)
+            {
                 break;
             }
             top = y;
