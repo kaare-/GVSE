@@ -101,7 +101,7 @@
     "max_slush_cells_per_column_per_tick": 1,
     "max_break_cells_per_column_per_tick": 2,
     "min_budget_to_snow": 255.0,
-    "max_ice_cells_per_column": 12,
+    "max_ice_cells_per_column": 64,
     "snow_spread_radius": 6,
     "snow_blanket_depth": 2,
     "frost_coat_depth": 1,
@@ -115,7 +115,7 @@
     "ice_carry_thickness": 2,
     "max_load_break_cells_per_column_per_tick": 2,
     "enable_cold_avalanche": true,
-    "enable_cull": true,
+    "enable_cull": false,
     "enable_snow_precip": true,
     "period_ticks": 4
   },

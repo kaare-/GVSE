@@ -501,6 +501,7 @@ pub fn step_world(
             world,
             temperature,
             cfg.phase.freeze_point_c,
+            cfg.phase.ice_carry_thickness,
             avalanche_roots.as_ref(),
         );
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {

@@ -179,7 +179,8 @@ pub use pipe::{
 };
 pub use phase::{
     apply_freeze, apply_phase, deposit_condensate_on_surface, deposit_precip_on_surface,
-    ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig, PRECIP_IN_AIR_MIN,
+    ice_column_thickness, ice_is_solid_pack, ice_lid_thickness, precip_forms_snow_at_air,
+    PhaseConfig, ICE_CARRY_THICKNESS_DEFAULT, PRECIP_IN_AIR_MIN,
 };
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,

@@ -237,7 +237,9 @@ pub fn is_grain(material: MaterialId) -> bool {
 
 /// Soft pack / litter: falls through *empty* Air, floats on standing water.
 /// Organic is included so dead leaves and dissolved stems drop to the bed
-/// without soaking into lakes.
+/// without soaking into lakes. Ice is in this set for freefall seating, but
+/// grain fall treats thick Ice as a brittle solid (no haze soft-fall) and
+/// floes on lake film — see [`crate::rules`].
 pub fn falls_through_empty_air(material: MaterialId) -> bool {
     matches!(
         material,

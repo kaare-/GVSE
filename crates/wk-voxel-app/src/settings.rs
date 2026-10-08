@@ -1074,7 +1074,7 @@ impl SimSettings {
                         ui,
                         hash!(),
                         "Max ice+snow cells / column",
-                        1.0..48.0,
+                        1.0..64.0,
                         &mut max_ice,
                     );
                     labeled_slider(

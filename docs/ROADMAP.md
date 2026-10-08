@@ -117,10 +117,25 @@ Pipe net live nearby; no clear mouth-on-ice money shot.
 Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 `phase3-ice-15-lid-soak.png`.
 
+**Brittle solid locked** (2026-10-08 owner)
+
+- Mimic ocean ice: floes float on water; **thin sheets fragile**, thicker
+  sections more solid / load-bearing.
+- Kill powder look (Ice should not soft-pack fall / hillside powder peel
+  when thick).
+- With `water_temp` melt: **drop / greatly relax** Ice+Snow column hardcap
+  so packs can thicken for real.
+
+**Landed (brittle solid pass)**
+
+- Thick Ice (`ice_column_thickness ≥ ice_carry_thickness`) refuses haze
+  soft-fall and hillside cold-peel; thin glaze still peels / drops.
+- Ice floes on full lake + surface film over full water; rise kept.
+- Default `max_ice_cells_per_column=64`, `enable_cull=false`.
+
 **Still open**
 
-- Brittle-solid look (block throughflow / powder) — owner call.
-- Formal “reads as ice” acceptance (Xvfb glance positive; close Phase 3?).
+- Formal “reads as ice” acceptance (Xvfb / playtest) after brittle pass.
 
 **Exit criteria**
 
@@ -194,6 +209,7 @@ before coding.
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |
 | 2026-10-07 | Phase 2 code | Sticky/local (#357), UW mouths (#358), mild vert (#359) |
+| 2026-10-08 | Phase 3 brittle | Ocean-like float; thin fragile / thick solid; relax column hardcap (water_temp melt) |
 | 2026-10-08 | Phase 3 Xvfb | Ice lid + water: film/wet band holds; no powder thrash in stills |
 | 2026-10-07 | Phase 3 ice option | **2 — water carries T** (sparse free-water ledger; melt + geyser cool) |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |

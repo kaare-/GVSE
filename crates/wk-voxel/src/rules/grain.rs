@@ -541,6 +541,91 @@ fn floats_on_air_seat_ptrs(
         && water_column_grounded_ptrs(ptrs, wrap_width, gx, gy)
 }
 
+/// Contiguous Ice stack through `(gx, gy)` via the chunk ptr map.
+fn ice_stack_thickness_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> u8 {
+    let Some(here) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
+        return 0;
+    };
+    if here.material != MaterialId::Ice {
+        return 0;
+    }
+    let mut top = gy;
+    for _ in 0..255 {
+        match unsafe { parallel::get_cell(ptrs, wrap_width, gx, top + 1) } {
+            Some(c) if c.material == MaterialId::Ice => top += 1,
+            _ => break,
+        }
+    }
+    let mut n = 0u8;
+    let mut y = top;
+    loop {
+        match unsafe { parallel::get_cell(ptrs, wrap_width, gx, y) } {
+            Some(c) if c.material == MaterialId::Ice => {
+                n = n.saturating_add(1);
+                y -= 1;
+            }
+            _ => break,
+        }
+    }
+    n
+}
+
+/// True when a non-empty Air seat sits over a grounded full-water lake
+/// (haze / film on the ocean free surface). Land mist over rock is not
+/// a floe seat — only a column that still has `sat == FULL` below.
+fn lake_under_film_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    if !water_column_grounded_ptrs(ptrs, wrap_width, gx, gy) {
+        return false;
+    }
+    let mut y = gy;
+    for _ in 0..512 {
+        let Some(c) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, y) }) else {
+            return false;
+        };
+        if c.material != MaterialId::Air {
+            return false;
+        }
+        if c.sat.is_full() {
+            return true;
+        }
+        if c.sat.is_empty() {
+            return false;
+        }
+        y -= 1;
+    }
+    false
+}
+
+/// Ice floe seat: full grounded lake **or** haze/film over full lake water
+/// (ocean free surface). Avoids soft-pack freefall into the column while
+/// land mist (haze over rock, no full water below) still drops thin ice.
+fn ice_floe_seat_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    seat: Cell,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    if seat.material != MaterialId::Air || seat.sat.is_empty() {
+        return false;
+    }
+    if floats_on_air_seat_ptrs(ptrs, wrap_width, seat, gx, gy) {
+        return true;
+    }
+    // Partial sat — only when a full lake cell remains below.
+    lake_under_film_ptrs(ptrs, wrap_width, gx, gy)
+}
+
 /// True when `litter_y` is buoyant litter whose column reaches a grounded
 /// lake seat.
 ///
@@ -1223,9 +1308,14 @@ pub fn apply_grain_fall_regions_ex(
                     // Snow / Ice / Organic: drop through empty Air, haze,
                     // and *suspended* full-sat blobs. Float only on
                     // grounded lake / puddle surfaces (unless waterlogged).
-                    if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy)
-                        && !above.is_waterlogged_organic()
-                    {                        // Floating raft cannot carry dense cargo. Walk up
+                    // Ice floes also hold on haze/film over full lake water;
+                    // thick Ice refuses soft-pack haze fall entirely.
+                    let ice_floats = above.material == MaterialId::Ice
+                        && ice_floe_seat_ptrs(ptrs, wrap_width, cur, gx, gy);
+                    let litter_floats = above.material != MaterialId::Ice
+                        && floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy);
+                    if (ice_floats || litter_floats) && !above.is_waterlogged_organic() {
+                        // Floating raft cannot carry dense cargo. Walk up
                         // contiguous litter to the lowest grain and swap
                         // that grain with the water-contact litter cell.
                         let mut cargo_y = gy + 2;
@@ -1253,6 +1343,15 @@ pub fn apply_grain_fall_regions_ex(
                             }
                             break;
                         }
+                        continue;
+                    }
+                    // Thick Ice is a brittle solid — not soft-pack through haze.
+                    // Thin sheets still drop through mist (ice-pump dead-band).
+                    if above.material == MaterialId::Ice
+                        && !cur.sat.is_empty()
+                        && ice_stack_thickness_ptrs(ptrs, wrap_width, gx, gy + 1)
+                            >= crate::phase::ICE_CARRY_THICKNESS_DEFAULT
+                    {
                         continue;
                     }
                 } else if allow_buoyancy {
@@ -2483,7 +2582,14 @@ pub fn apply_grain_repose_regions(
     active: &[ActiveChunk],
     rooted: Option<&HashSet<(i32, i32)>>,
 ) -> u32 {
-    apply_repose_pass(world, active, None, f32::INFINITY, rooted)
+    apply_repose_pass(
+        world,
+        active,
+        None,
+        f32::INFINITY,
+        crate::phase::ICE_CARRY_THICKNESS_DEFAULT,
+        rooted,
+    )
 }
 
 /// Cold snap avalanche: wet sand loosens, snow/hillside ice spill onto
@@ -2492,14 +2598,22 @@ pub fn apply_grain_repose_regions(
 /// and before [`crate::phase::apply_phase`] so thin lids can then break
 /// under the new load.
 pub fn apply_cold_avalanche(world: &mut World, temp: &Temperature, freeze_point_c: f32) {
-    apply_cold_avalanche_bound(world, temp, freeze_point_c, None);
+    apply_cold_avalanche_bound(
+        world,
+        temp,
+        freeze_point_c,
+        crate::phase::ICE_CARRY_THICKNESS_DEFAULT,
+        None,
+    );
 }
 
-/// [`apply_cold_avalanche`] with optional living-root binding.
+/// [`apply_cold_avalanche`] with optional living-root binding and ice
+/// solid-pack thickness ([`crate::phase::PhaseConfig::ice_carry_thickness`]).
 pub fn apply_cold_avalanche_bound(
     world: &mut World,
     temp: &Temperature,
     freeze_point_c: f32,
+    ice_carry_thickness: u8,
     rooted: Option<&HashSet<(i32, i32)>>,
 ) {
     // Prefer the dirty halo when present, but never fall back to a full
@@ -2538,8 +2652,9 @@ pub fn apply_cold_avalanche_bound(
             }
         }
     };
+    let carry = ice_carry_thickness.max(1);
     for pass in partition_checkerboard(&regions) {
-        apply_repose_pass(world, &pass, Some(temp), freeze_point_c, rooted);
+        apply_repose_pass(world, &pass, Some(temp), freeze_point_c, carry, rooted);
     }
 }
 
@@ -2548,6 +2663,7 @@ fn apply_repose_pass(
     active: &[ActiveChunk],
     temp: Option<&Temperature>,
     freeze_point_c: f32,
+    ice_carry_thickness: u8,
     rooted: Option<&HashSet<(i32, i32)>>,
 ) -> u32 {
     let seed = world.seed.0;
@@ -2589,7 +2705,18 @@ fn apply_repose_pass(
                     };
                     let below_src =
                         unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy - 1) };
-                    if !avalanche_source_ok(src.material, below_src, cold_mode) {
+                    let ice_thick = if src.material == MaterialId::Ice {
+                        ice_stack_thickness_ptrs(ptrs, wrap_width, sx, sy)
+                    } else {
+                        0
+                    };
+                    if !avalanche_source_ok(
+                        src.material,
+                        below_src,
+                        cold_mode,
+                        ice_thick,
+                        ice_carry_thickness,
+                    ) {
                         continue;
                     }
                     match below_src {
@@ -2760,10 +2887,16 @@ fn apply_repose_pass(
                         continue;
                     }
                     let wet = grain_is_wet(src, below_src);
+                    let ice_thick = if src.material == MaterialId::Ice {
+                        ice_stack_thickness_ptrs(ptrs, wrap_width, sx, sy)
+                    } else {
+                        0
+                    };
                     let can_smear = (is_grain(src.material) && wet)
                         || src.material == MaterialId::Snow
                         || (src.material == MaterialId::Ice
-                            && hillside_ice_support(below_src));
+                            && hillside_ice_support(below_src)
+                            && ice_thick < ice_carry_thickness);
                     if !can_smear {
                         continue;
                     }
@@ -3175,11 +3308,21 @@ fn hillside_ice_support(below_src: Option<Cell>) -> bool {
     }
 }
 
-fn avalanche_source_ok(mat: MaterialId, below_src: Option<Cell>, cold_mode: bool) -> bool {
+fn avalanche_source_ok(
+    mat: MaterialId,
+    below_src: Option<Cell>,
+    cold_mode: bool,
+    ice_thick: u8,
+    ice_carry_thickness: u8,
+) -> bool {
     if is_repose_grain(mat) {
         return true;
     }
-    cold_mode && mat == MaterialId::Ice && hillside_ice_support(below_src)
+    // Thin hillside glaze peels; thick packs (≥ carry) stay solid.
+    cold_mode
+        && mat == MaterialId::Ice
+        && hillside_ice_support(below_src)
+        && ice_thick < ice_carry_thickness.max(1)
 }
 
 /// Tunables for grain / sediment + floating Organic litter.
