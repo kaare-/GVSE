@@ -126,9 +126,16 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 - With `water_temp` melt: **drop / greatly relax** Ice+Snow column hardcap
   so packs can thicken for real.
 
+**Landed (brittle solid pass)**
+
+- Thick Ice (`ice_column_thickness ≥ ice_carry_thickness`) refuses haze
+  soft-fall and hillside cold-peel; thin glaze still peels / drops.
+- Ice floes on full lake + surface film over full water; rise kept.
+- Default `max_ice_cells_per_column=64`, `enable_cull=false`.
+
 **Still open**
 
-- Formal “reads as ice” acceptance after brittle pass lands.
+- Formal “reads as ice” acceptance (Xvfb / playtest) after brittle pass.
 
 **Exit criteria**
 

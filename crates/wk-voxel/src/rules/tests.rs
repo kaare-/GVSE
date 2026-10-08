@@ -1080,7 +1080,8 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
     assert_eq!(w2.get_cell(3, 1).unwrap().material, MaterialId::Air);
     assert!(w2.get_cell(3, 1).unwrap().sat.is_full());
 
-    // Haze is not a float seat — drop through (closes the ice-pump dead-band).
+    // Thin ice over land haze (no full lake below) still drops — ice-pump
+    // dead-band. Thick pack / ocean film are separate cases below.
     let mut w3 = setup_column_world();
     w3.set_cell(
         3,
@@ -1098,10 +1099,64 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
     assert_eq!(
         w3.get_cell(3, 1).unwrap().material,
         MaterialId::Ice,
-        "ice must fall through partial-sat haze"
+        "thin ice must fall through land haze (no lake below)"
     );
     assert_eq!(w3.get_cell(3, 2).unwrap().material, MaterialId::Air);
     assert_eq!(w3.get_cell(3, 2).unwrap().sat.0, 128);
+}
+
+#[test]
+fn ice_floe_holds_on_haze_over_full_lake() {
+    let mut w = setup_column_world();
+    // Ocean column: full water under a surface film, ice floe on the film.
+    w.set_cell(3, 1, Cell::water());
+    w.set_cell(
+        3,
+        2,
+        Cell {
+            material: MaterialId::Air,
+            sat: Sat(128),
+            flags: Default::default(),
+            _pad: 0,
+            pore: 128,
+        },
+    );
+    w.set_cell(3, 3, Cell::solid(MaterialId::Ice));
+    apply_grain_fall(&mut w);
+    assert_eq!(
+        w.get_cell(3, 3).unwrap().material,
+        MaterialId::Ice,
+        "floe must not freefall through ocean surface film into the column"
+    );
+    assert_eq!(w.get_cell(3, 2).unwrap().material, MaterialId::Air);
+    assert_eq!(w.get_cell(3, 2).unwrap().sat.0, 128);
+    assert!(w.get_cell(3, 1).unwrap().sat.is_full());
+}
+
+#[test]
+fn thick_ice_does_not_soft_fall_through_land_haze() {
+    let mut w = setup_column_world();
+    w.set_cell(
+        3,
+        1,
+        Cell {
+            material: MaterialId::Air,
+            sat: Sat(128),
+            flags: Default::default(),
+            _pad: 0,
+            pore: 128,
+        },
+    );
+    w.set_cell(3, 2, Cell::solid(MaterialId::Ice));
+    w.set_cell(3, 3, Cell::solid(MaterialId::Ice)); // 2-cell solid pack
+    apply_grain_fall(&mut w);
+    assert_eq!(
+        w.get_cell(3, 2).unwrap().material,
+        MaterialId::Ice,
+        "thick ice must not powder-fall through haze"
+    );
+    assert_eq!(w.get_cell(3, 3).unwrap().material, MaterialId::Ice);
+    assert_eq!(w.get_cell(3, 1).unwrap().material, MaterialId::Air);
 }
 
 #[test]
@@ -2756,13 +2811,31 @@ fn cold_wet_sand_smears_onto_ice_lid() {
 fn hillside_ice_slides_in_cold_avalanche() {
     let mut w = setup_column_world();
     w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
-    w.set_cell(5, 2, Cell::solid(MaterialId::Ice)); // glaze on rock
+    w.set_cell(5, 2, Cell::solid(MaterialId::Ice)); // thin glaze on rock
     let temp = cold_field(-10.0);
     apply_cold_avalanche(&mut w, &temp, 0.0);
     assert_eq!(w.get_cell(5, 2).unwrap().material, MaterialId::Air);
     let left = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Ice);
     let right = w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Ice);
-    assert!(left || right, "hillside ice peels into a diagonal seat");
+    assert!(left || right, "thin hillside ice peels into a diagonal seat");
+}
+
+#[test]
+fn thick_hillside_ice_does_not_cold_peel() {
+    let mut w = setup_column_world();
+    w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Ice));
+    w.set_cell(5, 3, Cell::solid(MaterialId::Ice)); // ≥ ice_carry_thickness
+    let temp = cold_field(-10.0);
+    apply_cold_avalanche(&mut w, &temp, 0.0);
+    assert_eq!(
+        w.get_cell(5, 2).unwrap().material,
+        MaterialId::Ice,
+        "thick hillside pack must not powder-peel"
+    );
+    assert_eq!(w.get_cell(5, 3).unwrap().material, MaterialId::Ice);
+    assert_ne!(w.get_cell(4, 1).map(|c| c.material), Some(MaterialId::Ice));
+    assert_ne!(w.get_cell(6, 1).map(|c| c.material), Some(MaterialId::Ice));
 }
 
 #[test]

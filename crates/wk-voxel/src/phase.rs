@@ -61,12 +61,12 @@ pub struct PhaseConfig {
     /// is a whole cell (`255`): thaw yields `Air+FULL`, so a cheaper seat
     /// mints water. Shortfall below freeze → hold, not liquid rain.
     pub min_budget_to_snow: f32,
-    /// Cap on Ice+Snow cells stacked in one column. New freeze / snow
-    /// seating refuse past the cap; existing excess is relocated
-    /// laterally onto thinner cold columns (mass-flat). Peel-to-Air
-    /// deleted TRACKED; steam/H banks recondensed into another cull
-    /// cycle. Beyond the cap with no lateral seat, cold precip is held
-    /// (not dumped as pore-soaking rain).
+    /// Soft cap on Ice+Snow cells stacked in one column. New freeze /
+    /// snow seating refuse past the cap; when [`Self::enable_cull`] is
+    /// on, existing excess relocates laterally onto thinner cold
+    /// columns (mass-flat). Default is high — `water_temp` melt (not
+    /// tower cull) limits packs. Beyond the cap with no lateral seat,
+    /// cold precip is held (not dumped as pore-soaking rain).
     pub max_ice_cells_per_column: u8,
     /// Lateral search radius (columns) when seating new snow. Prefers
     /// thinner packs so peaks don't monopolize every flake.
@@ -95,8 +95,10 @@ pub struct PhaseConfig {
     /// Break thin lake ice that is carrying grain / snow / ice debris.
     /// Thick lids ([`Self::ice_carry_thickness`]) hold the load.
     pub enable_ice_load_break: bool,
-    /// Contiguous Ice cells needed to carry overburden. Default 2 —
-    /// a one-cell skin fails under sand/snow; a thickened lid holds.
+    /// Contiguous Ice cells needed to carry overburden **and** to read
+    /// as solid pack (no soft-haze fall / hillside cold-peel). Default
+    /// [`ICE_CARRY_THICKNESS_DEFAULT`] — a one-cell skin fails under
+    /// sand/snow and may powder-peel; a thickened lid holds.
     pub ice_carry_thickness: u8,
     /// Max ice cells broken under debris load **per column per tick**.
     pub max_load_break_cells_per_column_per_tick: u8,
@@ -104,7 +106,9 @@ pub struct PhaseConfig {
     /// [`crate::rules::apply_cold_avalanche`] when this is on).
     pub enable_cold_avalanche: bool,
     /// Relocate Ice/Snow stacks taller than [`Self::max_ice_cells_per_column`]
-    /// onto thinner cold neighbours (mass-flat). Soak `OFF=cull` disables.
+    /// onto thinner cold neighbours (mass-flat). Default **off** — packs
+    /// thicken freely; melt via `water_temp` replaces peel-to-Air budgets.
+    /// Soak `OFF=cull` also disables. Tab can re-enable for alpine spreads.
     pub enable_cull: bool,
     /// Cold precip settles as Snow (when off, cold columns get liquid rain).
     pub enable_snow_precip: bool,
@@ -124,7 +128,7 @@ impl Default for PhaseConfig {
             max_slush_cells_per_column_per_tick: 1,
             max_break_cells_per_column_per_tick: 2,
             min_budget_to_snow: 255.0,
-            max_ice_cells_per_column: 12,
+            max_ice_cells_per_column: 64,
             snow_spread_radius: 6,
             snow_blanket_depth: 2,
             frost_coat_depth: 1,
@@ -135,15 +139,19 @@ impl Default for PhaseConfig {
             enable_slush: true,
             enable_break_unsupported: true,
             enable_ice_load_break: true,
-            ice_carry_thickness: 2,
+            ice_carry_thickness: ICE_CARRY_THICKNESS_DEFAULT,
             max_load_break_cells_per_column_per_tick: 2,
             enable_cold_avalanche: true,
-            enable_cull: true,
+            enable_cull: false,
             enable_snow_precip: true,
             period_ticks: 4,
         }
     }
 }
+
+/// Contiguous Ice cells that carry debris and refuse soft-pack haze fall /
+/// hillside cold-peel. Thin sheets (`<` this) stay fragile.
+pub const ICE_CARRY_THICKNESS_DEFAULT: u8 = 2;
 
 /// Full phase pass: cull → break unsupported → break overloaded thin ice →
 /// water-on-ice / slush → thaw → freeze.
@@ -787,6 +795,31 @@ pub fn ice_lid_thickness(world: &World, gx: i32, gy: i32) -> u8 {
         }
     }
     n
+}
+
+/// Contiguous Ice stack through `(gx, gy)` (up and down). 0 if not Ice.
+///
+/// Used for solid-pack gates (cold peel / haze soft-fall): a cell in a
+/// multi-cell sheet is load-bearing even when it is the bottom contact.
+pub fn ice_column_thickness(world: &World, gx: i32, gy: i32) -> u8 {
+    match world.get_cell(gx, gy) {
+        Some(c) if c.material == MaterialId::Ice => {}
+        _ => return 0,
+    }
+    let mut top = gy;
+    for _ in 0..255 {
+        match world.get_cell(gx, top + 1) {
+            Some(c) if c.material == MaterialId::Ice => top += 1,
+            _ => break,
+        }
+    }
+    ice_lid_thickness(world, gx, top)
+}
+
+/// True when contiguous Ice at `(gx, gy)` is thick enough to carry load
+/// and refuse soft-pack motion ([`PhaseConfig::ice_carry_thickness`]).
+pub fn ice_is_solid_pack(world: &World, gx: i32, gy: i32, carry: u8) -> bool {
+    ice_column_thickness(world, gx, gy) >= carry.max(1)
 }
 
 fn is_debris_load(material: MaterialId) -> bool {
@@ -1479,6 +1512,7 @@ mod tests {
         let cfg = PhaseConfig {
             max_ice_cells_per_column: cap as u8,
             snow_spread_radius: 3,
+            enable_cull: true,
             enable_thaw: false,
             enable_freeze: false,
             enable_slush: false,
@@ -1539,6 +1573,7 @@ mod tests {
         let cfg = PhaseConfig {
             max_ice_cells_per_column: cap as u8,
             snow_spread_radius: 2,
+            enable_cull: true,
             enable_thaw: false,
             enable_freeze: false,
             enable_slush: false,
@@ -2002,6 +2037,23 @@ mod tests {
             MaterialId::Sand,
             "debris stays on a thick lid"
         );
+        assert_eq!(ice_column_thickness(&w, 2, 2), 2);
+        assert!(ice_is_solid_pack(&w, 2, 2, 2));
+    }
+
+    #[test]
+    fn default_ice_column_budget_is_relaxed() {
+        let cfg = PhaseConfig::default();
+        assert!(
+            cfg.max_ice_cells_per_column >= 64,
+            "brittle solid: packs thicken freely (got {})",
+            cfg.max_ice_cells_per_column
+        );
+        assert!(
+            !cfg.enable_cull,
+            "cull off by default — water_temp melt replaces tower sink"
+        );
+        assert_eq!(cfg.ice_carry_thickness, ICE_CARRY_THICKNESS_DEFAULT);
     }
 
     #[test]
