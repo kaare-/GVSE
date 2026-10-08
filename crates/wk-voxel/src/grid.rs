@@ -190,6 +190,15 @@ pub struct World {
     /// Live pipe steam temperature (°C) per cell.
     #[serde(default)]
     pub pipe_steam_t: FxHashMap<(i32, i32), f32>,
+    /// Sparse free-water temperature (°C) for **Air sat only** (Phase 3).
+    ///
+    /// Absent key ⇒ inherit tile [`crate::temperature::Temperature::at_cell`].
+    /// Heat-only ledger — never invents sat. Mix on free-water transfer;
+    /// clear when `sat → 0`. Pore-water T deferred.
+    ///
+    /// Sparse and saved (`#[serde(default)]` so older snaps load empty).
+    #[serde(default)]
+    pub water_temp: FxHashMap<(i32, i32), f32>,
     /// Sat ↔ unit scale for the pipe book. Set from steam expand on flash.
     #[serde(default = "default_world_pipe_expand")]
     pub pipe_expand: u16,
@@ -301,6 +310,7 @@ impl World {
             pipe_steam: FxHashMap::default(),
             pipe_res: FxHashMap::default(),
             pipe_steam_t: FxHashMap::default(),
+            water_temp: FxHashMap::default(),
             pipe_expand: default_world_pipe_expand(),
             sym_net_flow: FxHashMap::default(),
             mycelium_strain_lineage: FxHashMap::default(),

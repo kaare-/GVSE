@@ -6,7 +6,8 @@
 //!
 //! Rain stays **on top of** ice as a water film (it does not density-swap
 //! under the sheet — that lofted ice into the rain column). Water on ice
-//! melts the sheet when warm or when a full cell of rain has ponded.
+//! melts the sheet when the **film** is warm ([`crate::water_temp::water_temp_at`],
+//! absent ⇒ tile inherit) — including hot free water in a cold tile.
 //! Ice/Snow with dry air below **fall** as solids ([`crate::rules::apply_grain_fall`]);
 //! the unsupported break pass no longer turns empty-air gaps into water.
 //!
@@ -661,18 +662,17 @@ fn deposit_frozen_lid_on_surface(
 /// Water film on Ice/Snow, and Snow sitting on water.
 ///
 /// - **Water on ice/snow:** stays on top (no density swap under the sheet).
-///   Melts the frozen cell when **warm** only — cold ponded rain must not
+///   Melts the frozen cell when the film's free-water T is **warm**
+///   ([`crate::water_temp::water_temp_at`]) — cold ponded rain must not
 ///   melt ice (that churned melt→refreeze towers).
-/// - **Snow on water:** warm → melt snow; cold → freeze **full** water
-///   under the snow into ice (snow-on-ice pack).
+/// - **Snow on water:** warm free water / tile → melt snow; cold → freeze
+///   **full** water under the snow into ice (snow-on-ice pack).
 fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
     };
     let mut left = cfg.max_slush_cells_per_column_per_tick.max(1) as i32;
-    let sample_y = ground_sample_y(world, gx);
-    let t_c = temp.at_cell_packed(gx, sample_y);
-    let warm = t_c > cfg.freeze_point_c;
+    let freeze = cfg.freeze_point_c;
 
     for y in (y0..=y1).rev() {
         if left <= 0 {
@@ -683,12 +683,12 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
         };
 
         // Water film directly above ice → melt the sheet from above when
-        // warm. Cold full rain must NOT melt ice (that churned melt→freeze
-        // towers and looked like minted ice pillars).
+        // the film is warm (sparse water_temp or tile inherit). Cold full
+        // rain must NOT melt ice (that churned melt→freeze towers).
         if cell.material == MaterialId::Ice {
             if let Some(above) = world.get_cell(gx, y + 1) {
                 if is_wet_air(above) {
-                    if warm {
+                    if free_water_temp_c(world, temp, gx, y + 1) > freeze {
                         world.set_cell(gx, y, Cell::water());
                         left -= 1;
                     }
@@ -703,16 +703,18 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
                 continue;
             };
             if !is_wet_air(below) {
-                // Water film on snow — melt snow from above when warm only.
+                // Water film on snow — melt snow from above when film warm.
                 if let Some(above) = world.get_cell(gx, y + 1) {
-                    if is_wet_air(above) && warm {
+                    if is_wet_air(above)
+                        && free_water_temp_c(world, temp, gx, y + 1) > freeze
+                    {
                         world.set_cell(gx, y, Cell::water());
                         left -= 1;
                     }
                 }
                 continue;
             }
-            if warm {
+            if free_water_temp_c(world, temp, gx, y - 1) > freeze {
                 world.set_cell(gx, y, Cell::water());
                 left -= 1;
             } else if below.sat.0 >= cfg.min_sat_to_freeze {
@@ -1291,7 +1293,9 @@ fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig
 /// Empty air *below* a flake is not contact — that cell is still falling,
 /// and [`thaw_airborne_snow`] owns it. Warm sand or stone under a seat
 /// is contact: the snow tile can stay cold (albedo) while the ground
-/// tile it just hit is above freeze.
+/// tile it just hit is above freeze. Free-water seats use
+/// [`crate::water_temp::water_temp_at`] so a warm film in a cold tile
+/// still counts as contact.
 fn frozen_contact_is_warm(
     world: &World,
     gx: i32,
@@ -1301,7 +1305,7 @@ fn frozen_contact_is_warm(
 ) -> bool {
     if let Some(above) = world.get_cell(gx, gy + 1) {
         if !is_frozen_solid(above.material)
-            && temp.at_cell_packed(gx, gy + 1) > freeze
+            && contact_temp_c(world, temp, gx, gy + 1, above) > freeze
             && (above.material == MaterialId::Air
                 || above.material == MaterialId::Water
                 || above.material.is_solid())
@@ -1320,7 +1324,7 @@ fn frozen_contact_is_warm(
             y -= 1;
             continue;
         }
-        if temp.at_cell_packed(gx, y) <= freeze {
+        if contact_temp_c(world, temp, gx, y, below) <= freeze {
             break;
         }
         if below.material == MaterialId::Air && is_standing_water(world, gx, y) {
@@ -1335,6 +1339,22 @@ fn frozen_contact_is_warm(
         break;
     }
     false
+}
+
+/// Free-water °C at an Air sat seat ([`crate::water_temp::water_temp_at`]).
+#[inline]
+fn free_water_temp_c(world: &World, temp: &Temperature, gx: i32, gy: i32) -> f32 {
+    crate::water_temp::water_temp_at(world, temp, gx, gy)
+}
+
+/// Contact °C: free Air sat uses the sparse water ledger; else tile.
+#[inline]
+fn contact_temp_c(world: &World, temp: &Temperature, gx: i32, gy: i32, cell: Cell) -> f32 {
+    if cell.material == MaterialId::Air && !cell.sat.is_empty() {
+        free_water_temp_c(world, temp, gx, gy)
+    } else {
+        temp.at_cell_packed(gx, gy)
+    }
 }
 
 #[cfg(test)]
@@ -1853,6 +1873,59 @@ mod tests {
         apply_phase(&mut w, &temp, &PhaseConfig::default());
         assert_eq!(w.get_cell(1, 2).unwrap().material, MaterialId::Air);
         assert!(w.get_cell(1, 2).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn warm_film_water_temp_melts_ice_in_cold_tile() {
+        // Phase 3 slice B: sparse free-water T, not the cold tile, drives
+        // film-on-ice melt. Freeze off so same-tick skin freeze (tile-cold)
+        // does not snap the melt seat back — mouth cool is slice C.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(1, 1, Cell::water());
+        w.set_cell(1, 2, Cell::solid(MaterialId::Ice));
+        w.set_cell(
+            1,
+            3,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(100),
+                flags: Default::default(),
+                _pad: 0,
+                pore: 128,
+            },
+        );
+        crate::water_temp::set_water_temp(&mut w, 1, 3, 18.0);
+        let temp = cold_temp(16, 16, -8.0);
+        let film_sat0 = w.get_cell(1, 3).unwrap().sat.0;
+        let tracked0 = crate::audit::sat_totals(&w).cell_total;
+        let cfg = PhaseConfig {
+            enable_freeze: false,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(1, 2).unwrap().material,
+            MaterialId::Air,
+            "warm water_temp film must melt ice under a cold tile"
+        );
+        assert!(w.get_cell(1, 2).unwrap().sat.is_full());
+        assert_eq!(
+            w.get_cell(1, 3).unwrap().sat.0,
+            film_sat0,
+            "film sat must stay put (mass-flat aside from ice→FULL thaw)"
+        );
+        // Ice→Air+FULL adds one cell of TRACKED; film ledger is heat-only.
+        assert_eq!(
+            crate::audit::sat_totals(&w).cell_total,
+            tracked0 + 255,
+            "melt must be exactly one FULL thaw cell (no film mint/loss)"
+        );
+        assert!(
+            (crate::water_temp::water_temp_at(&w, &temp, 1, 3) - 18.0).abs() < 1e-3,
+            "film water_temp must survive the melt pass"
+        );
     }
 
     #[test]

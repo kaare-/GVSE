@@ -111,6 +111,11 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
     let track_load = !loaded.is_empty();
     let load_moves: std::sync::Mutex<Vec<((i32, i32), (i32, i32), u8, u8)>> =
         std::sync::Mutex::new(Vec::new());
+    // Free-water T ledger (Phase 3): Air→Air dumps only. Collected like
+    // mineral load — hot loop cannot touch the sparse map.
+    let track_wt = temp.is_some() && !world.water_temp.is_empty();
+    let wt_moves: std::sync::Mutex<Vec<((i32, i32), (i32, i32), u8, u8)>> =
+        std::sync::Mutex::new(Vec::new());
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
         let wrap = |gx: i32| match wrap_width {
@@ -356,6 +361,7 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
                             above.sat.0,
                         ));
                     }
+                    // Pore-water T deferred — no water_temp into solids.
                     next_cur = Some(new_above);
                     return;
                 }
@@ -404,6 +410,14 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
                         above.sat.0,
                     ));
                 }
+                if track_wt {
+                    wt_moves.lock().unwrap().push((
+                        (gx_of(x), y as i32 + 1),
+                        (gx_of(x), y as i32),
+                        move_amt,
+                        above.sat.0,
+                    ));
+                }
                 next_cur = Some(new_above);
             });
         });
@@ -413,5 +427,60 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
             crate::mineral::carry_with_water(world, from, to, moved, donor_before);
             crate::sediment::carry_with_water(world, from, to, moved, donor_before);
         }
+    }
+    if track_wt {
+        if let Some(t) = temp {
+            for (from, to, moved, donor_before) in wt_moves.into_inner().unwrap() {
+                crate::water_temp::mix_water_temp_on_transfer(
+                    world,
+                    t,
+                    from,
+                    to,
+                    moved,
+                    donor_before,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod water_temp_wire_tests {
+    use super::*;
+    use crate::audit::sat_totals;
+    use crate::chunk::ChunkCoord;
+    use crate::temperature::Temperature;
+    use crate::water_temp::{set_water_temp, water_temp_at};
+
+    #[test]
+    fn gravity_air_dump_carries_sparse_water_temp() {
+        let mut w = World::new(31);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(8, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(8, 3, Cell::air());
+        let mut hot = Cell::air();
+        hot.sat = Sat(180);
+        w.set_cell(8, 4, hot);
+        set_water_temp(&mut w, 8, 4, 90.0);
+
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 32, false);
+        temp.config.base_temp_c = -15.0;
+        temp.config.water_convect_bias = 0.0;
+        for v in temp.cells.values_mut() {
+            *v = -15.0;
+        }
+
+        let tracked0 = sat_totals(&w).cell_total;
+        let loaded = water_load_index(&w);
+        let active = crate::active::plan_active(&w);
+        apply_gravity_fall_regions_loaded(&mut w, &active, &loaded, Some(&temp));
+
+        assert_eq!(sat_totals(&w).cell_total, tracked0);
+        assert!(w.get_cell(8, 3).unwrap().sat.0 > 0);
+        let t_water = water_temp_at(&w, &temp, 8, 3);
+        assert!(
+            (t_water - temp.at_cell(8, 3)).abs() > 20.0,
+            "gravity dump must retain hot water_temp vs cold tile ({t_water})"
+        );
     }
 }

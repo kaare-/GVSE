@@ -470,6 +470,13 @@ pub fn step_world(
         let t0 = profile.then(Instant::now);
         let t_now = world.tick;
         temperature.step(Some(world), humidity, t_now, Some(wind));
+        // Phase 3 slice C: soft-cool sparse free-water T toward (skin-coupled)
+        // tile ambient — ≪ instant wipe. Heat-only; empty ledger is a no-op.
+        crate::water_temp::cool_water_temp_toward_ambient(
+            world,
+            temperature,
+            crate::water_temp::WATER_TEMP_SOFT_COOL_RATE,
+        );
         // Hold just shrank. Dump the surplus now, not next step's lottery.
         precipitate_thermal_surplus(world, humidity, temperature, Some(cfg.phase));
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {

@@ -67,7 +67,7 @@ shell left for later / Phase 4.
 
 ---
 
-## Phase 2 — Geysers / hydrothermal tighten *(code done 2026-10-07; Xvfb glance done)*
+## Phase 2 — Geysers / hydrothermal tighten *(done 2026-10-07)*
 
 **Goal:** Feel local and readable; less glitchy route churn.
 
@@ -77,40 +77,47 @@ shell left for later / Phase 4.
 - Leftover lake UW / seafloor mouths (#358).
 - Mild reverse-seep vertical soften (rock×32 / vent×48) (#359).
 - Short budget soak near vents: `park=0`.
-- Xvfb soak (~tick 1122): pipe HUD claimed (`P=4+24/3041`); overlay
-  straws look like thin stable verticals on a vent hill — no obvious
-  route thrash in stills. UW mouth plumes not clear in those pans
-  (surface/vent hill + pipe band showed). Artifacts:
-  `/opt/cursor/artifacts/phase2-geyser-vent-soak-late.png`.
+- Xvfb soak (~tick 1122): stable pipe straws on vent hill; UW plumes
+  not clear in that pan — owner closed Phase 2 anyway (2026-10-07).
 
-**Owner fork**
-
-- Close Phase 2 → Phase 3 ice, **or** one more Xvfb pan for lake/seafloor
-  mouths before closing.
-
-**Scope guard:** mass-flat mouth / park / sinter already audited. Cooling
-too fast in sub-zero air stays Phase 3 (water-T).
+**Scope guard held:** mass-flat mouth / park / sinter. Cooling-too-fast
+in sub-zero air deferred to Phase 3 (water-T).
 
 ---
 
-## Phase 3 — Ice revisit
+## Phase 3 — Ice revisit *(current)*
 
 **Goal:** Ice is an old material with quirks. Treat as a concentrated
-pass, not drive-by tweaks.
+pass, not drive-by tweaks. **Design discussion first** — do not pre-commit
+a water-T rewrite.
 
 **Owner notes** (2026-10-07)
 
 - Direction: toward a **brittle solid**, not powder-throughflow as the
   default look.
 - Biggest suspect: **water particles don’t carry temperature**, so
-  standing water on ice can’t really melt it. May need a larger rewrite;
-  **discuss when we get here**, don’t pre-commit the design.
+  standing water on ice can’t really melt it. May need a larger rewrite.
 - Related: geyser discharge cooling too fast in mostly sub-zero climates
   (same missing water-T bookkeeping).
 
+**Design locked** (2026-10-07 owner): **option 2 — free water carries
+temperature.** Sparse ledger (not `Cell` widen). Also addresses geyser
+discharge cooling in sub-zero air. See [`VOXEL_WATER.md`](VOXEL_WATER.md) § Phase 3.
+
+**Done (option 2 slices A–C)**
+
+- Sparse `World.water_temp` + mix/clear (gravity + mouth).
+- Phase film-on-ice / contact melt reads free-water T.
+- Mouth stamps hot water_temp; soft cool after thermal step.
+
+**Still open**
+
+- Brittle-solid look (block throughflow / powder) — optional follow-up.
+- Xvfb / playtest “reads as ice” acceptance.
+
 **Exit criteria**
 
-- Agreed ice model in docs + tests after the design discussion.
+- Agreed ice model in docs + tests (option 2 A–C met).
 - Visual soak (Xvfb or playtest) accepted as “reads as ice”.
 
 ---
@@ -180,6 +187,8 @@ before coding.
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |
 | 2026-10-07 | Phase 2 code | Sticky/local (#357), UW mouths (#358), mild vert (#359) |
+| 2026-10-07 | Phase 3 ice option | **2 — water carries T** (sparse free-water ledger; melt + geyser cool) |
+| 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
 | 2026-10-07 | UW / ocean vents | Lake underwater springs **and** seafloor ocean-column vents |
@@ -190,6 +199,6 @@ before coding.
 ## Clarifications later
 
 - Phase-1 stretch width / field-shell cuts deferred to Phase 4 (or revisit).
-- Ice water-temperature design options when Phase 3 starts.
+- Phase 3 ice option 2 slices: A sparse map spike → B melt on ice → C geyser mouth cool.
 - Phase-5 scoping agenda (plants/fungi vs creatures first — open until planning session).
 - Phase-8 shortlist of client stacks when that review starts.

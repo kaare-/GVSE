@@ -56,7 +56,9 @@ extend the same couples into pores. Detail is optional later.
 ### Hard no’s
 
 - No world-wide heat PDE finer than the existing tile field.
-- No second temperature store per cell.
+- No second temperature store **on every cell** / widening `Cell`.
+  Phase 3 ice (2026-10-07) adds a **sparse free-water** `water_temp`
+  ledger for Air sat only — see [`VOXEL_WATER.md`](VOXEL_WATER.md) § Phase 3.
 - No merging underground boil into sky Humidity “to make it one vapour.”
 - No Darcy pore-pressure continuum as a prerequisite (local rate bias later is enough).
 

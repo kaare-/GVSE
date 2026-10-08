@@ -493,6 +493,34 @@ Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
 - Shore / cascade suite (`impermeable_shore_*`, `continuous_rain_on_*`)
 - Grain repose: `sand_cliff_slides_diagonally`, `loose_rock_holds_single_step`, `snow_avalanches_off_cliff_but_not_into_water`, `sand_pile_flattens_over_ticks`
 
+
+## Phase 3 — ice revisit (roadmap)
+
+Owner closed Phase 2 (2026-10-07). Goal: **brittle solid** look, not
+powder-throughflow. Slices A–C landed: free-water `water_temp` drives
+film-on-ice melt; leftover mouths stamp hot discharge and soft-cool so
+sub-zero skin couple cannot instantly wipe it. Sticky / local / UW mouths
+unchanged.
+
+### Locked: option 2 — free water carries temperature (2026-10-07)
+
+Sparse `World.water_temp` (or equivalent) for **free Air sat only** — do
+**not** widen `Cell`. Absent key ⇒ inherit tile `Temperature::at_cell`.
+Heat-only (never touch TRACKED / `sat_totals`). Mix on sat transfer;
+clear when `sat→0`.
+
+| Slice | Scope | Exit |
+|-------|--------|------|
+| A | Sparse map + helpers; seed/mix on one path (mouth or gravity) | **Landed** (2026-10-07): `World.water_temp` + `water_temp::{get/set/clear/mix}`; wired on leftover mouth dump (`reverse_push` → Air) and gravity Air→Air when ledger non-empty. Hot dump retains T ≠ cold tile; heat-only (TRACKED flat). |
+| B | Phase reads water_temp for film-on-ice / contact melt | **Landed** (2026-10-07): `water_on_ice_and_slush` + `frozen_contact_is_warm` use `water_temp_at` for free-water seats; warm film over ice in cold tile melts; film sat unchanged (ice→FULL thaw only). |
+| C | Mouth writes hot water_temp; soft cool vs instant skin wipe | **Landed** (2026-10-07): `mix_mouth_water_temp_on_transfer` always stamps on leftover/`reverse_push` → Air (same-tile inherit no longer stays sparse); `cool_water_temp_toward_ambient` after thermal step (`WATER_TEMP_SOFT_COOL_RATE`); hot mouth retains vs cold tile after soft cool; heat-only. Sticky/local/UW mouths untouched. |
+
+Hard no’s: no weather coarsen / lottery skip / `live_surface_y` change;
+TRACKED mass-flat; no wholesale rustfmt of `phase.rs`; pore-water T deferred;
+short budget soak near vents stays `park=0`.
+
+**Slice A/C API** (`wk_voxel::water_temp`): `water_temp_at` (absent ⇒ `Temperature::at_cell`), `set_water_temp`, `clear_water_temp` / `clear_water_temp_if_dry`, `mix_water_temp_on_transfer` (gravity Air→Air; may stay sparse), `mix_mouth_water_temp_on_transfer` (mouth always stamps), `cool_water_temp_toward_ambient` (soft cool toward tile after skin couple).
+
 ## Ice / snow / phase (milestones 1–3)
 
 Module: `wk-voxel::phase` (`apply_phase`, `deposit_precip_on_surface`).
@@ -519,8 +547,10 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   a warm lake still melt) → `Air+FULL`. Columns with frozen cells probe
   deeper for the phase gate so buried ice under thick lakes still runs.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
-  sheet — that lofted ice into the rain). Melts the ice when **warm** only
-  (cold ponded rain no longer melts sheets — that churned ice towers).
+  sheet — that lofted ice into the rain). Melts the ice when the film's
+  free-water T is **warm** (`water_temp_at`, else tile inherit) — including
+  hot free water in a cold tile (Phase 3 slice B). Cold ponded rain (tile
+  inherit ≤ freeze) no longer melts sheets — that churned ice towers.
 - **Ice lid × evaporation:** intentional. Evap only runs on wet Air with
   **Air** above it (`dry_above_max`). An Ice/Snow sheet blocks that, so a
   capped lake loses far less mass and the humidity pump dries out — a

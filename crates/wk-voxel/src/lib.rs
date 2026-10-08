@@ -45,6 +45,7 @@ pub mod support_map;
 pub mod symbiosis;
 pub mod temperature;
 pub mod water_head;
+pub mod water_temp;
 pub mod wind;
 pub mod world_step;
 pub mod worldgen;
@@ -126,6 +127,11 @@ pub use geotech_map::{
     GEOTECH_MAP_PHASE,
 };
 pub use grid::{ChunkMap, World};
+pub use water_temp::{
+    clear_water_temp, clear_water_temp_if_dry, cool_water_temp_toward_ambient,
+    mix_mouth_water_temp_on_transfer, mix_water_temp_on_transfer, set_water_temp, water_temp_at,
+    water_temp_len, WATER_TEMP_SOFT_COOL_RATE,
+};
 pub use landscape_body::{
     apply_landscape_fall, detach_landscape_bodies, detach_landscape_bodies_with, force_stamp_all,
     step_landscape_bodies, LandscapeBody, LandscapeBodyStore, LandscapeFallStats,
