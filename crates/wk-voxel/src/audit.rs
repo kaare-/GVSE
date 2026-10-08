@@ -105,6 +105,9 @@ pub fn sat_totals(world: &World) -> SatTotals {
             }
             match cell.material {
                 MaterialId::Air => free_air += s,
+                // Ice/Snow bank thaw yield on `sat`; BudgetSnap / TRACKED
+                // credit it via the ice/snow books — not here.
+                MaterialId::Ice | MaterialId::Snow => {}
                 _ if water_capacity_cell(*cell, &world.hydro) > 0 => pore += s,
                 _ => {
                     // Impermeable with nonzero sat should be rare; still

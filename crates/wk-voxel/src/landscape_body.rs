@@ -113,7 +113,7 @@ impl LandscapeBodyStore {
       for &(_, _, c) in body.cells.iter().chain(body.cargo.iter()) {
         mineral += crate::mineral::cell_mineral(c) as i64;
         water += match c.material {
-          MaterialId::Ice | MaterialId::Snow => u8::MAX as i64,
+          MaterialId::Ice | MaterialId::Snow => crate::cell::frozen_thaw_sat(c) as i64,
           _ => c.sat.0 as i64,
         };
       }

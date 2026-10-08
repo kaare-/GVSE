@@ -29,8 +29,9 @@ must credit **integer** sat equal to vapour stored — rounding a
 fractional cold-cap room *up* was a slow night `UNEXPL-W` leak.
 
 Play overlay **`B`** (`budget::BudgetSnap`) is the same cell+humidity
-inventory plus Ice/Snow thaw yield (255 per cell) so freeze is a store
-move, not unexplained, plus **in-flight landscape slabs** (`body` /
+inventory plus Ice/Snow thaw yield (banked on `Cell.sat`, legacy `0` ⇒
+255) so freeze is a store move, not unexplained, plus **in-flight
+landscape slabs** (`body` /
 `min.body`) — detach writes Air, so hanging limestone would otherwise
 read as `UNEXPL-M` until stamp. `audit::tracked_totals` still omits ice
 and bodies. Scan runs only while the overlay is on, every 60 ticks.
@@ -528,6 +529,7 @@ thick lids solid / load-bearing. Column hardcap relaxed (melt via
 | Load break | Keep `ice_carry_thickness` — thin fails under debris, thick carries | Unchanged |
 | Float | Floes on full water; coherent sheet feel (not litter freefall through haze into the column) | Ice floe on full lake **and** haze/film over full lake; rise buoyancy kept |
 | Column budget | Raise / disable `max_ice_cells_per_column` cull; thicken freely | Default `max_ice=64`, `enable_cull=false` |
+| Partial freeze | Wet-air pockets (e.g. sat≈251) through/around ice lids | **Landed**: bank yield on `Cell.sat`; `min_sat_to_freeze` default **64**; thaw restores sat (no mint); BudgetSnap credits stored yield; frost/snow still pay full cell |
 
 Hard no’s: no weather coarsen / lottery skip / `live_surface_y` change;
 TRACKED mass-flat; no wholesale rustfmt of `phase.rs`; pore-water T deferred;
@@ -547,19 +549,22 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   high heat capacity (lakes barely cool over a night); **buried** bedrock
   ignores night air, eases toward a geothermal profile, and slowly leaks
   heat upward by diffusion. Snow albedo still shades solar.
-- **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`,
-  default **255** / full cell) when `temp ≤ freeze_point_c` → whole `Ice`
-  cell (lake skin). Partial films must not freeze — thaw always yields a
-  full water cell, so freezing mist would mint mass. **Cold lids then
-  thicken downward** one cell / tick into **full** wet Air under Ice/Snow.
+- **Freeze:** standing free-surface / under-lid wet Air
+  (`sat ≥ min_sat_to_freeze`, default **64**) when
+  `temp ≤ freeze_point_c` → `Ice` with **banked thaw yield** on
+  `Cell.sat` (frozen condensate / porous ice). Full cells bank `255`;
+  near-full pockets (e.g. sat 251) lock into the lid instead of pulsing
+  as wet Air through ice. Mist below the floor stays free Air. **Cold
+  lids thicken downward** one cell / tick into wet Air under Ice/Snow.
   Open-surface freeze is skipped only when Ice/Snow sits **under a
   free-water gap** in the same column (submerged flake / shore pump) —
   not merely because frozen cells exist deeper (that blocked whole cold
   lakes after any bed flake). Contiguous lids still thicken downward.
 - **Thaw:** top-of-stack Ice/Snow when cell `temp > freeze_point_c`, **or**
   when air/free-water **contact** is warm (albedo-cold snow/ice packs on
-  a warm lake still melt) → `Air+FULL`. Columns with frozen cells probe
-  deeper for the phase gate so buried ice under thick lakes still runs.
+  a warm lake still melt) → Air with the banked yield (`sat == 0` legacy
+  paint ⇒ `FULL`). Columns with frozen cells probe deeper for the phase
+  gate so buried ice under thick lakes still runs.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
   sheet — that lofted ice into the rain). Melts the ice when the film's
   free-water T is **warm** (`water_temp_at`, else tile inherit) — including
@@ -579,9 +584,9 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   Snow that hits **warm ground** melts to liquid; cold air + cold
   ground → solid `Snow` pack (never pore-soaks). Warm air always rains
   (ponds may freeze later via phase). Solid seats cost a **full cell**
-  (`min_budget_to_snow` default 255) — thaw always yields `Air+FULL`,
-  so a 64-sat droplet must not mint a Snow cell. Short budget / full
-  blanket → hold mass (`0`).
+  (`min_budget_to_snow` default 255) with banked thaw yield `255` —
+  frost/snow paths stay mass-flat; a 64-sat droplet must not mint a
+  Snow cell. Short budget / full blanket → hold mass (`0`).
 - **Condensation drizzle (`C`):** the play-app weather. Warm leftover
   vapour rains a falling drop (`deposit_water_in_air`). Below freeze
   the lottery gathers a **full-cell snowflake** — never liquid rain.

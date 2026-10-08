@@ -34,9 +34,10 @@ pub struct BudgetSnap {
     pub cave_h: i64,
     pub pipe: i64,
     pub humidity: f32,
-    /// Ice cells × 255 (thaw yield). Not in [`crate::sat_totals`].
+    /// Ice thaw yield ([`crate::cell::frozen_thaw_sat`]). Not in
+    /// [`crate::sat_totals`] (Ice/Snow sat is skipped there).
     pub ice: i64,
-    /// Snow cells × 255 (thaw / melt yield).
+    /// Snow thaw / melt yield (same banking as ice).
     pub snow: i64,
     pub mineral_solid: i64,
     pub mineral_load: i64,
@@ -68,12 +69,11 @@ impl BudgetSnap {
             .unwrap_or((0, 0));
         let mut ice = 0i64;
         let mut snow = 0i64;
-        let full = u8::MAX as i64;
         for chunk in world.chunks.values() {
             for cell in &chunk.cells {
                 match cell.material {
-                    MaterialId::Ice => ice += full,
-                    MaterialId::Snow => snow += full,
+                    MaterialId::Ice => ice += crate::cell::frozen_thaw_sat(*cell) as i64,
+                    MaterialId::Snow => snow += crate::cell::frozen_thaw_sat(*cell) as i64,
                     _ => {}
                 }
             }
@@ -379,7 +379,7 @@ fn probe_on() -> bool {
 
 fn overlay_water_units(cell: Cell) -> i64 {
     match cell.material {
-        MaterialId::Ice | MaterialId::Snow => u8::MAX as i64,
+        MaterialId::Ice | MaterialId::Snow => crate::cell::frozen_thaw_sat(cell) as i64,
         _ => cell.sat.0 as i64,
     }
 }
