@@ -17,7 +17,7 @@
 //! - `GVSE_BUDGET_PERIOD` — sample every N ticks (default 60)
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
 //! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `leftover`, `cadence`,
-//!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`
+//!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`, `surplus`, `snow`
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
@@ -191,6 +191,9 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         phase.enable_cull = false;
     }
     if soak_off("snow") {
+        phase.enable_snow_precip = false;
+    }
+    if soak_off("snow") {
         // Airborne flake paths (cond lottery + thermal surplus) refuse Snow.
         // 5k soak: TRACKED ~+136/t → ~0 with this flag (see VOXEL_BUDGET_SOAK).
         phase.enable_snow_precip = false;
@@ -264,6 +267,19 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     led.period = period;
     led.enable_with(&s.world, &s.humidity, Some(&s.landscape));
 
+    // Optional windowed attribution: GVSE_SOAK_WINDOW=N prints per-window
+    // ΔTRACKED / Δsnow / Δhum so mint onset (~2k→5k) is visible without a
+    // full mark remake. Default 0 = off.
+    let window = env_u64("GVSE_SOAK_WINDOW", 0);
+    let mut win_mark = if window > 0 {
+        Some(wk_voxel::BudgetSnap::capture_with(
+            &s.world,
+            &s.humidity,
+            Some(&s.landscape),
+        ))
+    } else {
+        None
+    };
     for i in 1..=ticks {
         let _ = step_world(
             WorldStep {
@@ -282,6 +298,30 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
             None,
         );
         led.sample_if_due_with(&s.world, &s.humidity, Some(&s.landscape));
+        if let (Some(mark), w) = (win_mark.as_ref(), window) {
+            if w > 0 && i % w == 0 {
+                let now = wk_voxel::BudgetSnap::capture_with(
+                    &s.world,
+                    &s.humidity,
+                    Some(&s.landscape),
+                );
+                let d = now.delta(*mark);
+                let dt = d.ticks.max(1) as f64;
+                eprintln!(
+                    "win t={}: TRACKED {:+.0} ({:+.2}/t) snow={:+} ice={:+} hum={:+.0} free={:+} pore={:+} steam={:+}",
+                    now.tick,
+                    d.d_tracked,
+                    d.d_tracked / dt,
+                    d.d_snow,
+                    d.d_ice,
+                    d.d_humidity,
+                    d.d_free,
+                    d.d_pore,
+                    d.d_steam
+                );
+                win_mark = Some(now);
+            }
+        }
         if i == ticks || (period > 0 && i % (period * 20).max(1) == 0) {
             led.refresh_with(&s.world, &s.humidity, Some(&s.landscape));
             print_budget(&led, s.landscape.len(), label);
