@@ -3214,6 +3214,47 @@ mod tests {
     }
 
     #[test]
+    fn take_around_after_dense_slab_advect_reduces_total_mass() {
+        // Soak mint hunt: flake pay must be visible to BudgetSnap after a
+        // dense advect left a live slab (cells may lag).
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.05,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        let world = World::new(p.seed);
+        let y0 = p.sea_level_y + 16;
+        let mut h = Humidity::with_world_bounds(4, 0, y0, 32, y0 + 32);
+        h.wrap_x = true;
+        let gy = y0 + 8;
+        h.add(8, gy, 400.0);
+        assert!(h.use_dense_slab(h.bounds.unwrap()));
+        h.advect_with_surface(0.05, 0.0, &wind, &world);
+        assert!(h.slab.is_some(), "dense path must keep a live slab");
+        let before = h.total_mass();
+        let paid = h.take_around(8, gy, 255.0);
+        assert!((paid - 255.0).abs() < 1e-3, "parcel must pay a flake ({paid})");
+        let after = h.total_mass();
+        assert!(
+            (before - after - 255.0).abs() < 1e-2,
+            "take_around must shrink total_mass through the slab (before={before} after={after})"
+        );
+    }
+
+    #[test]
     fn both_axis_flux_matches_two_passes() {
         let h = Humidity::with_world_bounds(1, 0, 0, 8, 8);
         let b = h.bounds.unwrap();
