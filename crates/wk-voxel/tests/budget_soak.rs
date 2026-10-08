@@ -17,7 +17,8 @@
 //! - `GVSE_BUDGET_PERIOD` — sample every N ticks (default 60)
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
 //! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `leftover`, `cadence`,
-//!   `karst`, `competent`, `phase`, `cull`, `failure`
+//!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`
+//!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
     stamp_world, step_world, BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig,
@@ -188,6 +189,11 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     }
     if soak_off("cull") {
         phase.enable_cull = false;
+    }
+    if soak_off("snow") {
+        // Airborne flake paths (cond lottery + thermal surplus) refuse Snow.
+        // 5k soak: TRACKED ~+136/t → ~0 with this flag (see VOXEL_BUDGET_SOAK).
+        phase.enable_snow_precip = false;
     }
     let mut steam = SteamConfig::default();
     if soak_off("steam") {
