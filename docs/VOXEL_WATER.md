@@ -563,7 +563,10 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   free-water gap** in the same column (submerged flake / shore pump) —
   not merely because frozen cells exist deeper, and **not** because the
   cell below is already Ice (that left ponded rain liquid forever).
-  Contiguous lids still thicken downward. **Hysteresis:** freeze at
+  Contiguous lids still thicken downward with a **sheet lock**: a column
+  may not deepen more than one cell past a wet neighbour's ice bottom
+  (and may not keep fingering while a wet neighbour has no lid yet).
+  Empty air / shore solids do not block. **Hysteresis:** freeze at
   `≤ freeze_point_c`; thaw needs `> freeze_point_c + thaw_hysteresis_c`
   (default **0.75 °C**) so shore water near 0 °C does not straddle.
 - **Thaw:** top-of-stack Ice/Snow when cell `temp > freeze_point_c +
