@@ -181,8 +181,11 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 
 - `park=0`, mineral ~flat (`+0.06/t`). Test passed.
 - TRACKED `+136/t` with UNEXPL-W/M flags still lighting — not a Phase 0
-  flat gate. Likely pre-existing H/precip bookkeeping on this stack, not
-  the sheet-lock path; chase only if you want a Phase 0 reopen.
+  flat gate. Isolation (2026-10-08): killed by `enable_snow_precip=false`
+  (`GVSE_SOAK_OFF=snow` → TRACKED `−0.01/t`); flake H-debit itself is
+  clean (`under=0`). Pre-existing snow-precip coupling, not sheet-lock.
+  Next hunt: post-seat path after Air→Snow (steam evict / melt / H
+  topology). Soak kill switch: `OFF=snow` or `OFF=cond,surplus`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 

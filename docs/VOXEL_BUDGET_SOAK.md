@@ -39,5 +39,22 @@ Prefer a subagent for the long wait. Drop screenshots under `/opt/cursor/artifac
 ## Work cycle
 
 - Oslo 09:00 local: decision list in this Cursor chat (timer is 07:00 UTC while CEST).
+
+### TRACKED mint @5k when snow precip is on (2026-10-08)
+
+Headless `short_budget_soak` on the Phase 3 ice tip showed TRACKED
+`~+130…136/t` with `park=0`. Differential `GVSE_SOAK_OFF`:
+
+| OFF | TRACKED /t | note |
+|-----|------------|------|
+| *(none)* | +131…136 | snow store rises |
+| `snow` (`enable_snow_precip=false`) | ~0 | sharpest kill |
+| `cond,surplus` | ~0 | both flake paths off |
+| `cond` alone | still + | thermal-surplus snow remains |
+| `steam` / `phase` / `cadence` | still + | not the gate |
+
+Flake humidity debit probes clean (`under=0`). Suspect is **after**
+`deposit_snow_in_air` seats Snow (not the pay path). Use `OFF=snow` as
+the soak kill switch until the post-seat mint is found.
 - Automerge when CI green once GitHub auto-merge is available to the agent; until then mark ready and note merge wait.
 - Hard problems: verify headless and/or Xvfb before asking to merge.
