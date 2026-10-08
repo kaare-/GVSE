@@ -57,5 +57,10 @@ Flake humidity debit probes clean (`under=0`). Suspect is **after**
 `deposit_snow_in_air` seats Snow (not the pay path). Soak kill switch:
 `GVSE_SOAK_OFF=snow` → `PhaseConfig::enable_snow_precip = false` until the
 post-seat mint is found.
+
+**Ruled out (unit):** `Air→Snow` + H pay + `evict_steam_seat` stays TRACKED
+flat (`phase::airborne_snow_seat_over_steam_stays_tracked_flat`). Still open:
+H re-injection / advect around snow topology, orphan-film evap coupling,
+multi-tick climate feedback once flakes exist (mint onset ~2k→5k).
 - Automerge when CI green once GitHub auto-merge is available to the agent; until then mark ready and note merge wait.
 - Hard problems: verify headless and/or Xvfb before asking to merge.
