@@ -633,9 +633,12 @@ fn ice_dest_is_free_surface_film_ptrs(
     }
 }
 
-/// Ice floe seat: full grounded lake **or** haze/film over full lake water
-/// (ocean free surface). Avoids soft-pack freefall into the column while
-/// land mist (haze over rock, no full water below) still drops thin ice.
+/// Ice floe seat: full grounded lake, haze/film over lake, **or** a brief
+/// empty gap over still-present lake water / same-Y wet neighbour.
+///
+/// Cascade can drain the contact cell for a tick; falling into that hole
+/// left water on top of ice and a pulsing shore line. Land empty air
+/// (no lake below, no wet neighbour) still drops ice.
 fn ice_floe_seat_ptrs(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
@@ -643,14 +646,64 @@ fn ice_floe_seat_ptrs(
     gx: i32,
     gy: i32,
 ) -> bool {
-    if seat.material != MaterialId::Air || seat.sat.is_empty() {
+    if seat.material != MaterialId::Air {
         return false;
     }
-    if floats_on_air_seat_ptrs(ptrs, wrap_width, seat, gx, gy) {
-        return true;
+    if !seat.sat.is_empty() {
+        if floats_on_air_seat_ptrs(ptrs, wrap_width, seat, gx, gy) {
+            return true;
+        }
+        // Partial sat — only when a full lake cell remains below.
+        return lake_under_film_ptrs(ptrs, wrap_width, gx, gy);
     }
-    // Partial sat — only when a full lake cell remains below.
-    lake_under_film_ptrs(ptrs, wrap_width, gx, gy)
+    // Empty seat: hold if grounded full water is within a short drop, or
+    // a same-Y neighbour is still standing lake water (shore continuity).
+    lake_water_within_ptrs(ptrs, wrap_width, gx, gy, 3)
+        || lake_surface_neighbor_ptrs(ptrs, wrap_width, gx, gy)
+}
+
+/// Grounded `sat == FULL` Air within `max_down` cells at or below `gy`.
+fn lake_water_within_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+    max_down: i32,
+) -> bool {
+    for dy in 0..=max_down {
+        let y = gy - dy;
+        let Some(c) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, y) }) else {
+            return false;
+        };
+        if c.material != MaterialId::Air {
+            return false;
+        }
+        if c.sat.is_full() && water_column_grounded_ptrs(ptrs, wrap_width, gx, y) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Same-Y neighbour is standing full lake water (shore line continuity).
+fn lake_surface_neighbor_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    for dx in [-1_i32, 1] {
+        let Some(n) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx + dx, gy) }) else {
+            continue;
+        };
+        if n.material == MaterialId::Air
+            && n.sat.is_full()
+            && water_column_grounded_ptrs(ptrs, wrap_width, gx + dx, gy)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when `litter_y` is buoyant litter whose column reaches a grounded

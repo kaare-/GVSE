@@ -1181,6 +1181,42 @@ fn ice_floe_holds_on_haze_over_full_lake() {
 }
 
 #[test]
+fn ice_floe_holds_over_empty_lake_gap() {
+    // Cascade can empty the contact cell for a tick. Falling into that
+    // hole left water on the lid and a pulsing shore line.
+    let mut w = setup_column_world();
+    w.set_cell(3, 1, Cell::water());
+    w.set_cell(3, 2, Cell::air()); // drained gap
+    w.set_cell(3, 3, Cell::solid(MaterialId::Ice));
+    apply_grain_fall(&mut w);
+    assert_eq!(
+        w.get_cell(3, 3).unwrap().material,
+        MaterialId::Ice,
+        "floe must bridge a brief empty gap over lake water"
+    );
+    assert_eq!(w.get_cell(3, 2).unwrap().material, MaterialId::Air);
+    assert!(w.get_cell(3, 2).unwrap().sat.is_empty());
+}
+
+#[test]
+fn ice_floe_holds_over_empty_with_wet_neighbour() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 1, Cell::water());
+    w.set_cell(3, 1, Cell::water());
+    w.set_cell(4, 1, Cell::water());
+    w.set_cell(2, 2, Cell::water());
+    w.set_cell(3, 2, Cell::air()); // hole
+    w.set_cell(4, 2, Cell::water());
+    w.set_cell(3, 3, Cell::solid(MaterialId::Ice));
+    apply_grain_fall(&mut w);
+    assert_eq!(
+        w.get_cell(3, 3).unwrap().material,
+        MaterialId::Ice,
+        "shore ice must not drop into a one-cell surface hole"
+    );
+}
+
+#[test]
 fn thick_ice_does_not_soft_fall_through_land_haze() {
     let mut w = setup_column_world();
     w.set_cell(

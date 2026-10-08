@@ -577,9 +577,11 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   capped lake loses far less mass and the humidity pump dries out — a
   useful cold-climate feedback even before a full thermal field.
 - **Unsupported ice/snow:** empty Air below → **fall** as solids in
-  `apply_grain_fall` (float on full water; drop through empty/haze Air).
-  Phase break does **not** melt packs over empty or haze — fall owns those
-  seats (melting haze used to fight freeze and pump flakes at the surface).
+  `apply_grain_fall` (float on full water / haze-over-lake; Ice also
+  **bridges** brief empty gaps over still-present lake water or a wet
+  same-Y neighbour so cascade drain cannot drop the lid and pulse the
+  shore line). Land empty air still drops ice. Phase break does **not**
+  melt packs over empty or haze — fall owns those seats.
 - **Snow precip:** condensation (`C`) and the library injector
   `apply_rain` both call `deposit_precip_on_surface`. **Air temp at
   precip origin** (`start_y` / tile height) chooses flake vs drop.
