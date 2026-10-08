@@ -110,10 +110,17 @@ discharge cooling in sub-zero air. See [`VOXEL_WATER.md`](VOXEL_WATER.md) § Pha
 - Phase film-on-ice / contact melt reads free-water T.
 - Mouth stamps hot water_temp; soft cool after thermal step.
 
+**Xvfb glance** (2026-10-08): cold alpine + ice lid / water paint —
+standing film sits on the lid; after soak a wet band under the pale cap
+(not instant vanish). No obvious powder cascading through solid ice.
+Pipe net live nearby; no clear mouth-on-ice money shot.
+Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
+`phase3-ice-15-lid-soak.png`.
+
 **Still open**
 
-- Brittle-solid look (block throughflow / powder) — optional follow-up.
-- Xvfb / playtest “reads as ice” acceptance.
+- Brittle-solid look (block throughflow / powder) — owner call.
+- Formal “reads as ice” acceptance (Xvfb glance positive; close Phase 3?).
 
 **Exit criteria**
 
@@ -187,6 +194,7 @@ before coding.
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |
 | 2026-10-07 | Phase 2 code | Sticky/local (#357), UW mouths (#358), mild vert (#359) |
+| 2026-10-08 | Phase 3 Xvfb | Ice lid + water: film/wet band holds; no powder thrash in stills |
 | 2026-10-07 | Phase 3 ice option | **2 — water carries T** (sparse free-water ledger; melt + geyser cool) |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
