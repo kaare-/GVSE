@@ -155,6 +155,16 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   remains the acceptance gate (pulse / deep-lake heat / “reads as ice”).
 - Glossary Phase line updated for partial-sat freeze + hysteresis.
 
+**Landed (alpine-cold cull + lid chill)** (2026-10-08 playtest)
+
+- `alpine-cold` preset still had `enable_cull=true` / `max_ice=12` —
+  thickening lids relocated laterally (“pulling hard”). Now matches
+  brittle defaults (`cull=false`, `max_ice=64`).
+- Ice lids report `free_water≈0`, so buoyancy never sank skin cold into
+  the column; deep lake stayed still near −5 under −30 °C air. Skin
+  couple now quenches free-water tiles under the lid; buried free-water
+  climate relax slightly stronger.
+
 **Still open**
 
 - Owner playtest gate: “reads as ice” / no lake lid pulse / deep lake
