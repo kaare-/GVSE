@@ -1927,7 +1927,7 @@ mod tests {
             ..PhaseConfig::default()
         };
         assert_eq!(cfg.min_sat_to_freeze, 64);
-        let hum = crate::humidity::Humidity::new(16, 16);
+        let hum = crate::humidity::Humidity::new(16);
         let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
         apply_phase(&mut w, &temp, &cfg);
         let ice = w.get_cell(1, 1).unwrap();
