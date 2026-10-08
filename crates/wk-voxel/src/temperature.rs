@@ -1211,11 +1211,12 @@ impl Temperature {
                         // stack capacity is already large; full inertia left
                         // mid-lake nearly frozen in place across soaks.
                         // Owner −30 °C soak: lid chill alone left mid-lake
-                        // stuck near −5; slightly stronger climate pull.
-                        let relax = (cfg.sky_relax * 0.55
+                        // stuck near −5. Mid between the first climate
+                        // pull and the "vacuum" quench feel.
+                        let relax = (cfg.sky_relax * 0.45
                             / (1.0
-                                + props.capacity.max(0.05) * cfg.inertia_scale * 0.15))
-                            .clamp(0.004, 0.10);
+                                + props.capacity.max(0.05) * cfg.inertia_scale * 0.18))
+                            .clamp(0.003, 0.08);
                         t + (target - t) * relax
                     } else {
                         // Overburden from the live rock surface, every step.
@@ -1580,11 +1581,11 @@ impl Temperature {
         bounds: Option<TileBounds>,
         slab_w: usize,
     ) {
-        let rate = rate.clamp(0.0, 0.55);
+        let rate = rate.clamp(0.0, 0.45);
         if rate < 1e-5 {
             return;
         }
-        for d in 1..=8 {
+        for d in 1..=5 {
             let hy = skin_hy - d;
             let Some(props) = self.props_cache.get(&(hx, hy)).copied() else {
                 break;
@@ -1601,8 +1602,8 @@ impl Temperature {
                 continue;
             }
             // Depth falloff: near-skin tiles quench harder.
-            let depth_k = (1.0 - 0.08 * (d as f32 - 1.0)).clamp(0.35, 1.0);
-            let a = (rate * 0.65 * depth_k).clamp(0.0, 0.45);
+            let depth_k = (1.0 - 0.12 * (d as f32 - 1.0)).clamp(0.30, 1.0);
+            let a = (rate * 0.45 * depth_k).clamp(0.0, 0.30);
             let n0 = t0 + (skin_t - t0) * a;
             self.write_tile_temp(hx, hy, t0, n0, dense, bounds, slab_w);
         }

@@ -1113,6 +1113,11 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         if !under_lid && !open_surface {
             continue;
         }
+        // Under-lid thickening must keep a sheet front: do not race a
+        // column deeper than its wet neighbours (owner ice "fingers").
+        if under_lid && !under_lid_sheet_supported(world, gx, y) {
+            continue;
+        }
         // Free-water T (sparse ledger, else tile). A cold night tile must
         // not freeze a warm film the same period contact thaw peels it.
         let t_c = free_water_temp_c(world, temp, gx, y);
@@ -1125,6 +1130,23 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         freezes_left -= 1;
         frozen_count += 1;
     }
+}
+
+/// Under-lid freeze only when both left/right lid-level cells are ice,
+/// snow, or solid shore — so a column cannot finger ahead of the sheet.
+fn under_lid_sheet_supported(world: &World, gx: i32, y: i32) -> bool {
+    let lid_y = y + 1;
+    for dx in [-1, 1] {
+        let nx = world.wrap_x(gx + dx);
+        match world.get_cell(nx, lid_y) {
+            Some(c) if is_frozen_solid(c.material) => {}
+            Some(c) if c.material.is_solid() => {}
+            // Wet / empty neighbour at the current lid bottom — wait for
+            // the sheet to catch up before thickening this column.
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// True when Ice/Snow sits below `gy` with free water in between.
@@ -1602,6 +1624,54 @@ mod tests {
             MaterialId::Ice,
             "cold lid must thicken downward into the pond"
         );
+    }
+
+    #[test]
+    fn under_lid_freeze_waits_for_sheet_neighbours() {
+        // Owner: ice fingers raced down some columns while neighbours
+        // still had a thin lid. Sheet lock refuses deepen-ahead.
+        let mut w = World::new(21);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // Wide cold pond: columns 2..9 water, walls at 1 and 10.
+        w.set_cell(1, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(1, 2, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(1, 3, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(1, 4, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(10, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(10, 2, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(10, 3, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(10, 4, Cell::solid(MaterialId::Bedrock));
+        for x in 2..10 {
+            for y in 1..=3 {
+                w.set_cell(x, y, Cell::water());
+            }
+            w.set_cell(x, 4, Cell::air());
+        }
+        // Thin lid everywhere except column 5 already has a deep finger.
+        for x in 2..10 {
+            w.set_cell(x, 3, Cell::solid(MaterialId::Ice));
+        }
+        w.set_cell(5, 2, Cell::solid(MaterialId::Ice));
+        w.set_cell(5, 1, Cell::water()); // wet under the finger tip
+        let temp = cold_temp(32, 16, -12.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        w.tick = 0;
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(5, 1).unwrap().material,
+            MaterialId::Air,
+            "finger tip must not deepen while neighbours are still thin"
+        );
+        assert!(w.get_cell(5, 1).unwrap().sat.is_full());
+        // Neighbours thicken one step (sheet front at y=2).
+        assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Ice);
+        assert_eq!(w.get_cell(6, 2).unwrap().material, MaterialId::Ice);
     }
 
     #[test]
