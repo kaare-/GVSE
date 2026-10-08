@@ -1415,7 +1415,8 @@ impl Humidity {
     }
 
     /// Donor-cell flux into `work`. Masses come from the pre-advect
-    /// `snap` so both axes commute the same way as [`Self::flux_axis`].
+    /// `snap`. Test/compare helper — production uses [`Self::flux_both_into`].
+    #[cfg(test)]
     fn flux_axis_into(
         &self,
         snap: &[f32],
