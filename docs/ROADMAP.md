@@ -167,14 +167,37 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 
 **Landed (ice sheet lock)** (2026-10-08 playtest)
 
-- Under-lid freeze waits for lid-level neighbours (ice/snow/shore) so
-  columns cannot finger ahead of the sheet. Heat quench retuned milder
-  after owner “dumping heat” note.
+- Under-lid freeze may not deepen more than one cell past a wet
+  neighbour’s ice bottom (empty air / shore do not block). Heat quench
+  retuned milder after owner “dumping heat” note.
+
+**Xvfb sheet tip** (2026-10-08, `#370` tip)
+
+- Stills: `/opt/cursor/artifacts/phase3-sheet-03-lid-fresh.png` …
+  `09-final.png`. Agent framing again weak for lid geometry; owner
+  playtest remains the gate.
+
+**Headless 5k soak** (tip `#370`, `short_budget_soak`)
+
+- `park=0`, mineral ~flat (`+0.06/t`). Test passed.
+- TRACKED `+136/t` with UNEXPL-W/M flags still lighting — not a Phase 0
+  flat gate. Likely pre-existing H/precip bookkeeping on this stack, not
+  the sheet-lock path; chase only if you want a Phase 0 reopen.
+
+**Decision list** (2026-10-08 evening Oslo cycle)
+
+1. **Merge stack `#365`→`#370`?** All CI-green, ready, CLEAN. Bottom-up
+   onto `park-bank`. Agent cannot enable GitHub auto-merge from here.
+2. **Phase 3 exit?** Accept “reads as ice” after sheet-lock + lid-chill
+   playtest, or list remaining lid/heat issues.
+3. **Phase 4 start?** Only after (2). Goal: re-profile + larger worlds
+   (see below). No Phase 4 code until you close Phase 3.
 
 **Still open**
 
-- Owner playtest gate: “reads as ice” / no lake lid pulse / deep lake
-  cools when `base_temp` dropped with overburden off.
+- Owner playtest gate on tip `#370`: “reads as ice” / no lake lid pulse /
+  sheet (not fingers) / deep lake cools under hard cold without vacuum.
+  Stack `#365`–`#370` is CI-green and ready to merge bottom-up.
 
 **Exit criteria**
 
