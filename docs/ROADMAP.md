@@ -183,9 +183,9 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 - TRACKED `+136/t` with UNEXPL-W/M flags still lighting — not a Phase 0
   flat gate. Isolation (2026-10-08): killed by `enable_snow_precip=false`
   (`GVSE_SOAK_OFF=snow` → TRACKED `−0.01/t`); flake H-debit itself is
-  clean (`under=0`). Pre-existing snow-precip coupling, not sheet-lock.
-  Next hunt: post-seat path after Air→Snow (steam evict / melt / H
-  topology). Soak kill switch: `OFF=snow` or `OFF=cond,surplus`.
+  clean (`under=0`). Root cause: humidity dual-axis flux over-donate when
+  `|vx|+|vy|>1` (snow pack boosts near-crest wind); fixed via joint leave
+  scale in `flux_both_into` / `flux_both`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 

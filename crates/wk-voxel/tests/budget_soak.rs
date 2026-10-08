@@ -191,9 +191,6 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         phase.enable_cull = false;
     }
     if soak_off("snow") {
-        phase.enable_snow_precip = false;
-    }
-    if soak_off("snow") {
         // Airborne flake paths (cond lottery + thermal surplus) refuse Snow.
         // 5k soak: TRACKED ~+136/t → ~0 with this flag (see VOXEL_BUDGET_SOAK).
         phase.enable_snow_precip = false;

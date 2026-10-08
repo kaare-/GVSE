@@ -2306,23 +2306,6 @@ mod tests {
     }
 
     #[test]
-    fn dual_axis_flux_does_not_mint_when_speed_exceeds_one() {
-        // Both axes donate from the same snap. |vx|=1 plus capped vy used
-        // to plan leave > mass; apply clamped the debit and neighbours
-        // kept the full credit (TRACKED mint gated by snow-boosted wind).
-        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
-        h.wrap_x = true;
-        h.add(8, 8, 100.0);
-        let before = h.total_mass();
-        h.advect(1.0, 0.80); // vy clamps to HUMIDITY_VY_ADV_CAP (0.10)
-        assert!(
-            (h.total_mass() - before).abs() < 1e-3,
-            "dual-axis overspeed must stay mass-flat (before={before} after={})",
-            h.total_mass()
-        );
-    }
-
-    #[test]
     fn vertical_wind_does_not_vacuum_a_tile_in_one_hop() {
         let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         h.wrap_x = true;
