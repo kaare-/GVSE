@@ -3218,7 +3218,6 @@ mod tests {
     fn cold_lake_lid_does_not_water_ice_pulse() {
         // Owner soak: film on ice + buoyancy used to loft the lid through
         // the film, freeze re-skinned the gap, and the pack interleaved.
-        use crate::audit::sat_totals;
         use crate::rules::{apply_grain_fall, apply_water_flow, rise_buoyant_litter};
 
         let mut w = World::new(99);
@@ -3238,7 +3237,8 @@ mod tests {
             w.set_cell(x, 6, Cell::water()); // ponded film on the lid
             w.set_cell(x, 7, Cell::air());
         }
-        let tracked0 = sat_totals(&w).cell_total;
+        let hum = crate::humidity::Humidity::new(32);
+        let tracked0 = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
         let temp = cold_temp(32, 16, -33.0);
         let cfg = PhaseConfig {
             period_ticks: 1,
@@ -3299,9 +3299,22 @@ mod tests {
             "cold lake must keep an ice lid"
         );
         assert_eq!(
-            sat_totals(&w).cell_total,
+            crate::budget::BudgetSnap::capture(&w, &hum).tracked(),
             tracked0,
             "lid pulse fix must stay TRACKED-flat"
+        );
+        // Film stayed on the lid — ice did not pop through it.
+        let ice_top = ice_top_ys.last().copied().unwrap();
+        assert_eq!(
+            w.get_cell(7, ice_top).map(|c| c.material),
+            Some(MaterialId::Ice)
+        );
+        let above = w.get_cell(7, ice_top + 1).unwrap();
+        assert_eq!(above.material, MaterialId::Air);
+        assert!(
+            above.sat.is_empty() || above.sat.is_full(),
+            "sky or ponded film on ice, not a mid-pack stripe (sat={})",
+            above.sat.0
         );
     }
 }
