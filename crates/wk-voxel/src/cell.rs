@@ -310,6 +310,25 @@ pub fn water_capacity(material: MaterialId) -> u8 {
     water_capacity_with(material, &wk_material::HydroOverrides::default())
 }
 
+/// Thaw / TRACKED water units banked in an Ice or Snow cell.
+///
+/// Partial-sat freeze stores the Air sat on the frozen cell so thaw
+/// restores that amount (no mint). `sat == 0` is the legacy whole-cell
+/// sentinel (`255`) used by editor paint and older saves.
+#[inline]
+pub fn frozen_thaw_sat(cell: Cell) -> u8 {
+    match cell.material {
+        MaterialId::Ice | MaterialId::Snow => {
+            if cell.sat.0 == 0 {
+                u8::MAX
+            } else {
+                cell.sat.0
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// [`water_capacity`] with an explicit hydrology override table
 /// (typically [`crate::grid::World::hydro`]).
 pub fn water_capacity_with(material: MaterialId, hydro: &wk_material::HydroOverrides) -> u8 {
@@ -548,6 +567,19 @@ mod tests {
     fn ice_and_snow_treated_impermeable_here() {
         assert_eq!(water_capacity(MaterialId::Ice), 0);
         assert_eq!(water_capacity(MaterialId::Snow), 0);
+    }
+
+    #[test]
+    fn frozen_thaw_sat_banks_partial_and_legacy_full() {
+        let legacy = Cell::solid(MaterialId::Ice);
+        assert_eq!(frozen_thaw_sat(legacy), u8::MAX);
+        let mut partial = Cell::solid(MaterialId::Ice);
+        partial.sat.0 = 100;
+        assert_eq!(frozen_thaw_sat(partial), 100);
+        let mut full = Cell::solid(MaterialId::Snow);
+        full.sat.0 = u8::MAX;
+        assert_eq!(frozen_thaw_sat(full), u8::MAX);
+        assert_eq!(frozen_thaw_sat(Cell::air()), 0);
     }
 
     #[test]

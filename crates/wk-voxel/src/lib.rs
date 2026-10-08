@@ -80,9 +80,9 @@ pub use cave_humidity::{
     CAVE_HUMIDITY_HAZE_TILE, MAX_CAVE_HUMIDITY_CELLS,
 };
 pub use cell::{
-    falls_through_empty_air, grain_max_stable_step, hosts_mycelium, is_flow_erodible, is_grain,
-    is_repose_grain, permeability_cell, water_capacity, water_capacity_cell, water_capacity_with,
-    Cell, CellFlags, Sat,
+    falls_through_empty_air, frozen_thaw_sat, grain_max_stable_step, hosts_mycelium,
+    is_flow_erodible, is_grain, is_repose_grain, permeability_cell, water_capacity,
+    water_capacity_cell, water_capacity_with, Cell, CellFlags, Sat,
 };
 pub use chunk::{
     material_is_loose, Chunk, ChunkCoord, DirtyBits, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W,
