@@ -928,6 +928,14 @@ fn accumulate_water_flow_xfers(
                     None => false,
                     Some(b) => b.material != MaterialId::Air || b.sat.is_full(),
                 };
+                // Ponded film on Ice/Snow stays put — cascade / diagonal
+                // dump off the lid left a water stripe that freeze then
+                // re-skinned (shore ice pulse). Same-Y equalise still
+                // levels films sitting on the pack.
+                let on_frozen_lid = matches!(
+                    below_cell,
+                    Some(b) if matches!(b.material, MaterialId::Ice | MaterialId::Snow)
+                );
 
                 // Calm free surface: full sat on full water/solid below
                 // with full-sat Air on both sides — no cascade, equalise,
@@ -984,7 +992,11 @@ fn accumulate_water_flow_xfers(
 
                 // --- Priority 1: diagonal-down into Air with room ---
                 // Shelf edge: (dx, y-1) is Air, so water can fall there.
+                // Skip when seated on Ice/Snow (lid film must not peel).
                 for dx in dirs {
+                    if on_frozen_lid {
+                        break;
+                    }
                     if remaining == 0 {
                         break;
                     }
@@ -1005,7 +1017,7 @@ fn accumulate_water_flow_xfers(
                     remaining -= move_amt;
                 }
 
-                if remaining > 0 {
+                if remaining > 0 && !on_frozen_lid {
                     // --- Priority 2: immediate side is a cascade edge ---
                     // side is Air AND (side, y-1) is Air with room → water
                     // dumped there falls next tick. Move all we can.
