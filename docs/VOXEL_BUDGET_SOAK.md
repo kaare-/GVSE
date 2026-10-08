@@ -66,8 +66,9 @@ conservation fix; it is not the snow soak leftover.
 `+111/t` — mint is post-seat coupling. Relative to `OFF=snow`, the leftover
 lines up with **extra humidity** (~mint-sized) plus free/pore retained as
 if evap slowed; not steam scrub (`OFF=steam` still +). Dense-slab
-`take_around` is visible to `total_mass` (unit). Next: `hum_adv` probe /
-orphan-film / H re-injection after flakes exist. Kill switch:
-`GVSE_SOAK_OFF=snow`.
+`take_around` is visible to `total_mass` (unit). Soak `hum_adv` on
+advect_with_surface is ~0 (±tens) while TRACKED is +10…130/t — **not
+advect**. Next: diffuse / evap try_add / orphan-film once flakes exist.
+Kill switch: `GVSE_SOAK_OFF=snow`.
 - Automerge when CI green once GitHub auto-merge is available to the agent; until then mark ready and note merge wait.
 - Hard problems: verify headless and/or Xvfb before asking to merge.

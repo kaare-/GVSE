@@ -184,9 +184,8 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   flat gate. Isolation (2026-10-08): killed by `enable_snow_precip=false`
   (`GVSE_SOAK_OFF=snow` → TRACKED `−0.01/t`); flake H-debit itself is
   clean (`under=0`). Dual-axis H flux over-donate fixed (real, unit-tested)
-  but **5k still +131/t** after that fix — not the soak mint. Next:
-  humidity re-injection / advect around snow topology (`hum_adv` probe).
-  Kill switch: `OFF=snow`.
+  but **5k still +131/t** after that fix — not the soak mint. Soak
+  `hum_adv`≈0 → not advect; next diffuse/evap/orphan-film. Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 
