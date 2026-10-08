@@ -2481,39 +2481,53 @@ mod tests {
         // Post-seat TRACKED mint hunt: Air→Snow calls evict_steam_seat.
         // H pays the flake; steam must relocate, not double-count with snow.
         let mut w = World::new(3);
-        w.ensure_chunk(ChunkCoord::new(0, 0));
-        for x in 0..8 {
-            for y in 0..8 {
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 0..16 {
+            for y in 0..24 {
                 w.set_cell(x, y, Cell::air());
             }
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
         }
-        let seat_y = 4;
-        crate::steam::add_steam(&mut w, 4, seat_y, 180);
-        // Neighbour void so eviction has somewhere mass-flat to go.
-        crate::steam::add_steam(&mut w, 5, seat_y, 0);
-        let mut hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 32, 32);
-        hum.add(4, seat_y, 255.0);
+        let mut hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        // Seed steam on many empty-air columns; neighbours stay void for eviction.
+        for x in (2..14).step_by(2) {
+            let y = 8 + (x % 5);
+            crate::steam::add_steam(&mut w, x, y, 200);
+            hum.add(x, y, 255.0);
+        }
         let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
-        let snowed = deposit_snow_in_air(&mut w, 4, seat_y, 255.0);
-        assert_eq!(snowed, 255.0, "must seat a whole flake");
-        let paid = hum.take_around(4, seat_y, snowed);
-        assert!((paid - snowed).abs() < 1e-3, "H must pay the flake ({paid})");
-        assert_eq!(
-            w.get_cell(4, seat_y)
-                .or_else(|| w.get_cell(4, seat_y + 1))
-                .map(|c| c.material),
-            Some(MaterialId::Snow)
-        );
-        assert_eq!(
-            crate::steam::steam_at(&w, 4, seat_y),
-            0,
-            "snow seat must not keep steam"
+        let mut seated = 0u32;
+        let mut paid_total = 0.0f32;
+        for x in (2..14).step_by(2) {
+            let y = 8 + (x % 5);
+            let snowed = deposit_snow_in_air(&mut w, x, y, 255.0);
+            if snowed <= 0.0 {
+                continue;
+            }
+            seated += 1;
+            let paid = hum.take_around(x, y, snowed);
+            paid_total += paid;
+            assert!(
+                (paid - snowed).abs() < 1e-3,
+                "H must pay flake at ({x},{y}): paid={paid}"
+            );
+            assert_eq!(
+                crate::steam::steam_at(&w, x, y),
+                0,
+                "snow seat must not keep steam at ({x},{y})"
+            );
+        }
+        assert!(seated >= 4, "probe must seat several flakes (got {seated})");
+        assert!(
+            (paid_total - seated as f32 * 255.0).abs() < 1.0,
+            "paid={paid_total} seated={seated}"
         );
         let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
         assert!(
             (after - before).abs() < 1.0,
-            "Air→Snow + H pay + steam evict must stay TRACKED flat (Δ={})",
+            "N×(Air→Snow + H pay + steam evict) must stay TRACKED flat (Δ={} seated={seated})",
             after - before
         );
     }

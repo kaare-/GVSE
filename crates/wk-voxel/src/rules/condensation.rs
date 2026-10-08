@@ -1,10 +1,48 @@
 //! Humidity condensation drizzle (+ orographic boost).
 
+use std::cell::Cell as StdCell;
+
 use serde::{Deserialize, Serialize};
 
 use crate::grid::World;
 
 use super::util::hash_prob;
+
+/// Cumulative flake accounting for the snow TRACKED-mint hunt.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SnowMintProbe {
+    pub seated: u64,
+    pub paid: f64,
+    pub under: f64,
+}
+
+thread_local! {
+    static SNOW_MINT_PROBE: StdCell<SnowMintProbe> = const {
+        StdCell::new(SnowMintProbe {
+            seated: 0,
+            paid: 0.0,
+            under: 0.0,
+        })
+    };
+}
+
+pub fn snow_mint_probe_reset() {
+    SNOW_MINT_PROBE.with(|c| c.set(SnowMintProbe::default()));
+}
+
+pub fn snow_mint_probe_snapshot() -> SnowMintProbe {
+    SNOW_MINT_PROBE.with(|c| c.get())
+}
+
+fn snow_mint_probe_note(snowed: f32, paid: f32) {
+    SNOW_MINT_PROBE.with(|c| {
+        let mut v = c.get();
+        v.seated = v.seated.saturating_add(1);
+        v.paid += f64::from(paid);
+        v.under += f64::from((snowed - paid).max(0.0));
+        c.set(v);
+    });
+}
 
 /// Condensation-rain parameters for [`apply_condensation_rain`].
 ///
@@ -170,7 +208,9 @@ fn try_snow_from_parcel(
     if snowed <= 0.0 {
         return 0.0;
     }
-    humidity.take_around(gx, gy, snowed)
+    let paid = humidity.take_around(gx, gy, snowed);
+    snow_mint_probe_note(snowed, paid);
+    paid
 }
 
 /// Turn vapour the local air can no longer hold into precip.
@@ -869,6 +909,55 @@ mod tests {
             u8::MAX,
             "flake banks full thaw yield (not free-water sat)"
         );
+    }
+
+    #[test]
+    fn seating_n_flakes_keeps_tracked_flat() {
+        use crate::budget::BudgetSnap;
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(9);
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..40 {
+            for x in 0..32 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut h = Humidity::new(4);
+        // Eight separated parcels so each can pay a full flake.
+        for (i, hx) in [0i32, 2, 4, 6, 1, 3, 5, 7].into_iter().enumerate() {
+            h.cells.insert((hx, 8), FLAKE_MASS + 10.0 + i as f32);
+        }
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -20.0;
+        }
+        temp.rebuild_row_means();
+        let before = BudgetSnap::capture(&w, &h).tracked();
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, None);
+        let after = BudgetSnap::capture(&w, &h).tracked();
+        assert!(
+            (after - before).abs() < 1.0,
+            "flake H debit must match snow yield (TRACKED {before} → {after})"
+        );
+        let flakes = (0..32)
+            .filter(|&x| {
+                (1..40).any(|y| {
+                    w.get_cell(x, y)
+                        .is_some_and(|c| c.material == MaterialId::Snow)
+                })
+            })
+            .count();
+        assert!(flakes > 0, "expected at least one flake");
     }
 
     #[test]

@@ -25,8 +25,8 @@ mod tests;
 
 pub use condensation::{
     apply_condensation_rain, apply_condensation_rain_phased,
-    apply_condensation_rain_with_orographic, precipitate_thermal_surplus, CondensationConfig,
-    OrographicConfig,
+    apply_condensation_rain_with_orographic, precipitate_thermal_surplus, snow_mint_probe_reset,
+    snow_mint_probe_snapshot, CondensationConfig, OrographicConfig, SnowMintProbe,
 };
 pub use evap::{
     apply_evaporation, apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate,

@@ -21,11 +21,11 @@
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
-    stamp_world, step_world, BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig,
-    CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
-    FungiConfig, GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrographicConfig,
-    PerfConfig, PhaseConfig, SteamConfig, Temperature, Wind, World, WorldStep, WorldStepConfig,
-    WorldgenParams,
+    snow_mint_probe_reset, snow_mint_probe_snapshot, stamp_world, step_world, BudgetLedger,
+    BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
+    CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GrainConfig,
+    Humidity, KarstConfig, LandscapeBodyStore, OrographicConfig, PerfConfig, PhaseConfig,
+    SteamConfig, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams,
 };
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -266,6 +266,7 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     let mut led = BudgetLedger::default();
     led.period = period;
     led.enable_with(&s.world, &s.humidity, Some(&s.landscape));
+    snow_mint_probe_reset();
 
     // Optional windowed attribution: GVSE_SOAK_WINDOW=N prints per-window
     // ΔTRACKED / Δsnow / Δhum so mint onset (~2k→5k) is visible without a
@@ -335,6 +336,17 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         &format!("{label} final"),
     );
     let d = led.delta().expect("ledger on");
+    let snow = snow_mint_probe_snapshot();
+    let phase_store = d.d_ice + d.d_snow;
+    eprintln!(
+        "snow-mint-probe seated={} paid={:.0} under={:.0} Δsnow+ice={:+} ΔTRACKED={:+.0} paid−phase={:+.0}",
+        snow.seated,
+        snow.paid,
+        snow.under,
+        phase_store,
+        d.d_tracked,
+        snow.paid - phase_store as f64,
+    );
     (d.d_min_total, d.d_tracked as i64, BudgetProbe::snapshot())
 }
 
