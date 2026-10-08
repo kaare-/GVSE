@@ -177,6 +177,13 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   `09-final.png`. Agent framing again weak for lid geometry; owner
   playtest remains the gate.
 
+**Headless 5k soak** (tip `#370`, `short_budget_soak`)
+
+- `park=0`, mineral ~flat (`+0.06/t`). Test passed.
+- TRACKED `+136/t` with UNEXPL-W/M flags still lighting — not a Phase 0
+  flat gate. Likely pre-existing H/precip bookkeeping on this stack, not
+  the sheet-lock path; chase only if you want a Phase 0 reopen.
+
 **Decision list** (2026-10-08 evening Oslo cycle)
 
 1. **Merge stack `#365`→`#370`?** All CI-green, ready, CLEAN. Bottom-up
