@@ -337,14 +337,15 @@ fn peel_airborne_loose(world: &World, gx: i32, start: i32, search: i32) -> i32 {
     y.max(0)
 }
 
-/// Soak hunt: when set, every Snow cell peels from [`live_surface_y`]
-/// (as if still airborne). Physical snow still blocks evap; weather /
-/// free_air_hy / orographic crest ignore the pack. `OFF=snowsurf`.
 thread_local! {
     static PEEL_SEATED_SNOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Toggle seated-snow peel for live-surface walks (soak `OFF=snowsurf`).
+///
+/// When set, every Snow cell peels from [`live_surface_y`] (as if still
+/// airborne). Physical snow still blocks evap; weather / free_air_hy /
+/// orographic crest ignore the pack.
 pub fn set_peel_seated_snow(on: bool) {
     PEEL_SEATED_SNOW.with(|c| c.set(on));
 }
