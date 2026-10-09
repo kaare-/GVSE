@@ -170,8 +170,17 @@ pub(crate) unsafe fn set_cell(
     let Some(ptr) = ptrs.get(&coord) else {
         return;
     };
+    // Snow-book + free-Air miss probe (soak mint hunt). Full `note_set_cell`
+    // stays on `World::set_cell` — grain swaps would otherwise flood water_swap.
+    let prev = unsafe { (*ptr).get(lx, ly) };
     unsafe {
         (*ptr).set(lx, ly, cell);
+    }
+    crate::budget::note_parallel_set_cell(prev, cell);
+    if prev.material == wk_material::MaterialId::Snow
+        || cell.material == wk_material::MaterialId::Snow
+    {
+        crate::budget::note_snow_book_exit(prev, cell);
     }
 }
 

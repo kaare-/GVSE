@@ -2191,12 +2191,15 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], mut moves: Vec<(i
       }
     }
   }
-  for (x, y) in sources {
-    world.set_cell(*x, *y, Cell::air());
-  }
-  for (tx, ty, cell) in moves {
-    world.set_cell(tx, ty, cell);
-    world.touch_dirty(tx, ty);
+  {
+    let _scope = crate::budget::SnowSwapScope::competent();
+    for (x, y) in sources {
+      world.set_cell(*x, *y, Cell::air());
+    }
+    for (tx, ty, cell) in moves {
+      world.set_cell(tx, ty, cell);
+      world.touch_dirty(tx, ty);
+    }
   }
   // Vacated cells first (the volume the body used to fill), then outward.
   let vacated: Vec<(i32, i32)> = sources

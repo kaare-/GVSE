@@ -1,5 +1,6 @@
 //! Physics tick orchestration and performance knobs.
 
+use std::cell::Cell as StdCell;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,71 @@ use serde::{Deserialize, Serialize};
 use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 use crate::temperature::Temperature;
+
+thread_local! {
+    /// Soak `OFF=flow` — skip surface cascade / equalise / throughflow / confined.
+    static SKIP_SURFACE_FLOW: StdCell<bool> = const { StdCell::new(false) };
+    /// Soak `OFF=seep` — skip pore seepage + contact wet + seam coupling.
+    static SKIP_SEEPAGE: StdCell<bool> = const { StdCell::new(false) };
+    /// Soak `OFF=park` — `park_orphan_water` discards without writing free sat.
+    static SKIP_PARK_ORPHAN: StdCell<bool> = const { StdCell::new(false) };
+    /// Soak `OFF=gravity` — skip free-water / infiltration gravity pulls
+    /// (chunk-direct writes; landed-pack free_in hunt).
+    static SKIP_GRAVITY: StdCell<bool> = const { StdCell::new(false) };
+    /// Soak `OFF=settle` — skip multi-pass grain fall/repose settle
+    /// (parallel::set_cell free-sat miss hunt; airborne snow roll stays on).
+    static SKIP_GRAIN_SETTLE: StdCell<bool> = const { StdCell::new(false) };
+}
+
+/// Toggle surface-flow skip (soak `OFF=flow` — snow-mint free-writer hunt).
+pub fn set_skip_surface_flow(on: bool) {
+    SKIP_SURFACE_FLOW.with(|c| c.set(on));
+}
+
+/// Toggle seepage skip (soak `OFF=seep`).
+pub fn set_skip_seepage(on: bool) {
+    SKIP_SEEPAGE.with(|c| c.set(on));
+}
+
+/// Toggle park-orphan skip (soak `OFF=park`).
+pub fn set_skip_park_orphan(on: bool) {
+    SKIP_PARK_ORPHAN.with(|c| c.set(on));
+}
+
+/// Toggle gravity-fall skip (soak `OFF=gravity`).
+pub fn set_skip_gravity(on: bool) {
+    SKIP_GRAVITY.with(|c| c.set(on));
+}
+
+/// Toggle grain-settle skip (soak `OFF=settle`).
+pub fn set_skip_grain_settle(on: bool) {
+    SKIP_GRAIN_SETTLE.with(|c| c.set(on));
+}
+
+#[inline]
+pub(crate) fn skip_surface_flow() -> bool {
+    SKIP_SURFACE_FLOW.with(|c| c.get())
+}
+
+#[inline]
+pub(crate) fn skip_seepage() -> bool {
+    SKIP_SEEPAGE.with(|c| c.get())
+}
+
+#[inline]
+pub(crate) fn skip_park_orphan() -> bool {
+    SKIP_PARK_ORPHAN.with(|c| c.get())
+}
+
+#[inline]
+pub(crate) fn skip_gravity() -> bool {
+    SKIP_GRAVITY.with(|c| c.get())
+}
+
+#[inline]
+pub(crate) fn skip_grain_settle() -> bool {
+    SKIP_GRAIN_SETTLE.with(|c| c.get())
+}
 
 use super::grain::{
     active_has_unsupported_grain, settle_loose_grains_regions_ex, GRAIN_SETTLE_PASSES,
@@ -434,7 +500,9 @@ fn tick_with_life_inner(
     // They run once, just before the seepage plan that consumes their dirty —
     // see the wake block below. Waking here as well only fed the *flow* plan,
     // which does not move pore water, and cost a full scan of every wet chunk.
-    let run_seepage = !perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0;
+    let run_seepage = !skip_seepage()
+        && (!perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0);
+    let run_surface_flow = !skip_surface_flow();
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
@@ -450,6 +518,8 @@ fn tick_with_life_inner(
     // checkerboard colour × substep was 16 HashSet walks/tick after karst,
     // growing with soak age (1.2k → 12k keys on the demo inventory).
     let gravity_load = water_load_index(world);
+    let _flow_stage =
+        crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::FLOW);
     for step in 0..max_steps {
         let t0 = profile.then(Instant::now);
         let active = plan_active(world);
@@ -469,8 +539,10 @@ fn tick_with_life_inner(
         flow_halo = active.clone();
         let passes = partition_checkerboard(&active);
         let t0 = profile.then(Instant::now);
-        for pass in &passes {
-            apply_gravity_fall_regions_loaded(world, pass, &gravity_load, temp);
+        if !skip_gravity() {
+            for pass in &passes {
+                apply_gravity_fall_regions_loaded(world, pass, &gravity_load, temp);
+            }
         }
         if let (true, Some(t0)) = (profile, t0) {
             local.gravity += t0.elapsed();
@@ -481,7 +553,8 @@ fn tick_with_life_inner(
         // step 1 saw an empty plan and broke before any leveling.)
         // Odd-step gravity is load-bearing: without it the dirty halo
         // fattens and each flow call costs more than the gravity saved.
-        let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
+        let run_flow =
+            run_surface_flow && (!perf.flow_every_other_substep || (step % 2 == 0));
         // Interactive: surface priorities only; throughflow/confined once
         // after the loop. full_feel: throughflow+confined every substep.
         let interactive = perf.flow_quiet_early_out;
@@ -517,7 +590,7 @@ fn tick_with_life_inner(
     // substep) — rainy beaches paid Priority-4 deep walks and confined
     // BFS ×N. full_feel already ran them inside each flow substep.
     let interactive = perf.flow_quiet_early_out;
-    if interactive && !flow_halo.is_empty() {
+    if run_surface_flow && interactive && !flow_halo.is_empty() {
         let t0 = profile.then(Instant::now);
         apply_throughflow_regions(world, &flow_halo);
         if let (true, Some(t0)) = (profile, t0) {
@@ -536,7 +609,7 @@ fn tick_with_life_inner(
     }
     // Communicating vessels: a filled pipe can go locally quiet while the
     // reservoir head is still higher. Periodic full-chunk confined scan.
-    {
+    if run_surface_flow {
         let t0 = profile.then(Instant::now);
         super::water_flow::wake_confined_head(world, temp);
         if let (true, Some(t0)) = (profile, t0) {
@@ -574,7 +647,7 @@ fn tick_with_life_inner(
             (false, false) => merge_active_regions(dirty, flow_halo),
         }
     };
-    if !flow_active.is_empty() {
+    if !flow_active.is_empty() && !skip_seepage() {
         let t0 = profile.then(Instant::now);
         if run_seepage {
             // Deep pass: includes peer pore↔pore percolation.
@@ -584,6 +657,7 @@ fn tick_with_life_inner(
             // but the contact between fast surface water and slow
             // groundwater must be resolved every tick, or the surface
             // layers carry the wrong saturation (and deposition with it).
+            // Hunt `OFF=seep` skips this branch too (see guard above).
             super::seepage::apply_seepage_contact_regions(world, &flow_active);
         }
         if let (true, Some(t0)) = (profile, t0) {
@@ -602,6 +676,7 @@ fn tick_with_life_inner(
         }
     }
     mass_checkpoint!("seepage");
+    drop(_flow_stage);
 
     // Re-wake unsupported grains and steep cliff faces. Cadence-gated:
     // full sticky-loose scan every 16 ticks; dirty-halo wake every 4.
@@ -652,6 +727,7 @@ fn tick_with_life_inner(
     // walks × wet Air × passes → ~1 FPS). Teleport rise clears the column
     // first; settle then handles sand / true freefall.
     {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::RISE);
         let t0 = profile.then(Instant::now);
         match grain {
             Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
@@ -674,7 +750,8 @@ fn tick_with_life_inner(
         // FPS shallow polish: only on wake cadence or when something is
         // mid-air. Quiet rainy shores were paying ×8 settle every tick
         // (~0.7 ms) with deep_settle_ticks=0 / punch_hits=0.
-        let run_settle = deep || world.tick % GRAIN_WAKE_EVERY == 0;
+        let run_settle =
+            !skip_grain_settle() && (deep || world.tick % GRAIN_WAKE_EVERY == 0);
         if run_settle {
             let passes = if deep {
                 if interactive {
@@ -688,10 +765,20 @@ fn tick_with_life_inner(
             if profile && deep {
                 local.deep_settle_ticks += 1;
             }
+            let _stage =
+                crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::SETTLE);
             let t0 = profile.then(Instant::now);
             // Rise already teleported buoyant litter — do not one-cell
             // bob through wet Air inside settle (Organic flood FPS spike).
-            settle_loose_grains_regions_ex(world, &grain_active, rooted, passes, false);
+            let grain_cfg = grain.cloned().unwrap_or_default();
+            settle_loose_grains_regions_ex(
+                world,
+                &grain_active,
+                rooted,
+                passes,
+                false,
+                &grain_cfg,
+            );
             if let (true, Some(t0)) = (profile, t0) {
                 local.settle += t0.elapsed();
             }
@@ -702,7 +789,15 @@ fn tick_with_life_inner(
     // Snow is not "unsupported grain" for deep settle. One cheap
     // downward roll here so a shower still leaves the sky.
     if world.chunks.values().any(|c| c.has_snow) {
-        let _ = super::grain::apply_airborne_snow_fall(world);
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::FALL);
+        match grain {
+            Some(g) => {
+                let _ = super::grain::apply_airborne_snow_fall_cfg(world, g);
+            }
+            None => {
+                let _ = super::grain::apply_airborne_snow_fall(world);
+            }
+        }
     }
 
     // Dense cargo cannot ride floating Organic/Snow/Ice. Skip the full
@@ -710,6 +805,7 @@ fn tick_with_life_inner(
     // still ~0.19 ms empty scan). Full wake every 16 still finds cargo
     // outside the halo and sets `raft_cargo_seen`.
     if did_wake && raft_cargo_seen > 0 {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::PUNCH);
         let t0 = profile.then(Instant::now);
         let punched = super::grain::punch_through_floating_rafts(world);
         if let (true, Some(t0)) = (profile, t0) {
@@ -725,14 +821,16 @@ fn tick_with_life_inner(
                 local.wake_grains += t0.elapsed();
             }
             let sink = filter_loose_regions(world, &plan_active(world));
-            if !sink.is_empty() {
+            if !sink.is_empty() && !skip_grain_settle() {
                 let t0 = profile.then(Instant::now);
+                let grain_cfg = grain.cloned().unwrap_or_default();
                 settle_loose_grains_regions_ex(
                     world,
                     &sink,
                     rooted,
                     GRAIN_SETTLE_PASSES_PUNCH,
                     false,
+                    &grain_cfg,
                 );
                 if let (true, Some(t0)) = (profile, t0) {
                     local.settle += t0.elapsed();
@@ -746,6 +844,8 @@ fn tick_with_life_inner(
     // Floating wake is mandatory — F1 defers competent rock to this pass, so
     // sky boulders hang forever if they are never re-dirtied.
     if failure.enable_competent_fall {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::COMPETENT);
         // Cadence-gated floating wake only. Do **not** re-seed from the water
         // dirty / flow halo: sloshing `sat` cannot destabilise rock, and that
         // path re-flooded wet hills every GRAIN_WAKE_EVERY (~2.5k flood cells
@@ -791,16 +891,20 @@ fn tick_with_life_inner(
     // wake (+ neighbours); a full has_solid scan runs on
     // FAILURE_FULL_SCAN_PERIOD so static karst rooms still fail.
     const FAILURE_EVERY: u64 = 4;
-    let failure_stats = if world.tick % FAILURE_EVERY == 0 {
-        let t0 = profile.then(Instant::now);
-        let stats =
-            crate::failure::apply_failure_with_wake(world, failure, geotech, &geotech_wake);
-        if let (true, Some(t0)) = (profile, t0) {
-            local.failure += t0.elapsed();
+    let failure_stats = {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::FAILURE);
+        if world.tick % FAILURE_EVERY == 0 {
+            let t0 = profile.then(Instant::now);
+            let stats =
+                crate::failure::apply_failure_with_wake(world, failure, geotech, &geotech_wake);
+            if let (true, Some(t0)) = (profile, t0) {
+                local.failure += t0.elapsed();
+            }
+            stats
+        } else {
+            crate::failure::FailureStats::default()
         }
-        stats
-    } else {
-        crate::failure::FailureStats::default()
     };
     mass_checkpoint!("geotech failure");
 
@@ -810,6 +914,8 @@ fn tick_with_life_inner(
 
     // Mycelium field: lives in Organic independently of fruiting bodies.
     {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::MYCELIUM);
         let t0 = profile.then(Instant::now);
         match fungi {
             Some(f) => crate::fungi::step_mycelium_field_cfg(world, f),

@@ -623,6 +623,7 @@ fn rests_on_solid_or_pack(world: &World, gx: i32, gy: i32) -> bool {
 /// Soft blanket depth caps column spikes. Leaf frost tint is a future
 /// overlay animation, not world Snow on Photosystem cells.
 fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
+    let _scope = crate::budget::SnowSwapScope::surface();
     deposit_frozen_lid_on_surface(world, gx, start_y, snow_cell())
 }
 
@@ -648,6 +649,7 @@ pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f
     let Some(air_y) = first_empty_air_y_for_snow(world, jx, y) else {
         return 0.0;
     };
+    let _scope = crate::budget::SnowSwapScope::nucleate();
     world.set_cell(jx, air_y, snow_cell());
     u8::MAX as f32
 }
@@ -1030,6 +1032,7 @@ fn cull_relocate_candidates(
 
 /// Seat a relocated Ice/Snow lid on empty Air only (no wet-film absorb).
 fn seat_relocated_frozen(world: &mut World, gx: i32, start_y: i32, lid: Cell) -> bool {
+    let _scope = crate::budget::SnowSwapScope::reloc();
     let jx = world.wrap_x(gx);
     let mut y = start_y;
     let mut last_empty_air_y: Option<i32> = None;
@@ -2474,6 +2477,169 @@ mod tests {
             Some(MaterialId::Snow)
         );
         assert_eq!(w.get_cell(2, 2).map(|c| c.sat.0), Some(0));
+    }
+
+    #[test]
+    fn airborne_snow_seat_over_steam_stays_tracked_flat() {
+        // Post-seat TRACKED mint hunt: Air→Snow calls evict_steam_seat.
+        // H pays the flake; steam must relocate, not double-count with snow.
+        let mut w = World::new(3);
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 0..16 {
+            for y in 0..24 {
+                w.set_cell(x, y, Cell::air());
+            }
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let mut hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        // Seed steam on many empty-air columns; neighbours stay void for eviction.
+        for x in (2..14).step_by(2) {
+            let y = 8 + (x % 5);
+            crate::steam::add_steam(&mut w, x, y, 200);
+            hum.add(x, y, 255.0);
+        }
+        let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        let mut seated = 0u32;
+        let mut paid_total = 0.0f32;
+        for x in (2..14).step_by(2) {
+            let y = 8 + (x % 5);
+            let snowed = deposit_snow_in_air(&mut w, x, y, 255.0);
+            if snowed <= 0.0 {
+                continue;
+            }
+            seated += 1;
+            let paid = hum.take_around(x, y, snowed);
+            paid_total += paid;
+            assert!(
+                (paid - snowed).abs() < 1e-3,
+                "H must pay flake at ({x},{y}): paid={paid}"
+            );
+            assert_eq!(
+                crate::steam::steam_at(&w, x, y),
+                0,
+                "snow seat must not keep steam at ({x},{y})"
+            );
+        }
+        assert!(seated >= 4, "probe must seat several flakes (got {seated})");
+        assert!(
+            (paid_total - seated as f32 * 255.0).abs() < 1.0,
+            "paid={paid_total} seated={seated}"
+        );
+        let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        assert!(
+            (after - before).abs() < 1.0,
+            "N×(Air→Snow + H pay + steam evict) must stay TRACKED flat (Δ={} seated={seated})",
+            after - before
+        );
+    }
+
+    #[test]
+    fn thaw_to_air_snow_and_airborne_thaw_stay_tracked_flat() {
+        // Phase-ON mint hunt (B): thaw must credit free = banked yield.
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            for y in 2..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Landed pack + airborne flake.
+        w.set_cell(2, 2, snow_cell());
+        w.set_cell(2, 3, snow_cell());
+        w.set_cell(4, 8, snow_cell());
+        let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let before = crate::budget::BudgetSnap::capture(&w, &hum);
+        let warm = cold_temp(16, 16, 12.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..6 {
+            w.tick = tick;
+            apply_phase(&mut w, &warm, &cfg);
+        }
+        let after = crate::budget::BudgetSnap::capture(&w, &hum);
+        let d = after.delta(before);
+        assert!(
+            d.d_tracked.abs() < 1.0,
+            "thaw_to_air / airborne thaw must stay TRACKED flat (Δtracked={})",
+            d.d_tracked
+        );
+        assert!(
+            d.d_snow <= 0,
+            "warm phase must shrink snow book (Δsnow={})",
+            d.d_snow
+        );
+        // Free must rise by the snow that left (no bare drop, no double credit).
+        assert_eq!(
+            d.d_free + d.d_snow,
+            0,
+            "free credit must match snow exit (Δfree={} Δsnow={})",
+            d.d_free,
+            d.d_snow
+        );
+    }
+
+    #[test]
+    fn snow_on_warm_water_slush_thaw_stays_tracked_flat() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::water());
+        w.set_cell(3, 2, snow_cell());
+        let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        let warm = cold_temp(16, 16, 10.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..4 {
+            w.tick = tick;
+            apply_phase(&mut w, &warm, &cfg);
+        }
+        let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        assert!(
+            (after - before).abs() < 1.0,
+            "snow-on-warm-water thaw must stay TRACKED flat (Δ={})",
+            after - before
+        );
+        assert_ne!(
+            w.get_cell(3, 2).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "slush path must melt the flake"
+        );
+    }
+
+    #[test]
+    fn grain_overwrite_snow_with_sand_is_bare_exit_not_mint() {
+        // Non-phase snow-book exit: sand landing on snow drops yield with no
+        // free credit → TRACKED *sink*, never a mint.
+        let mut w = World::new(6);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, snow_cell());
+        let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let mut led = crate::budget::BudgetLedger::default();
+        led.enable(&w, &hum);
+        let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        let p = crate::budget::BudgetProbe::snapshot();
+        led.disable();
+        assert_eq!(p.snow_exit_n, 1);
+        assert_eq!(p.snow_exit_yield, u8::MAX as i64);
+        assert_eq!(p.snow_exit_credit, 0);
+        assert_eq!(p.snow_exit_bare, u8::MAX as i64);
+        assert!(
+            after < before - 200.0,
+            "bare Snow→Sand must sink TRACKED (Δ={})",
+            after - before
+        );
     }
 
     #[test]

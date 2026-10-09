@@ -46,6 +46,10 @@ flat 120-tick run).
 | `park` | **0** |
 | wall | ~66 min |
 
+**Reconfirm (2026-10-09)** — 50k after roof-collapse Snow mint fix, tip
+`7838473`: TRACKED **−0.00/t** (d=−6), min.tot **+0.07/t** (d=+3405),
+`park=0`. Gate still holds with snow precip on.
+
 ---
 
 ## Phase 1 — Performance for larger worlds & long soaks *(done 2026-10-07)*
@@ -183,9 +187,34 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 - TRACKED `+136/t` with UNEXPL-W/M flags still lighting — not a Phase 0
   flat gate. Isolation (2026-10-08): killed by `enable_snow_precip=false`
   (`GVSE_SOAK_OFF=snow` → TRACKED `−0.01/t`); flake H-debit itself is
-  clean (`under=0`). Pre-existing snow-precip coupling, not sheet-lock.
-  Next hunt: post-seat path after Air→Snow (steam evict / melt / H
-  topology). Soak kill switch: `OFF=snow` or `OFF=cond,surplus`.
+  clean (`under=0`). Dual-axis H flux over-donate fixed (real, unit-tested)
+  but **5k still +131/t** after that fix — not the soak mint. Soak
+  `hum_adv`≈0 → not advect; diffuse / orphan / evap add=debit ruled out
+  (5k OFF table in VOXEL_BUDGET_SOAK). Descent gate: `OFF=snowfall` →
+  **+15.66/t** (baseline +131); `snowwet`/`slush` still +135/+140 — not
+  haze swap or slush. `snowraft`/`snowsurf` still +159/+141 — not lake
+  float lid or weather crest. Condensation liquid stale-`take_around`
+  underpay fixed (unit mint; live clamp) but 5k still **+130.86/t**
+  (`dep_add=debit=534`) — not the soak leftover. Free writers beside
+  Snow (`OFF=flow` **+196**, `seep` **+145**, `park` **+133**; units
+  TRACKED-flat) ruled out — not flow/seep/park. **A vs B split:**
+  `OFF=phase` still **+111/t** (`paid≈Δsnow`, bare≈0) = residual **A**
+  post-descent; phase ON only **~+20/t** more (**B**). Thaw units
+  TRACKED-flat; baseline free↑ ≈ snow leave — thaw credits OK.
+  `paid−phase`~+640k ≈ total mint, not B (coincidence with A). Residual
+  **A** remeasure: `phase` vs `phase,snowfall` late triad isolates
+  **~+91/t** landed-pack; `phase,cond` still **+93**, `phase,steam`
+  **+102**, `phase,gravity` **+109** — not lottery/steam/gravity.
+  `free_other+evap≈+80k` ≪ free_in — mint not in scoped World::set_cell
+  Air writers. Chunk miss probes: `par_air≈0`, `grav_air` sink only.
+  `OFF=settle` → **+43/t** (cuts ~⅔ of A); `TRACKED≈swap_snow−paid`.
+  Call-site: fall/drift/nucleate paired; **failure** other net ≈ TRACKED.
+  **Fixed:** Ice/Snow excluded from roof collapse (thaw-sat dump mint).
+  5k after: baseline **−0.01/t**, `phase` **−0.01**, `phase,settle`
+  **−0.01**, `phase,snowfall` **−0.04**. Residual A closed (full soak
+  flat). Kill: `OFF=snow`.
+  **50k Phase 0 gate** tip `7838473`: TRACKED **−0.00/t**, min
+  **+0.07/t**, `park=0` — rates still under 0.5/t with snow on.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 
@@ -270,6 +299,7 @@ before coding.
 | 2026-10-07 | Phase 0 rate eps | Tight: `\|rate W\|` and `\|rate M\|` &lt; **0.5/t** on 50k+ headless |
 | 2026-10-07 | Phase 0 organisms | **Off** until Phase 5 bio rewrite |
 | 2026-10-07 | Phase 0 closed | 50k headless: TRACKED **0.03/t**, min **+0.12/t**, park=0 (#351) |
+| 2026-10-09 | Phase 0 reconfirm | 50k after roof-collapse Snow fix (`7838473`): TRACKED **−0.00/t**, min **+0.07/t**, park=0 |
 | 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |

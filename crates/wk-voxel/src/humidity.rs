@@ -432,15 +432,18 @@ impl Humidity {
 
     /// Drain `amount` from a humidity tile (rain / surplus). Write-through
     /// keeps the runtime slab honest so the next dense pack can reuse it.
-    pub fn drain_tile(&mut self, hx: i32, hy: i32, amount: f32) {
+    /// Returns how much was actually removed (may be less than `amount`).
+    pub fn drain_tile(&mut self, hx: i32, hy: i32, amount: f32) -> f32 {
         if amount <= 0.0 {
-            return;
+            return 0.0;
         }
         let cur = self.at_tile(hx, hy);
         if cur <= 0.0 {
-            return;
+            return 0.0;
         }
-        self.write_tile(hx, hy, (cur - amount.min(cur)).max(0.0));
+        let take = amount.min(cur);
+        self.write_tile(hx, hy, (cur - take).max(0.0));
+        take
     }
 
     /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.
@@ -864,9 +867,11 @@ impl Humidity {
         if alpha == 0.0 || !self.has_mass() {
             return;
         }
+        let before = self.total_mass();
         if let Some(b) = self.bounds {
             if self.use_dense_slab(b) {
                 self.diffuse_slab(alpha, b);
+                crate::budget::note_hum_diffuse_delta(self.total_mass() - before);
                 return;
             }
         }
@@ -933,6 +938,7 @@ impl Humidity {
             self.apply_tile_delta(k.0, k.1, d);
         }
         self.prune_near_zero();
+        crate::budget::note_hum_diffuse_delta(self.total_mass() - before);
     }
 
     /// Same +x/+y pairwise stencil as [`Self::diffuse`], walking the
@@ -1213,9 +1219,14 @@ impl Humidity {
         wind: &crate::wind::Wind,
         world: &crate::grid::World,
     ) {
+        let probe = crate::budget::BudgetProbe::is_recording();
+        let before = if probe { self.total_mass() } else { 0.0 };
         if let Some(b) = self.bounds {
             if self.use_dense_slab(b) {
                 self.advect_with_surface_slab(vx, vy, wind, world, b);
+                if probe {
+                    crate::budget::note_hum_advect_delta(self.total_mass() - before);
+                }
                 return;
             }
         }
@@ -1224,6 +1235,9 @@ impl Humidity {
         self.advect_inner(vx, vy, Some((wind, world, &free_air)));
         self.wind_mix(wind.mix_strength(vx, vy), Some((wind, world, &free_air)));
         self.apply_orographic_lift(wind, Some(world));
+        if probe {
+            crate::budget::note_hum_advect_delta(self.total_mass() - before);
+        }
     }
 
     /// One pack of the bound box, then flux / buried-lift / mix / oro
@@ -1305,6 +1319,11 @@ impl Humidity {
 
     /// Both axes donate from `snap`. Horizontal deltas land before
     /// vertical ones, matching two [`Self::flux_axis_into`] calls.
+    ///
+    /// Leaves are scaled so `leave_h + leave_v ≤ mass`. Unscaled dual-axis
+    /// donation minted when `|vx| + capped|vy| > 1` (debit clamps on the
+    /// second axis while the credit still lands) — airborne snow raised
+    /// local |vx| enough for that path to show up as TRACKED mint.
     fn flux_both_into(
         &self,
         snap: &[f32],
@@ -1345,20 +1364,36 @@ impl Humidity {
                         .unwrap_or((climate_vx, climate_vy)),
                     None => (climate_vx, climate_vy),
                 };
-                for horizontal in [true, false] {
-                    let Some((step, leave)) = Self::flux_step_leave(mass, vx, vy, horizontal)
-                    else {
-                        continue;
-                    };
-                    let Some((tx, ty)) =
-                        self.flux_dest(hx, hy, step, horizontal, surface, air_cols, hx_min)
-                    else {
-                        continue;
-                    };
-                    let deltas = if horizontal { &mut horiz } else { &mut vert };
-                    deltas[i] -= leave;
+                let hop_h = Self::flux_step_leave(mass, vx, vy, true)
+                    .and_then(|(step, leave)| {
+                        self.flux_dest(hx, hy, step, true, surface, air_cols, hx_min)
+                            .map(|dest| (dest, leave))
+                    });
+                let hop_v = Self::flux_step_leave(mass, vx, vy, false)
+                    .and_then(|(step, leave)| {
+                        self.flux_dest(hx, hy, step, false, surface, air_cols, hx_min)
+                            .map(|dest| (dest, leave))
+                    });
+                let leave_h = hop_h.as_ref().map(|(_, l)| *l).unwrap_or(0.0);
+                let leave_v = hop_v.as_ref().map(|(_, l)| *l).unwrap_or(0.0);
+                let total = leave_h + leave_v;
+                let scale = if total > mass && total > 0.0 {
+                    mass / total
+                } else {
+                    1.0
+                };
+                if let Some(((tx, ty), leave)) = hop_h {
+                    let leave = leave * scale;
+                    horiz[i] -= leave;
                     if b.contains(tx, ty) {
-                        deltas[b.index(w, tx, ty)] += leave;
+                        horiz[b.index(w, tx, ty)] += leave;
+                    }
+                }
+                if let Some(((tx, ty), leave)) = hop_v {
+                    let leave = leave * scale;
+                    vert[i] -= leave;
+                    if b.contains(tx, ty) {
+                        vert[b.index(w, tx, ty)] += leave;
                     }
                 }
             }
@@ -1386,7 +1421,8 @@ impl Humidity {
     }
 
     /// Donor-cell flux into `work`. Masses come from the pre-advect
-    /// `snap` so both axes commute the same way as [`Self::flux_axis`].
+    /// `snap`. Test/compare helper — production uses [`Self::flux_both_into`].
+    #[cfg(test)]
     fn flux_axis_into(
         &self,
         snap: &[f32],
@@ -1788,11 +1824,8 @@ impl Humidity {
                     let (w, _) = b.dims();
                     let snap = self.packed_mass(b);
                     let mut work = snap.clone();
-                    self.flux_axis_into(
-                        &snap, &mut work, climate_vx, climate_vy, None, true, b, w, &[],
-                    );
-                    self.flux_axis_into(
-                        &snap, &mut work, climate_vx, climate_vy, None, false, b, w, &[],
+                    self.flux_both_into(
+                        &snap, &mut work, climate_vx, climate_vy, None, b, w, &[], &[],
                     );
                     self.adopt_work(b, work);
                     return;
@@ -1814,8 +1847,7 @@ impl Humidity {
                 .collect()
         });
         let vectors = vectors.as_deref();
-        self.flux_axis(&snap, climate_vx, climate_vy, surface, true, vectors);
-        self.flux_axis(&snap, climate_vx, climate_vy, surface, false, vectors);
+        self.flux_both(&snap, climate_vx, climate_vy, surface, vectors);
 
         if let Some((wind, world, cache)) = surface {
             self.lift_buried_to_free_air(wind, world, cache);
@@ -1826,6 +1858,11 @@ impl Humidity {
     /// `|v|` is the fraction that leaves this tick, capped at 1.
     /// Vertical hop is damped so face-following / Jacobi climb cannot
     /// empty a tile (uncapped `|vy|` vacuums below `min_mass_to_rain`).
+    ///
+    /// Callers that run **both** axes from one snap must scale the pair
+    /// of successful leaves so their sum never exceeds `mass` (see
+    /// [`Self::flux_both_into`] / [`Self::flux_both`]). Scaling here
+    /// would under-move when one axis's dest is refused.
     fn flux_step_leave(mass: f32, vx: f32, vy: f32, horizontal: bool) -> Option<(f32, f32)> {
         let v = if horizontal {
             vx
@@ -1900,9 +1937,8 @@ impl Humidity {
         self.free_air_cached(wind, world, hx, cache)
     }
 
-    /// Donor-cell flux along one axis. `|v|` is the fraction of mass that
-    /// leaves toward the neighbour this tick (capped at 1).
-    fn flux_axis(
+    /// Sparse dual-axis flux with the same leave scale as [`Self::flux_both_into`].
+    fn flux_both(
         &mut self,
         snap: &[((i32, i32), f32)],
         climate_vx: f32,
@@ -1912,11 +1948,12 @@ impl Humidity {
             &crate::grid::World,
             &FxHashMap<i32, i32>,
         )>,
-        horizontal: bool,
         vectors: Option<&[(f32, f32)]>,
     ) {
-        let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
-        deltas.reserve(snap.len());
+        let mut horiz: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        let mut vert: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        horiz.reserve(snap.len());
+        vert.reserve(snap.len());
         for (i, &((hx, hy), mass)) in snap.iter().enumerate() {
             if mass.abs() < 1e-9 {
                 continue;
@@ -1927,19 +1964,39 @@ impl Humidity {
                     .unwrap_or_else(|| wind.vector_at(Some(world), hx, hy)),
                 None => (climate_vx, climate_vy),
             };
-            let Some((step, leave)) = Self::flux_step_leave(mass, vx, vy, horizontal) else {
-                continue;
+            let hop_h = Self::flux_step_leave(mass, vx, vy, true).and_then(|(step, leave)| {
+                self.flux_dest(hx, hy, step, true, surface, &[], 0)
+                    .map(|dest| (dest, leave))
+            });
+            let hop_v = Self::flux_step_leave(mass, vx, vy, false).and_then(|(step, leave)| {
+                self.flux_dest(hx, hy, step, false, surface, &[], 0)
+                    .map(|dest| (dest, leave))
+            });
+            let leave_h = hop_h.as_ref().map(|(_, l)| *l).unwrap_or(0.0);
+            let leave_v = hop_v.as_ref().map(|(_, l)| *l).unwrap_or(0.0);
+            let total = leave_h + leave_v;
+            let scale = if total > mass && total > 0.0 {
+                mass / total
+            } else {
+                1.0
             };
-            let Some((tx, ty)) = self.flux_dest(hx, hy, step, horizontal, surface, &[], 0) else {
-                continue;
-            };
-            *deltas.entry((hx, hy)).or_insert(0.0) -= leave;
-            *deltas.entry((tx, ty)).or_insert(0.0) += leave;
+            if let Some((dest, leave)) = hop_h {
+                let leave = leave * scale;
+                *horiz.entry((hx, hy)).or_insert(0.0) -= leave;
+                *horiz.entry(dest).or_insert(0.0) += leave;
+            }
+            if let Some((dest, leave)) = hop_v {
+                let leave = leave * scale;
+                *vert.entry((hx, hy)).or_insert(0.0) -= leave;
+                *vert.entry(dest).or_insert(0.0) += leave;
+            }
         }
-        for (k, d) in deltas {
+        for (k, d) in horiz {
             self.apply_tile_delta(k.0, k.1, d);
         }
-        // Caller retains once after both axes.
+        for (k, d) in vert {
+            self.apply_tile_delta(k.0, k.1, d);
+        }
     }
 
     /// High wind mixes the column so vapour does not translate as a slab.
@@ -3122,14 +3179,12 @@ mod tests {
             "few keys must keep the sparse flux walk"
         );
         let snap: Vec<((i32, i32), f32)> = sparse.cells.iter().map(|(&k, &v)| (k, v)).collect();
-        sparse.flux_axis(&snap, 0.25, 0.05, None, true, None);
-        sparse.flux_axis(&snap, 0.25, 0.05, None, false, None);
+        sparse.flux_both(&snap, 0.25, 0.05, None, None);
         let b = dense.bounds.unwrap();
         let (w, _) = b.dims();
         let packed = dense.pack_slab(b);
         let mut work = packed.clone();
-        dense.flux_axis_into(&packed, &mut work, 0.25, 0.05, None, true, b, w, &[]);
-        dense.flux_axis_into(&packed, &mut work, 0.25, 0.05, None, false, b, w, &[]);
+        dense.flux_both_into(&packed, &mut work, 0.25, 0.05, None, b, w, &[], &[]);
         dense.sync_slab_changes(b, &packed, &work);
         assert!(
             (sparse.total_mass() - dense.total_mass()).abs() < 1e-4,
@@ -3146,6 +3201,64 @@ mod tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn cross_axis_flux_does_not_mint_when_speed_exceeds_one() {
+        // Both axes donated from the same snap mass. With |vx|=1 and
+        // capped |vy|=0.1 the second axis used to credit a full leave
+        // while the debit clamped at zero → +10% mint per tile/tick.
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        h.wrap_x = true;
+        h.add(8, 8, 100.0);
+        let before = h.total_mass();
+        h.advect(1.0, 0.80);
+        let after = h.total_mass();
+        assert!(
+            (after - before).abs() < 1e-3,
+            "dual-axis flux must not mint when |vx|+|vy_cap|>1 (before={before} after={after})"
+        );
+    }
+
+    #[test]
+    fn take_around_after_dense_slab_advect_reduces_total_mass() {
+        // Soak mint hunt: flake pay must be visible to BudgetSnap after a
+        // dense advect left a live slab (cells may lag).
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.05,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        let world = World::new(p.seed);
+        let y0 = p.sea_level_y + 16;
+        let mut h = Humidity::with_world_bounds(4, 0, y0, 32, y0 + 32);
+        h.wrap_x = true;
+        let gy = y0 + 8;
+        h.add(8, gy, 400.0);
+        assert!(h.use_dense_slab(h.bounds.unwrap()));
+        h.advect_with_surface(0.05, 0.0, &wind, &world);
+        assert!(h.slab.is_some(), "dense path must keep a live slab");
+        let before = h.total_mass();
+        let paid = h.take_around(8, gy, 255.0);
+        assert!((paid - 255.0).abs() < 1e-3, "parcel must pay a flake ({paid})");
+        let after = h.total_mass();
+        assert!(
+            (before - after - 255.0).abs() < 1e-2,
+            "take_around must shrink total_mass through the slab (before={before} after={after})"
+        );
     }
 
     #[test]
