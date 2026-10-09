@@ -354,8 +354,18 @@ pub fn roof_collapse_debris(material: MaterialId) -> MaterialId {
 }
 
 /// True when this solid can participate as a collapsing roof.
+///
+/// Ice / Snow are excluded: `roof_span_max_m = 0` would drop every flake
+/// over Air, and the debris path treats `sat` as pore water. Snow banks
+/// thaw yield on `sat` with capacity 0, so collapse wrote Snow(sat=0)
+/// (thaw reads 255) below and dumped the yield into vacated Air — World
+/// snow_in without a matching snow_out (residual A TRACKED mint).
+/// Airborne snow fall / grain settle already own Ice/Snow descent.
 fn is_roof_candidate(material: MaterialId) -> bool {
-    material != MaterialId::Air && roof_span_limit_cells(material) < i32::MAX
+    if matches!(material, MaterialId::Air | MaterialId::Ice | MaterialId::Snow) {
+        return false;
+    }
+    roof_span_limit_cells(material) < i32::MAX
 }
 
 /// All loaded chunks that hold a solid (insurance / full-scan path).
@@ -1357,6 +1367,47 @@ mod tests {
         assert_eq!(
             solids_before, solids_after,
             "collapse swaps roof into cavity — solid count unchanged"
+        );
+    }
+
+    #[test]
+    fn roof_collapse_ignores_snow_and_stays_tracked_flat() {
+        // Residual A: Snow over Air used to take the roof-collapse path
+        // (span limit 0) and mint TRACKED by dumping thaw sat into Air.
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 8);
+        w.set_cell(4, 1, Cell::air());
+        w.set_cell(
+            4,
+            2,
+            Cell {
+                material: MaterialId::Snow,
+                sat: Sat(u8::MAX),
+                flags: Default::default(),
+                _pad: 0,
+                pore: 128,
+            },
+        );
+        let h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 16, 16);
+        let before = crate::budget::BudgetSnap::capture(&w, &h);
+        apply_roof_collapse(&mut w, &FailureConfig::default());
+        let after = crate::budget::BudgetSnap::capture(&w, &h);
+        assert_eq!(
+            w.get_cell(4, 2).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "snow must not roof-collapse (airborne fall owns descent)"
+        );
+        assert_eq!(
+            w.get_cell(4, 1).map(|c| c.material),
+            Some(MaterialId::Air),
+            "cavity must stay Air"
+        );
+        assert_eq!(
+            after.tracked(),
+            before.tracked(),
+            "snow roof refuse must stay TRACKED flat (Δ={})",
+            after.tracked() - before.tracked()
         );
     }
 
