@@ -278,12 +278,14 @@ vacated Air → unpaired World snow_in. Ice same trap. Fix: exclude
 Ice/Snow from `is_roof_candidate` (airborne fall owns descent). Unit:
 `roof_collapse_ignores_snow_and_stays_tracked_flat`.
 
-**5k after fix** tip `124a197`:
+**5k after fix** tip `124a197` / baseline remeasure tip `45e6008`:
 
 | OFF | TRACKED /t | swap_snow−paid | note |
 |-----|------------|----------------|------|
+| *(none)* | **−0.01** | 0 | full baseline flat; park=0 |
 | `phase` | **−0.01** | 0 | paid=Δsnow; other net 0 |
 | `phase,settle` | **−0.01** | ~0 | settle leftover gone |
 | `phase,snowfall` | **−0.04** | 0 | aloft residual gone |
 
-Residual A **closed**. Kill switch `OFF=snow` unchanged for other hunts.
+Residual A **closed** (baseline and phase-OFF). Kill switch `OFF=snow`
+unchanged for other hunts.

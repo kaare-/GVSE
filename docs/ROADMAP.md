@@ -206,8 +206,9 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   `OFF=settle` → **+43/t** (cuts ~⅔ of A); `TRACKED≈swap_snow−paid`.
   Call-site: fall/drift/nucleate paired; **failure** other net ≈ TRACKED.
   **Fixed:** Ice/Snow excluded from roof collapse (thaw-sat dump mint).
-  5k after: `phase` **−0.01/t**, `phase,settle` **−0.01**, `phase,snowfall`
-  **−0.04**. Residual A closed. Kill: `OFF=snow`.
+  5k after: baseline **−0.01/t**, `phase` **−0.01**, `phase,settle`
+  **−0.01**, `phase,snowfall` **−0.04**. Residual A closed (full soak
+  flat). Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 
