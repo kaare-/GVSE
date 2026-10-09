@@ -204,8 +204,10 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   `free_other+evap≈+80k` ≪ free_in — mint not in scoped World::set_cell
   Air writers. Chunk miss probes: `par_air≈0`, `grav_air` sink only.
   `OFF=settle` → **+43/t** (cuts ~⅔ of A); `TRACKED≈swap_snow−paid`.
-  Next: unpaired World Air→Snow overlay vs parallel leave (call-site).
-  Kill: `OFF=snow`.
+  Call-site: fall/drift/nucleate paired; **failure** other net ≈ TRACKED.
+  **Fixed:** Ice/Snow excluded from roof collapse (thaw-sat dump mint).
+  5k after: `phase` **−0.01/t**, `phase,settle` **−0.01**, `phase,snowfall`
+  **−0.04**. Residual A closed. Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 

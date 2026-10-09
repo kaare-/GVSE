@@ -261,7 +261,29 @@ exactly the mint. Unit: settle beside Snow pack stays TRACKED-flat
 (+111 → +43 with settle off; snowfall still +20). Amplifies the World
 snow-overlay bias; does not mint via `parallel::set_cell` Air sat.
 
-**Still open (no clear fix):** which World Air→Snow path leaves unpaired
-overlay vs parallel Snow leave (call-site tag on `snow_in`), or a
-snow-lid × sky-budget coupling for the settle-off leftover (~+23/t vs
-aloft). Kill: `GVSE_SOAK_OFF=snow`.
+**Call-site tag (2026-10-09):** `SnowSwapScope` on World snow_in/out.
+5k `OFF=phase` before the fix — fall/drift/nucleate clean; **untagged
+other net ≈ TRACKED**. Stage split: almost all other was **failure**.
+
+| site | snow_in | snow_out | net | vs TRACKED |
+|------|---------|----------|-----|------------|
+| nucleate | +894k | 0 | +894k | = paid |
+| fall / drift / rise / punch / raft / land / competent | huge | −huge | **0** | paired |
+| **other (failure)** | +4.67M | −4.12M | **+555k** | ≈ TRACKED |
+
+**Root cause:** Snow (`roof_span_max_m = 0`) took F1 roof collapse over
+any Air cavity. Debris path treats `sat` as pore water; Snow capacity 0
+→ wrote Snow(sat=0) below (thaw reads 255) and dumped thaw yield into
+vacated Air → unpaired World snow_in. Ice same trap. Fix: exclude
+Ice/Snow from `is_roof_candidate` (airborne fall owns descent). Unit:
+`roof_collapse_ignores_snow_and_stays_tracked_flat`.
+
+**5k after fix** tip `124a197`:
+
+| OFF | TRACKED /t | swap_snow−paid | note |
+|-----|------------|----------------|------|
+| `phase` | **−0.01** | 0 | paid=Δsnow; other net 0 |
+| `phase,settle` | **−0.01** | ~0 | settle leftover gone |
+| `phase,snowfall` | **−0.04** | 0 | aloft residual gone |
+
+Residual A **closed**. Kill switch `OFF=snow` unchanged for other hunts.
