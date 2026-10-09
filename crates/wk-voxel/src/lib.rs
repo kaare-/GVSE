@@ -253,6 +253,6 @@ pub use world_step::{step_world, WorldStep, WorldStepConfig, WorldStepOutcome, W
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{
     airborne_loose_at, continental_surface_y, live_skin_y, live_surface_at, live_surface_y,
-    stamp_world, WorldgenParams, DEFAULT_SEA_LEVEL_Y, LIVE_SURFACE_DESCENT_MAX,
-    LIVE_SURFACE_SEARCH, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
+    set_peel_seated_snow, stamp_world, WorldgenParams, DEFAULT_SEA_LEVEL_Y,
+    LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };

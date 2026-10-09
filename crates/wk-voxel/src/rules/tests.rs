@@ -1337,6 +1337,60 @@ fn airborne_snow_fall_through_haze_stays_tracked_flat() {
 }
 
 #[test]
+fn airborne_snow_sinks_through_lake_when_float_disabled() {
+    // Soak OFF=snowraft: snow must not raft on full water (post-descent
+    // mint suspect — lake lid blocks evap while free+hum still rise).
+    use super::grain::{apply_airborne_snow_fall_cfg, GrainConfig};
+    let mut w = setup_column_world();
+    for y in 2..=8 {
+        w.set_cell(2, y, Cell::water());
+    }
+    w.set_cell(2, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(2, 10, Cell::solid(MaterialId::Snow));
+    let mut grain = GrainConfig::default();
+    grain.enable_snow_float = false;
+    let mut moved = 0u32;
+    for _ in 0..40 {
+        moved += apply_airborne_snow_fall_cfg(&mut w, &grain);
+        w.tick += 1;
+    }
+    assert!(moved > 0, "flake must sink into the lake when float is off");
+    let snow_y = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(2, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let snow_y = snow_y.expect("flake must remain");
+    assert!(
+        snow_y <= 8,
+        "must enter the water column (still at {snow_y})"
+    );
+    // Water that swapped upward must still be present (TRACKED-flat swap).
+    let free: i64 = (1..=12)
+        .filter_map(|y| w.get_cell(2, y))
+        .filter(|c| c.material == MaterialId::Air)
+        .map(|c| c.sat.0 as i64)
+        .sum();
+    assert_eq!(free, 7 * 255, "lake sat must survive the sink swaps (got {free})");
+}
+
+#[test]
+fn peel_seated_snow_drops_live_surface_below_pack() {
+    use crate::worldgen::{live_surface_y, set_peel_seated_snow, LIVE_SURFACE_SEARCH};
+    let mut w = setup_column_world();
+    w.set_cell(2, 5, Cell::solid(MaterialId::Stone));
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    w.set_cell(2, 7, Cell::solid(MaterialId::Snow));
+    assert_eq!(
+        live_surface_y(&w, 2, 5, LIVE_SURFACE_SEARCH),
+        7,
+        "precondition: seated pack is the crest"
+    );
+    set_peel_seated_snow(true);
+    let peeled = live_surface_y(&w, 2, 5, LIVE_SURFACE_SEARCH);
+    set_peel_seated_snow(false);
+    assert_eq!(peeled, 5, "OFF=snowsurf must peel pack back to stone");
+}
+
+#[test]
 fn snow_descends_across_settle_passes_in_one_tick() {
     // Deep settle used to hash the hold only on tick, so a flake that
     // held sat through all 64 FPS passes. Mix pass into the roll so the

@@ -20,12 +20,14 @@
 //!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`, `surplus`,
 //!   `diffuse` (α=0), `orphan` (evap crest-film 8× off),
 //!   `snowfall` (flakes nucleate but do not descend), `snowwet` (no haze/film
-//!   snow swap), `slush` (`PhaseConfig::enable_slush = false`)
+//!   snow swap), `slush` (`PhaseConfig::enable_slush = false`),
+//!   `snowraft` (Snow sinks through lakes — no float lid),
+//!   `snowsurf` (live_surface peels seated Snow; weather ignores pack)
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
-    snow_mint_probe_reset, snow_mint_probe_snapshot, stamp_world, step_world, BudgetLedger,
-    BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
+    set_peel_seated_snow, snow_mint_probe_reset, snow_mint_probe_snapshot, stamp_world, step_world,
+    BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
     CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GrainConfig,
     Humidity, KarstConfig, LandscapeBodyStore, OrographicConfig, PerfConfig, PhaseConfig,
     SteamConfig, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams,
@@ -173,6 +175,14 @@ fn soak_off(flag: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Clears [`set_peel_seated_snow`] when the soak returns (or panics).
+struct PeelSnowGuard;
+impl Drop for PeelSnowGuard {
+    fn drop(&mut self) {
+        set_peel_seated_snow(false);
+    }
+}
+
 fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, BudgetProbe) {
     let mut s = stamped_demo();
     let perf = PerfConfig::default();
@@ -236,6 +246,13 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         // Flakes only swap into empty Air — no haze/film ride.
         grain.enable_snow_wet_fall = false;
     }
+    if soak_off("snowraft") {
+        // Snow sinks through standing water — no lake raft / evap lid.
+        grain.enable_snow_float = false;
+    }
+    // Weather crest ignores seated snow (physical lid still blocks evap).
+    set_peel_seated_snow(soak_off("snowsurf"));
+    let _peel_guard = PeelSnowGuard;
     let fungi = FungiConfig::default();
     let mut competent = CompetentFallConfig::default();
     if soak_off("competent") {
