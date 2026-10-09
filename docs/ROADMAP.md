@@ -263,10 +263,11 @@ May include ring width / ceiling / streaming follow-ups from
 
 **Now**
 
-- Re-profile + Ice sticky-loose lever landed ([`VOXEL_PERF.md`](VOXEL_PERF.md)).
-  Stress ~30 sim-FPS; 5k soak TRACKED flat / `park=0`.
-- Compact stretch (4096×1064) measured: **~16 sim-FPS** (seepage 10.3 /
-  bodies 9.2). Next lever: those two at km width (or streaming), not settle.
+- Ice sticky-loose + **seam-wake** Compact cut landed
+  ([`VOXEL_PERF.md`](VOXEL_PERF.md)). Stress **~34** sim-FPS; Compact
+  **~18** (was ~16); 5k soak TRACKED flat / `park=0`.
+- Next: bodies under climatic stack on Compact (or weep wake), then
+  streaming if CA returns diminish.
 
 ---
 
@@ -333,6 +334,7 @@ before coding.
 | 2026-10-07 | Phase 3 ice option | **2 — water carries T** (sparse free-water ledger; melt + geyser cool) |
 | 2026-10-09 | Phase 3 closed | Owner: move to Phase 4; ice + TRACKED flat after roof Snow fix |
 | 2026-10-09 | Phase 4 start | Re-profile post-ice tip; then width stretch / ≥1 ms lever ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
+| 2026-10-09 | Phase 4 seam wake | Wet seam lowers + skip full↔full band; Compact wall **62→55** ms (~18 FPS) |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |

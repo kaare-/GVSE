@@ -339,9 +339,29 @@ also scales (temp amort 4.5, phase 3.3). **Compact is not ≥30 sim-FPS
 yet** — next Phase 4 levers are seepage wakes / bodies at this width
 (or streaming residency), not another settle trim.
 
+### After seam-wake cut (tip `7a7b2c0`)
+
+`wake_vertical_chunk_seam_pores`: wet-involved seam lowers only; both-at-
+capacity pore↔pore skips the 4-row band dirty (downward front only when
+the lower chunk still has unsaturated room). `seepage_split_probe`
+stretch seam_wake **7.8 → 0.54 ms/call**; active set roughly halves.
+5k soak: TRACKED **−0.01/t**, min **+0.01/t**, `park=0`.
+
+| Stamp | wall ms/tick | ~sim-FPS | seepage | settle | bodies | Δ wall vs prior |
+|-------|-------------:|---------:|--------:|-------:|-------:|----------------:|
+| demo | 18.6 | ~54 | 2.37 | 3.86 | 2.00 | **−2.5** |
+| stress | 29.2 | **~34** | 3.72 | 3.71 | 4.40 | **−4.3** |
+| stretch (4096) | 54.7 | ~18 | 7.86 | 1.41 | 9.16 | **−7.5** |
+
+Logs: `/opt/cursor/artifacts/phase4-demo-stress-after-seam.log`,
+`phase4-stretch-after-seam.log`, `phase4-seepage-split-after.log`.
+
+Stretch hotspots now: bodies **9.2**, seepage **7.9**, humidity.advect
+**6.3**. Weep wake (~3.8 ms/call) is the next seepage slice; bodies need
+a full `step_world` probe (tick-only probe shows ~0 — climate wakes).
+
 ### Next Phase 4 steps
 
-1. Seepage / rock-bodies cuts aimed at Compact stretch (≥1 ms), or
-   document a lower FPS gate / streaming for km rings.
-2. Deep-settle sand freefall on demo/stress only if it still pays ≥1 ms
-   after stretch work — do not coarsen weather.
+1. Rock-bodies under climatic `step_world` on Compact (solidity / cadence
+   wakes), or weep-wake trim if ≥1 ms amortized.
+2. Streaming / residency for km rings if CA returns diminish.
