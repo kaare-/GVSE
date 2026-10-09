@@ -68,7 +68,29 @@ lines up with **extra humidity** (~mint-sized) plus free/pore retained as
 if evap slowed; not steam scrub (`OFF=steam` still +). Dense-slab
 `take_around` is visible to `total_mass` (unit). Soak `hum_adv` on
 advect_with_surface is ~0 (±tens) while TRACKED is +10…130/t — **not
-advect**. Next: diffuse / evap try_add / orphan-film once flakes exist.
-Kill switch: `GVSE_SOAK_OFF=snow`.
+advect**.
+
+**Diffuse / evap try_add / orphan (2026-10-09):** 5k attribution on the
+snow-mint probe tip. Probes: `hum_dif`, `evap_add`/`evap_debit`,
+`orphan_rm`. `OFF=diffuse` (α=0) and `OFF=orphan` (crest-film 8× off).
+
+| OFF | TRACKED /t | note |
+|-----|------------|------|
+| *(none)* | **+136.01** | `hum_dif≈−88`, `evap_add=evap_debit`, `orphan_rm≈25k` |
+| `snow` | **−0.01** | kill unchanged |
+| `diffuse` | **+132.13** | `hum_dif=0` — not the mint |
+| `orphan` | **+133.98** | `orphan_rm=0` — not the mint |
+| `phase` | **+110.96** | paid≈Δsnow; triad `Δ(free+pore+hum+snow)≈+mint` |
+
+Evap apply pairs try_add with sat debit (`evap_add==evap_debit` on every
+window). Defensive skip when a cell is no longer Air at apply (Snow thaw
+sat×capacity-0 trap) is kept + unit-tested; collect→apply is back-to-back
+in `step_world`, so that race is not the 5k leftover.
+
+**Best remaining suspect:** post-seat coupling that raises the
+free+pore+hum+snow triad once flakes exist — not diffuse, not orphan
+boost, not evap try_add/debit asymmetry. Next: post-evap free-sat restore
+/ snow-fall↔standing-water, or another writer that re-adds sat after a
+paired free→hum move. Kill switch: `GVSE_SOAK_OFF=snow`.
 - Automerge when CI green once GitHub auto-merge is available to the agent; until then mark ready and note merge wait.
 - Hard problems: verify headless and/or Xvfb before asking to merge.
