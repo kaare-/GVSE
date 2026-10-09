@@ -263,11 +263,12 @@ May include ring width / ceiling / streaming follow-ups from
 
 **Now**
 
-- Ice sticky-loose + **seam-wake** Compact cut landed
+- Ice sticky-loose + seam-wake (+ small weep trim) landed
   ([`VOXEL_PERF.md`](VOXEL_PERF.md)). Stress **~34** sim-FPS; Compact
-  **~18** (was ~16); 5k soak TRACKED flat / `park=0`.
-- Next: bodies under climatic stack on Compact (or weep wake), then
-  streaming if CA returns diminish.
+  **~19**; 5k soak TRACKED flat / `park=0`.
+- Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t),
+  not quiet churn. Next: streaming / residency for km rings, or accept
+  ~18–20 FPS full-resident Compact.
 
 ---
 

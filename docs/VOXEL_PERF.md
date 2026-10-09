@@ -360,8 +360,26 @@ Stretch hotspots now: bodies **9.2**, seepage **7.9**, humidity.advect
 **6.3**. Weep wake (~3.8 ms/call) is the next seepage slice; bodies need
 a full `step_world` probe (tick-only probe shows ~0 — climate wakes).
 
+### Climatic body probe + weep trim (tip `05758f7`)
+
+`probe_body_climatic_stretch` (`step_world` + rain): Compact bodies
+**~9.9 ms/tick** with **~35 comps fell/tick** and solidity wakes
+**~362/tick** — real undercutting / peel, not quiet-world churn
+(tick-only probes still read ~0). Weep full-pore + open-Air path skips
+interior donor walks (probe 3.8→3.4 ms/call); wall noise-level on
+re-profile.
+
+| Stamp | wall ms/tick | ~sim-FPS | seepage | bodies |
+|-------|-------------:|---------:|--------:|-------:|
+| demo | 18.4 | ~54 | 2.37 | 1.98 |
+| stress | 29.6 | **~34** | 3.88 | 4.33 |
+| stretch (4096) | 53.4 | ~19 | 7.97 | **8.99** |
+
+5k soak: TRACKED **−0.01/t**, `park=0`.
+
 ### Next Phase 4 steps
 
-1. Rock-bodies under climatic `step_world` on Compact (solidity / cadence
-   wakes), or weep-wake trim if ≥1 ms amortized.
-2. Streaming / residency for km rings if CA returns diminish.
+1. Accept Compact **~18–20 sim-FPS** as the full-resident gate for now,
+   or pursue streaming / residency (WORLDGEN) before more CA on bodies.
+2. Body undercut cost is gameplay-shaped — only cut with a playtest
+   dial, not a blind skip.
