@@ -263,11 +263,10 @@ May include ring width / ceiling / streaming follow-ups from
 
 **Now**
 
-- Re-profile landed in [`VOXEL_PERF.md`](VOXEL_PERF.md) § Phase 4.
-- First lever: Ice out of sticky-loose settle + thick early-out + dirty
-  thin-ice fall — stress ~30 sim-FPS again; settle still elevated vs
-  Phase 1 Air-dest (sand freefall leftover).
-- Next: Compact stretch stamp (4096 cols) + optional deep-settle hunt.
+- Re-profile + Ice sticky-loose lever landed ([`VOXEL_PERF.md`](VOXEL_PERF.md)).
+  Stress ~30 sim-FPS; 5k soak TRACKED flat / `park=0`.
+- Compact stretch (4096×1064) measured: **~16 sim-FPS** (seepage 10.3 /
+  bodies 9.2). Next lever: those two at km width (or streaming), not settle.
 
 ---
 
