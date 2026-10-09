@@ -197,8 +197,13 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   `OFF=phase` still **+111/t** (`paid≈Δsnow`, bare≈0) = residual **A**
   post-descent; phase ON only **~+20/t** more (**B**). Thaw units
   TRACKED-flat; baseline free↑ ≈ snow leave — thaw credits OK.
-  `paid−phase`~+640k ≈ total mint, not B (coincidence with A). Next:
-  landed-pack triad mint with snow still in book. Kill: `OFF=snow`.
+  `paid−phase`~+640k ≈ total mint, not B (coincidence with A). Residual
+  **A** remeasure: `phase` vs `phase,snowfall` late triad isolates
+  **~+91/t** landed-pack; `phase,cond` still **+93**, `phase,steam`
+  **+102**, `phase,gravity` **+109** — not lottery/steam/gravity.
+  `free_other+evap≈+80k` ≪ free_in — mint not in scoped World::set_cell
+  Air writers. Next: parallel/chunk free-sat paths beyond gravity.
+  Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 

@@ -205,3 +205,34 @@ snow leave while A still mints with snow held. `to_ice=0`, `bare=0`.
 **Not fixed (no clear writer):** leftover is almost all **A**. Next:
 post-descent coupling that raises the triad while snow remains in the
 book (not thaw under/over-credit). Kill: `GVSE_SOAK_OFF=snow`.
+
+**Residual A — landed-pack window + free_in (2026-10-09):** 5k on tip
+`48b3925` after `free_other` / `steam_solid` probes and `OFF=gravity`.
+Windowed triad (`GVSE_SOAK_WINDOW=500`): with `OFF=phase`, late wins
+mint **~+100…127k/500t** triad; with `OFF=phase,snowfall` late wins
+are near-flat / low tens — isolates **~+91/t** as landed-pack delta.
+
+| OFF | TRACKED /t | paid−phase | free_other | steam_solid | note |
+|-----|------------|------------|------------|-------------|------|
+| `phase` | **+110.96** | +19 | −2.09M | 60k | paid≈Δsnow; triad late hot |
+| `phase,snowfall` | **+20.32** | 0 | −1.94M | 72k | aloft; late triad ~flat |
+| `phase,cond` | **+93.48** | +21 | — | — | thermal-surplus snow still A |
+| `phase,steam` | **+101.89** | 0 | — | — | not steam double-count |
+| `phase,gravity` | **+109.38** | +46 | −1.69M | 56k | chunk gravity **not** A |
+| `phase,evap` | −4.25 | 0 | — | — | no H → no flakes |
+
+**Accounting (phase):** `hum ≈ evap_add − paid` (within ~500);
+`TRACKED ≈ (Δfree+evap) + Δpore + Δsteam + Δcave` with snow paired.
+Landed vs aloft: extra **~+362k free_in** and **~+125k pore retained**
+(−33k steam) ≈ **+453k TRACKED**. `free_other + evap_debit ≈ +80…90k`
+on both — World::set_cell Air writers outside flow/seep/park are **not**
+the mint-sized term (evap dominates `free_other` as a sink).
+`steam_solid` peak ~60k is real (parallel Air→Snow skips evict) but
+`OFF=steam` still **+102/t**.
+
+**Ruled out for A:** thaw/B, snowfall-aloft residual, cond lottery
+(majority), steam, gravity pulls, prior flow/seep/park/snowsurf/raft.
+**Next:** chunk-direct / parallel writers other than gravity (grain
+Air↔Snow sat integrity under multi-pass settle; any path that adds free
+or pore without `note_set_cell`), or a snow-lid × sky-budget coupling
+that is not a single OFF. Kill: `GVSE_SOAK_OFF=snow`.
