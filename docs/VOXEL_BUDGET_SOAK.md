@@ -172,6 +172,36 @@ to leave contact on).
 **Ruled out:** water_flow / lateral equalise, pore seep / contact wet,
 `park_orphan` free placement (and same-mat Air Δ under those scopes).
 Scope nets are free↔pore moves, not TRACKED. `paid−phase` still
-~+665k with `under=0` — flakes seat then leave the snow book. Next:
-post-seat phase / melt / thaw-yield path once flakes land. Kill:
-`GVSE_SOAK_OFF=snow`.
+~+665k with `under=0` — flakes seat then leave the snow book.
+
+**A vs B split — phase OFF residual vs phase ON thaw (2026-10-09):**
+5k remeasure after snow-book enter/exit probes (`snow_enter_yield` /
+`snow_exit_yield` / `net_leave` / `bare` / `to_ice`). Fall swaps both
+enter and exit; `net_leave = exit − enter` matches `−Δsnow`. `bare` is
+solid overwrite only (Sand→Snow sink, unit-tested). Units:
+`thaw_to_air` / airborne thaw / snow-on-warm-water slush stay
+TRACKED-flat; free credit matches snow leave.
+
+| OFF | TRACKED /t | paid | Δsnow+ice | paid−phase | net_leave | bare | note |
+|-----|------------|------|-----------|------------|-----------|------|------|
+| *(none)* | **+130.86** | 860k | +219k | **+640k** | −208k | **0** | credit≈thaw; free −1.00M |
+| `phase` | **+110.96** | 894k | +894k | **+19** | −894k | 2.8k | paid≈Δsnow; free −1.63M |
+| `snowfall` | **+15.14** | 757k | +742k | +15k | −742k | 0 | aloft; late wins ~flat |
+| `snow` | −0.01 | — | — | — | — | — | kill unchanged |
+
+**A — residual with phase OFF (~+111/t):** descent on, thaw off.
+`paid≈Δsnow`, `to_ice=0`, `bare≪mint`. Late windows still mint triad
+`free+pore+hum+snow` (~+120k/500t) while snow banks grow — **not** a
+snow-book exit. Vs `OFF=snowfall` (+15/t, late near-flat): ~+96/t is
+**post-descent / landed-pack** coupling. Non-phase exits are not the
+mint (bare ~0.5/t).
+
+**B — extra when phase ON (~+20/t over A):** thaw returns snow→free.
+Baseline free is ~0.63M higher than phase-OFF — ≈`paid−Δsnow` (~640k)
+— so thaw **credits free correctly** (units agree). `paid−phase≈+640k`
+matches **total** mint magnitude, not B; that coincidence is A-sized
+snow leave while A still mints with snow held. `to_ice=0`, `bare=0`.
+
+**Not fixed (no clear writer):** leftover is almost all **A**. Next:
+post-descent coupling that raises the triad while snow remains in the
+book (not thaw under/over-credit). Kill: `GVSE_SOAK_OFF=snow`.

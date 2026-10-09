@@ -193,9 +193,12 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   underpay fixed (unit mint; live clamp) but 5k still **+130.86/t**
   (`dep_add=debit=534`) — not the soak leftover. Free writers beside
   Snow (`OFF=flow` **+196**, `seep` **+145**, `park` **+133**; units
-  TRACKED-flat) ruled out — not flow/seep/park. Next: post-seat phase /
-  melt / thaw-yield once flakes land (`paid−phase`~+665k, `under=0`).
-  Kill: `OFF=snow`.
+  TRACKED-flat) ruled out — not flow/seep/park. **A vs B split:**
+  `OFF=phase` still **+111/t** (`paid≈Δsnow`, bare≈0) = residual **A**
+  post-descent; phase ON only **~+20/t** more (**B**). Thaw units
+  TRACKED-flat; baseline free↑ ≈ snow leave — thaw credits OK.
+  `paid−phase`~+640k ≈ total mint, not B (coincidence with A). Next:
+  landed-pack triad mint with snow still in book. Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 
