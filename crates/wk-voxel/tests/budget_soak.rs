@@ -32,6 +32,8 @@
 //!
 //! Residual A probes (print in summary): `swap_snow` / `snow_in` / `snow_out`,
 //! `par_air` / `par_snow` (parallel::set_cell free miss), `grav_air`.
+//! Call-site tags on World snow_in/out: nucleate / surface / fall / drift /
+//! reloc / other (`SnowSwapScope`).
 
 use wk_voxel::{
     set_peel_seated_snow, set_skip_grain_settle, set_skip_gravity, set_skip_park_orphan,
@@ -171,6 +173,21 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         p.water_par_snow,
         p.water_grav_air,
         p.steam_on_solid
+    );
+    eprintln!(
+        "snow_in-by-site nucleate={:+}/{:+} surface={:+}/{:+} fall={:+}/{:+} drift={:+}/{:+} reloc={:+}/{:+} other={:+}/{:+}  (in/out)",
+        p.snow_in_nucleate,
+        p.snow_out_nucleate,
+        p.snow_in_surface,
+        p.snow_out_surface,
+        p.snow_in_fall,
+        p.snow_out_fall,
+        p.snow_in_drift,
+        p.snow_out_drift,
+        p.snow_in_reloc,
+        p.snow_out_reloc,
+        p.snow_in_other,
+        p.snow_out_other,
     );
     eprintln!(
         "probe-M bare={:+} credit={:+} clip={:+}",
@@ -462,6 +479,16 @@ fn short_budget_soak() {
     assert_eq!(probe.mineral_clip, 0, "dissolved clip must stay closed");
     // Absolute leftover over short windows is noisy; rates are the signal.
     let snow_net = probe.snow_exit_yield - probe.snow_enter_yield;
+    let snow = snow_mint_probe_snapshot();
+    let paid = snow.paid as i64;
+    let site = |name: &str, inn: i64, out: i64| {
+        let net = inn + out;
+        eprintln!(
+            "  snow_site {name}: in={inn:+} out={out:+} net={net:+} in−paid={:+} net−paid={:+}",
+            inn - paid,
+            net - paid,
+        );
+    };
     eprintln!(
         "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} swap={} swap_snow={} snow_in={} snow_out={} swap_other={} flow_air={} seep_air={} park_air={} free_other={} par_air={} par_snow={} grav_air={} steam_solid={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
         d_tracked as f64 / ticks.max(1) as f64,
@@ -487,6 +514,23 @@ fn short_budget_soak() {
         probe.snow_exit_credit,
         probe.snow_exit_bare,
         probe.snow_to_ice,
+    );
+    eprintln!(
+        "snow_site table (TRACKED={d_tracked:+} paid={paid} swap_snow−paid={:+}):",
+        probe.water_swap_snow - paid,
+    );
+    site("nucleate", probe.snow_in_nucleate, probe.snow_out_nucleate);
+    site("surface", probe.snow_in_surface, probe.snow_out_surface);
+    site("fall", probe.snow_in_fall, probe.snow_out_fall);
+    site("drift", probe.snow_in_drift, probe.snow_out_drift);
+    site("reloc", probe.snow_in_reloc, probe.snow_out_reloc);
+    site("other", probe.snow_in_other, probe.snow_out_other);
+    // Fall/drift closed swaps: net≈0; unpaired mint ≈ site_net (or in−paid for nucleate).
+    let fall_net = probe.snow_in_fall + probe.snow_out_fall;
+    let drift_net = probe.snow_in_drift + probe.snow_out_drift;
+    let nuc_unpaid = probe.snow_in_nucleate - paid;
+    eprintln!(
+        "snow_site match: fall_net={fall_net:+} drift_net={drift_net:+} nuc_in−paid={nuc_unpaid:+} TRACKED={d_tracked:+}"
     );
 }
 

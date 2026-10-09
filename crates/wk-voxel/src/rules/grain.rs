@@ -334,6 +334,7 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
     }
 
     let mut moved = 0u32;
+    let _scope = crate::budget::SnowSwapScope::drift();
     for (gx, gy, nx) in planned {
         let Some(flake) = world.get_cell(gx, gy) else {
             continue;
@@ -439,8 +440,11 @@ pub fn apply_airborne_snow_fall_cfg(world: &mut World, grain: &GrainConfig) -> u
             continue;
         }
         claimed.insert((gx, dest_y));
-        world.set_cell(gx, dest_y, flake);
-        world.set_cell(gx, gy, dest);
+        {
+            let _scope = crate::budget::SnowSwapScope::fall();
+            world.set_cell(gx, dest_y, flake);
+            world.set_cell(gx, gy, dest);
+        }
         moved += 1;
     }
     moved

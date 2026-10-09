@@ -325,6 +325,24 @@ pub struct BudgetProbe {
     pub water_swap_snow_in: i64,
     /// World overlay Δ on Snow → not-Snow (thaw / bare / fall src + …).
     pub water_swap_snow_out: i64,
+    /// [`SnowSwapScope::Nucleate`] (`deposit_snow_in_air`) snow_in / snow_out.
+    pub snow_in_nucleate: i64,
+    pub snow_out_nucleate: i64,
+    /// [`SnowSwapScope::Surface`] (phase surface lid / frost snow).
+    pub snow_in_surface: i64,
+    pub snow_out_surface: i64,
+    /// [`SnowSwapScope::Fall`] (`apply_airborne_snow_fall` World swap).
+    pub snow_in_fall: i64,
+    pub snow_out_fall: i64,
+    /// [`SnowSwapScope::Drift`] (`apply_snow_wind_drift` World swap).
+    pub snow_in_drift: i64,
+    pub snow_out_drift: i64,
+    /// [`SnowSwapScope::Reloc`] (phase cull relocate seat).
+    pub snow_in_reloc: i64,
+    pub snow_out_reloc: i64,
+    /// World snow_in / snow_out with no [`SnowSwapScope`] (editor / miss).
+    pub snow_in_other: i64,
+    pub snow_out_other: i64,
     /// [`Self::water_swap`] − [`Self::water_swap_snow`] (Sand/Organic/…).
     pub water_swap_other: i64,
     /// `park_orphan_*` leftover the caller discarded.
@@ -423,6 +441,18 @@ thread_local! {
         water_swap_snow: 0,
         water_swap_snow_in: 0,
         water_swap_snow_out: 0,
+        snow_in_nucleate: 0,
+        snow_out_nucleate: 0,
+        snow_in_surface: 0,
+        snow_out_surface: 0,
+        snow_in_fall: 0,
+        snow_out_fall: 0,
+        snow_in_drift: 0,
+        snow_out_drift: 0,
+        snow_in_reloc: 0,
+        snow_out_reloc: 0,
+        snow_in_other: 0,
+        snow_out_other: 0,
         water_swap_other: 0,
         water_park: 0,
         water_hum_rej: 0,
@@ -459,6 +489,13 @@ thread_local! {
     static FREE_SAT_FLOW_N: StdCell<u32> = const { StdCell::new(0) };
     static FREE_SAT_SEEP_N: StdCell<u32> = const { StdCell::new(0) };
     static FREE_SAT_PARK_N: StdCell<u32> = const { StdCell::new(0) };
+    /// Active [`SnowSwapScope`] bit (0 = untagged / other).
+    static SNOW_SWAP_SCOPE: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_NUCLEATE_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_SURFACE_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_FALL_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_DRIFT_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_RELOC_N: StdCell<u32> = const { StdCell::new(0) };
 }
 
 /// Cumulative humidity mass change across one `advect_with_surface` call.
@@ -578,6 +615,12 @@ fn probe_reset() {
     FREE_SAT_FLOW_N.with(|n| n.set(0));
     FREE_SAT_SEEP_N.with(|n| n.set(0));
     FREE_SAT_PARK_N.with(|n| n.set(0));
+    SNOW_SWAP_SCOPE.with(|s| s.set(0));
+    SNOW_SWAP_NUCLEATE_N.with(|n| n.set(0));
+    SNOW_SWAP_SURFACE_N.with(|n| n.set(0));
+    SNOW_SWAP_FALL_N.with(|n| n.set(0));
+    SNOW_SWAP_DRIFT_N.with(|n| n.set(0));
+    SNOW_SWAP_RELOC_N.with(|n| n.set(0));
 }
 
 #[inline]
@@ -701,6 +744,7 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
                 && prev.material != MaterialId::Snow;
             let snow_out = prev.material == MaterialId::Snow
                 && next.material != MaterialId::Snow;
+            let scope = SNOW_SWAP_SCOPE.with(|s| s.get());
             PROBE.with(|p| {
                 let mut v = p.get();
                 v.water_swap += d;
@@ -708,9 +752,25 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
                     v.water_swap_snow += d;
                     if snow_in {
                         v.water_swap_snow_in += d;
+                        match scope {
+                            SnowSwapScope::NUCLEATE => v.snow_in_nucleate += d,
+                            SnowSwapScope::SURFACE => v.snow_in_surface += d,
+                            SnowSwapScope::FALL => v.snow_in_fall += d,
+                            SnowSwapScope::DRIFT => v.snow_in_drift += d,
+                            SnowSwapScope::RELOC => v.snow_in_reloc += d,
+                            _ => v.snow_in_other += d,
+                        }
                     }
                     if snow_out {
                         v.water_swap_snow_out += d;
+                        match scope {
+                            SnowSwapScope::NUCLEATE => v.snow_out_nucleate += d,
+                            SnowSwapScope::SURFACE => v.snow_out_surface += d,
+                            SnowSwapScope::FALL => v.snow_out_fall += d,
+                            SnowSwapScope::DRIFT => v.snow_out_drift += d,
+                            SnowSwapScope::RELOC => v.snow_out_reloc += d,
+                            _ => v.snow_out_other += d,
+                        }
                     }
                 } else {
                     v.water_swap_other += d;
@@ -893,6 +953,123 @@ impl Drop for FreeSatScope {
                 n.set(next);
                 if next == 0 {
                     FREE_SAT_SCOPE.with(|s| s.set(s.get() & !Self::PARK));
+                }
+            }),
+            _ => {}
+        }
+    }
+}
+
+/// RAII: attribute World `snow_in` / `snow_out` overlay to a call site.
+///
+/// Residual A hunt: which Air→Snow path leaves unpaired overlay vs paid
+/// H debit or a matching Snow leave. Parallel grain settle does not use
+/// [`note_set_cell`] — only World writers land here.
+pub struct SnowSwapScope {
+    bit: u32,
+}
+
+impl SnowSwapScope {
+    pub const NUCLEATE: u32 = 1;
+    pub const SURFACE: u32 = 2;
+    pub const FALL: u32 = 4;
+    pub const DRIFT: u32 = 8;
+    pub const RELOC: u32 = 16;
+
+    fn enter(bit: u32) -> Self {
+        match bit {
+            Self::NUCLEATE => SNOW_SWAP_NUCLEATE_N.with(|n| {
+                if n.get() == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(Self::NUCLEATE));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            Self::SURFACE => SNOW_SWAP_SURFACE_N.with(|n| {
+                if n.get() == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(Self::SURFACE));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            Self::FALL => SNOW_SWAP_FALL_N.with(|n| {
+                if n.get() == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(Self::FALL));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            Self::DRIFT => SNOW_SWAP_DRIFT_N.with(|n| {
+                if n.get() == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(Self::DRIFT));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            Self::RELOC => SNOW_SWAP_RELOC_N.with(|n| {
+                if n.get() == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(Self::RELOC));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            _ => {}
+        }
+        Self { bit }
+    }
+
+    pub fn nucleate() -> Self {
+        Self::enter(Self::NUCLEATE)
+    }
+
+    pub fn surface() -> Self {
+        Self::enter(Self::SURFACE)
+    }
+
+    pub fn fall() -> Self {
+        Self::enter(Self::FALL)
+    }
+
+    pub fn drift() -> Self {
+        Self::enter(Self::DRIFT)
+    }
+
+    pub fn reloc() -> Self {
+        Self::enter(Self::RELOC)
+    }
+}
+
+impl Drop for SnowSwapScope {
+    fn drop(&mut self) {
+        match self.bit {
+            Self::NUCLEATE => SNOW_SWAP_NUCLEATE_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(0));
+                }
+            }),
+            Self::SURFACE => SNOW_SWAP_SURFACE_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(0));
+                }
+            }),
+            Self::FALL => SNOW_SWAP_FALL_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(0));
+                }
+            }),
+            Self::DRIFT => SNOW_SWAP_DRIFT_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(0));
+                }
+            }),
+            Self::RELOC => SNOW_SWAP_RELOC_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    SNOW_SWAP_SCOPE.with(|s| s.set(0));
                 }
             }),
             _ => {}

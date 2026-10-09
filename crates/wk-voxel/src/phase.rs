@@ -623,6 +623,7 @@ fn rests_on_solid_or_pack(world: &World, gx: i32, gy: i32) -> bool {
 /// Soft blanket depth caps column spikes. Leaf frost tint is a future
 /// overlay animation, not world Snow on Photosystem cells.
 fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
+    let _scope = crate::budget::SnowSwapScope::surface();
     deposit_frozen_lid_on_surface(world, gx, start_y, snow_cell())
 }
 
@@ -648,6 +649,7 @@ pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f
     let Some(air_y) = first_empty_air_y_for_snow(world, jx, y) else {
         return 0.0;
     };
+    let _scope = crate::budget::SnowSwapScope::nucleate();
     world.set_cell(jx, air_y, snow_cell());
     u8::MAX as f32
 }
@@ -1030,6 +1032,7 @@ fn cull_relocate_candidates(
 
 /// Seat a relocated Ice/Snow lid on empty Air only (no wet-film absorb).
 fn seat_relocated_frozen(world: &mut World, gx: i32, start_y: i32, lid: Cell) -> bool {
+    let _scope = crate::budget::SnowSwapScope::reloc();
     let jx = world.wrap_x(gx);
     let mut y = start_y;
     let mut last_empty_air_y: Option<i32> = None;
