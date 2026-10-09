@@ -1303,6 +1303,40 @@ fn airborne_snow_fall_steps_without_a_deep_settle() {
 }
 
 #[test]
+fn airborne_snow_fall_through_haze_stays_tracked_flat() {
+    // Snow↔haze swap must move film sat with the Air cell, not mint free
+    // water under a still-banked flake (snow-mint soak suspect).
+    let mut w = setup_column_world();
+    for y in 2..16 {
+        w.set_cell(2, y, Cell::air());
+    }
+    let mut haze = Cell::air();
+    haze.sat = Sat(120);
+    w.set_cell(2, 10, haze);
+    w.set_cell(2, 14, Cell::solid(MaterialId::Snow));
+    let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+    let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    let mut moved = 0u32;
+    for _ in 0..40 {
+        moved += apply_airborne_snow_fall(&mut w);
+        w.tick += 1;
+    }
+    assert!(moved > 0, "flake must step through haze");
+    let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    assert!(
+        (after - before).abs() < 1.0,
+        "snow↔haze fall must stay TRACKED flat (Δ={})",
+        after - before
+    );
+    let free: i64 = (0..20)
+        .filter_map(|y| w.get_cell(2, y))
+        .filter(|c| c.material == MaterialId::Air)
+        .map(|c| c.sat.0 as i64)
+        .sum();
+    assert_eq!(free, 120, "haze sat must survive the swap (got {free})");
+}
+
+#[test]
 fn snow_descends_across_settle_passes_in_one_tick() {
     // Deep settle used to hash the hold only on tick, so a flake that
     // held sat through all 64 FPS passes. Mix pass into the roll so the

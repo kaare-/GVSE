@@ -191,7 +191,8 @@ pub use plant::{
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use rules::{
-    active_has_unsupported_grain, apply_airborne_snow_fall, apply_cold_avalanche,
+    active_has_unsupported_grain, apply_airborne_snow_fall, apply_airborne_snow_fall_cfg,
+    apply_cold_avalanche,
     apply_cold_avalanche_bound, apply_competent_fall_regions, apply_competent_fall_wake,
     apply_condensation_rain, apply_condensation_rain_phased,
     apply_condensation_rain_with_orographic, apply_evaporation, apply_evaporation_into_humidity,

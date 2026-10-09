@@ -691,7 +691,15 @@ fn tick_with_life_inner(
             let t0 = profile.then(Instant::now);
             // Rise already teleported buoyant litter — do not one-cell
             // bob through wet Air inside settle (Organic flood FPS spike).
-            settle_loose_grains_regions_ex(world, &grain_active, rooted, passes, false);
+            let grain_cfg = grain.cloned().unwrap_or_default();
+            settle_loose_grains_regions_ex(
+                world,
+                &grain_active,
+                rooted,
+                passes,
+                false,
+                &grain_cfg,
+            );
             if let (true, Some(t0)) = (profile, t0) {
                 local.settle += t0.elapsed();
             }
@@ -702,7 +710,14 @@ fn tick_with_life_inner(
     // Snow is not "unsupported grain" for deep settle. One cheap
     // downward roll here so a shower still leaves the sky.
     if world.chunks.values().any(|c| c.has_snow) {
-        let _ = super::grain::apply_airborne_snow_fall(world);
+        match grain {
+            Some(g) => {
+                let _ = super::grain::apply_airborne_snow_fall_cfg(world, g);
+            }
+            None => {
+                let _ = super::grain::apply_airborne_snow_fall(world);
+            }
+        }
     }
 
     // Dense cargo cannot ride floating Organic/Snow/Ice. Skip the full
@@ -727,12 +742,14 @@ fn tick_with_life_inner(
             let sink = filter_loose_regions(world, &plan_active(world));
             if !sink.is_empty() {
                 let t0 = profile.then(Instant::now);
+                let grain_cfg = grain.cloned().unwrap_or_default();
                 settle_loose_grains_regions_ex(
                     world,
                     &sink,
                     rooted,
                     GRAIN_SETTLE_PASSES_PUNCH,
                     false,
+                    &grain_cfg,
                 );
                 if let (true, Some(t0)) = (profile, t0) {
                     local.settle += t0.elapsed();

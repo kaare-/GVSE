@@ -18,7 +18,9 @@
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
 //! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `leftover`, `cadence`,
 //!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`, `surplus`,
-//!   `diffuse` (α=0), `orphan` (evap crest-film 8× off)
+//!   `diffuse` (α=0), `orphan` (evap crest-film 8× off),
+//!   `snowfall` (flakes nucleate but do not descend), `snowwet` (no haze/film
+//!   snow swap), `slush` (`PhaseConfig::enable_slush = false`)
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
@@ -207,6 +209,9 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         // 5k soak: TRACKED ~+136/t → ~0 with this flag (see VOXEL_BUDGET_SOAK).
         phase.enable_snow_precip = false;
     }
+    if soak_off("slush") {
+        phase.enable_slush = false;
+    }
     let mut steam = SteamConfig::default();
     if soak_off("steam") {
         steam.enabled = false;
@@ -222,7 +227,15 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     }
     let climate = ClimateConfig::default();
     let carbon_cfg = CarbonConfig::default();
-    let grain = GrainConfig::default();
+    let mut grain = GrainConfig::default();
+    if soak_off("snowfall") {
+        // Nucleation stays on; airborne roll + grain-fall flake descent off.
+        grain.enable_airborne_snow_fall = false;
+    }
+    if soak_off("snowwet") {
+        // Flakes only swap into empty Air — no haze/film ride.
+        grain.enable_snow_wet_fall = false;
+    }
     let fungi = FungiConfig::default();
     let mut competent = CompetentFallConfig::default();
     if soak_off("competent") {

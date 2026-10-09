@@ -356,10 +356,20 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
 /// (that forced the ×64 deep path and killed FPS). This walk is the
 /// same `has_snow` scan as drift: one roll, one cell, no repose.
 pub fn apply_airborne_snow_fall(world: &mut World) -> u32 {
+    apply_airborne_snow_fall_cfg(world, &GrainConfig::default())
+}
+
+/// [`apply_airborne_snow_fall`] with live [`GrainConfig`] snow-fall gates
+/// (`enable_airborne_snow_fall` / `enable_snow_wet_fall`).
+pub fn apply_airborne_snow_fall_cfg(world: &mut World, grain: &GrainConfig) -> u32 {
+    if !grain.enable_airborne_snow_fall {
+        return 0;
+    }
     let any_snow = world.chunks.values().any(|c| c.has_snow);
     if !any_snow {
         return 0;
     }
+    let allow_wet = grain.enable_snow_wet_fall;
     let seed = world.seed.0;
     let tick_no = world.tick;
     let mut candidates: Vec<(i32, i32)> = Vec::new();
@@ -417,6 +427,10 @@ pub fn apply_airborne_snow_fall(world: &mut World) -> u32 {
         }
         // Float on a grounded lake; drop through empty / haze air.
         if dest.sat.is_full() {
+            continue;
+        }
+        // Hunt gate: refuse haze/film swaps (empty Air only).
+        if !allow_wet && !dest.sat.is_empty() {
             continue;
         }
         claimed.insert((gx, dest_y));
@@ -1171,7 +1185,14 @@ pub fn settle_loose_grains_regions(
     rooted: Option<&HashSet<(i32, i32)>>,
     max_passes: u32,
 ) {
-    settle_loose_grains_regions_ex(world, initial, rooted, max_passes, true);
+    settle_loose_grains_regions_ex(
+        world,
+        initial,
+        rooted,
+        max_passes,
+        true,
+        &GrainConfig::default(),
+    );
 }
 
 /// Like [`settle_loose_grains_regions`] with optional in-fall buoyancy.
@@ -1247,12 +1268,14 @@ pub fn settle_loose_grains_regions_ex(
     rooted: Option<&HashSet<(i32, i32)>>,
     max_passes: u32,
     allow_buoyancy: bool,
+    grain: &GrainConfig,
 ) {
     // Caller usually pre-filters sticky-loose; Air trim still applies so
     // seepage pore dirty inside sand/shore chunks is not re-walked ×N.
     // Leave global dirty intact — multi-pass re-plans filter via
     // [`settle_scan_regions`] instead of clearing the wet-pore halo.
     let mut cur: Vec<ActiveChunk> = keep_air_dest_regions(world, initial);
+    let snow_gate = SnowFallGate::from_grain(grain);
     for settle_i in 0..max_passes {
         if cur.is_empty() {
             break;
@@ -1264,7 +1287,13 @@ pub fn settle_loose_grains_regions_ex(
         // is outside this colour's ptr map.
         for pass in &partition_checkerboard(&cur) {
             if !pass.is_empty() {
-                moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy, settle_i);
+                moved += apply_grain_fall_regions_ex(
+                    world,
+                    pass,
+                    allow_buoyancy,
+                    settle_i,
+                    snow_gate,
+                );
             }
         }
         // Re-plan is global dirty, which on a wet world is dominated by pore
@@ -1326,8 +1355,24 @@ fn snowflake_holds_position(seed: u64, tick: u64, pass: u32, gx: i32, gy: i32) -
 const SNOWFALL_STEP_ODDS: f32 = 0.38;
 const SNOWFALL_SALT: u64 = 0x5F04_FA11;
 
+/// Snow descent gates for grain fall / airborne roll (soak OFF hooks).
+#[derive(Clone, Copy, Debug)]
+struct SnowFallGate {
+    enable: bool,
+    allow_wet: bool,
+}
+
+impl SnowFallGate {
+    fn from_grain(grain: &GrainConfig) -> Self {
+        Self {
+            enable: grain.enable_airborne_snow_fall,
+            allow_wet: grain.enable_snow_wet_fall,
+        }
+    }
+}
+
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
-    apply_grain_fall_regions_ex(world, active, true, 0)
+    apply_grain_fall_regions_ex(world, active, true, 0, SnowFallGate::from_grain(&GrainConfig::default()))
 }
 
 /// [`apply_grain_fall_regions`] with optional buoyancy pull.
@@ -1341,6 +1386,7 @@ pub fn apply_grain_fall_regions_ex(
     active: &[ActiveChunk],
     allow_buoyancy: bool,
     fall_pass: u32,
+    snow_gate: SnowFallGate,
 ) -> u32 {
     let moves = std::sync::atomic::AtomicU32::new(0);
     // Parallel cell writes can't touch `World::mycelium_strains`; replay
@@ -1382,10 +1428,16 @@ pub fn apply_grain_fall_regions_ex(
                     //
                     // Only while airborne: once it lands it is snowpack and behaves
                     // as any other loose material, which is what lets drifts build.
-                    if above.material == MaterialId::Snow
-                        && snowflake_holds_position(seed, tick_no, fall_pass, gx, gy)
-                    {
-                        continue;
+                    if above.material == MaterialId::Snow {
+                        if !snow_gate.enable
+                            || snowflake_holds_position(seed, tick_no, fall_pass, gx, gy)
+                        {
+                            continue;
+                        }
+                        // Hunt gate: empty Air only (no haze/film swap).
+                        if !snow_gate.allow_wet && !cur.sat.is_empty() {
+                            continue;
+                        }
                     }
                     // Snow / Ice / Organic: drop through empty Air, haze,
                     // and *suspended* full-sat blobs. Float only on
@@ -3491,6 +3543,18 @@ pub struct GrainConfig {
     /// Higher values make Organic mats stick to plants and form perched
     /// water bladders on slopes.
     pub raft_root_bind_radius: i32,
+    /// Once-per-tick airborne snow step + gentle grain-fall flake descent.
+    /// Soak `OFF=snowfall` clears this so flakes nucleate but stay put.
+    #[serde(default = "default_true")]
+    pub enable_airborne_snow_fall: bool,
+    /// When false, flakes only swap into empty Air (`sat == 0`) — no
+    /// haze/film ride. Soak `OFF=snowwet` for snow↔standing-water mint hunt.
+    #[serde(default = "default_true")]
+    pub enable_snow_wet_fall: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for GrainConfig {
@@ -3506,6 +3570,8 @@ impl Default for GrainConfig {
             organic_waterlog_rate: 0.002,
             // Body-span bind only — no neighbour dilation (was 1).
             raft_root_bind_radius: 0,
+            enable_airborne_snow_fall: true,
+            enable_snow_wet_fall: true,
         }
     }
 }
