@@ -263,8 +263,11 @@ May include ring width / ceiling / streaming follow-ups from
 
 **Now**
 
-- Re-profile on tip of `#373` / `snow-mint-probe` stack; document.
-- First lever chosen from the new hotspot table (width or CA).
+- Re-profile landed in [`VOXEL_PERF.md`](VOXEL_PERF.md) § Phase 4.
+- First lever: Ice out of sticky-loose settle + thick early-out + dirty
+  thin-ice fall — stress ~30 sim-FPS again; settle still elevated vs
+  Phase 1 Air-dest (sand freefall leftover).
+- Next: Compact stretch stamp (4096 cols) + optional deep-settle hunt.
 
 ---
 
@@ -341,7 +344,7 @@ before coding.
 
 ## Clarifications later
 
-- Phase-1 stretch width / field-shell cuts deferred to Phase 4 (or revisit).
-- Phase 3 ice option 2 slices: A sparse map spike → B melt on ice → C geyser mouth cool.
+- Phase-1 stretch width / field-shell cuts: **Phase 4 now** (re-profile first).
+- Phase 3 ice option 2 slices A–C + brittle/sheet/lid: closed with Phase 3.
 - Phase-5 scoping agenda (plants/fungi vs creatures first — open until planning session).
 - Phase-8 shortlist of client stacks when that review starts.

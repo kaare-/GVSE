@@ -304,3 +304,29 @@ Restore settle toward the Phase 1 Air-dest band before width stretch —
 a ≥1 ms surgical win without weather coarsen. Stretch past 2048 toward
 WORLDGEN Compact (4096 cols / ~1 km) only after stress is back ≥30
 sim-FPS (or a new gate is documented).
+
+### After Ice sticky-loose cut (tip `4458bba`)
+
+Ice removed from `material_is_loose` / wake `saw_loose`; thick packs
+early-out before `ice_floe_seat`; thin glaze uses dirty-halo
+`apply_airborne_thin_ice_fall`. Short `budget_soak` 5k: TRACKED
+**−0.01/t**, min **+0.04/t**, `park=0`. Log:
+`/opt/cursor/artifacts/phase4-perf-reprofile3.log`.
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 19.7 | ~51 | 11.4 | 3.32 | 2.86 | 1.71 |
+| demo | 21.1 | ~47 | 12.1 | 2.89 | 4.74 | 2.04 |
+| stress (2048×1064) | 33.5 | ~30 | 18.4 | 4.81 | 5.48 | 4.25 |
+
+Stress back to the Phase 1 ≥30 sim-FPS gate (~30). Settle is still
+**~4–5 ms** on demo (not the Phase 1 Air-dest ≪1 ms band) — leftover is
+real sand freefall / deep-settle (~9/200 ticks), not Ice lids. Host
+noise on wall is ~±1–2 ms across re-runs.
+
+### Next Phase 4 steps
+
+1. Width stretch stamp (64-wide / 4096 cols, WORLDGEN Compact) via
+   `perf_profile_stretch_width` / `perf_profile_demo_and_stress`.
+2. Deep-settle sand freefall (~9/200) if a clear ≥1 ms cut appears —
+   do not coarsen weather.
