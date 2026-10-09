@@ -1257,6 +1257,19 @@ fn thick_ice_does_not_soft_fall_through_empty_air() {
     );
     assert_eq!(w.get_cell(3, 3).unwrap().material, MaterialId::Ice);
     assert_eq!(w.get_cell(3, 1).unwrap().material, MaterialId::Air);
+    // Once-per-tick thin-ice path must also refuse thick packs.
+    assert_eq!(apply_airborne_thin_ice_fall(&mut w), 0);
+    assert_eq!(w.get_cell(3, 2).unwrap().material, MaterialId::Ice);
+}
+
+#[test]
+fn thin_ice_airborne_fall_steps_through_empty_air() {
+    let mut w = setup_column_world();
+    w.set_cell(4, 1, Cell::air());
+    w.set_cell(4, 2, Cell::solid(MaterialId::Ice)); // 1-cell glaze
+    assert!(apply_airborne_thin_ice_fall(&mut w) >= 1);
+    assert_eq!(w.get_cell(4, 1).unwrap().material, MaterialId::Ice);
+    assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);
 }
 
 #[test]

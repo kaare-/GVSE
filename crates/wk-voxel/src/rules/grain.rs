@@ -12,7 +12,8 @@ use crate::cell::{
     water_capacity_cell, Cell, CellFlags, Sat,
 };
 use crate::chunk::{
-    Chunk, ChunkCoord, DirtyBits, STANDING_AIR_SAT, CHUNK_CELLS_H, CHUNK_CELLS_W,
+    material_is_loose, Chunk, ChunkCoord, DirtyBits, STANDING_AIR_SAT, CHUNK_CELLS_H,
+    CHUNK_CELLS_W,
 };
 use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
 use crate::grid::World;
@@ -474,6 +475,189 @@ fn snowflake_is_airborne(world: &World, gx: i32, gy: i32, allow_float: bool) -> 
         return true;
     }
     !floats_on_air_seat_world(world, below, gx, gy - 1)
+}
+
+/// Contiguous Ice stack thickness through `(gx, gy)` via world lookups.
+fn ice_stack_thickness_world(world: &World, gx: i32, gy: i32) -> u8 {
+    let Some(here) = world.get_cell(gx, gy) else {
+        return 0;
+    };
+    if here.material != MaterialId::Ice {
+        return 0;
+    }
+    let mut top = gy;
+    for _ in 0..255 {
+        match world.get_cell(gx, top + 1) {
+            Some(c) if c.material == MaterialId::Ice => top += 1,
+            _ => break,
+        }
+    }
+    let mut n = 0u8;
+    let mut y = top;
+    loop {
+        match world.get_cell(gx, y) {
+            Some(c) if c.material == MaterialId::Ice => {
+                n = n.saturating_add(1);
+                y -= 1;
+            }
+            _ => break,
+        }
+    }
+    n
+}
+
+/// World-side floe seat (same rules as [`ice_floe_seat_ptrs`]).
+fn ice_floe_seat_world(world: &World, seat: Cell, gx: i32, gy: i32) -> bool {
+    if seat.material != MaterialId::Air {
+        return false;
+    }
+    if !seat.sat.is_empty() {
+        if floats_on_air_seat_world(world, seat, gx, gy) {
+            return true;
+        }
+        return lake_under_film_world(world, gx, gy);
+    }
+    lake_water_within_world(world, gx, gy, 3) || lake_surface_neighbor_world(world, gx, gy)
+}
+
+fn lake_under_film_world(world: &World, gx: i32, gy: i32) -> bool {
+    if !water_column_grounded_world(world, gx, gy) {
+        return false;
+    }
+    let mut y = gy;
+    for _ in 0..512 {
+        let Some(c) = world.get_cell(gx, y) else {
+            return false;
+        };
+        if c.material != MaterialId::Air {
+            return false;
+        }
+        if c.sat.is_full() {
+            return true;
+        }
+        if c.sat.is_empty() {
+            return false;
+        }
+        y -= 1;
+    }
+    false
+}
+
+fn lake_water_within_world(world: &World, gx: i32, gy: i32, max_down: i32) -> bool {
+    for dy in 0..=max_down {
+        let y = gy - dy;
+        let Some(c) = world.get_cell(gx, y) else {
+            return false;
+        };
+        if c.material != MaterialId::Air {
+            return false;
+        }
+        if c.sat.is_full() && water_column_grounded_world(world, gx, y) {
+            return true;
+        }
+    }
+    false
+}
+
+fn lake_surface_neighbor_world(world: &World, gx: i32, gy: i32) -> bool {
+    for dx in [-1_i32, 1] {
+        let Some(n) = world.get_cell(gx + dx, gy) else {
+            continue;
+        };
+        if n.material == MaterialId::Air
+            && n.sat.is_full()
+            && water_column_grounded_world(world, gx + dx, gy)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Once-per-tick downward step for **thin** unsupported Ice (glaze).
+///
+/// Thick packs (≥ [`crate::phase::ICE_CARRY_THICKNESS_DEFAULT`]) stay put —
+/// brittle solid, not powder. Ice is no longer sticky-`has_loose`, so settle
+/// does not walk lake lids; this scan is the freefall seat for one-cell ice.
+pub fn apply_airborne_thin_ice_fall(world: &mut World) -> u32 {
+    let any_ice = world.chunks.values().any(|c| c.has_ice);
+    if !any_ice {
+        return 0;
+    }
+    let carry = crate::phase::ICE_CARRY_THICKNESS_DEFAULT.max(1);
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_ice)
+        .map(|(&coord, _)| coord)
+        .collect();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if cell.material != MaterialId::Ice {
+                    continue;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                if ice_stack_thickness_world(world, gx, gy) >= carry {
+                    continue;
+                }
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                if below.material != MaterialId::Air {
+                    continue;
+                }
+                if ice_floe_seat_world(world, below, gx, gy - 1) {
+                    continue;
+                }
+                candidates.push((gx, gy));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return 0;
+    }
+    candidates.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    let mut claimed: std::collections::HashSet<(i32, i32)> =
+        std::collections::HashSet::new();
+    let mut moved = 0u32;
+    for (gx, gy) in candidates {
+        let dest_y = gy - 1;
+        if claimed.contains(&(gx, dest_y)) {
+            continue;
+        }
+        let Some(ice) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        let Some(dest) = world.get_cell(gx, dest_y) else {
+            continue;
+        };
+        if ice.material != MaterialId::Ice || dest.material != MaterialId::Air {
+            continue;
+        }
+        if ice_stack_thickness_world(world, gx, gy) >= carry {
+            continue;
+        }
+        if ice_floe_seat_world(world, dest, gx, dest_y) {
+            continue;
+        }
+        claimed.insert((gx, dest_y));
+        {
+            let _scope = crate::budget::SnowSwapScope::fall();
+            world.set_cell(gx, dest_y, ice);
+            world.set_cell(gx, gy, dest);
+        }
+        moved += 1;
+    }
+    moved
 }
 
 const SNOWDRIFT_SALT: u64 = 0x51DE_5417;
@@ -1022,8 +1206,13 @@ pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -
                 let cell = chunk.get(lx, ly);
                 let gx = x0 + lx as i32;
                 let gy = y0 + ly as i32;
-                let loose = is_grain(cell.material)
-                    || falls_through_empty_air(cell.material)
+                // Ice is not sticky-loose (brittle solid / thin-ice fall path).
+                // Counting it here kept every lake-lid chunk in `has_loose`
+                // forever and re-dirtied settle around lids.
+                if cell.material == MaterialId::Ice {
+                    continue;
+                }
+                let loose = material_is_loose(cell.material)
                     || is_repose_grain(cell.material);
                 if !loose {
                     continue;

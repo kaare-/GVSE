@@ -298,6 +298,11 @@ fn standing_band_unset_hi() -> u8 {
 }
 
 /// Materials that participate in grain settle / float / punch passes.
+///
+/// Ice is intentionally excluded: thick packs are brittle solids and thin
+/// glaze falls on the once-per-tick airborne path (see grain settle). Keeping
+/// Ice in `has_loose` pulled every lake-lid chunk into sticky settle after
+/// Phase 3 and dominated the Phase 4 re-profile.
 #[inline]
 pub fn material_is_loose(material: MaterialId) -> bool {
     matches!(
@@ -310,7 +315,6 @@ pub fn material_is_loose(material: MaterialId) -> bool {
             | MaterialId::LooseRock
             | MaterialId::LooseLimestone
             | MaterialId::Snow
-            | MaterialId::Ice
             | MaterialId::Organic
     )
 }
