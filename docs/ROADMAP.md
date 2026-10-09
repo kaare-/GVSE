@@ -191,9 +191,11 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   haze swap or slush. `snowraft`/`snowsurf` still +159/+141 — not lake
   float lid or weather crest. Condensation liquid stale-`take_around`
   underpay fixed (unit mint; live clamp) but 5k still **+130.86/t**
-  (`dep_add=debit=534`) — not the soak leftover. Next: free writers
-  beside landed Snow other than cond deposit (flow/seep/park). Kill:
-  `OFF=snow`.
+  (`dep_add=debit=534`) — not the soak leftover. Free writers beside
+  Snow (`OFF=flow` **+196**, `seep` **+145**, `park` **+133**; units
+  TRACKED-flat) ruled out — not flow/seep/park. Next: post-seat phase /
+  melt / thaw-yield once flakes land (`paid−phase`~+665k, `under=0`).
+  Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 

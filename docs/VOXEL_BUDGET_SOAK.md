@@ -153,3 +153,25 @@ deposit (`deposit_liquid_paid`); probe `dep_add`/`dep_debit`.
 condensation liquid underpay. Next: free-sat writers beside landed Snow
 other than cond deposit — water_flow / lateral seep / park_orphan, or
 same-mat Air sat writes near Snow solids. Kill: `GVSE_SOAK_OFF=snow`.
+
+**Free writers beside Snow (2026-10-09):** 5k on tip after
+`OFF=flow|seep|park` + `FreeSatScope` probes (`flow_air` / `seep_air` /
+`park_air`). Units: flow / contact-seep / take→park beside Snow stay
+TRACKED-flat. `OFF=seep` must skip contact apply too (cadence-else used
+to leave contact on).
+
+| OFF | TRACKED /t | note |
+|-----|------------|------|
+| *(none)* | **+136.01** | `flow_air≈−2.6M`, `seep_air≈+3.3M`, `park_air≈+197k` |
+| `flow` | **+196.47** | **worse** — surface flow not the mint |
+| `seep` | **+145.24** | `seep_air=0`; still + — not the mint |
+| `park` | **+132.60** | ≈same; `park` leftover huge, mint stays |
+| `snowfall` | +15.66 | descent gate unchanged |
+| `snow` | −0.01 | kill unchanged |
+
+**Ruled out:** water_flow / lateral equalise, pore seep / contact wet,
+`park_orphan` free placement (and same-mat Air Δ under those scopes).
+Scope nets are free↔pore moves, not TRACKED. `paid−phase` still
+~+665k with `under=0` — flakes seat then leave the snow book. Next:
+post-seat phase / melt / thaw-yield path once flakes land. Kill:
+`GVSE_SOAK_OFF=snow`.
