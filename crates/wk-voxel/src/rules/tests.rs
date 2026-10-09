@@ -1267,6 +1267,7 @@ fn thin_ice_airborne_fall_steps_through_empty_air() {
     let mut w = setup_column_world();
     w.set_cell(4, 1, Cell::air());
     w.set_cell(4, 2, Cell::solid(MaterialId::Ice)); // 1-cell glaze
+    // Dirty-halo path — set_cell already dirties the written cells.
     assert!(apply_airborne_thin_ice_fall(&mut w) >= 1);
     assert_eq!(w.get_cell(4, 1).unwrap().material, MaterialId::Ice);
     assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);

@@ -574,11 +574,13 @@ fn lake_surface_neighbor_world(world: &World, gx: i32, gy: i32) -> bool {
     false
 }
 
-/// Once-per-tick downward step for **thin** unsupported Ice (glaze).
+/// Dirty-halo downward step for **thin** unsupported Ice (glaze).
 ///
 /// Thick packs (≥ [`crate::phase::ICE_CARRY_THICKNESS_DEFAULT`]) stay put —
 /// brittle solid, not powder. Ice is no longer sticky-`has_loose`, so settle
-/// does not walk lake lids; this scan is the freefall seat for one-cell ice.
+/// does not walk lake lids; this is the freefall seat for one-cell ice.
+/// Walks only the current dirty wake in `has_ice` chunks — a full ice-chunk
+/// scan every tick erased the settle win on the Phase 4 re-profile.
 pub fn apply_airborne_thin_ice_fall(world: &mut World) -> u32 {
     let any_ice = world.chunks.values().any(|c| c.has_ice);
     if !any_ice {
@@ -586,26 +588,43 @@ pub fn apply_airborne_thin_ice_fall(world: &mut World) -> u32 {
     }
     let carry = crate::phase::ICE_CARRY_THICKNESS_DEFAULT.max(1);
     let mut candidates: Vec<(i32, i32)> = Vec::new();
-    let coords: Vec<ChunkCoord> = world
-        .chunks
-        .iter()
-        .filter(|(_, c)| c.has_ice)
-        .map(|(&coord, _)| coord)
-        .collect();
-    for coord in coords {
-        let x0 = coord.cx * CHUNK_CELLS_W as i32;
-        let y0 = coord.cy * CHUNK_CELLS_H as i32;
-        let Some(chunk) = world.chunks.get(&coord) else {
+    for ac in plan_active(world) {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
             continue;
         };
-        for ly in 0..CHUNK_CELLS_H {
-            for lx in 0..CHUNK_CELLS_W {
-                let cell = chunk.get(lx, ly);
+        if !chunk.has_ice {
+            continue;
+        }
+        let x0 = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = ac.coord.cy * CHUNK_CELLS_H as i32;
+        for y in ac.rect.y0..=ac.rect.y1 {
+            for x in ac.rect.x0..=ac.rect.x1 {
+                if !ac.visits(x, y) {
+                    continue;
+                }
+                let gx = x0 + x as i32;
+                let gy = y0 + y as i32;
+                let cell = chunk.get(x as usize, y as usize);
+                // Air seat: pull thin Ice from above (settle-style).
+                if cell.material == MaterialId::Air {
+                    let Some(above) = world.get_cell(gx, gy + 1) else {
+                        continue;
+                    };
+                    if above.material != MaterialId::Ice {
+                        continue;
+                    }
+                    if ice_stack_thickness_world(world, gx, gy + 1) >= carry {
+                        continue;
+                    }
+                    if ice_floe_seat_world(world, cell, gx, gy) {
+                        continue;
+                    }
+                    candidates.push((gx, gy + 1));
+                    continue;
+                }
                 if cell.material != MaterialId::Ice {
                     continue;
                 }
-                let gx = x0 + lx as i32;
-                let gy = y0 + ly as i32;
                 if ice_stack_thickness_world(world, gx, gy) >= carry {
                     continue;
                 }
@@ -626,6 +645,7 @@ pub fn apply_airborne_thin_ice_fall(world: &mut World) -> u32 {
         return 0;
     }
     candidates.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    candidates.dedup();
     let mut claimed: std::collections::HashSet<(i32, i32)> =
         std::collections::HashSet::new();
     let mut moved = 0u32;
