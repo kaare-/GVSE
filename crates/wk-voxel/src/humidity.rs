@@ -432,15 +432,18 @@ impl Humidity {
 
     /// Drain `amount` from a humidity tile (rain / surplus). Write-through
     /// keeps the runtime slab honest so the next dense pack can reuse it.
-    pub fn drain_tile(&mut self, hx: i32, hy: i32, amount: f32) {
+    /// Returns how much was actually removed (may be less than `amount`).
+    pub fn drain_tile(&mut self, hx: i32, hy: i32, amount: f32) -> f32 {
         if amount <= 0.0 {
-            return;
+            return 0.0;
         }
         let cur = self.at_tile(hx, hy);
         if cur <= 0.0 {
-            return;
+            return 0.0;
         }
-        self.write_tile(hx, hy, (cur - amount.min(cur)).max(0.0));
+        let take = amount.min(cur);
+        self.write_tile(hx, hy, (cur - take).max(0.0));
+        take
     }
 
     /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.

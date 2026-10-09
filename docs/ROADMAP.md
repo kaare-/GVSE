@@ -189,8 +189,9 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   (5k OFF table in VOXEL_BUDGET_SOAK). Descent gate: `OFF=snowfall` →
   **+15.66/t** (baseline +131); `snowwet`/`slush` still +135/+140 — not
   haze swap or slush. `snowraft`/`snowsurf` still +159/+141 — not lake
-  float lid or weather crest. Next: free writers beside landed Snow.
-  Kill: `OFF=snow`.
+  float lid or weather crest. Suspect: condensation liquid deposit used
+  stale tile mass after neighbor flake `take_around` (unit-repro mint;
+  live clamp fix). 5k remeasure on probe tip. Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 

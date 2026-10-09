@@ -137,7 +137,7 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         d.d_min_solid, d.d_min_load, d.d_min_body, d.d_min_total
     );
     eprintln!(
-        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+}",
+        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+}",
         p.water_swap,
         p.water_park,
         p.water_hum_rej,
@@ -146,7 +146,9 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         p.water_hum_diffuse,
         p.water_evap_add,
         p.water_evap_debit,
-        p.water_orphan_rm
+        p.water_orphan_rm,
+        p.water_dep_add,
+        p.water_dep_debit
     );
     eprintln!(
         "probe-M bare={:+} credit={:+} clip={:+}",

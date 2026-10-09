@@ -336,6 +336,10 @@ pub struct BudgetProbe {
     pub water_evap_debit: i64,
     /// Evap path: sat removed from orphan-boosted surface films.
     pub water_orphan_rm: i64,
+    /// Condensation liquid: free sat written by `deposit_water_in_air` / surface.
+    pub water_dep_add: i64,
+    /// Condensation liquid: humidity actually drained for that deposit.
+    pub water_dep_debit: i64,
     /// `set_cell` carbonate delta **outside** widen / scour / precip / emit.
     pub mineral_bare: i64,
     /// Same delta **inside** those ledger APIs (should be paired with load).
@@ -378,6 +382,8 @@ thread_local! {
         water_evap_add: 0,
         water_evap_debit: 0,
         water_orphan_rm: 0,
+        water_dep_add: 0,
+        water_dep_debit: 0,
         mineral_bare: 0,
         mineral_credit: 0,
         mineral_clip: 0,
@@ -446,6 +452,32 @@ pub fn note_orphan_film_rm(units: i32) {
     PROBE.with(|p| {
         let mut v = p.get();
         v.water_orphan_rm += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Condensation liquid free-sat written (paired with [`note_dep_hum_debit`]).
+#[inline]
+pub fn note_dep_sat_add(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_dep_add += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Humidity drained for a condensation liquid deposit.
+#[inline]
+pub fn note_dep_hum_debit(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_dep_debit += i64::from(units);
         p.set(v);
     });
 }
