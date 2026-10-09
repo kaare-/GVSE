@@ -617,7 +617,7 @@ fn tick_with_life_inner(
             (false, false) => merge_active_regions(dirty, flow_halo),
         }
     };
-    if !flow_active.is_empty() {
+    if !flow_active.is_empty() && !skip_seepage() {
         let t0 = profile.then(Instant::now);
         if run_seepage {
             // Deep pass: includes peer pore↔pore percolation.
@@ -627,6 +627,7 @@ fn tick_with_life_inner(
             // but the contact between fast surface water and slow
             // groundwater must be resolved every tick, or the surface
             // layers carry the wrong saturation (and deposition with it).
+            // Hunt `OFF=seep` skips this branch too (see guard above).
             super::seepage::apply_seepage_contact_regions(world, &flow_active);
         }
         if let (true, Some(t0)) = (profile, t0) {
