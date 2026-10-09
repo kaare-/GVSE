@@ -1579,6 +1579,83 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
             }
             continue;
         }
+        // Full pores + open Air: sticky flags already say there is no room
+        // inside the matrix. Interior donor walks were leftover on Compact
+        // shore chunks (weep ~3.8 ms/call). Perimeter donors cover neighbour
+        // Air; in-chunk vents still need a pass — collect vents only.
+        if open_air && !unsat {
+            let mut still_wet = false;
+            let mut vents: Vec<(u8, u8)> = Vec::new();
+            for y in 0..CHUNK_CELLS_H {
+                for x in 0..CHUNK_CELLS_W {
+                    let cell = chunk.get(x, y);
+                    if cell.material == MaterialId::Air && !cell.sat.is_full() {
+                        vents.push((x as u8, y as u8));
+                    }
+                    if is_porous_cell(cell, &hydro) && cell.sat.0 > 0 {
+                        still_wet = true;
+                    }
+                }
+            }
+            for &(vx, vy) in &vents {
+                let x = vx as usize;
+                let y = vy as usize;
+                for (dx, dy) in WEEP_DIRS {
+                    let lx = x as i32 + dx;
+                    let ly = y as i32 + dy;
+                    if lx < 0 || lx >= cw || ly < 0 || ly >= ch {
+                        continue;
+                    }
+                    let donor = chunk.get(lx as usize, ly as usize);
+                    if !is_weep_donor(donor, &hydro) {
+                        continue;
+                    }
+                    let dgx = world.wrap_x(base_gx + lx);
+                    let dgy = base_gy + ly;
+                    weep_dirty_from_donor(
+                        world,
+                        chunk,
+                        &hydro,
+                        dgx,
+                        dgy,
+                        lx as usize,
+                        ly as usize,
+                        donor,
+                        &mut touches,
+                    );
+                }
+            }
+            for y in 0..CHUNK_CELLS_H {
+                for x in 0..CHUNK_CELLS_W {
+                    if !is_chunk_perimeter(x, y) {
+                        continue;
+                    }
+                    let cell = chunk.get(x, y);
+                    if !is_weep_donor(cell, &hydro) {
+                        continue;
+                    }
+                    let gx = world.wrap_x(base_gx + x as i32);
+                    let gy = base_gy + y as i32;
+                    weep_dirty_from_donor(
+                        world,
+                        chunk,
+                        &hydro,
+                        gx,
+                        gy,
+                        x,
+                        y,
+                        cell,
+                        &mut touches,
+                    );
+                }
+            }
+            if !still_wet {
+                clear_pores.push(coord);
+            }
+            air_updates.push((coord, true));
+            unsat_updates.push((coord, false));
+            continue;
+        }
         let mut still_wet = false;
         let mut any_air = false;
         let mut any_unsat = false;
