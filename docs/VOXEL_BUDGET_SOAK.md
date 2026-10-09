@@ -136,15 +136,20 @@ OFF at a time. Kill: `GVSE_SOAK_OFF=snow`.
 **Condensation liquid underpay (2026-10-09):** lottery apply used a
 **snapshot** `mass`/`take_mass` while an earlier freezing hit's
 `take_around` could already have drained that tile — `deposit_water_in_air`
-wrote free sat, then `drain_tile` underpaid → TRACKED mint. Matches the
-descent gate (more continuous flake nucleation → more `take_around`
-races with warm liquid tiles). Unit:
+wrote free sat, then `drain_tile` underpaid → TRACKED mint. Unit:
 `liquid_deposit_after_neighbor_snow_take_stays_tracked_flat` (stale path
-mints ≈+245; live clamp flat). Fix: re-read `at_tile` before deposit
-(`deposit_liquid_paid`); probe `dep_add`/`dep_debit`. 5k remeasure below.
+mints ≈+245; live clamp flat). Fix kept: re-read `at_tile` before
+deposit (`deposit_liquid_paid`); probe `dep_add`/`dep_debit`.
 
-| OFF | TRACKED /t | note |
-|-----|------------|------|
-| *(none)* post-fix | *remeasure* | expect mint ≪ +131 if this was the leftover |
-| `snowfall` | +15.66 | prior descent gate |
+| OFF / tip | TRACKED /t | note |
+|-----------|------------|------|
+| *(none)* post-fix `d6124f3` | **+130.86** | identical to pre-fix baseline |
+| probe | dep_add=dep_debit=**534** | liquid path balanced; ≪ mint |
+| late win 500t | free **≈+154k** | hum −14k; free not from H/dep |
+| `snowfall` | +15.66 | descent gate unchanged |
 | `snow` | −0.01 | kill unchanged |
+
+**Not the 5k leftover** (real conservation bug, soak-irrelevant):
+condensation liquid underpay. Next: free-sat writers beside landed Snow
+other than cond deposit — water_flow / lateral seep / park_orphan, or
+same-mat Air sat writes near Snow solids. Kill: `GVSE_SOAK_OFF=snow`.
