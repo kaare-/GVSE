@@ -332,6 +332,8 @@ pub struct BudgetProbe {
     pub water_hum_diffuse: f64,
     /// Evap path: cumulative humidity mass `try_add*` accepted (sat units).
     pub water_evap_add: i64,
+    /// Evap path: cumulative free-air sat actually removed after try_add.
+    pub water_evap_debit: i64,
     /// Evap path: sat removed from orphan-boosted surface films.
     pub water_orphan_rm: i64,
     /// `set_cell` carbonate delta **outside** widen / scour / precip / emit.
@@ -374,6 +376,7 @@ thread_local! {
         water_hum_advect: 0.0,
         water_hum_diffuse: 0.0,
         water_evap_add: 0,
+        water_evap_debit: 0,
         water_orphan_rm: 0,
         mineral_bare: 0,
         mineral_credit: 0,
@@ -417,6 +420,19 @@ pub fn note_evap_hum_add(units: i32) {
     PROBE.with(|p| {
         let mut v = p.get();
         v.water_evap_add += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Free-air sat removed in the same evap apply step as [`note_evap_hum_add`].
+#[inline]
+pub fn note_evap_sat_debit(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_evap_debit += i64::from(units);
         p.set(v);
     });
 }

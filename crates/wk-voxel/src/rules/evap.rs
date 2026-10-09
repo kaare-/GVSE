@@ -391,6 +391,9 @@ fn apply_evap_deltas(
             crate::budget::note_orphan_film_rm(accepted);
         }
         let new_sat = (cell.sat.0 as i32 - accepted).clamp(0, cap);
+        if open {
+            crate::budget::note_evap_sat_debit(cell.sat.0 as i32 - new_sat);
+        }
         world.set_cell(
             gx,
             gy,
