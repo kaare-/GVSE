@@ -286,7 +286,8 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
                         continue;
                     }
                 }
-                if snowflake_is_airborne(world, gx, gy) {
+                // Wind drift: lake rafts are seated (float on), not sky flakes.
+                if snowflake_is_airborne(world, gx, gy, true) {
                     candidates.push((gx, gy));
                 }
             }
