@@ -1337,6 +1337,61 @@ fn airborne_snow_fall_through_haze_stays_tracked_flat() {
 }
 
 #[test]
+fn grain_settle_beside_snow_pack_stays_tracked_flat() {
+    // Landed-pack free_in hunt: multi-pass parallel fall/repose next to
+    // a snow bank + haze/standing film must not mint free via chunk.set.
+    let mut w = World::new(13);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    // Snow pack on stone; sand cliff + haze film beside it.
+    w.set_cell(6, 2, Cell::solid(MaterialId::Snow));
+    w.set_cell(6, 3, Cell::solid(MaterialId::Snow));
+    w.set_cell(4, 2, Cell::solid(MaterialId::Sand));
+    w.set_cell(4, 3, Cell::solid(MaterialId::Sand));
+    w.set_cell(4, 4, Cell::solid(MaterialId::Sand));
+    let mut haze = Cell::air();
+    haze.sat = Sat(140);
+    w.set_cell(5, 2, haze);
+    w.set_cell(5, 3, haze);
+    w.set_cell(7, 2, Cell::water());
+    w.set_cell(8, 2, Cell::water());
+    let mut film = Cell::air();
+    film.sat = Sat(200);
+    w.set_cell(7, 3, film);
+    let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+    let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    let free_before: i64 = (0..16)
+        .flat_map(|x| (0..8).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .filter(|c| c.material == MaterialId::Air)
+        .map(|c| c.sat.0 as i64)
+        .sum();
+    for _ in 0..8 {
+        settle_loose_grains(&mut w, None, GRAIN_SETTLE_PASSES_SHALLOW);
+        w.tick += 1;
+    }
+    let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    let free_after: i64 = (0..16)
+        .flat_map(|x| (0..8).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .filter(|c| c.material == MaterialId::Air)
+        .map(|c| c.sat.0 as i64)
+        .sum();
+    assert!(
+        (after - before).abs() < 1.0,
+        "settle beside Snow must stay TRACKED flat (Δ={})",
+        after - before
+    );
+    assert!(
+        free_after <= free_before,
+        "settle must not mint free Air sat beside Snow (before={free_before} after={free_after})"
+    );
+}
+
+#[test]
 fn water_flow_beside_snow_bank_stays_tracked_flat() {
     // Post-descent mint hunt: same-mat Air sat writes beside Snow must
     // not double-count when the pack blocks a neighbour face.

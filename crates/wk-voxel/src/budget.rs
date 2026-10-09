@@ -351,6 +351,14 @@ pub struct BudgetProbe {
     /// leftover park, rain fill, etc.). Landed-pack mint hunt: if this
     /// tracks `|TRACKED|` with `OFF=phase`, the writer is not flow/seep/park.
     pub water_free_other: i64,
+    /// Free-Air sat Δ through [`crate::parallel::set_cell`] (grain fall /
+    /// repose). Misses [`note_set_cell`] — landed-pack free_in hunt.
+    pub water_par_air: i64,
+    /// Subset of [`Self::water_par_air`] when prev or next material is Snow.
+    pub water_par_snow: i64,
+    /// Free-Air sat Δ through gravity's chunk-direct `write_xy` (also
+    /// misses [`note_set_cell`]). Pair with soak `OFF=gravity`.
+    pub water_grav_air: i64,
     /// Peak steam mass found on non-Air cells during soak samples
     /// (parallel grain Air→Snow skips `evict_steam_seat`).
     pub steam_on_solid: i64,
@@ -418,6 +426,9 @@ thread_local! {
         water_seep_air: 0,
         water_park_air: 0,
         water_free_other: 0,
+        water_par_air: 0,
+        water_par_snow: 0,
+        water_grav_air: 0,
         steam_on_solid: 0,
         snow_exit_yield: 0,
         snow_enter_yield: 0,
@@ -609,6 +620,57 @@ pub fn note_snow_book_exit(prev: Cell, next: Cell) {
             // Solid overwrite — yield leaves with no free/ice credit.
             v.snow_exit_bare += yield_u;
         }
+        p.set(v);
+    });
+}
+
+/// Free-water units on a cell (Air sat only — Ice/Snow bank elsewhere).
+#[inline]
+fn free_air_units(cell: Cell) -> i64 {
+    if cell.material == MaterialId::Air {
+        cell.sat.0 as i64
+    } else {
+        0
+    }
+}
+
+/// Chunk-direct write probe for [`crate::parallel::set_cell`].
+///
+/// Closed grain swaps net ~0. A soak-sized positive means free sat was
+/// minted (or double-applied) without going through [`note_set_cell`].
+#[inline]
+pub fn note_parallel_set_cell(prev: Cell, next: Cell) {
+    if !probe_on() {
+        return;
+    }
+    let d = free_air_units(next) - free_air_units(prev);
+    if d == 0 {
+        return;
+    }
+    let snow = prev.material == MaterialId::Snow || next.material == MaterialId::Snow;
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_par_air += d;
+        if snow {
+            v.water_par_snow += d;
+        }
+        p.set(v);
+    });
+}
+
+/// Chunk-direct write probe for gravity `write_xy`.
+#[inline]
+pub fn note_gravity_set_cell(prev: Cell, next: Cell) {
+    if !probe_on() {
+        return;
+    }
+    let d = free_air_units(next) - free_air_units(prev);
+    if d == 0 {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_grav_air += d;
         p.set(v);
     });
 }

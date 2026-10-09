@@ -26,12 +26,13 @@
 //!   `flow` (skip surface cascade / equalise / throughflow / confined),
 //!   `seep` (skip pore seepage + contact wet + seam),
 //!   `park` (`park_orphan_water` discards — free-sat park off),
-//!   `gravity` (skip free-water / infiltration gravity pulls)
+//!   `gravity` (skip free-water / infiltration gravity pulls),
+//!   `settle` (skip multi-pass grain fall/repose; airborne snow roll stays)
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
-    set_peel_seated_snow, set_skip_gravity, set_skip_park_orphan, set_skip_seepage,
-    set_skip_surface_flow,
+    set_peel_seated_snow, set_skip_grain_settle, set_skip_gravity, set_skip_park_orphan,
+    set_skip_seepage, set_skip_surface_flow,
     snow_mint_probe_reset, snow_mint_probe_snapshot, stamp_world, step_world, BudgetLedger,
     BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
     CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GrainConfig,
@@ -143,7 +144,7 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         d.d_min_solid, d.d_min_load, d.d_min_body, d.d_min_total
     );
     eprintln!(
-        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+} flow_air={:+} seep_air={:+} park_air={:+} free_other={:+} steam_solid={:+}",
+        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+} flow_air={:+} seep_air={:+} park_air={:+} free_other={:+} par_air={:+} par_snow={:+} grav_air={:+} steam_solid={:+}",
         p.water_swap,
         p.water_park,
         p.water_hum_rej,
@@ -159,6 +160,9 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         p.water_seep_air,
         p.water_park_air,
         p.water_free_other,
+        p.water_par_air,
+        p.water_par_snow,
+        p.water_grav_air,
         p.steam_on_solid
     );
     eprintln!(
@@ -197,6 +201,7 @@ impl Drop for HuntGateGuard {
         set_skip_seepage(false);
         set_skip_park_orphan(false);
         set_skip_gravity(false);
+        set_skip_grain_settle(false);
     }
 }
 
@@ -274,6 +279,7 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     set_skip_seepage(soak_off("seep"));
     set_skip_park_orphan(soak_off("park"));
     set_skip_gravity(soak_off("gravity"));
+    set_skip_grain_settle(soak_off("settle"));
     let _hunt_guard = HuntGateGuard;
     let fungi = FungiConfig::default();
     let mut competent = CompetentFallConfig::default();
@@ -450,13 +456,16 @@ fn short_budget_soak() {
     // Absolute leftover over short windows is noisy; rates are the signal.
     let snow_net = probe.snow_exit_yield - probe.snow_enter_yield;
     eprintln!(
-        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={} free_other={} steam_solid={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
+        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={} free_other={} par_air={} par_snow={} grav_air={} steam_solid={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
         d_tracked as f64 / ticks.max(1) as f64,
         probe.water_park,
         probe.water_flow_air,
         probe.water_seep_air,
         probe.water_park_air,
         probe.water_free_other,
+        probe.water_par_air,
+        probe.water_par_snow,
+        probe.water_grav_air,
         probe.steam_on_solid,
         probe.snow_enter_n,
         probe.snow_exit_n,

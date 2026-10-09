@@ -20,6 +20,9 @@ thread_local! {
     /// Soak `OFF=gravity` — skip free-water / infiltration gravity pulls
     /// (chunk-direct writes; landed-pack free_in hunt).
     static SKIP_GRAVITY: StdCell<bool> = const { StdCell::new(false) };
+    /// Soak `OFF=settle` — skip multi-pass grain fall/repose settle
+    /// (parallel::set_cell free-sat miss hunt; airborne snow roll stays on).
+    static SKIP_GRAIN_SETTLE: StdCell<bool> = const { StdCell::new(false) };
 }
 
 /// Toggle surface-flow skip (soak `OFF=flow` — snow-mint free-writer hunt).
@@ -42,6 +45,11 @@ pub fn set_skip_gravity(on: bool) {
     SKIP_GRAVITY.with(|c| c.set(on));
 }
 
+/// Toggle grain-settle skip (soak `OFF=settle`).
+pub fn set_skip_grain_settle(on: bool) {
+    SKIP_GRAIN_SETTLE.with(|c| c.set(on));
+}
+
 #[inline]
 pub(crate) fn skip_surface_flow() -> bool {
     SKIP_SURFACE_FLOW.with(|c| c.get())
@@ -60,6 +68,11 @@ pub(crate) fn skip_park_orphan() -> bool {
 #[inline]
 pub(crate) fn skip_gravity() -> bool {
     SKIP_GRAVITY.with(|c| c.get())
+}
+
+#[inline]
+pub(crate) fn skip_grain_settle() -> bool {
+    SKIP_GRAIN_SETTLE.with(|c| c.get())
 }
 
 use super::grain::{
@@ -733,7 +746,8 @@ fn tick_with_life_inner(
         // FPS shallow polish: only on wake cadence or when something is
         // mid-air. Quiet rainy shores were paying ×8 settle every tick
         // (~0.7 ms) with deep_settle_ticks=0 / punch_hits=0.
-        let run_settle = deep || world.tick % GRAIN_WAKE_EVERY == 0;
+        let run_settle =
+            !skip_grain_settle() && (deep || world.tick % GRAIN_WAKE_EVERY == 0);
         if run_settle {
             let passes = if deep {
                 if interactive {
@@ -799,7 +813,7 @@ fn tick_with_life_inner(
                 local.wake_grains += t0.elapsed();
             }
             let sink = filter_loose_regions(world, &plan_active(world));
-            if !sink.is_empty() {
+            if !sink.is_empty() && !skip_grain_settle() {
                 let t0 = profile.then(Instant::now);
                 let grain_cfg = grain.cloned().unwrap_or_default();
                 settle_loose_grains_regions_ex(
