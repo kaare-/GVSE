@@ -188,7 +188,9 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   `hum_adv`≈0 → not advect; diffuse / orphan / evap add=debit ruled out
   (5k OFF table in VOXEL_BUDGET_SOAK). Descent gate: `OFF=snowfall` →
   **+15.66/t** (baseline +131); `snowwet`/`slush` still +135/+140 — not
-  haze swap or slush. Next: post-landing free+hum writers. Kill: `OFF=snow`.
+  haze swap or slush. `snowraft`/`snowsurf` still +159/+141 — not lake
+  float lid or weather crest. Next: free writers beside landed Snow.
+  Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 

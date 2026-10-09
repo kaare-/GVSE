@@ -110,9 +110,25 @@ still ~2.0–2.5k. Unit: snow↔haze swap stays TRACKED-flat.
 can leave the sky — not nucleation underpay, not haze/film swap, not
 slush. With `OFF=snowfall`, late windows are near-flat while snow banks
 aloft; baseline late windows mint large **free** (+150k/500t) with hum
-barely dropping. Still open: landed snow as live surface / raft / cover
-changing free+hum writers (not a single swap debit). Residual
-`OFF=snowfall` ~+16/t may be drift or weak sky-snow coupling. Kill:
-`GVSE_SOAK_OFF=snow`.
-- Automerge when CI green once GitHub auto-merge is available to the agent; until then mark ready and note merge wait.
-- Hard problems: verify headless and/or Xvfb before asking to merge.
+barely dropping. Residual `OFF=snowfall` ~+16/t may be drift or weak
+sky-snow coupling. Kill: `GVSE_SOAK_OFF=snow`.
+
+**Post-descent lid / crest (2026-10-09):** 5k after `OFF=snowraft|snowsurf`
+(`GrainConfig::enable_snow_float`, `set_peel_seated_snow`). Windowed free
+still explodes late when flakes can land. Vs `OFF=phase` (descent on,
+thaw off) still **+111/t** — mint is not melt accounting.
+
+| OFF | TRACKED /t | note |
+|-----|------------|------|
+| *(none)* | **+130.86** | late free ≈+154k/500t |
+| `snowraft` | **+159.02** | Snow sinks through lakes — **worse**; lake float lid not the mint |
+| `snowsurf` | **+140.85** | live_surface/live_skin peel seated Snow — weather crest not the mint |
+| `snowfall` | **+15.66** | descent gate unchanged |
+| `snow` | **−0.01** | kill unchanged |
+
+**Ruled out (post-landing):** lake raft / evap lid from floating Snow;
+weather `free_air_hy` / orographic crest from seated pack. Blocked evap
+alone cannot raise TRACKED (free↔hum). Next: free-sat **writers** beside
+landed Snow (rain `drain_tile` vs deposit near pack, water_flow/seep /
+park adjacent to Snow solids) — spatial free attribution or one writer
+OFF at a time. Kill: `GVSE_SOAK_OFF=snow`.
