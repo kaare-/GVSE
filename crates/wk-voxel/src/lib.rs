@@ -67,7 +67,7 @@ pub use blueprint::{
     BODY_MUTATION_MAX_EDITS, BODY_MUTATION_MAX_MODULES,
 };
 pub use budget::{
-    BudgetDelta, BudgetLedger, BudgetProbe, BudgetSnap, BUDGET_SAMPLE_PERIOD,
+    BudgetDelta, BudgetLedger, BudgetProbe, BudgetSnap, FreeSatScope, BUDGET_SAMPLE_PERIOD,
     BUDGET_UNEXPLAINED_EPS,
 };
 pub use carbon::{
@@ -207,11 +207,11 @@ pub use rules::{
     drift_floating_organic_columns_cfg, floating_organic_column_at, is_standing_water,
     precipitate_thermal_surplus, punch_through_floating_rafts, rise_and_soak_buoyant_litter,
     rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter, settle_loose_grains,
-    settle_loose_grains_regions, shove_floating_organic_columns,
-    shove_floating_organic_with_current, snow_mint_probe_reset, snow_mint_probe_snapshot,
-    soak_floating_litter, soak_floating_litter_cfg, tick, tick_with_configs,
-    tick_with_configs_and_geotech, tick_with_life, tick_with_life_profiled, tick_with_perf,
-    tick_with_perf_profiled, wake_competent_bodies, wake_competent_bodies_all,
+    set_skip_park_orphan, set_skip_seepage, set_skip_surface_flow, settle_loose_grains_regions,
+    shove_floating_organic_columns, shove_floating_organic_with_current, snow_mint_probe_reset,
+    snow_mint_probe_snapshot, soak_floating_litter, soak_floating_litter_cfg, tick,
+    tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_life_profiled,
+    tick_with_perf, tick_with_perf_profiled, wake_competent_bodies, wake_competent_bodies_all,
     wake_competent_bodies_regions, wake_confined_head, wake_floating_competent,
     wake_grains_for_settle, wake_grains_for_settle_coords, wake_lake_bed_pores,
     wake_pore_weep_into_air, wake_unstable_slopes, wake_unsupported_grains,

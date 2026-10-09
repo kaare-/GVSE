@@ -71,8 +71,10 @@ pub use seepage::{
 };
 pub use spill::{apply_lateral_spill, apply_lateral_spill_regions};
 pub use tick::{
-    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
-    tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled, PerfConfig, PhysicsTimings,
-    FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN, SEEPAGE_EVERY,
+    set_skip_park_orphan, set_skip_seepage, set_skip_surface_flow, tick, tick_with_configs,
+    tick_with_configs_and_geotech, tick_with_life, tick_with_life_profiled, tick_with_perf,
+    tick_with_perf_profiled, PerfConfig, PhysicsTimings, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
+    FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN, SEEPAGE_EVERY,
 };
+pub(crate) use tick::skip_park_orphan;
 pub use water_flow::{apply_water_flow, apply_water_flow_regions, wake_confined_head};

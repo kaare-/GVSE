@@ -768,6 +768,7 @@ pub fn apply_seepage_regions_ex(world: &mut World, active: &[ActiveChunk], conta
     if active.is_empty() {
         return;
     }
+    let _free_scope = crate::budget::FreeSatScope::seep();
     // (from, to, amt) with amt > 0.
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_seepage_xfers_ex(world, active, &mut xfers, contact_only);

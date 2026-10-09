@@ -1337,6 +1337,125 @@ fn airborne_snow_fall_through_haze_stays_tracked_flat() {
 }
 
 #[test]
+fn water_flow_beside_snow_bank_stays_tracked_flat() {
+    // Post-descent mint hunt: same-mat Air sat writes beside Snow must
+    // not double-count when the pack blocks a neighbour face.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    // Snow bank at x=6; standing water on both sides + dry Air beyond.
+    w.set_cell(6, 2, Cell::solid(MaterialId::Snow));
+    w.set_cell(6, 3, Cell::solid(MaterialId::Snow));
+    w.set_cell(4, 2, Cell::water());
+    w.set_cell(5, 2, Cell::water());
+    w.set_cell(7, 2, Cell::water());
+    w.set_cell(8, 2, Cell::air());
+    let mut film = Cell::air();
+    film.sat = Sat(180);
+    w.set_cell(5, 3, film);
+    w.set_cell(7, 3, film);
+    let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+    let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    for _ in 0..24 {
+        apply_water_flow(&mut w);
+        w.tick += 1;
+    }
+    let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    assert!(
+        (after - before).abs() < 1.0,
+        "flow beside Snow must stay TRACKED flat (Δ={})",
+        after - before
+    );
+}
+
+#[test]
+fn seepage_contact_beside_snow_stays_tracked_flat() {
+    // Pore weep / contact wet next to Snow solids — free↔pore only.
+    use crate::active::ActiveChunk;
+    use crate::chunk::Rect;
+    let mut w = World::new(12);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Sand);
+    w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(6, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(
+        4,
+        1,
+        Cell {
+            material: MaterialId::Sand,
+            sat: Sat(cap),
+            ..Cell::default()
+        },
+    );
+    w.set_cell(5, 1, Cell::solid(MaterialId::Snow));
+    w.set_cell(6, 1, Cell::air());
+    w.set_cell(4, 2, Cell::air());
+    w.set_cell(5, 2, Cell::solid(MaterialId::Snow));
+    w.set_cell(6, 2, Cell::air());
+    let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+    let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    let regions = [ActiveChunk::new(
+        ChunkCoord::new(0, 0),
+        Rect {
+            x0: 3,
+            y0: 0,
+            x1: 7,
+            y1: 3,
+        },
+    )];
+    for _ in 0..16 {
+        super::seepage::apply_seepage_contact_regions(&mut w, &regions);
+        w.tick += 1;
+    }
+    let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    assert!(
+        (after - before).abs() < 1.0,
+        "seepage beside Snow must stay TRACKED flat (Δ={})",
+        after - before
+    );
+}
+
+#[test]
+fn park_orphan_take_then_place_beside_snow_stays_tracked_flat() {
+    // Displace park next to Snow: alpine film seats refuse; standing /
+    // non-lid Air must absorb. Take→park is the closed ledger path.
+    let mut w = World::new(13);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    w.set_cell(5, 2, Cell::solid(MaterialId::Snow));
+    w.set_cell(5, 3, Cell::solid(MaterialId::Snow));
+    // Seed free water, then take + park near the pack.
+    w.set_cell(7, 2, Cell::water());
+    w.set_cell(8, 2, Cell::air());
+    // Dry Air above snow would be alpine — park must refuse seeding it.
+    w.set_cell(5, 4, Cell::air());
+    let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+    let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    let took = crate::displace::take_free_water(&mut w, 7, 2);
+    assert_eq!(took, 255);
+    let left = crate::displace::park_orphan_water(&mut w, 7, 2, took);
+    assert_eq!(left, 0, "park must place onto non-alpine Air");
+    assert_eq!(
+        w.get_cell(5, 4).map(|c| c.sat.0),
+        Some(0),
+        "must not seed alpine film on Snow"
+    );
+    let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+    assert!(
+        (after - before).abs() < 1.0,
+        "take→park beside Snow must stay TRACKED flat (Δ={})",
+        after - before
+    );
+}
+
+#[test]
 fn airborne_snow_sinks_through_lake_when_float_disabled() {
     // Soak OFF=snowraft: snow must not raft on full water (post-descent
     // mint suspect — lake lid blocks evap while free+hum still rise).

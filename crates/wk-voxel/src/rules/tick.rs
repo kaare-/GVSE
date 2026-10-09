@@ -1,5 +1,6 @@
 //! Physics tick orchestration and performance knobs.
 
+use std::cell::Cell as StdCell;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,45 @@ use serde::{Deserialize, Serialize};
 use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 use crate::temperature::Temperature;
+
+thread_local! {
+    /// Soak `OFF=flow` — skip surface cascade / equalise / throughflow / confined.
+    static SKIP_SURFACE_FLOW: StdCell<bool> = const { StdCell::new(false) };
+    /// Soak `OFF=seep` — skip pore seepage + contact wet + seam coupling.
+    static SKIP_SEEPAGE: StdCell<bool> = const { StdCell::new(false) };
+    /// Soak `OFF=park` — `park_orphan_water` discards without writing free sat.
+    static SKIP_PARK_ORPHAN: StdCell<bool> = const { StdCell::new(false) };
+}
+
+/// Toggle surface-flow skip (soak `OFF=flow` — snow-mint free-writer hunt).
+pub fn set_skip_surface_flow(on: bool) {
+    SKIP_SURFACE_FLOW.with(|c| c.set(on));
+}
+
+/// Toggle seepage skip (soak `OFF=seep`).
+pub fn set_skip_seepage(on: bool) {
+    SKIP_SEEPAGE.with(|c| c.set(on));
+}
+
+/// Toggle park-orphan skip (soak `OFF=park`).
+pub fn set_skip_park_orphan(on: bool) {
+    SKIP_PARK_ORPHAN.with(|c| c.set(on));
+}
+
+#[inline]
+pub(crate) fn skip_surface_flow() -> bool {
+    SKIP_SURFACE_FLOW.with(|c| c.get())
+}
+
+#[inline]
+pub(crate) fn skip_seepage() -> bool {
+    SKIP_SEEPAGE.with(|c| c.get())
+}
+
+#[inline]
+pub(crate) fn skip_park_orphan() -> bool {
+    SKIP_PARK_ORPHAN.with(|c| c.get())
+}
 
 use super::grain::{
     active_has_unsupported_grain, settle_loose_grains_regions_ex, GRAIN_SETTLE_PASSES,
@@ -434,7 +474,9 @@ fn tick_with_life_inner(
     // They run once, just before the seepage plan that consumes their dirty —
     // see the wake block below. Waking here as well only fed the *flow* plan,
     // which does not move pore water, and cost a full scan of every wet chunk.
-    let run_seepage = !perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0;
+    let run_seepage = !skip_seepage()
+        && (!perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0);
+    let run_surface_flow = !skip_surface_flow();
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
@@ -481,7 +523,8 @@ fn tick_with_life_inner(
         // step 1 saw an empty plan and broke before any leveling.)
         // Odd-step gravity is load-bearing: without it the dirty halo
         // fattens and each flow call costs more than the gravity saved.
-        let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
+        let run_flow =
+            run_surface_flow && (!perf.flow_every_other_substep || (step % 2 == 0));
         // Interactive: surface priorities only; throughflow/confined once
         // after the loop. full_feel: throughflow+confined every substep.
         let interactive = perf.flow_quiet_early_out;
@@ -517,7 +560,7 @@ fn tick_with_life_inner(
     // substep) — rainy beaches paid Priority-4 deep walks and confined
     // BFS ×N. full_feel already ran them inside each flow substep.
     let interactive = perf.flow_quiet_early_out;
-    if interactive && !flow_halo.is_empty() {
+    if run_surface_flow && interactive && !flow_halo.is_empty() {
         let t0 = profile.then(Instant::now);
         apply_throughflow_regions(world, &flow_halo);
         if let (true, Some(t0)) = (profile, t0) {
@@ -536,7 +579,7 @@ fn tick_with_life_inner(
     }
     // Communicating vessels: a filled pipe can go locally quiet while the
     // reservoir head is still higher. Periodic full-chunk confined scan.
-    {
+    if run_surface_flow {
         let t0 = profile.then(Instant::now);
         super::water_flow::wake_confined_head(world, temp);
         if let (true, Some(t0)) = (profile, t0) {

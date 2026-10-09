@@ -22,12 +22,16 @@
 //!   `snowfall` (flakes nucleate but do not descend), `snowwet` (no haze/film
 //!   snow swap), `slush` (`PhaseConfig::enable_slush = false`),
 //!   `snowraft` (Snow sinks through lakes — no float lid),
-//!   `snowsurf` (live_surface peels seated Snow; weather ignores pack)
+//!   `snowsurf` (live_surface peels seated Snow; weather ignores pack),
+//!   `flow` (skip surface cascade / equalise / throughflow / confined),
+//!   `seep` (skip pore seepage + contact wet + seam),
+//!   `park` (`park_orphan_water` discards — free-sat park off)
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
-    set_peel_seated_snow, snow_mint_probe_reset, snow_mint_probe_snapshot, stamp_world, step_world,
-    BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
+    set_peel_seated_snow, set_skip_park_orphan, set_skip_seepage, set_skip_surface_flow,
+    snow_mint_probe_reset, snow_mint_probe_snapshot, stamp_world, step_world, BudgetLedger,
+    BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
     CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GrainConfig,
     Humidity, KarstConfig, LandscapeBodyStore, OrographicConfig, PerfConfig, PhaseConfig,
     SteamConfig, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams,
@@ -137,7 +141,7 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         d.d_min_solid, d.d_min_load, d.d_min_body, d.d_min_total
     );
     eprintln!(
-        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+}",
+        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+} flow_air={:+} seep_air={:+} park_air={:+}",
         p.water_swap,
         p.water_park,
         p.water_hum_rej,
@@ -148,7 +152,10 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         p.water_evap_debit,
         p.water_orphan_rm,
         p.water_dep_add,
-        p.water_dep_debit
+        p.water_dep_debit,
+        p.water_flow_air,
+        p.water_seep_air,
+        p.water_park_air
     );
     eprintln!(
         "probe-M bare={:+} credit={:+} clip={:+}",
@@ -177,11 +184,14 @@ fn soak_off(flag: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Clears [`set_peel_seated_snow`] when the soak returns (or panics).
-struct PeelSnowGuard;
-impl Drop for PeelSnowGuard {
+/// Clears soak hunt TLS gates when the soak returns (or panics).
+struct HuntGateGuard;
+impl Drop for HuntGateGuard {
     fn drop(&mut self) {
         set_peel_seated_snow(false);
+        set_skip_surface_flow(false);
+        set_skip_seepage(false);
+        set_skip_park_orphan(false);
     }
 }
 
@@ -254,7 +264,11 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     }
     // Weather crest ignores seated snow (physical lid still blocks evap).
     set_peel_seated_snow(soak_off("snowsurf"));
-    let _peel_guard = PeelSnowGuard;
+    // Free-sat writers beside landed Snow (post-descent mint hunt).
+    set_skip_surface_flow(soak_off("flow"));
+    set_skip_seepage(soak_off("seep"));
+    set_skip_park_orphan(soak_off("park"));
+    let _hunt_guard = HuntGateGuard;
     let fungi = FungiConfig::default();
     let mut competent = CompetentFallConfig::default();
     if soak_off("competent") {
@@ -403,14 +417,20 @@ fn short_budget_soak() {
         format!("short/{ticks}/OFF={off}")
     };
     let (d_min, d_tracked, probe) = run_soak(ticks, warm, period, &label);
-    assert_eq!(probe.water_park, 0, "park leftover must stay closed");
+    // OFF=park deliberately discards orphan water — park leftover is the signal.
+    if !soak_off("park") {
+        assert_eq!(probe.water_park, 0, "park leftover must stay closed");
+    }
     assert_eq!(probe.water_clamp, 0, "humidity clamp must stay closed");
     assert_eq!(probe.mineral_clip, 0, "dissolved clip must stay closed");
     // Absolute leftover over short windows is noisy; rates are the signal.
     eprintln!(
-        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={}",
+        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={}",
         d_tracked as f64 / ticks.max(1) as f64,
-        probe.water_park
+        probe.water_park,
+        probe.water_flow_air,
+        probe.water_seep_air,
+        probe.water_park_air
     );
 }
 

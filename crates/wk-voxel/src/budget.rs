@@ -340,6 +340,13 @@ pub struct BudgetProbe {
     pub water_dep_add: i64,
     /// Condensation liquid: humidity actually drained for that deposit.
     pub water_dep_debit: i64,
+    /// Same-mat Air sat Δ inside surface-flow commit ([`FreeSatScope::Flow`]).
+    /// Closed transfers net ~0; a mint-sized positive means double-count write.
+    pub water_flow_air: i64,
+    /// Same-mat Air sat Δ inside seepage apply ([`FreeSatScope::Seep`]).
+    pub water_seep_air: i64,
+    /// Same-mat Air sat Δ inside `park_orphan_*` ([`FreeSatScope::Park`]).
+    pub water_park_air: i64,
     /// `set_cell` carbonate delta **outside** widen / scour / precip / emit.
     pub mineral_bare: i64,
     /// Same delta **inside** those ledger APIs (should be paired with load).
@@ -384,11 +391,19 @@ thread_local! {
         water_orphan_rm: 0,
         water_dep_add: 0,
         water_dep_debit: 0,
+        water_flow_air: 0,
+        water_seep_air: 0,
+        water_park_air: 0,
         mineral_bare: 0,
         mineral_credit: 0,
         mineral_clip: 0,
     }) };
     static MINERAL_SCOPE: StdCell<u32> = const { StdCell::new(0) };
+    /// Bitmask: 1=flow, 2=seep, 4=park — nestable via refcount per bit.
+    static FREE_SAT_SCOPE: StdCell<u32> = const { StdCell::new(0) };
+    static FREE_SAT_FLOW_N: StdCell<u32> = const { StdCell::new(0) };
+    static FREE_SAT_SEEP_N: StdCell<u32> = const { StdCell::new(0) };
+    static FREE_SAT_PARK_N: StdCell<u32> = const { StdCell::new(0) };
 }
 
 /// Cumulative humidity mass change across one `advect_with_surface` call.
@@ -489,6 +504,10 @@ fn probe_set_on(on: bool) {
 fn probe_reset() {
     PROBE.with(|p| p.set(BudgetProbe::default()));
     MINERAL_SCOPE.with(|s| s.set(0));
+    FREE_SAT_SCOPE.with(|s| s.set(0));
+    FREE_SAT_FLOW_N.with(|n| n.set(0));
+    FREE_SAT_SEEP_N.with(|n| n.set(0));
+    FREE_SAT_PARK_N.with(|n| n.set(0));
 }
 
 #[inline]
@@ -517,6 +536,28 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
                 v.water_swap += d;
                 p.set(v);
             });
+        }
+    } else if prev.material == MaterialId::Air {
+        // Same-mat Air sat writes (flow merge / seep weep / park). Net
+        // under a closed scope should be ~0; mint shows as a surplus.
+        let d = next.sat.0 as i64 - prev.sat.0 as i64;
+        if d != 0 {
+            let bits = FREE_SAT_SCOPE.with(|s| s.get());
+            if bits != 0 {
+                PROBE.with(|p| {
+                    let mut v = p.get();
+                    if bits & FreeSatScope::FLOW != 0 {
+                        v.water_flow_air += d;
+                    }
+                    if bits & FreeSatScope::SEEP != 0 {
+                        v.water_seep_air += d;
+                    }
+                    if bits & FreeSatScope::PARK != 0 {
+                        v.water_park_air += d;
+                    }
+                    p.set(v);
+                });
+            }
         }
     }
     let dm = cell_mineral(next) as i64 - cell_mineral(prev) as i64;
@@ -594,6 +635,83 @@ impl MineralLedgerScope {
 impl Drop for MineralLedgerScope {
     fn drop(&mut self) {
         MINERAL_SCOPE.with(|s| s.set(s.get().saturating_sub(1)));
+    }
+}
+
+/// RAII: attribute same-mat Air sat Δ to flow / seep / park (snow-mint hunt).
+pub struct FreeSatScope {
+    bit: u32,
+}
+
+impl FreeSatScope {
+    pub const FLOW: u32 = 1;
+    pub const SEEP: u32 = 2;
+    pub const PARK: u32 = 4;
+
+    pub fn enter(bit: u32) -> Self {
+        match bit {
+            Self::FLOW => FREE_SAT_FLOW_N.with(|n| {
+                if n.get() == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() | Self::FLOW));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            Self::SEEP => FREE_SAT_SEEP_N.with(|n| {
+                if n.get() == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() | Self::SEEP));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            Self::PARK => FREE_SAT_PARK_N.with(|n| {
+                if n.get() == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() | Self::PARK));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            _ => {}
+        }
+        Self { bit }
+    }
+
+    pub fn flow() -> Self {
+        Self::enter(Self::FLOW)
+    }
+
+    pub fn seep() -> Self {
+        Self::enter(Self::SEEP)
+    }
+
+    pub fn park() -> Self {
+        Self::enter(Self::PARK)
+    }
+}
+
+impl Drop for FreeSatScope {
+    fn drop(&mut self) {
+        match self.bit {
+            Self::FLOW => FREE_SAT_FLOW_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() & !Self::FLOW));
+                }
+            }),
+            Self::SEEP => FREE_SAT_SEEP_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() & !Self::SEEP));
+                }
+            }),
+            Self::PARK => FREE_SAT_PARK_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() & !Self::PARK));
+                }
+            }),
+            _ => {}
+        }
     }
 }
 
