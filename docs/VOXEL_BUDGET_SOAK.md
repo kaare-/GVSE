@@ -92,5 +92,27 @@ free+pore+hum+snow triad once flakes exist — not diffuse, not orphan
 boost, not evap try_add/debit asymmetry. Next: post-evap free-sat restore
 / snow-fall↔standing-water, or another writer that re-adds sat after a
 paired free→hum move. Kill switch: `GVSE_SOAK_OFF=snow`.
+
+**Snow descent / landing (2026-10-09):** 5k on tip after
+`OFF=snowfall|snowwet|slush` hooks (`GrainConfig::enable_airborne_snow_fall`
+/ `enable_snow_wet_fall`, `PhaseConfig::enable_slush`). Window onset
+still ~2.0–2.5k. Unit: snow↔haze swap stays TRACKED-flat.
+
+| OFF | TRACKED /t | note |
+|-----|------------|------|
+| *(none)* | **+130.86** | paid=860k, Δsnow+ice=219k, paid−phase≈+640k≈mint |
+| `snowfall` | **+15.66** | flakes nucleate but do not descend; Δsnow≈paid |
+| `snowwet` | **+134.94** | empty-Air fall only — haze/film swap **not** the mint |
+| `slush` | **+139.72** | water-on-ice / snow-on-water phase off — not the mint |
+| `snow` | **−0.01** | kill unchanged |
+
+**Narrowed:** mint is **post-descent / near-surface** coupling once flakes
+can leave the sky — not nucleation underpay, not haze/film swap, not
+slush. With `OFF=snowfall`, late windows are near-flat while snow banks
+aloft; baseline late windows mint large **free** (+150k/500t) with hum
+barely dropping. Still open: landed snow as live surface / raft / cover
+changing free+hum writers (not a single swap debit). Residual
+`OFF=snowfall` ~+16/t may be drift or weak sky-snow coupling. Kill:
+`GVSE_SOAK_OFF=snow`.
 - Automerge when CI green once GitHub auto-merge is available to the agent; until then mark ready and note merge wait.
 - Hard problems: verify headless and/or Xvfb before asking to merge.
