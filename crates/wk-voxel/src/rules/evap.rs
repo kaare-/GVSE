@@ -317,6 +317,14 @@ fn apply_evap_deltas(
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
         };
+        // Collect only marks wet Air. Between collect and apply a flake
+        // may seat / fall onto that cell. Snow/Ice bank thaw yield on
+        // `sat` with capacity 0 — treating that as evaporable free water
+        // try_add's the yield into humidity while `frozen_thaw_sat` still
+        // counts a full cell (sat→0 is the legacy 255 sentinel) → TRACKED mint.
+        if cell.material != MaterialId::Air {
+            continue;
+        }
         let cap = water_capacity_cell(cell, &world.hydro) as i32;
         let want_new = (cell.sat.0 as i32 + delta).clamp(0, cap);
         let want_removed = cell.sat.0 as i32 - want_new;
@@ -530,6 +538,77 @@ mod tests {
         assert!(
             w.get_cell(5, 1).unwrap().sat.0 < before,
             "standing lake surface must still evaporate"
+        );
+    }
+
+    #[test]
+    fn evap_apply_skips_cell_that_became_snow_after_collect() {
+        // Collect marks wet Air; a flake then seats on that cell before
+        // apply. Evap must not drain Snow's banked thaw sat into humidity
+        // (TRACKED mint: hum += yield while frozen_thaw_sat stays 255).
+        use crate::budget::BudgetSnap;
+        use crate::cell::frozen_thaw_sat;
+
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        let mut film = Cell::air();
+        film.sat.0 = 80;
+        w.set_cell(4, 1, film);
+        for y in 2..12 {
+            w.set_cell(4, y, Cell::air());
+        }
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let warm = hot_fill(&w, 25.0);
+        let cfg = EvapConfig {
+            period_ticks: 1,
+            rate_per_tick: 8,
+            ..EvapConfig::default()
+        };
+        w.tick = 0;
+        let (deltas, orphans, occupancy) = {
+            let climate = Some((&warm, 0.1f32, &h as &Humidity));
+            super::collect_evap_deltas(&w, &cfg, climate)
+        };
+        assert!(
+            deltas.contains_key(&(4, 1)),
+            "collect must mark the wet Air film"
+        );
+        // Seat Snow on the film cell with a full thaw yield (same bank
+        // airborne / surface flakes use).
+        w.set_cell(
+            4,
+            1,
+            Cell {
+                material: MaterialId::Snow,
+                sat: Sat(u8::MAX),
+                flags: Default::default(),
+                _pad: 0,
+                pore: 128,
+            },
+        );
+        let before = BudgetSnap::capture(&w, &h);
+        let thaw_before = frozen_thaw_sat(w.get_cell(4, 1).unwrap());
+        let hum_before = h.total_mass();
+        super::apply_evap_occupancy_flags(&mut w, &occupancy);
+        super::apply_evap_deltas(&mut w, deltas, &orphans, Some(&mut h), Some(&warm));
+        let after = BudgetSnap::capture(&w, &h);
+        let snow = w.get_cell(4, 1).unwrap();
+        assert_eq!(snow.material, MaterialId::Snow, "flake must remain");
+        assert_eq!(
+            frozen_thaw_sat(snow),
+            thaw_before,
+            "evap must not zero Snow sat into the legacy-255 sentinel trap"
+        );
+        assert!(
+            (h.total_mass() - hum_before).abs() < 1e-3,
+            "humidity must not receive Snow thaw yield (Δhum={})",
+            h.total_mass() - hum_before
+        );
+        assert!(
+            (after.tracked() - before.tracked()).abs() < 1.0,
+            "TRACKED must stay flat across the collect→snow→apply race (Δ={})",
+            after.tracked() - before.tracked()
         );
     }
 }
