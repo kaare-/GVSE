@@ -518,6 +518,8 @@ fn tick_with_life_inner(
     // checkerboard colour × substep was 16 HashSet walks/tick after karst,
     // growing with soak age (1.2k → 12k keys on the demo inventory).
     let gravity_load = water_load_index(world);
+    let _flow_stage =
+        crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::FLOW);
     for step in 0..max_steps {
         let t0 = profile.then(Instant::now);
         let active = plan_active(world);
@@ -674,6 +676,7 @@ fn tick_with_life_inner(
         }
     }
     mass_checkpoint!("seepage");
+    drop(_flow_stage);
 
     // Re-wake unsupported grains and steep cliff faces. Cadence-gated:
     // full sticky-loose scan every 16 ticks; dirty-halo wake every 4.
@@ -888,16 +891,20 @@ fn tick_with_life_inner(
     // wake (+ neighbours); a full has_solid scan runs on
     // FAILURE_FULL_SCAN_PERIOD so static karst rooms still fail.
     const FAILURE_EVERY: u64 = 4;
-    let failure_stats = if world.tick % FAILURE_EVERY == 0 {
-        let t0 = profile.then(Instant::now);
-        let stats =
-            crate::failure::apply_failure_with_wake(world, failure, geotech, &geotech_wake);
-        if let (true, Some(t0)) = (profile, t0) {
-            local.failure += t0.elapsed();
+    let failure_stats = {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::FAILURE);
+        if world.tick % FAILURE_EVERY == 0 {
+            let t0 = profile.then(Instant::now);
+            let stats =
+                crate::failure::apply_failure_with_wake(world, failure, geotech, &geotech_wake);
+            if let (true, Some(t0)) = (profile, t0) {
+                local.failure += t0.elapsed();
+            }
+            stats
+        } else {
+            crate::failure::FailureStats::default()
         }
-        stats
-    } else {
-        crate::failure::FailureStats::default()
     };
     mass_checkpoint!("geotech failure");
 
@@ -907,6 +914,8 @@ fn tick_with_life_inner(
 
     // Mycelium field: lives in Organic independently of fruiting bodies.
     {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::MYCELIUM);
         let t0 = profile.then(Instant::now);
         match fungi {
             Some(f) => crate::fungi::step_mycelium_field_cfg(world, f),

@@ -436,6 +436,8 @@ pub fn step_world(
     }
 
     {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::EROSION);
         let t0 = profile.then(Instant::now);
         apply_flow_erosion_bound(world, cfg.grain, rooted.as_ref());
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
@@ -444,6 +446,8 @@ pub fn step_world(
     }
 
     {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::EROSION);
         let t0 = profile.then(Instant::now);
         apply_suspension(world);
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {

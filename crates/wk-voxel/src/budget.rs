@@ -538,7 +538,7 @@ thread_local! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnowOtherStage;
 impl SnowOtherStage {
-    pub const N: usize = 12;
+    pub const N: usize = 16;
     pub const UNKNOWN: u8 = 0;
     pub const COND: u8 = 1;
     pub const RISE: u8 = 2;
@@ -551,6 +551,10 @@ impl SnowOtherStage {
     pub const STEAM: u8 = 9;
     pub const PHASE: u8 = 10;
     pub const LANDSCAPE: u8 = 11;
+    pub const FLOW: u8 = 12;
+    pub const FAILURE: u8 = 13;
+    pub const EROSION: u8 = 14;
+    pub const MYCELIUM: u8 = 15;
 
     pub const NAMES: [&'static str; Self::N] = [
         "unknown",
@@ -565,6 +569,10 @@ impl SnowOtherStage {
         "steam",
         "phase",
         "landscape",
+        "flow",
+        "failure",
+        "erosion",
+        "mycelium",
     ];
 }
 
