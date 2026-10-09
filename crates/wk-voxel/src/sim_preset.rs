@@ -178,6 +178,7 @@ impl SimPreset {
                 rate_per_tick: 1,
                 dry_above_max: 200,
                 period_ticks: 5,
+                enable_orphan_boost: true,
             },
             cond,
             oro: OrographicConfig::default(),
@@ -227,6 +228,7 @@ impl SimPreset {
             rate_per_tick: 1,
             dry_above_max: 200,
             period_ticks: 5,
+            enable_orphan_boost: true,
         };
         p.cloud.coag_rate = 0.12;
         p.cloud.coag_max_take = 22.0;

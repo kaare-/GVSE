@@ -5780,6 +5780,7 @@ fn lone_ridge_pixel_drains_via_throughflow_or_evap() {
         rate_per_tick: 1,
         dry_above_max: 200,
         period_ticks: 1,
+        enable_orphan_boost: true,
     };
     for _ in 0..200 {
         tick(&mut w);
@@ -5920,6 +5921,7 @@ fn evap_drains_a_droplet_to_zero_over_time() {
         rate_per_tick: 5,
         dry_above_max: 200,
         period_ticks: 1,
+        enable_orphan_boost: true,
     };
     for _ in 0..10 {
         apply_evaporation(&mut w, &cfg);
@@ -5968,6 +5970,7 @@ fn evap_into_humidity_conserves_mass() {
         rate_per_tick: 3,
         dry_above_max: 200,
         period_ticks: 1,
+        enable_orphan_boost: true,
     };
     let cell_sat_before: i64 = (1..=5)
         .map(|y| w.get_cell(4, y).unwrap().sat.0 as i64)
@@ -6169,6 +6172,7 @@ fn shell_scans_match_with_parallel_on_or_off() {
         rate_per_tick: 2,
         dry_above_max: 200,
         period_ticks: 1,
+        enable_orphan_boost: true,
     };
 
     set_parallel_enabled(false);
@@ -6773,6 +6777,7 @@ fn quiescent_lake_still_evaporates() {
         rate_per_tick: 5,
         dry_above_max: 200,
         period_ticks: 1,
+        enable_orphan_boost: true,
     };
     apply_evaporation_into_humidity(&mut w, &mut h, &cfg);
     assert!(
@@ -6802,6 +6807,7 @@ fn evap_refuses_near_saturated_vapor_column() {
             rate_per_tick: 8,
             dry_above_max: 200,
             period_ticks: 1,
+            enable_orphan_boost: true,
         },
     );
     assert_eq!(
@@ -6855,6 +6861,7 @@ fn evap_pumps_faster_when_warm_and_windy() {
         rate_per_tick: 2,
         dry_above_max: 200,
         period_ticks: 1,
+        enable_orphan_boost: true,
     };
     let run = |temp_c: f32, wind: f32| {
         let mut w = setup_column_world();

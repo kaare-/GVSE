@@ -682,6 +682,7 @@ mod tests {
             rate_per_tick: 1,
             dry_above_max: 200,
             period_ticks: 5,
+            enable_orphan_boost: true,
         };
         let mut cond = CondensationConfig::default();
         cond.top_y = params.sky_ceiling_y - 2;
@@ -745,6 +746,7 @@ mod tests {
                 rate_per_tick: 1,
                 dry_above_max: 200,
                 period_ticks: 5,
+                enable_orphan_boost: true,
             };
             let mut cond = CondensationConfig::default();
             cond.top_y = params.sky_ceiling_y - 2;

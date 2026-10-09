@@ -22,6 +22,15 @@ pub struct EvapConfig {
     /// Only run on ticks where `world.tick % period_ticks == 0`.
     /// Higher values slow the water→humidity pump so basins linger.
     pub period_ticks: u64,
+    /// Ridge crest film with no Air neighbour gets an 8× rate so a
+    /// single pixel does not linger. Snow lids make more orphans;
+    /// soak `OFF=orphan` parks this for the TRACKED-mint hunt.
+    #[serde(default = "default_orphan_boost")]
+    pub enable_orphan_boost: bool,
+}
+
+fn default_orphan_boost() -> bool {
+    true
 }
 
 impl Default for EvapConfig {
@@ -30,7 +39,8 @@ impl Default for EvapConfig {
             rate_per_tick: 1,
             dry_above_max: 200,
             period_ticks: 1,
-        }
+enable_orphan_boost: true,
+}
     }
 }
 
@@ -52,9 +62,9 @@ pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
     if world.tick % period != 0 {
         return;
     }
-    let (deltas, occupancy) = collect_evap_deltas(world, cfg, None);
+    let (deltas, orphans, occupancy) = collect_evap_deltas(world, cfg, None);
     apply_evap_occupancy_flags(world, &occupancy);
-    apply_evap_deltas(world, deltas, None, None);
+    apply_evap_deltas(world, deltas, &orphans, None, None);
 }
 
 /// Mass-conservative variant of [`apply_evaporation`]. Instead of
@@ -89,12 +99,12 @@ pub fn apply_evaporation_into_humidity_climate(
     if humidity.atmosphere_overfull() {
         return;
     }
-    let (deltas, occupancy) = {
+    let (deltas, orphans, occupancy) = {
         let climate = temp.map(|t| (t, wind_speed.abs(), humidity as &crate::humidity::Humidity));
         collect_evap_deltas(world, cfg, climate)
     };
     apply_evap_occupancy_flags(world, &occupancy);
-    apply_evap_deltas(world, deltas, Some(humidity), temp);
+    apply_evap_deltas(world, deltas, &orphans, Some(humidity), temp);
 }
 
 /// Reference `rate_per_tick` is ~18 °C, light breeze, dry air.
@@ -144,6 +154,7 @@ fn collect_evap_deltas(
     )>,
 ) -> (
     HashMap<(i32, i32), i32>,
+    HashMap<(i32, i32), bool>,
     Vec<(ChunkCoord, bool, bool, u8, u8)>,
 ) {
     // Surface films only. Rain-film sky (`has_wet_air` without solid or
@@ -166,7 +177,7 @@ fn collect_evap_deltas(
         let below = world.chunks.get(&ChunkCoord::new(coord.cx, coord.cy - 1));
         let base_gx = coord.cx * CHUNK_CELLS_W as i32;
         let base_gy = coord.cy * CHUNK_CELLS_H as i32;
-        let mut local: Vec<((i32, i32), i32)> = Vec::new();
+        let mut local: Vec<((i32, i32), i32, bool)> = Vec::new();
         let mut still_wet = false;
         let mut still_standing = false;
         let mut stand_lo = 255u8;
@@ -227,27 +238,36 @@ fn collect_evap_deltas(
                 // a single ridge pixel doesn't linger for hours.
                 // Standing / lake cells are not ridge films — skip the
                 // six-neighbour walk on every full-water surface cell.
-                if cur.sat.0 < STANDING_AIR_SAT && is_orphan_surface_film(world, gx, gy) {
+                let mut orphan = false;
+                if cfg.enable_orphan_boost
+                    && cur.sat.0 < STANDING_AIR_SAT
+                    && is_orphan_surface_film(world, gx, gy)
+                {
                     rate = (rate * 8).max(4);
+                    orphan = true;
                 }
                 if rate <= 0 {
                     continue;
                 }
-                local.push(((gx, gy), -rate));
+                local.push(((gx, gy), -rate, orphan));
             }
         }
         (coord, still_wet, still_standing, stand_lo, stand_hi, local)
     });
 
     let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut orphan_keys: HashMap<(i32, i32), bool> = HashMap::new();
     let mut occupancy = Vec::new();
     for (coord, still_wet, still_standing, stand_lo, stand_hi, local) in per_chunk {
         occupancy.push((coord, still_wet, still_standing, stand_lo, stand_hi));
-        for (key, delta) in local {
+        for (key, delta, orphan) in local {
             *deltas.entry(key).or_insert(0) += delta;
+            if orphan {
+                orphan_keys.insert(key, true);
+            }
         }
     }
-    (deltas, occupancy)
+    (deltas, orphan_keys, occupancy)
 }
 
 fn apply_evap_occupancy_flags(
@@ -289,6 +309,7 @@ fn is_orphan_surface_film(world: &World, gx: i32, gy: i32) -> bool {
 fn apply_evap_deltas(
     world: &mut World,
     deltas: HashMap<(i32, i32), i32>,
+    orphans: &HashMap<(i32, i32), bool>,
     mut humidity: Option<&mut crate::humidity::Humidity>,
     temp: Option<&crate::temperature::Temperature>,
 ) {
@@ -354,6 +375,12 @@ fn apply_evap_deltas(
         };
         if accepted <= 0 {
             continue;
+        }
+        if open {
+            crate::budget::note_evap_hum_add(accepted);
+        }
+        if orphans.contains_key(&(gx, gy)) {
+            crate::budget::note_orphan_film_rm(accepted);
         }
         let new_sat = (cell.sat.0 as i32 - accepted).clamp(0, cap);
         world.set_cell(

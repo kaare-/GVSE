@@ -17,7 +17,8 @@
 //! - `GVSE_BUDGET_PERIOD` — sample every N ticks (default 60)
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
 //! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `leftover`, `cadence`,
-//!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`, `surplus`, `snow`
+//!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`, `surplus`,
+//!   `diffuse` (α=0), `orphan` (evap crest-film 8× off)
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
@@ -132,8 +133,15 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         d.d_min_solid, d.d_min_load, d.d_min_body, d.d_min_total
     );
     eprintln!(
-        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0}",
-        p.water_swap, p.water_park, p.water_hum_rej, p.water_clamp, p.water_hum_advect
+        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} orphan_rm={:+}",
+        p.water_swap,
+        p.water_park,
+        p.water_hum_rej,
+        p.water_clamp,
+        p.water_hum_advect,
+        p.water_hum_diffuse,
+        p.water_evap_add,
+        p.water_orphan_rm
     );
     eprintln!(
         "probe-M bare={:+} credit={:+} clip={:+}",
@@ -171,7 +179,10 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         failure.enable_shear_weaken = false;
         failure.enable_compaction = false;
     }
-    let evap = EvapConfig::default();
+    let mut evap = EvapConfig::default();
+    if soak_off("orphan") {
+        evap.enable_orphan_boost = false;
+    }
     let cond = CondensationConfig {
         top_y: s.params.sky_ceiling_y - 2,
         ..CondensationConfig::default()
@@ -232,7 +243,7 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         grain: &grain,
         fungi: &fungi,
         competent: &competent,
-        humidity_diffusion_alpha: 0.15,
+        humidity_diffusion_alpha: if soak_off("diffuse") { 0.0 } else { 0.15 },
         sea_level_y: s.params.sea_level_y,
         sky_ceiling_y: s.params.sky_ceiling_y,
         evap_on: !soak_off("evap"),

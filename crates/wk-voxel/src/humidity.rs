@@ -864,9 +864,11 @@ impl Humidity {
         if alpha == 0.0 || !self.has_mass() {
             return;
         }
+        let before = self.total_mass();
         if let Some(b) = self.bounds {
             if self.use_dense_slab(b) {
                 self.diffuse_slab(alpha, b);
+                crate::budget::note_hum_diffuse_delta(self.total_mass() - before);
                 return;
             }
         }
@@ -933,6 +935,7 @@ impl Humidity {
             self.apply_tile_delta(k.0, k.1, d);
         }
         self.prune_near_zero();
+        crate::budget::note_hum_diffuse_delta(self.total_mass() - before);
     }
 
     /// Same +x/+y pairwise stencil as [`Self::diffuse`], walking the

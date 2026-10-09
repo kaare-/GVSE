@@ -328,6 +328,12 @@ pub struct BudgetProbe {
     /// Cumulative `Humidity::total_mass` Δ across `advect_with_surface`
     /// (should be ~0; snow-onset mint hunt).
     pub water_hum_advect: f64,
+    /// Cumulative `Humidity::total_mass` Δ across `diffuse` (should be ~0).
+    pub water_hum_diffuse: f64,
+    /// Evap path: cumulative humidity mass `try_add*` accepted (sat units).
+    pub water_evap_add: i64,
+    /// Evap path: sat removed from orphan-boosted surface films.
+    pub water_orphan_rm: i64,
     /// `set_cell` carbonate delta **outside** widen / scour / precip / emit.
     pub mineral_bare: i64,
     /// Same delta **inside** those ledger APIs (should be paired with load).
@@ -351,6 +357,7 @@ impl BudgetProbe {
             && self.water_hum_rej == 0
             && self.water_clamp == 0
             && self.water_hum_advect.abs() < 1e-3
+            && self.water_hum_diffuse.abs() < 1e-3
             && self.mineral_bare == 0
             && self.mineral_credit == 0
             && self.mineral_clip == 0
@@ -365,6 +372,9 @@ thread_local! {
         water_hum_rej: 0,
         water_clamp: 0,
         water_hum_advect: 0.0,
+        water_hum_diffuse: 0.0,
+        water_evap_add: 0,
+        water_orphan_rm: 0,
         mineral_bare: 0,
         mineral_credit: 0,
         mineral_clip: 0,
@@ -381,6 +391,45 @@ pub fn note_hum_advect_delta(delta: f32) {
     PROBE.with(|p| {
         let mut v = p.get();
         v.water_hum_advect += f64::from(delta);
+        p.set(v);
+    });
+}
+
+/// Cumulative humidity mass change across one `diffuse` call.
+#[inline]
+pub fn note_hum_diffuse_delta(delta: f32) {
+    if !probe_on() || delta.abs() < 1e-9 {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_hum_diffuse += f64::from(delta);
+        p.set(v);
+    });
+}
+
+/// Evap → humidity `try_add*` accepted mass (integer sat units).
+#[inline]
+pub fn note_evap_hum_add(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_evap_add += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Sat removed from an orphan-boosted surface film.
+#[inline]
+pub fn note_orphan_film_rm(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_orphan_rm += i64::from(units);
         p.set(v);
     });
 }
