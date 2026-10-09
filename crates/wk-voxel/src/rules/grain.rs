@@ -1357,7 +1357,7 @@ const SNOWFALL_SALT: u64 = 0x5F04_FA11;
 
 /// Snow descent gates for grain fall / airborne roll (soak OFF hooks).
 #[derive(Clone, Copy, Debug)]
-struct SnowFallGate {
+pub(crate) struct SnowFallGate {
     enable: bool,
     allow_wet: bool,
 }
