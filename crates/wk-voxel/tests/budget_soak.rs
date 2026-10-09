@@ -144,9 +144,11 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         d.d_min_solid, d.d_min_load, d.d_min_body, d.d_min_total
     );
     eprintln!(
-        "probe-W swap={:+} swap_snow={:+} swap_other={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+} flow_air={:+} seep_air={:+} park_air={:+} free_other={:+} par_air={:+} par_snow={:+} grav_air={:+} steam_solid={:+}",
+        "probe-W swap={:+} swap_snow={:+} snow_in={:+} snow_out={:+} swap_other={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+} flow_air={:+} seep_air={:+} park_air={:+} free_other={:+} par_air={:+} par_snow={:+} grav_air={:+} steam_solid={:+}",
         p.water_swap,
         p.water_swap_snow,
+        p.water_swap_snow_in,
+        p.water_swap_snow_out,
         p.water_swap_other,
         p.water_park,
         p.water_hum_rej,
@@ -458,11 +460,13 @@ fn short_budget_soak() {
     // Absolute leftover over short windows is noisy; rates are the signal.
     let snow_net = probe.snow_exit_yield - probe.snow_enter_yield;
     eprintln!(
-        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} swap={} swap_snow={} swap_other={} flow_air={} seep_air={} park_air={} free_other={} par_air={} par_snow={} grav_air={} steam_solid={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
+        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} swap={} swap_snow={} snow_in={} snow_out={} swap_other={} flow_air={} seep_air={} park_air={} free_other={} par_air={} par_snow={} grav_air={} steam_solid={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
         d_tracked as f64 / ticks.max(1) as f64,
         probe.water_park,
         probe.water_swap,
         probe.water_swap_snow,
+        probe.water_swap_snow_in,
+        probe.water_swap_snow_out,
         probe.water_swap_other,
         probe.water_flow_air,
         probe.water_seep_air,

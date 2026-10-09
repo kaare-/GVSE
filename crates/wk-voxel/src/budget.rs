@@ -321,6 +321,10 @@ pub struct BudgetProbe {
     pub water_swap: i64,
     /// Subset of [`Self::water_swap`] when prev or next material is Snow.
     pub water_swap_snow: i64,
+    /// World overlay Δ on not-Snow → Snow (nucleation + fall dest + …).
+    pub water_swap_snow_in: i64,
+    /// World overlay Δ on Snow → not-Snow (thaw / bare / fall src + …).
+    pub water_swap_snow_out: i64,
     /// [`Self::water_swap`] − [`Self::water_swap_snow`] (Sand/Organic/…).
     pub water_swap_other: i64,
     /// `park_orphan_*` leftover the caller discarded.
@@ -417,6 +421,8 @@ thread_local! {
     static PROBE: StdCell<BudgetProbe> = const { StdCell::new(BudgetProbe {
         water_swap: 0,
         water_swap_snow: 0,
+        water_swap_snow_in: 0,
+        water_swap_snow_out: 0,
         water_swap_other: 0,
         water_park: 0,
         water_hum_rej: 0,
@@ -691,13 +697,21 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
     if prev.material != next.material {
         let d = overlay_water_units(next) - overlay_water_units(prev);
         if d != 0 {
-            let snow =
-                prev.material == MaterialId::Snow || next.material == MaterialId::Snow;
+            let snow_in = next.material == MaterialId::Snow
+                && prev.material != MaterialId::Snow;
+            let snow_out = prev.material == MaterialId::Snow
+                && next.material != MaterialId::Snow;
             PROBE.with(|p| {
                 let mut v = p.get();
                 v.water_swap += d;
-                if snow {
+                if snow_in || snow_out {
                     v.water_swap_snow += d;
+                    if snow_in {
+                        v.water_swap_snow_in += d;
+                    }
+                    if snow_out {
+                        v.water_swap_snow_out += d;
+                    }
                 } else {
                     v.water_swap_other += d;
                 }
