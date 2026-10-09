@@ -29,6 +29,9 @@
 //!   `gravity` (skip free-water / infiltration gravity pulls),
 //!   `settle` (skip multi-pass grain fall/repose; airborne snow roll stays)
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
+//!
+//! Residual A probes (print in summary): `swap_snow` / `snow_in` / `snow_out`,
+//! `par_air` / `par_snow` (parallel::set_cell free miss), `grav_air`.
 
 use wk_voxel::{
     set_peel_seated_snow, set_skip_grain_settle, set_skip_gravity, set_skip_park_orphan,

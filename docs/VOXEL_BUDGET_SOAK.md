@@ -236,3 +236,32 @@ the mint-sized term (evap dominates `free_other` as a sink).
 Air↔Snow sat integrity under multi-pass settle; any path that adds free
 or pore without `note_set_cell`), or a snow-lid × sky-budget coupling
 that is not a single OFF. Kill: `GVSE_SOAK_OFF=snow`.
+
+**Residual A — settle + World snow overlay (2026-10-09):** 5k on tip
+`f6d7f9c` after `par_air` / `grav_air` miss probes and `OFF=settle`.
+
+| OFF | TRACKED /t | swap_snow | snow_in | snow_out | par_air | note |
+|-----|------------|-----------|---------|----------|---------|------|
+| `phase` | **+110.96** | +1.449M | +193.3M | −191.8M | **−157** | paid=894k; late triad ~+127k/500t |
+| `phase,settle` | **+42.89** | +0.936M | +279.0M | −278.1M | **0** | settle off → A −68/t; airborne still lands |
+| `phase,snowfall` | **+20.32** | +0.880M | +19.3M | −18.5M | −36 | aloft; late triad ~flat |
+
+**Miss probes:** `par_air` / `par_snow` ≈ 0 (parallel free-Air sat
+conserved). `grav_air` is a large sink (infiltration), not a mint —
+agrees with prior `OFF=gravity` **+109/t**. Chunk-direct free-sat writers
+are **not** residual A.
+
+**Accounting identity:** `TRACKED ≈ swap_snow − paid` (±1k) on all three
+rows. `paid≈Δsnow`. World Snow enter/exit traffic is huge (airborne /
+drift / rise swaps); **net** World snow overlay exceeds nucleation by
+exactly the mint. Unit: settle beside Snow pack stays TRACKED-flat
+(no local free mint in a toy bank).
+
+**Settle role:** multi-pass grain fall/repose is ~⅔ of landed-pack A
+(+111 → +43 with settle off; snowfall still +20). Amplifies the World
+snow-overlay bias; does not mint via `parallel::set_cell` Air sat.
+
+**Still open (no clear fix):** which World Air→Snow path leaves unpaired
+overlay vs parallel Snow leave (call-site tag on `snow_in`), or a
+snow-lid × sky-budget coupling for the settle-off leftover (~+23/t vs
+aloft). Kill: `GVSE_SOAK_OFF=snow`.

@@ -202,7 +202,9 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   **~+91/t** landed-pack; `phase,cond` still **+93**, `phase,steam`
   **+102**, `phase,gravity` **+109** — not lottery/steam/gravity.
   `free_other+evap≈+80k` ≪ free_in — mint not in scoped World::set_cell
-  Air writers. Next: parallel/chunk free-sat paths beyond gravity.
+  Air writers. Chunk miss probes: `par_air≈0`, `grav_air` sink only.
+  `OFF=settle` → **+43/t** (cuts ~⅔ of A); `TRACKED≈swap_snow−paid`.
+  Next: unpaired World Air→Snow overlay vs parallel leave (call-site).
   Kill: `OFF=snow`.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
