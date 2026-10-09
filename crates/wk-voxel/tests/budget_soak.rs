@@ -37,12 +37,12 @@
 
 use wk_voxel::{
     set_peel_seated_snow, set_skip_grain_settle, set_skip_gravity, set_skip_park_orphan,
-    set_skip_seepage, set_skip_surface_flow,
-    snow_mint_probe_reset, snow_mint_probe_snapshot, stamp_world, step_world, BudgetLedger,
-    BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
-    CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GrainConfig,
-    Humidity, KarstConfig, LandscapeBodyStore, OrographicConfig, PerfConfig, PhaseConfig,
-    SteamConfig, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams,
+    set_skip_seepage, set_skip_surface_flow, snow_mint_probe_reset, snow_mint_probe_snapshot,
+    stamp_world, step_world, BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig,
+    CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
+    FungiConfig, GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrographicConfig,
+    PerfConfig, PhaseConfig, SnowOtherStage, SteamConfig, Temperature, Wind, World, WorldStep,
+    WorldStepConfig, WorldgenParams,
 };
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -540,6 +540,19 @@ fn short_budget_soak() {
     site("landscape", probe.snow_in_landscape, probe.snow_out_landscape);
     site("competent", probe.snow_in_competent, probe.snow_out_competent);
     site("other", probe.snow_in_other, probe.snow_out_other);
+    eprintln!("snow_other_by_stage (in/out/net):");
+    for i in 0..SnowOtherStage::N {
+        let inn = probe.snow_in_other_by_stage[i];
+        let out = probe.snow_out_other_by_stage[i];
+        if inn == 0 && out == 0 {
+            continue;
+        }
+        eprintln!(
+            "  stage {}: in={inn:+} out={out:+} net={:+}",
+            SnowOtherStage::NAMES[i],
+            inn + out
+        );
+    }
     // Closed swaps: net≈0; unpaired mint ≈ site_net (or in−paid for nucleate).
     let sites = [
         ("nucleate", probe.snow_in_nucleate + probe.snow_out_nucleate - paid),

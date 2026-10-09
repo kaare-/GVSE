@@ -358,6 +358,9 @@ pub struct BudgetProbe {
     /// World snow_in / snow_out with no [`SnowSwapScope`] (editor / miss).
     pub snow_in_other: i64,
     pub snow_out_other: i64,
+    /// Untagged snow_in split by [`SnowOtherStage`] (residual A hunt).
+    pub snow_in_other_by_stage: [i64; SnowOtherStage::N],
+    pub snow_out_other_by_stage: [i64; SnowOtherStage::N],
     /// [`Self::water_swap`] − [`Self::water_swap_snow`] (Sand/Organic/…).
     pub water_swap_other: i64,
     /// `park_orphan_*` leftover the caller discarded.
@@ -478,6 +481,8 @@ thread_local! {
         snow_out_competent: 0,
         snow_in_other: 0,
         snow_out_other: 0,
+        snow_in_other_by_stage: [0; SnowOtherStage::N],
+        snow_out_other_by_stage: [0; SnowOtherStage::N],
         water_swap_other: 0,
         water_park: 0,
         water_hum_rej: 0,
@@ -526,6 +531,63 @@ thread_local! {
     static SNOW_SWAP_RAFT_N: StdCell<u32> = const { StdCell::new(0) };
     static SNOW_SWAP_LANDSCAPE_N: StdCell<u32> = const { StdCell::new(0) };
     static SNOW_SWAP_COMPETENT_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_OTHER_STAGE: StdCell<u8> = const { StdCell::new(0) };
+}
+
+/// Coarse step section for untagged World snow overlay (when no [`SnowSwapScope`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnowOtherStage;
+impl SnowOtherStage {
+    pub const N: usize = 12;
+    pub const UNKNOWN: u8 = 0;
+    pub const COND: u8 = 1;
+    pub const RISE: u8 = 2;
+    pub const SETTLE: u8 = 3;
+    pub const FALL: u8 = 4;
+    pub const PUNCH: u8 = 5;
+    pub const COMPETENT: u8 = 6;
+    pub const DRIFT: u8 = 7;
+    pub const RAFT: u8 = 8;
+    pub const STEAM: u8 = 9;
+    pub const PHASE: u8 = 10;
+    pub const LANDSCAPE: u8 = 11;
+
+    pub const NAMES: [&'static str; Self::N] = [
+        "unknown",
+        "cond",
+        "rise",
+        "settle",
+        "fall",
+        "punch",
+        "competent",
+        "drift",
+        "raft",
+        "steam",
+        "phase",
+        "landscape",
+    ];
+}
+
+/// RAII: mark the active step section for untagged snow_in/out attribution.
+pub struct SnowOtherStageGuard {
+    prev: u8,
+}
+
+impl SnowOtherStageGuard {
+    pub fn enter(stage: u8) -> Self {
+        let prev = SNOW_OTHER_STAGE.with(|c| {
+            let p = c.get();
+            c.set(stage);
+            p
+        });
+        Self { prev }
+    }
+}
+
+impl Drop for SnowOtherStageGuard {
+    fn drop(&mut self) {
+        SNOW_OTHER_STAGE.with(|c| c.set(self.prev));
+    }
 }
 
 /// Cumulative humidity mass change across one `advect_with_surface` call.
@@ -656,6 +718,7 @@ fn probe_reset() {
     SNOW_SWAP_RAFT_N.with(|n| n.set(0));
     SNOW_SWAP_LANDSCAPE_N.with(|n| n.set(0));
     SNOW_SWAP_COMPETENT_N.with(|n| n.set(0));
+    SNOW_OTHER_STAGE.with(|c| c.set(0));
 }
 
 #[inline]
@@ -798,7 +861,13 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
                             SnowSwapScope::RAFT => v.snow_in_raft += d,
                             SnowSwapScope::LANDSCAPE => v.snow_in_landscape += d,
                             SnowSwapScope::COMPETENT => v.snow_in_competent += d,
-                            _ => v.snow_in_other += d,
+                            _ => {
+                                v.snow_in_other += d;
+                                let st = SNOW_OTHER_STAGE.with(|c| c.get()) as usize;
+                                if st < SnowOtherStage::N {
+                                    v.snow_in_other_by_stage[st] += d;
+                                }
+                            }
                         }
                     }
                     if snow_out {
@@ -814,7 +883,13 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
                             SnowSwapScope::RAFT => v.snow_out_raft += d,
                             SnowSwapScope::LANDSCAPE => v.snow_out_landscape += d,
                             SnowSwapScope::COMPETENT => v.snow_out_competent += d,
-                            _ => v.snow_out_other += d,
+                            _ => {
+                                v.snow_out_other += d;
+                                let st = SNOW_OTHER_STAGE.with(|c| c.get()) as usize;
+                                if st < SnowOtherStage::N {
+                                    v.snow_out_other_by_stage[st] += d;
+                                }
+                            }
                         }
                     }
                 } else {

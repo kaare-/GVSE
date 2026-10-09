@@ -252,6 +252,7 @@ pub fn step_world(
     }
 
     {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::COND);
         let t0 = profile.then(Instant::now);
         // Surplus the local air cannot hold becomes water here.
         // The drizzle lottery below is a different gate — a missed
@@ -297,6 +298,8 @@ pub fn step_world(
     }
 
     {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::LANDSCAPE);
         let t0 = profile.then(Instant::now);
         if let (Some(support_map), Some(landscape_store)) = (support.as_mut(), landscape.as_mut()) {
             let support_due = support_map_due(tick_no);
@@ -372,6 +375,7 @@ pub fn step_world(
     set_parallel_enabled(true);
 
     {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::DRIFT);
         let t0 = profile.then(Instant::now);
         let _ = apply_snow_wind_drift(world, wind_vx, wind.tile_cols);
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
@@ -388,6 +392,7 @@ pub fn step_world(
     }
 
     {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::RAFT);
         let t0 = profile.then(Instant::now);
         // One floating-Organic collect for sail/drift + cascade shove.
         // Quiet compost land (no rafts moving) used to pay the full-chunk
@@ -510,6 +515,7 @@ pub fn step_world(
     }
 
     {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::STEAM);
         let t0 = profile.then(Instant::now);
         // Leftover straw first so thaw sees cavity heat on the same
         // tick (130 °C ice at a vent was phase-then-steam leftover).
@@ -519,6 +525,7 @@ pub fn step_world(
         }
     }
     {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::STEAM);
         let t0 = profile.then(Instant::now);
         apply_steam_cadence(world, temperature, cfg.steam, Some(humidity));
         if let (true, Some(t0), Some(t)) = (profile, t0, timings.as_mut()) {
@@ -526,6 +533,7 @@ pub fn step_world(
         }
     }
     {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::PHASE);
         let t0 = profile.then(Instant::now);
         apply_phase(world, temperature, cfg.phase);
         apply_pore_ice(world, temperature, cfg.phase.freeze_point_c);

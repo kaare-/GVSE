@@ -724,6 +724,7 @@ fn tick_with_life_inner(
     // walks × wet Air × passes → ~1 FPS). Teleport rise clears the column
     // first; settle then handles sand / true freefall.
     {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::RISE);
         let t0 = profile.then(Instant::now);
         match grain {
             Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
@@ -761,6 +762,8 @@ fn tick_with_life_inner(
             if profile && deep {
                 local.deep_settle_ticks += 1;
             }
+            let _stage =
+                crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::SETTLE);
             let t0 = profile.then(Instant::now);
             // Rise already teleported buoyant litter — do not one-cell
             // bob through wet Air inside settle (Organic flood FPS spike).
@@ -783,6 +786,7 @@ fn tick_with_life_inner(
     // Snow is not "unsupported grain" for deep settle. One cheap
     // downward roll here so a shower still leaves the sky.
     if world.chunks.values().any(|c| c.has_snow) {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::FALL);
         match grain {
             Some(g) => {
                 let _ = super::grain::apply_airborne_snow_fall_cfg(world, g);
@@ -798,6 +802,7 @@ fn tick_with_life_inner(
     // still ~0.19 ms empty scan). Full wake every 16 still finds cargo
     // outside the halo and sets `raft_cargo_seen`.
     if did_wake && raft_cargo_seen > 0 {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::PUNCH);
         let t0 = profile.then(Instant::now);
         let punched = super::grain::punch_through_floating_rafts(world);
         if let (true, Some(t0)) = (profile, t0) {
@@ -836,6 +841,8 @@ fn tick_with_life_inner(
     // Floating wake is mandatory — F1 defers competent rock to this pass, so
     // sky boulders hang forever if they are never re-dirtied.
     if failure.enable_competent_fall {
+        let _stage =
+            crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::COMPETENT);
         // Cadence-gated floating wake only. Do **not** re-seed from the water
         // dirty / flow halo: sloshing `sat` cannot destabilise rock, and that
         // path re-flooded wet hills every GRAIN_WAKE_EVERY (~2.5k flood cells
