@@ -324,9 +324,24 @@ Stress back to the Phase 1 ≥30 sim-FPS gate (~30). Settle is still
 real sand freefall / deep-settle (~9/200 ticks), not Ice lids. Host
 noise on wall is ~±1–2 ms across re-runs.
 
+### Stretch stamp (Compact 4096×1064, tip `ece4802`)
+
+`perf_profile_stretch_width`, same harness, 0 plants. Log:
+`/opt/cursor/artifacts/phase4-stretch-profile.log`.
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies | advect |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|-------:|
+| stretch (4096×1064) | 62.2 | ~16 | 30.6 | **10.3** | 2.38 | **9.19** | 6.37 |
+
+~2× cells vs stress → wall ~1.9× (33.5 → 62). Hotspots flip: seepage +
+bodies dominate; settle drops (fewer deep ticks: 2/200). Field shell
+also scales (temp amort 4.5, phase 3.3). **Compact is not ≥30 sim-FPS
+yet** — next Phase 4 levers are seepage wakes / bodies at this width
+(or streaming residency), not another settle trim.
+
 ### Next Phase 4 steps
 
-1. Width stretch stamp (64-wide / 4096 cols, WORLDGEN Compact) via
-   `perf_profile_stretch_width` / `perf_profile_demo_and_stress`.
-2. Deep-settle sand freefall (~9/200) if a clear ≥1 ms cut appears —
-   do not coarsen weather.
+1. Seepage / rock-bodies cuts aimed at Compact stretch (≥1 ms), or
+   document a lower FPS gate / streaming for km rings.
+2. Deep-settle sand freefall on demo/stress only if it still pays ≥1 ms
+   after stretch work — do not coarsen weather.
