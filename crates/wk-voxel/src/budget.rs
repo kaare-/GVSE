@@ -348,15 +348,21 @@ pub struct BudgetProbe {
     /// Same-mat Air sat Δ inside `park_orphan_*` ([`FreeSatScope::Park`]).
     pub water_park_air: i64,
     /// Snow cells leaving the snow book (`Snow` → not-`Snow`). Yield sum.
+    /// Includes grain-fall swap sources — pair with [`Self::snow_enter_yield`].
     pub snow_exit_yield: i64,
-    /// Free/ice credit written into the destination on those exits.
+    /// Non-Snow → Snow yield (nucleation + fall swap destinations).
+    pub snow_enter_yield: i64,
+    /// Free/ice credit written into the destination on snow exits.
     pub snow_exit_credit: i64,
-    /// `snow_exit_yield − snow_exit_credit` when credit underpays (bare drop).
+    /// Solid overwrite of Snow (Sand/Stone/…) — yield lost with no free credit.
+    /// `Snow`→`Air` is thaw or swap (not counted here); see net leave.
     pub snow_exit_bare: i64,
     /// Snow → Ice conversions (stay in phase book; yield moved).
     pub snow_to_ice: i64,
     /// Count of `Snow` → not-`Snow` material changes.
     pub snow_exit_n: u64,
+    /// Count of not-`Snow` → `Snow` material changes.
+    pub snow_enter_n: u64,
     /// `set_cell` carbonate delta **outside** widen / scour / precip / emit.
     pub mineral_bare: i64,
     /// Same delta **inside** those ledger APIs (should be paired with load).
@@ -405,10 +411,12 @@ thread_local! {
         water_seep_air: 0,
         water_park_air: 0,
         snow_exit_yield: 0,
+        snow_enter_yield: 0,
         snow_exit_credit: 0,
         snow_exit_bare: 0,
         snow_to_ice: 0,
         snow_exit_n: 0,
+        snow_enter_n: 0,
         mineral_bare: 0,
         mineral_credit: 0,
         mineral_clip: 0,
@@ -537,13 +545,27 @@ fn overlay_water_units(cell: Cell) -> i64 {
     }
 }
 
-/// Snow leaving the snow book (World `set_cell` or parallel grain writes).
+/// Snow book enter/exit (World `set_cell` or parallel grain writes).
 ///
-/// Credits: Air sat or Ice thaw yield on `next`. Underpay (`bare`) is a
-/// TRACKED sink suspect; overpay would mint free relative to the snow book.
+/// Grain-fall swaps both exit (source→Air) and enter (dest→Snow); net
+/// `exit_yield − enter_yield` is true book leave (thaw / bare overwrite).
+/// `bare` is only solid overwrite (not Snow→Air).
 #[inline]
 pub fn note_snow_book_exit(prev: Cell, next: Cell) {
-    if !probe_on() || prev.material != MaterialId::Snow || next.material == MaterialId::Snow {
+    if !probe_on() {
+        return;
+    }
+    if prev.material != MaterialId::Snow && next.material == MaterialId::Snow {
+        let yield_u = crate::cell::frozen_thaw_sat(next) as i64;
+        PROBE.with(|p| {
+            let mut v = p.get();
+            v.snow_enter_n = v.snow_enter_n.saturating_add(1);
+            v.snow_enter_yield += yield_u;
+            p.set(v);
+        });
+        return;
+    }
+    if prev.material != MaterialId::Snow || next.material == MaterialId::Snow {
         return;
     }
     let yield_u = crate::cell::frozen_thaw_sat(prev) as i64;
@@ -559,8 +581,9 @@ pub fn note_snow_book_exit(prev: Cell, next: Cell) {
         v.snow_exit_credit += credit;
         if next.material == MaterialId::Ice {
             v.snow_to_ice += yield_u;
-        } else if credit < yield_u {
-            v.snow_exit_bare += yield_u - credit;
+        } else if next.material != MaterialId::Air {
+            // Solid overwrite — yield leaves with no free/ice credit.
+            v.snow_exit_bare += yield_u;
         }
         p.set(v);
     });

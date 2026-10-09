@@ -426,15 +426,19 @@ fn short_budget_soak() {
     assert_eq!(probe.water_clamp, 0, "humidity clamp must stay closed");
     assert_eq!(probe.mineral_clip, 0, "dissolved clip must stay closed");
     // Absolute leftover over short windows is noisy; rates are the signal.
+    let snow_net = probe.snow_exit_yield - probe.snow_enter_yield;
     eprintln!(
-        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={} snow_exit_n={} yield={} credit={} bare={} to_ice={}",
+        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
         d_tracked as f64 / ticks.max(1) as f64,
         probe.water_park,
         probe.water_flow_air,
         probe.water_seep_air,
         probe.water_park_air,
+        probe.snow_enter_n,
         probe.snow_exit_n,
+        probe.snow_enter_yield,
         probe.snow_exit_yield,
+        snow_net,
         probe.snow_exit_credit,
         probe.snow_exit_bare,
         probe.snow_to_ice,
