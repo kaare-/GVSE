@@ -2533,6 +2533,113 @@ mod tests {
     }
 
     #[test]
+    fn thaw_to_air_snow_and_airborne_thaw_stay_tracked_flat() {
+        // Phase-ON mint hunt (B): thaw must credit free = banked yield.
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            for y in 2..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Landed pack + airborne flake.
+        w.set_cell(2, 2, snow_cell());
+        w.set_cell(2, 3, snow_cell());
+        w.set_cell(4, 8, snow_cell());
+        let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let before = crate::budget::BudgetSnap::capture(&w, &hum);
+        let warm = cold_temp(16, 16, 12.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..6 {
+            w.tick = tick;
+            apply_phase(&mut w, &warm, &cfg);
+        }
+        let after = crate::budget::BudgetSnap::capture(&w, &hum);
+        let d = after.delta(before);
+        assert!(
+            d.d_tracked.abs() < 1.0,
+            "thaw_to_air / airborne thaw must stay TRACKED flat (Δtracked={})",
+            d.d_tracked
+        );
+        assert!(
+            d.d_snow <= 0,
+            "warm phase must shrink snow book (Δsnow={})",
+            d.d_snow
+        );
+        // Free must rise by the snow that left (no bare drop, no double credit).
+        assert_eq!(
+            d.d_free + d.d_snow,
+            0,
+            "free credit must match snow exit (Δfree={} Δsnow={})",
+            d.d_free,
+            d.d_snow
+        );
+    }
+
+    #[test]
+    fn snow_on_warm_water_slush_thaw_stays_tracked_flat() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::water());
+        w.set_cell(3, 2, snow_cell());
+        let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        let warm = cold_temp(16, 16, 10.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..4 {
+            w.tick = tick;
+            apply_phase(&mut w, &warm, &cfg);
+        }
+        let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        assert!(
+            (after - before).abs() < 1.0,
+            "snow-on-warm-water thaw must stay TRACKED flat (Δ={})",
+            after - before
+        );
+        assert_ne!(
+            w.get_cell(3, 2).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "slush path must melt the flake"
+        );
+    }
+
+    #[test]
+    fn grain_overwrite_snow_with_sand_is_bare_exit_not_mint() {
+        // Non-phase snow-book exit: sand landing on snow drops yield with no
+        // free credit → TRACKED *sink*, never a mint.
+        let mut w = World::new(6);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, snow_cell());
+        let hum = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        let mut led = crate::budget::BudgetLedger::default();
+        led.enable(&w, &hum);
+        let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let after = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
+        let p = crate::budget::BudgetProbe::snapshot();
+        led.disable();
+        assert_eq!(p.snow_exit_n, 1);
+        assert_eq!(p.snow_exit_yield, u8::MAX as i64);
+        assert_eq!(p.snow_exit_credit, 0);
+        assert_eq!(p.snow_exit_bare, u8::MAX as i64);
+        assert!(
+            after < before - 200.0,
+            "bare Snow→Sand must sink TRACKED (Δ={})",
+            after - before
+        );
+    }
+
+    #[test]
     fn warm_precip_stays_rain() {
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));

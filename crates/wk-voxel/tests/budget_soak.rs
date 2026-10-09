@@ -363,8 +363,9 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
                 );
                 let d = now.delta(*mark);
                 let dt = d.ticks.max(1) as f64;
+                let triad = d.d_free as f64 + d.d_pore as f64 + d.d_humidity + d.d_snow as f64;
                 eprintln!(
-                    "win t={}: TRACKED {:+.0} ({:+.2}/t) snow={:+} ice={:+} hum={:+.0} free={:+} pore={:+} steam={:+}",
+                    "win t={}: TRACKED {:+.0} ({:+.2}/t) snow={:+} ice={:+} hum={:+.0} free={:+} pore={:+} steam={:+} triad(f+p+h+s)={:+.0}",
                     now.tick,
                     d.d_tracked,
                     d.d_tracked / dt,
@@ -373,7 +374,8 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
                     d.d_humidity,
                     d.d_free,
                     d.d_pore,
-                    d.d_steam
+                    d.d_steam,
+                    triad
                 );
                 win_mark = Some(now);
             }
@@ -425,12 +427,17 @@ fn short_budget_soak() {
     assert_eq!(probe.mineral_clip, 0, "dissolved clip must stay closed");
     // Absolute leftover over short windows is noisy; rates are the signal.
     eprintln!(
-        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={}",
+        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={} snow_exit_n={} yield={} credit={} bare={} to_ice={}",
         d_tracked as f64 / ticks.max(1) as f64,
         probe.water_park,
         probe.water_flow_air,
         probe.water_seep_air,
-        probe.water_park_air
+        probe.water_park_air,
+        probe.snow_exit_n,
+        probe.snow_exit_yield,
+        probe.snow_exit_credit,
+        probe.snow_exit_bare,
+        probe.snow_to_ice,
     );
 }
 
