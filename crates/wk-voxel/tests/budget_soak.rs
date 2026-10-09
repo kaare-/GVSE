@@ -25,11 +25,13 @@
 //!   `snowsurf` (live_surface peels seated Snow; weather ignores pack),
 //!   `flow` (skip surface cascade / equalise / throughflow / confined),
 //!   `seep` (skip pore seepage + contact wet + seam),
-//!   `park` (`park_orphan_water` discards — free-sat park off)
+//!   `park` (`park_orphan_water` discards — free-sat park off),
+//!   `gravity` (skip free-water / infiltration gravity pulls)
 //!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
 
 use wk_voxel::{
-    set_peel_seated_snow, set_skip_park_orphan, set_skip_seepage, set_skip_surface_flow,
+    set_peel_seated_snow, set_skip_gravity, set_skip_park_orphan, set_skip_seepage,
+    set_skip_surface_flow,
     snow_mint_probe_reset, snow_mint_probe_snapshot, stamp_world, step_world, BudgetLedger,
     BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
     CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GrainConfig,
@@ -141,7 +143,7 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         d.d_min_solid, d.d_min_load, d.d_min_body, d.d_min_total
     );
     eprintln!(
-        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+} flow_air={:+} seep_air={:+} park_air={:+}",
+        "probe-W swap={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+} flow_air={:+} seep_air={:+} park_air={:+} free_other={:+} steam_solid={:+}",
         p.water_swap,
         p.water_park,
         p.water_hum_rej,
@@ -155,7 +157,9 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         p.water_dep_debit,
         p.water_flow_air,
         p.water_seep_air,
-        p.water_park_air
+        p.water_park_air,
+        p.water_free_other,
+        p.steam_on_solid
     );
     eprintln!(
         "probe-M bare={:+} credit={:+} clip={:+}",
@@ -192,6 +196,7 @@ impl Drop for HuntGateGuard {
         set_skip_surface_flow(false);
         set_skip_seepage(false);
         set_skip_park_orphan(false);
+        set_skip_gravity(false);
     }
 }
 
@@ -268,6 +273,7 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     set_skip_surface_flow(soak_off("flow"));
     set_skip_seepage(soak_off("seep"));
     set_skip_park_orphan(soak_off("park"));
+    set_skip_gravity(soak_off("gravity"));
     let _hunt_guard = HuntGateGuard;
     let fungi = FungiConfig::default();
     let mut competent = CompetentFallConfig::default();
@@ -354,6 +360,22 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
             None,
         );
         led.sample_if_due_with(&s.world, &s.humidity, Some(&s.landscape));
+        // Peak steam sitting on non-Air (parallel grain Air→Snow skips evict).
+        if period > 0 && i % period == 0 {
+            let mut on_solid = 0i64;
+            for (&(gx, gy), &amt) in s.world.steam.iter() {
+                if amt == 0 {
+                    continue;
+                }
+                if !matches!(
+                    s.world.get_cell(gx, gy).map(|c| c.material),
+                    Some(wk_material::MaterialId::Air)
+                ) {
+                    on_solid += i64::from(amt);
+                }
+            }
+            wk_voxel::budget::note_steam_on_solid_peak(on_solid);
+        }
         if let (Some(mark), w) = (win_mark.as_ref(), window) {
             if w > 0 && i % w == 0 {
                 let now = wk_voxel::BudgetSnap::capture_with(
@@ -428,12 +450,14 @@ fn short_budget_soak() {
     // Absolute leftover over short windows is noisy; rates are the signal.
     let snow_net = probe.snow_exit_yield - probe.snow_enter_yield;
     eprintln!(
-        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
+        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} flow_air={} seep_air={} park_air={} free_other={} steam_solid={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
         d_tracked as f64 / ticks.max(1) as f64,
         probe.water_park,
         probe.water_flow_air,
         probe.water_seep_air,
         probe.water_park_air,
+        probe.water_free_other,
+        probe.steam_on_solid,
         probe.snow_enter_n,
         probe.snow_exit_n,
         probe.snow_enter_yield,

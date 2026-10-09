@@ -347,6 +347,13 @@ pub struct BudgetProbe {
     pub water_seep_air: i64,
     /// Same-mat Air sat Δ inside `park_orphan_*` ([`FreeSatScope::Park`]).
     pub water_park_air: i64,
+    /// Same-mat Air sat Δ **outside** flow/seep/park scopes (gravity,
+    /// leftover park, rain fill, etc.). Landed-pack mint hunt: if this
+    /// tracks `|TRACKED|` with `OFF=phase`, the writer is not flow/seep/park.
+    pub water_free_other: i64,
+    /// Peak steam mass found on non-Air cells during soak samples
+    /// (parallel grain Air→Snow skips `evict_steam_seat`).
+    pub steam_on_solid: i64,
     /// Snow cells leaving the snow book (`Snow` → not-`Snow`). Yield sum.
     /// Includes grain-fall swap sources — pair with [`Self::snow_enter_yield`].
     pub snow_exit_yield: i64,
@@ -410,6 +417,8 @@ thread_local! {
         water_flow_air: 0,
         water_seep_air: 0,
         water_park_air: 0,
+        water_free_other: 0,
+        steam_on_solid: 0,
         snow_exit_yield: 0,
         snow_enter_yield: 0,
         snow_exit_credit: 0,
@@ -520,6 +529,21 @@ pub fn note_dep_hum_debit(units: i32) {
     });
 }
 
+/// Record steam mass currently seated on non-Air (peak over the soak).
+#[inline]
+pub fn note_steam_on_solid_peak(units: i64) {
+    if units <= 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        if units > v.steam_on_solid {
+            v.steam_on_solid = units;
+        }
+        p.set(v);
+    });
+}
+
 fn probe_set_on(on: bool) {
     PROBE_ON.with(|c| c.set(on));
 }
@@ -611,9 +635,9 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
         let d = next.sat.0 as i64 - prev.sat.0 as i64;
         if d != 0 {
             let bits = FREE_SAT_SCOPE.with(|s| s.get());
-            if bits != 0 {
-                PROBE.with(|p| {
-                    let mut v = p.get();
+            PROBE.with(|p| {
+                let mut v = p.get();
+                if bits != 0 {
                     if bits & FreeSatScope::FLOW != 0 {
                         v.water_flow_air += d;
                     }
@@ -623,9 +647,13 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
                     if bits & FreeSatScope::PARK != 0 {
                         v.water_park_air += d;
                     }
-                    p.set(v);
-                });
-            }
+                } else {
+                    // Gravity pull, rain `fill_air_sat`, steam→liquid park,
+                    // leftover restore, etc.
+                    v.water_free_other += d;
+                }
+                p.set(v);
+            });
         }
     }
     let dm = cell_mineral(next) as i64 - cell_mineral(prev) as i64;

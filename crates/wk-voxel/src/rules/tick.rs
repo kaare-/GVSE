@@ -17,6 +17,9 @@ thread_local! {
     static SKIP_SEEPAGE: StdCell<bool> = const { StdCell::new(false) };
     /// Soak `OFF=park` — `park_orphan_water` discards without writing free sat.
     static SKIP_PARK_ORPHAN: StdCell<bool> = const { StdCell::new(false) };
+    /// Soak `OFF=gravity` — skip free-water / infiltration gravity pulls
+    /// (chunk-direct writes; landed-pack free_in hunt).
+    static SKIP_GRAVITY: StdCell<bool> = const { StdCell::new(false) };
 }
 
 /// Toggle surface-flow skip (soak `OFF=flow` — snow-mint free-writer hunt).
@@ -34,6 +37,11 @@ pub fn set_skip_park_orphan(on: bool) {
     SKIP_PARK_ORPHAN.with(|c| c.set(on));
 }
 
+/// Toggle gravity-fall skip (soak `OFF=gravity`).
+pub fn set_skip_gravity(on: bool) {
+    SKIP_GRAVITY.with(|c| c.set(on));
+}
+
 #[inline]
 pub(crate) fn skip_surface_flow() -> bool {
     SKIP_SURFACE_FLOW.with(|c| c.get())
@@ -47,6 +55,11 @@ pub(crate) fn skip_seepage() -> bool {
 #[inline]
 pub(crate) fn skip_park_orphan() -> bool {
     SKIP_PARK_ORPHAN.with(|c| c.get())
+}
+
+#[inline]
+pub(crate) fn skip_gravity() -> bool {
+    SKIP_GRAVITY.with(|c| c.get())
 }
 
 use super::grain::{
@@ -511,8 +524,10 @@ fn tick_with_life_inner(
         flow_halo = active.clone();
         let passes = partition_checkerboard(&active);
         let t0 = profile.then(Instant::now);
-        for pass in &passes {
-            apply_gravity_fall_regions_loaded(world, pass, &gravity_load, temp);
+        if !skip_gravity() {
+            for pass in &passes {
+                apply_gravity_fall_regions_loaded(world, pass, &gravity_load, temp);
+            }
         }
         if let (true, Some(t0)) = (profile, t0) {
             local.gravity += t0.elapsed();
