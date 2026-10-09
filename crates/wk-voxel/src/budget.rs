@@ -319,6 +319,10 @@ pub struct BudgetProbe {
     /// `set_cell` sat/ice change when **material** changed (moves that
     /// keep the material are ignored — gravity / evap / seepage).
     pub water_swap: i64,
+    /// Subset of [`Self::water_swap`] when prev or next material is Snow.
+    pub water_swap_snow: i64,
+    /// [`Self::water_swap`] − [`Self::water_swap_snow`] (Sand/Organic/…).
+    pub water_swap_other: i64,
     /// `park_orphan_*` leftover the caller discarded.
     pub water_park: i64,
     /// Humidity `try_add` refused because the tile is outside bounds.
@@ -412,6 +416,8 @@ thread_local! {
     static PROBE_ON: StdCell<bool> = const { StdCell::new(false) };
     static PROBE: StdCell<BudgetProbe> = const { StdCell::new(BudgetProbe {
         water_swap: 0,
+        water_swap_snow: 0,
+        water_swap_other: 0,
         water_park: 0,
         water_hum_rej: 0,
         water_clamp: 0,
@@ -685,9 +691,16 @@ pub fn note_set_cell(prev: Cell, next: Cell) {
     if prev.material != next.material {
         let d = overlay_water_units(next) - overlay_water_units(prev);
         if d != 0 {
+            let snow =
+                prev.material == MaterialId::Snow || next.material == MaterialId::Snow;
             PROBE.with(|p| {
                 let mut v = p.get();
                 v.water_swap += d;
+                if snow {
+                    v.water_swap_snow += d;
+                } else {
+                    v.water_swap_other += d;
+                }
                 p.set(v);
             });
         }
