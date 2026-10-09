@@ -46,6 +46,10 @@ flat 120-tick run).
 | `park` | **0** |
 | wall | ~66 min |
 
+**Reconfirm (2026-10-09)** — 50k after roof-collapse Snow mint fix, tip
+`7838473`: TRACKED **−0.00/t** (d=−6), min.tot **+0.07/t** (d=+3405),
+`park=0`. Gate still holds with snow precip on.
+
 ---
 
 ## Phase 1 — Performance for larger worlds & long soaks *(done 2026-10-07)*
@@ -209,6 +213,8 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   5k after: baseline **−0.01/t**, `phase` **−0.01**, `phase,settle`
   **−0.01**, `phase,snowfall` **−0.04**. Residual A closed (full soak
   flat). Kill: `OFF=snow`.
+  **50k Phase 0 gate** tip `7838473`: TRACKED **−0.00/t**, min
+  **+0.07/t**, `park=0` — rates still under 0.5/t with snow on.
 
 **Decision list** (2026-10-08 evening Oslo cycle)
 
@@ -293,6 +299,7 @@ before coding.
 | 2026-10-07 | Phase 0 rate eps | Tight: `\|rate W\|` and `\|rate M\|` &lt; **0.5/t** on 50k+ headless |
 | 2026-10-07 | Phase 0 organisms | **Off** until Phase 5 bio rewrite |
 | 2026-10-07 | Phase 0 closed | 50k headless: TRACKED **0.03/t**, min **+0.12/t**, park=0 (#351) |
+| 2026-10-09 | Phase 0 reconfirm | 50k after roof-collapse Snow fix (`7838473`): TRACKED **−0.00/t**, min **+0.07/t**, park=0 |
 | 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |

@@ -289,3 +289,21 @@ Ice/Snow from `is_roof_candidate` (airborne fall owns descent). Unit:
 
 Residual A **closed** (baseline and phase-OFF). Kill switch `OFF=snow`
 unchanged for other hunts.
+
+### Phase 0 gate — 50k after roof-collapse Snow fix (2026-10-09)
+
+Headless `short_budget_soak` tip `7838473` (`GVSE_SOAK_TICKS=50000`,
+warm=40, period=60; wall ~56 min):
+
+| Signal | Result |
+|--------|--------|
+| TRACKED `/t` | **−0.00** (d=−6) |
+| min.tot `/t` | **+0.07** (d=+3405) |
+| `park` / clamp / clip | **0** |
+| snow / ice store | snow **+311610**, ice **0** |
+| snow sites | fall/drift/other net **0**; `swap_snow−paid≈0` |
+| flake underpay | `under=0` |
+| read flags | late windows `UNEXPL-M` only (abs min leftover; rate ≪ 0.5/t) |
+
+Phase 0 rate eps still met (`|rate W|` and `|rate M|` &lt; 0.5/t) with
+snow precip on after the Ice/Snow roof-collapse exclusion.
