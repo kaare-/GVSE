@@ -252,3 +252,55 @@ shell — Phase 2 / owner discussion, not another CA dirty trim.
 - Coarsening weather / skipping condensation lottery / changing `live_surface_y`
 - Enabling rayon by default (still slower on narrow dirty)
 - Owner discussion on the candidates above before another Phase 1 CA pass
+
+---
+
+## Phase 4 baseline (post ice / mint stack)
+
+Same host / harness as Phase 1 (`perf_profile_demo_and_stress`), tip of
+`snow-mint-probe` + Phase 4 docs (`23daaee` parent), warm 40 / measure 200,
+`PerfConfig` FPS defaults, parallel **OFF** unless noted. Full log:
+`/opt/cursor/artifacts/phase4-perf-profile.log`.
+
+### Size sweep (0 plants unless noted)
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 18.9 | ~53 | 11.2 | 3.28 | 2.81 | 1.70 |
+| demo | 20.8 | ~48 | 12.1 | 2.87 | 4.80 | 2.02 |
+| stress (2048×1064) | 36.5 | ~27 | 20.1 | 5.15 | 5.95 | 4.75 |
+| demo + 48 plants | 22.5 | ~44 | 13.4 | 2.81 | 5.80 | 2.37 |
+| demo + 256 plants | 24.4 | ~41 | 14.1 | 2.92 | 6.37 | 2.38 |
+| stress + 256 plants | 36.7 | ~27 | 18.3 | 5.29 | 3.85 | 4.80 |
+
+Demo parallel A/B (0 plants): FPS OFF 20.8 / ON 22.1; full_feel OFF 52.2 / ON 50.6.
+Creature sweep (demo FPS): 0→20.4, 48→22.4, 128→23.1, 256→25.2 ms (org ≤3%).
+
+### Delta vs Phase 1 settle2 gate
+
+| Stamp | wall Δ | settle Δ | bodies Δ | seepage Δ |
+|-------|-------:|---------:|---------:|----------:|
+| short sky | +2.6 | **+2.3** | −0.1 | ~0 |
+| demo | +3.5 | **+4.0** | −0.3 | ~0 |
+| stress | +9.2 | **+5.6** | +0.9 | +0.2 |
+
+Stress dropped under the Phase 1 ≥30 FPS gate (~27). **Settle** is the
+clear regression (Phase 1 Air-dest left settle ≪1 ms; now 3–6 ms). New
+shell costs also show: phase ~0.5–1.3, steam ~1.2–1.4, temp amortized
+~1.0–2.3, humidity.advect ~1.7–3.5.
+
+### Phase 4 hotspot table (ms/tick)
+
+| Rank | Demo (0 plants) | Stress (0 plants) |
+|-----:|-----------------|-------------------|
+| 1 | settle **4.80** | settle **5.95** |
+| 2 | seepage 2.87 | seepage 5.15 |
+| 3 | rock bodies 2.02 | rock bodies 4.75 |
+| 4 | humidity.advect 1.69 | humidity.advect 3.52 |
+
+### First lever (chosen)
+
+Restore settle toward the Phase 1 Air-dest band before width stretch —
+a ≥1 ms surgical win without weather coarsen. Stretch past 2048 toward
+WORLDGEN Compact (4096 cols / ~1 km) only after stress is back ≥30
+sim-FPS (or a new gate is documented).
