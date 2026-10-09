@@ -175,7 +175,7 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         p.steam_on_solid
     );
     eprintln!(
-        "snow_in-by-site nucleate={:+}/{:+} surface={:+}/{:+} fall={:+}/{:+} drift={:+}/{:+} reloc={:+}/{:+} other={:+}/{:+}  (in/out)",
+        "snow_in-by-site nucleate={:+}/{:+} surface={:+}/{:+} fall={:+}/{:+} drift={:+}/{:+} reloc={:+}/{:+} rise={:+}/{:+} punch={:+}/{:+} raft={:+}/{:+} land={:+}/{:+} comp={:+}/{:+} other={:+}/{:+}  (in/out)",
         p.snow_in_nucleate,
         p.snow_out_nucleate,
         p.snow_in_surface,
@@ -186,6 +186,16 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         p.snow_out_drift,
         p.snow_in_reloc,
         p.snow_out_reloc,
+        p.snow_in_rise,
+        p.snow_out_rise,
+        p.snow_in_punch,
+        p.snow_out_punch,
+        p.snow_in_raft,
+        p.snow_out_raft,
+        p.snow_in_landscape,
+        p.snow_out_landscape,
+        p.snow_in_competent,
+        p.snow_out_competent,
         p.snow_in_other,
         p.snow_out_other,
     );
@@ -524,13 +534,34 @@ fn short_budget_soak() {
     site("fall", probe.snow_in_fall, probe.snow_out_fall);
     site("drift", probe.snow_in_drift, probe.snow_out_drift);
     site("reloc", probe.snow_in_reloc, probe.snow_out_reloc);
+    site("rise", probe.snow_in_rise, probe.snow_out_rise);
+    site("punch", probe.snow_in_punch, probe.snow_out_punch);
+    site("raft", probe.snow_in_raft, probe.snow_out_raft);
+    site("landscape", probe.snow_in_landscape, probe.snow_out_landscape);
+    site("competent", probe.snow_in_competent, probe.snow_out_competent);
     site("other", probe.snow_in_other, probe.snow_out_other);
-    // Fall/drift closed swaps: net≈0; unpaired mint ≈ site_net (or in−paid for nucleate).
-    let fall_net = probe.snow_in_fall + probe.snow_out_fall;
-    let drift_net = probe.snow_in_drift + probe.snow_out_drift;
-    let nuc_unpaid = probe.snow_in_nucleate - paid;
+    // Closed swaps: net≈0; unpaired mint ≈ site_net (or in−paid for nucleate).
+    let sites = [
+        ("nucleate", probe.snow_in_nucleate + probe.snow_out_nucleate - paid),
+        ("fall", probe.snow_in_fall + probe.snow_out_fall),
+        ("drift", probe.snow_in_drift + probe.snow_out_drift),
+        ("rise", probe.snow_in_rise + probe.snow_out_rise),
+        ("punch", probe.snow_in_punch + probe.snow_out_punch),
+        ("raft", probe.snow_in_raft + probe.snow_out_raft),
+        ("landscape", probe.snow_in_landscape + probe.snow_out_landscape),
+        ("competent", probe.snow_in_competent + probe.snow_out_competent),
+        ("other", probe.snow_in_other + probe.snow_out_other),
+    ];
+    let mut best = ("?", i64::MAX);
+    for &(name, net) in &sites {
+        let err = (net - d_tracked).abs();
+        if err < best.1 {
+            best = (name, err);
+        }
+    }
     eprintln!(
-        "snow_site match: fall_net={fall_net:+} drift_net={drift_net:+} nuc_in−paid={nuc_unpaid:+} TRACKED={d_tracked:+}"
+        "snow_site match: best={} err={} TRACKED={d_tracked:+} (site_net≈TRACKED)",
+        best.0, best.1
     );
 }
 

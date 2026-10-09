@@ -879,7 +879,10 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
             continue;
         }
         // Grain ↔ litter — cream + strain shares ride with each host.
-        swap_cells_preserving_mycelium(world, gx, gy - 1, gx, gy);
+        {
+            let _scope = crate::budget::SnowSwapScope::punch();
+            swap_cells_preserving_mycelium(world, gx, gy - 1, gx, gy);
+        }
         // Keep the water seat awake so the next fall pass sinks cargo.
         if let Some(seat) = world.get_cell(gx, gy - 2) {
             if seat.material == MaterialId::Air {
@@ -2007,6 +2010,7 @@ fn raft_column_push(world: &World, gx: i32, waterline_y: i32, wind_push: f32) ->
 }
 
 fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx: i32) {
+    let _scope = crate::budget::SnowSwapScope::raft();
     for dy in (0..height).rev() {
         let y = bottom_y + dy;
         if world.get_cell(gx, y).is_none() || world.get_cell(nx, y).is_none() {
@@ -2673,6 +2677,7 @@ fn rise_buoyant_litter_list(world: &mut World, litter: &mut [(i32, i32)]) {
     if litter.is_empty() {
         return;
     }
+    let _scope = crate::budget::SnowSwapScope::rise();
     // Memoize grounded lake seats for this rise pass (flooded Organic used
     // to re-walk ≤512 cells per step × rise max).
     let mut grounded: HashMap<(i32, i32), bool> = HashMap::new();
