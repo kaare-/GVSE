@@ -250,7 +250,7 @@ fn report_climatic(label: &str, params: WorldgenParams) {
             Some(&mut humidity),
         );
         let mut step_t = wk_voxel::WorldStepTimings::default();
-        let mut step = WorldStep {
+        let step = WorldStep {
             world: &mut world,
             humidity: &mut humidity,
             wind: &mut wind,

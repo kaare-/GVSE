@@ -336,6 +336,7 @@ before coding.
 | 2026-10-09 | Phase 3 closed | Owner: move to Phase 4; ice + TRACKED flat after roof Snow fix |
 | 2026-10-09 | Phase 4 start | Re-profile post-ice tip; then width stretch / ≥1 ms lever ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-09 | Phase 4 seam wake | Wet seam lowers + skip full↔full band; Compact wall **62→55** ms (~18 FPS) |
+| 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
