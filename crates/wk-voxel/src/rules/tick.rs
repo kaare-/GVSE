@@ -799,6 +799,11 @@ fn tick_with_life_inner(
             }
         }
     }
+    // Thin Ice glaze: same once-per-tick seat (Ice is not sticky-loose).
+    if world.chunks.values().any(|c| c.has_ice) {
+        let _stage = crate::budget::SnowOtherStageGuard::enter(crate::budget::SnowOtherStage::FALL);
+        let _ = super::grain::apply_airborne_thin_ice_fall(world);
+    }
 
     // Dense cargo cannot ride floating Organic/Snow/Ice. Skip the full
     // loose punch scan when wake saw no raft cargo (demo: 0/200 hits but

@@ -371,8 +371,29 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
     let ch = CHUNK_CELLS_H as i32;
     let cw = CHUNK_CELLS_W as i32;
     let mut touches: Vec<(i32, i32)> = Vec::new();
-    let coords: Vec<_> = world.chunks.keys().copied().collect();
-    for coord in coords {
+    // Only seam lowers that touch a wet chunk (as lower or as upper).
+    // Walking every loaded cy pair was leftover on tall Compact rings
+    // (1088 chunks, most sky dry) — Phase 4 stretch seam_wake ~7.8 ms.
+    let lowers: Vec<ChunkCoord> = {
+        let mut set = std::collections::HashSet::new();
+        for (&coord, c) in &world.chunks {
+            if !(c.has_wet_pores || c.has_wet_air) {
+                continue;
+            }
+            let above = ChunkCoord::new(coord.cx, coord.cy + 1);
+            if world.chunks.contains_key(&above) {
+                set.insert(coord);
+            }
+            let below = ChunkCoord::new(coord.cx, coord.cy - 1);
+            if world.chunks.contains_key(&below) {
+                set.insert(below);
+            }
+        }
+        let mut v: Vec<_> = set.into_iter().collect();
+        v.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+        v
+    };
+    for coord in lowers {
         let above = ChunkCoord::new(coord.cx, coord.cy + 1);
         if !world.chunks.contains_key(&above) {
             continue;
@@ -390,8 +411,7 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
             continue;
         };
         // Same occupancy as [`seam_coupled_runs`]: a dry/dry pair has
-        // nothing to couple. Walking every loaded cy pair was leftover
-        // on a tall sky (272 chunks, most seams empty).
+        // nothing to couple.
         if !lo_chunk.has_wet_pores
             && !lo_chunk.has_wet_air
             && !hi_chunk.has_wet_pores
@@ -404,6 +424,7 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         if quiet_saturated_crust_pair(lo_chunk, hi_chunk) {
             continue;
         }
+        let lo_may_unsat = lo_chunk.has_unsaturated_pores;
         for lx in 0..cw {
             let gx = world.wrap_x(base_gx + lx);
             let lo = lo_chunk.get(lx as usize, (ch - 1) as usize);
@@ -427,6 +448,15 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
                 continue;
             }
             if !(lo_room || hi_room || lo_air || hi_air || lo_full || hi_full) {
+                continue;
+            }
+            // Both-at-capacity pore↔pore: apply already no-ops the face.
+            // Skip the 4-row band dirty; only chase a downward wetting
+            // front when the lower chunk still reports unsaturated room.
+            if lo_full && hi_full && !lo_air && !hi_air {
+                if lo_pore && lo_may_unsat {
+                    touch_downward_pore_front(world, &hydro, gx, y_lo, &mut touches);
+                }
                 continue;
             }
             for &yy in &band {
@@ -1547,6 +1577,83 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
                     );
                 }
             }
+            continue;
+        }
+        // Full pores + open Air: sticky flags already say there is no room
+        // inside the matrix. Interior donor walks were leftover on Compact
+        // shore chunks (weep ~3.8 ms/call). Perimeter donors cover neighbour
+        // Air; in-chunk vents still need a pass — collect vents only.
+        if open_air && !unsat {
+            let mut still_wet = false;
+            let mut vents: Vec<(u8, u8)> = Vec::new();
+            for y in 0..CHUNK_CELLS_H {
+                for x in 0..CHUNK_CELLS_W {
+                    let cell = chunk.get(x, y);
+                    if cell.material == MaterialId::Air && !cell.sat.is_full() {
+                        vents.push((x as u8, y as u8));
+                    }
+                    if is_porous_cell(cell, &hydro) && cell.sat.0 > 0 {
+                        still_wet = true;
+                    }
+                }
+            }
+            for &(vx, vy) in &vents {
+                let x = vx as usize;
+                let y = vy as usize;
+                for (dx, dy) in WEEP_DIRS {
+                    let lx = x as i32 + dx;
+                    let ly = y as i32 + dy;
+                    if lx < 0 || lx >= cw || ly < 0 || ly >= ch {
+                        continue;
+                    }
+                    let donor = chunk.get(lx as usize, ly as usize);
+                    if !is_weep_donor(donor, &hydro) {
+                        continue;
+                    }
+                    let dgx = world.wrap_x(base_gx + lx);
+                    let dgy = base_gy + ly;
+                    weep_dirty_from_donor(
+                        world,
+                        chunk,
+                        &hydro,
+                        dgx,
+                        dgy,
+                        lx as usize,
+                        ly as usize,
+                        donor,
+                        &mut touches,
+                    );
+                }
+            }
+            for y in 0..CHUNK_CELLS_H {
+                for x in 0..CHUNK_CELLS_W {
+                    if !is_chunk_perimeter(x, y) {
+                        continue;
+                    }
+                    let cell = chunk.get(x, y);
+                    if !is_weep_donor(cell, &hydro) {
+                        continue;
+                    }
+                    let gx = world.wrap_x(base_gx + x as i32);
+                    let gy = base_gy + y as i32;
+                    weep_dirty_from_donor(
+                        world,
+                        chunk,
+                        &hydro,
+                        gx,
+                        gy,
+                        x,
+                        y,
+                        cell,
+                        &mut touches,
+                    );
+                }
+            }
+            if !still_wet {
+                clear_pores.push(coord);
+            }
+            air_updates.push((coord, true));
+            unsat_updates.push((coord, false));
             continue;
         }
         let mut still_wet = false;

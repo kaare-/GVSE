@@ -379,6 +379,15 @@ local wetness once wetness is available.
 
 ## Chunk streaming: view / active / resident / evicted tiers
 
+**Phase 4 status (2026-10-10):** `wk-voxel` still **full-residency** —
+`stamp_world` loads the whole ring; there is no view/active/resident
+streamer, no eviction store, and no frozen-neighbour backlog. Compact
+(4096×1064) full-resident clocks **~19 sim-FPS** after Phase 4 CA cuts
+([`VOXEL_PERF.md`](VOXEL_PERF.md)). Per-tick cost therefore still scales
+with circumference. Owner fork: accept ~18–20 FPS full-resident Compact,
+or build the tiers below (first useful slice: **active-only physics**
+with resident frozen + in-memory store — no disk yet).
+
 Concretely, at any moment there are four sets of chunks:
 
 - **View**: chunks currently visible in the viewport (derived from
