@@ -223,8 +223,10 @@ hard gates; remaining Xvfb framing weakness is not a Phase-3 blocker.
 
 **Still open (merge hygiene, not Phase 3 scope)**
 
-- Stack `#365`→`#373` CI-green / ready / CLEAN onto `park-bank`. Agent
-  cannot Enable auto-merge from here — owner merge bottom-up.
+- Stack `#365`→`#373` CI-green / ready / CLEAN onto `park-bank` (2026-10-10
+  recheck: all `MERGEABLE` / `CLEAN`, `autoMergeRequest=null`). Agent
+  cannot Enable auto-merge from here — owner merge bottom-up. `#374`
+  (Phase 4 tip) stays draft until that stack lands under it.
 
 ---
 
