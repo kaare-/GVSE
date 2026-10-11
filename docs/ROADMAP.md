@@ -277,7 +277,33 @@ May include ring width / ceiling / streaming follow-ups from
   chunk store is on (default). F5 / quit-save flushes chunk + side +
   organism parks into the snapshot (re-parks next stream tick).
   Stale `saves/stream_chunks/{seed}` dirs prune on R / regen / load /
-  first disk enable. **OPEN:** other ≥1 ms Phase 4 levers.
+  first disk enable. **Streaming residency + disk park hygiene closed**
+  (through `#395`).
+
+### Decision list — next Phase 4 lever *(2026-10-11)*
+
+Pick one before more code (daily 09:00 Oslo lists continue):
+
+1. **Re-profile stretch stream+evict tip** after organism park + disk
+   wire — confirm ~67 sim-FPS still holds; capture new hotspot table
+   (bodies / seepage / steam / organism step).
+2. **Width stretch toward 5 km+** at stream-on (WORLDGEN scale goal) —
+   only after (1) if FPS headroom remains.
+3. **≥1 ms surgical CA/field cut** without weather coarsen — candidates
+   from settle2 table: seepage seam_wake, rock bodies leftover,
+   humidity.advect (see [`VOXEL_PERF.md`](VOXEL_PERF.md)). Prefer
+   measured A/B before shipping.
+4. **Park Phase 4 / open Phase 5 planning** — only if owner wants bio
+   major next instead of more scale/FPS.
+
+**Default if no pick:** (1) re-profile, then (2) or (3) from the new
+hotspots.
+
+**Re-profile done (2026-10-11):** stretch stream+evict still ~19 →
+**~67** sim-FPS (chunks 1088 → 459). Stream-on top costs: rock bodies
+**~4.3** ms, seepage **~2.4**, temp **~2.6**, rain **~1.4**, steam
+**~1.2**. Next pick without owner override: surgical bodies/seepage
+cut (≥1 ms) **or** width stretch if playable headroom is enough.
 
 ---
 
@@ -366,6 +392,7 @@ before coding.
 | 2026-10-11 | Stream disk play | Tab toggle; `saves/stream_chunks/{seed}` when streaming |
 | 2026-10-11 | F5 stream flush | to_snapshot restores ChunkStore/side/organism parks first |
 | 2026-10-11 | Stream chunk prune | Drop other seed dirs under saves/stream_chunks on reseed |
+| 2026-10-11 | Stream stack closed | Residency+disk+F5+prune done; next = re-profile / ≥1 ms / width |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
