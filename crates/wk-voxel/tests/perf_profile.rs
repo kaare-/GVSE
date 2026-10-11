@@ -18,13 +18,13 @@
 use std::time::{Duration, Instant};
 
 use wk_voxel::{
-    apply_rain_with_temp, find_plant_slot, set_parallel_enabled, stamp_world, step_world, Blueprint,
-    CarbonBudget,
-    CarbonConfig, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig,
-    EvapConfig, FailureConfig, FungiConfig, Genome, GrainConfig, Humidity, KarstConfig,
-    OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, PhysicsTimings,
-    RainConfig, SteamConfig, StreamWindow, Temperature, Wind, World, WorldStep, WorldStepConfig,
-    WorldStepTimings, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_SUBSTEPS,
+    apply_rain_with_temp, find_plant_slot, set_parallel_enabled, stamp_world, step_world,
+    sync_residency, Blueprint, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
+    CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, Genome,
+    GrainConfig, Humidity, KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig,
+    PerfConfig, PhaseConfig, PhysicsTimings, RainConfig, SteamConfig, StreamWindow, Temperature,
+    Wind, World, WorldStep, WorldStepConfig, WorldStepTimings, WorldgenParams, CHUNK_CELLS_H,
+    CHUNK_CELLS_W, FLOW_SUBSTEPS,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -726,6 +726,8 @@ fn perf_profile_stretch_width() {
 
 /// Compact stretch with camera `StreamWindow` on vs full-resident.
 /// Play-app default view ≈ screen/PX; use 320 cols (~5 chunks) + halo.
+/// Stream-on path also runs [`sync_residency`] (ChunkStore + side maps),
+/// matching the play app under stream-active physics.
 #[test]
 #[ignore]
 fn perf_profile_stretch_stream_ab() {
@@ -733,13 +735,14 @@ fn perf_profile_stretch_stream_ab() {
     let params = stretch_params();
     for (label, stream_on) in [
         ("stretch full-resident (stream off)", false),
-        ("stretch stream view=320 + halo", true),
+        ("stretch stream view=320 + halo + evict", true),
     ] {
         let mut scene = stamp_scene(params);
         scene.perf = PerfConfig::default();
         let apply_stream = |s: &mut Scene| {
             if stream_on {
                 s.world.stream_window = Some(StreamWindow::new(s.params.width_cols / 2, 320));
+                let _ = sync_residency(&mut s.world);
             } else {
                 s.world.stream_window = None;
             }
@@ -757,6 +760,13 @@ fn perf_profile_stretch_stream_ab() {
         }
         let wall = wall.elapsed();
         profile_label(label, &scene.params, scene.world.chunks.len());
+        eprintln!(
+            "  residency            chunks={}  store={}  side_entries={}  backlog_sat={}",
+            scene.world.chunks.len(),
+            scene.world.chunk_store.len(),
+            scene.world.side_map_store.entry_count(),
+            wk_voxel::frozen_backlog_total(&scene.world),
+        );
         print_pass_table(&accum, MEASURE_TICKS, wall);
         print_physics_table(&phys, MEASURE_TICKS);
         eprintln!();
