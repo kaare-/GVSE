@@ -165,6 +165,12 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   couple now quenches free-water tiles under the lid; buried free-water
   climate relax slightly stronger.
 
+**Landed (ice sheet lock)** (2026-10-08 playtest)
+
+- Under-lid freeze waits for lid-level neighbours (ice/snow/shore) so
+  columns cannot finger ahead of the sheet. Heat quench retuned milder
+  after owner “dumping heat” note.
+
 **Still open**
 
 - Owner playtest gate: “reads as ice” / no lake lid pulse / deep lake
