@@ -310,6 +310,16 @@ pub fn sync_residency(world: &mut World) -> Result<SyncResidencyStats, String> {
     }
     if stats.reloaded > 0 {
         world.invalidate_chunk_cache_pub();
+        // Thaw water booked while the slab was missing.
+        let thawed: Vec<crate::chunk::ChunkCoord> = world
+            .frozen_backlog
+            .keys()
+            .copied()
+            .filter(|c| world.chunks.contains_key(c))
+            .collect();
+        for coord in thawed {
+            crate::frozen_backlog::apply_frozen_backlog(world, coord);
+        }
     }
 
     let (side_parked, side_restored) = sync_side_maps(world, win);
@@ -337,6 +347,15 @@ pub fn restore_all_from_store(world: &mut World) -> Result<usize, String> {
         world.invalidate_chunk_cache_pub();
     }
     n += restore_all_side_maps(world);
+    let thawed: Vec<crate::chunk::ChunkCoord> = world
+        .frozen_backlog
+        .keys()
+        .copied()
+        .filter(|c| world.chunks.contains_key(c))
+        .collect();
+    for coord in thawed {
+        crate::frozen_backlog::apply_frozen_backlog(world, coord);
+    }
     Ok(n)
 }
 

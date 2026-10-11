@@ -98,6 +98,13 @@ pub struct World {
     /// [`crate::chunk_store::SideMapStore`].
     #[serde(skip, default)]
     pub side_map_store: crate::chunk_store::SideMapStore,
+    /// Water booked into missing (evicted) chunks while streaming.
+    /// See [`crate::frozen_backlog::FrozenBacklog`].
+    #[serde(skip, default)]
+    pub frozen_backlog: crate::fasthash::FxHashMap<
+        crate::chunk::ChunkCoord,
+        crate::frozen_backlog::FrozenBacklog,
+    >,
     /// Soft labile litter (Set E) keyed by wrapped world-x column.
     /// Death deposits units here; fungi digest them before Organic cells.
     ///
@@ -312,6 +319,7 @@ impl World {
             stream_window: None,
             chunk_store: crate::chunk_store::ChunkStore::default(),
             side_map_store: crate::chunk_store::SideMapStore::default(),
+            frozen_backlog: FxHashMap::default(),
             soft_litter: FxHashMap::default(),
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),

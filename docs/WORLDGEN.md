@@ -399,8 +399,10 @@ Steam boil + leftover cands windowed. Compact stretch stream ~19 →
    dissolved, pipe, soft litter, …) park with them. Play app calls
    `sync_residency` when stream-active physics is on;
    `restore_all_from_store` when it turns off. Far `set_cell` reloads
-   or skips blank remint. Mycelium/spore parking + `FrozenBacklog`
-   still open. TRACKED soaks stay full-resident (`stream_window = None`).
+   or skips blank remint. Water-only `FrozenBacklog` absorbs flow into
+   missing chunks and thaws on reload (`sat_totals` counts it).
+   Mycelium/spore parking + sediment backlog still open. TRACKED soaks
+   stay full-resident (`stream_window = None`).
 
 Concretely, at any moment there are four sets of chunks:
 
@@ -467,17 +469,20 @@ book it into a **backlog** on the frozen chunk:
 pub struct FrozenBacklog {
     pub water_in_left: i64,
     pub water_in_right: i64,
-    pub sediment_in_left: SedimentLoad,
-    pub sediment_in_right: SedimentLoad,
-    pub moisture_in_left: i64,
-    pub moisture_in_right: i64,
+    pub water_other: i64, // vertical / interior of a missing slab
+    // sediment / moisture — deferred
 }
 ```
 
-On thaw, the backlog is applied to the appropriate edge columns of the
-now-active chunk exactly once, then cleared. Mass is conserved
-throughout. This is the same shape as the existing `ChunkInbox` but
-persists across many ticks instead of being drained every tick.
+**Landed (water-only, 2026-10-11):** `commit_air_sat_xfers` books into
+`World::frozen_backlog` when the dest chunk is missing under a stream
+window (instead of reflecting). `sync_residency` / `restore_all_from_store`
+call `apply_frozen_backlog` after reload. `sat_totals` includes backlog
+(+ parked side-map steam/cave). Sediment/moisture backlog still open.
+
+On thaw, water is painted onto edge Air columns (left/right) or any Air
+(`water_other`), then the entry is cleared (remainder stays booked if
+the slab cannot hold it).
 
 ### Rule 2 — Active-window boundary is absorbing, not reflective
 
