@@ -433,3 +433,13 @@ re-profile.
    `/opt/cursor/artifacts/phase4-stretch-5km-stream.log`. Next: stream-
    gate temp props refresh + dense slab work, and clamp rain `x_range`
    to the active window.
+6. **Temp+rain stream gate (2026-10-11):** `apply_rain` skips outside
+   `StreamWindow`; temp props refresh uses air placeholders for far `hx`
+   (no `live_surface_at` through evicted chunks). **5 km** wall
+   **62.5 → 13.6** ms/tick (~16 → **~74** sim-FPS) — **passes ≥30**.
+   Rain **21.4 → 0.30** ms; temp **32.0 → 4.3** ms. Compact stretch
+   stream+evict wall **10.9 → 8.7** ms (~91 → **~115** sim-FPS); rain
+   **1.4 → 0.20**; temp **2.6 → 1.5**. Logs:
+   `phase4-stretch-5km-after-temp-rain.log`,
+   `phase4-stretch-temp-rain-ab.log`. Next: wind.rebuild / rock bodies
+   on 5 km, or park Phase 4.

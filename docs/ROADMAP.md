@@ -286,16 +286,15 @@ Pick one before more code (daily 09:00 Oslo lists continue):
 
 1. ~~**Re-profile stretch stream+evict tip**~~ — done (~67 → ~91 after
    body/seep gates).
-2. ~~**Width stretch toward 5 km+**~~ — probe done; **fails ≥30**
-   (~16 sim-FPS). Blockers: temp **32** + rain **21** ms full-ring.
-3. **Stream-gate temperature + rain** under `StreamWindow` — required
-   for 5 km playable; props refresh / dense slab still walk full width;
-   `apply_rain` `x_range` is full ring. Re-measure
-   `perf_profile_stretch_5km_stream` after.
-4. **Park Phase 4 / open Phase 5 planning** — only if owner wants bio
-   major next instead of more scale/FPS.
+2. ~~**Width stretch toward 5 km+**~~ — probe + gate: **~74** sim-FPS
+   (≥30 **pass**) after temp+rain stream gate.
+3. ~~**Stream-gate temperature + rain**~~ — done; 5 km wall **62.5 →
+   13.6** ms; Compact stream+evict ~91 → **~115** sim-FPS.
+4. **Park Phase 4 / open Phase 5 planning** — or trim 5 km leftovers
+   (wind.rebuild ~1.5 ms, rock bodies ~3.7 ms) if more headroom wanted.
 
-**Default if no pick:** (3) temp+rain stream gate, then re-run 5 km.
+**Default if no pick:** (4) park Phase 4 / open Phase 5, unless owner
+wants more 5 km FPS.
 
 - **2026-10-11:** Competent body wake/apply honors `StreamWindow`
   (far float cadence skipped; out-of-band wakes deferred). Stretch
@@ -308,8 +307,11 @@ Pick one before more code (daily 09:00 Oslo lists continue):
 - **2026-10-11:** Width stretch probe — 5.12 km ring under stream+evict
   (view=320): wall **62.5** ms (~**16** sim-FPS), chunks **459** /
   store **4981**. Physics **6.3** ms; **temperature.step 32** + **rain
-  21** dominate (full-ring). Gate: **fail ≥30**. Next lever: stream-
-  gate temp + rain (see [`VOXEL_PERF.md`](VOXEL_PERF.md)).
+  21** dominate (full-ring). Gate: **fail ≥30**.
+- **2026-10-11:** Temp props refresh + rain honor `StreamWindow`. 5 km
+  wall **62.5 → 13.6** ms (~16 → **~74** sim-FPS) — **pass ≥30**. Rain
+  **21 → 0.30** ms; temp **32 → 4.3** ms. Compact stream+evict ~91 →
+  **~115** sim-FPS.
 
 ---
 
@@ -402,6 +404,7 @@ before coding.
 | 2026-10-11 | Body stream gate | Competent float wake + wake regions honor active StreamWindow |
 | 2026-10-11 | Seep stream gate | Lake-bed/seam/weep wakes + seam couple honor StreamWindow |
 | 2026-10-11 | 5 km stream probe | 20480×1064 stream+evict ~16 sim-FPS (fail ≥30); temp 32 + rain 21 ms |
+| 2026-10-11 | Temp+rain stream | 5 km ~16→**~74** sim-FPS (pass ≥30); Compact stream ~91→**~115** |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

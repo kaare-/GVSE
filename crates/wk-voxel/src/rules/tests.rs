@@ -3976,6 +3976,51 @@ fn rain_respects_x_range() {
 }
 
 #[test]
+fn rain_skips_columns_outside_stream_window() {
+    use crate::streaming::StreamWindow;
+
+    // Wider than active (view + 2×halo ≈ 9 chunks) so a far side stays frozen.
+    let n_chunks = 32;
+    let width = CHUNK_CELLS_W as i32 * n_chunks;
+    let mut w = World::new(11);
+    w.wrap_width = Some(width);
+    for cx in 0..n_chunks {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+        for x in 0..CHUNK_CELLS_W as i32 {
+            let gx = cx * CHUNK_CELLS_W as i32 + x;
+            w.set_cell(gx, 0, Cell::solid(MaterialId::Bedrock));
+        }
+    }
+    // View one chunk (~64 cols) + halo; focus on ring centre.
+    w.stream_window = Some(StreamWindow::new(width / 2, CHUNK_CELLS_W as i32));
+    let cfg = RainConfig {
+        top_y: 30,
+        x_range: (0, width - 1),
+        prob_per_col_per_tick: 1.0,
+        droplet_sat: 40,
+        seed_salt: 1,
+        closed_loop: false,
+        ..RainConfig::default()
+    };
+    apply_rain(&mut w, &cfg);
+    let win = w.stream_window.unwrap();
+    let mut wet_in = 0;
+    let mut wet_out = 0;
+    for gx in 0..width {
+        let sat = w.get_cell(gx, 1).unwrap().sat.0;
+        if win.contains_world_x(&w, gx) {
+            if sat > 0 {
+                wet_in += 1;
+            }
+        } else if sat > 0 {
+            wet_out += 1;
+        }
+    }
+    assert!(wet_in > 0, "active band should receive rain");
+    assert_eq!(wet_out, 0, "far stream columns must stay dry");
+}
+
+#[test]
 fn rain_droplet_saturates_at_full() {
     let mut w = setup_sky_row(30);
     w.set_cell(3, 1, Cell::water()); // surface already full

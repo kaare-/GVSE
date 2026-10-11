@@ -892,9 +892,19 @@ impl Temperature {
         // One seed-rock walk per column. Far-sky / deep-crust tiles
         // share that anchor — calling `live_surface_at` per tall-sky
         // tile was leftover world scan on 1000-cell columns.
+        //
+        // Under a stream window, far columns keep a cheap air placeholder
+        // so we do not `live_surface_at` through evicted chunks (5 km
+        // dense refresh was ~hundreds of ms/call). Active columns refresh
+        // for real; the next age tick recomputes when the camera pans.
         let mut anchors: FxHashMap<i32, (i32, i32, i32)> = FxHashMap::default();
         let tc = self.tile_cols.max(1);
+        let air = air_thermal();
         for &(hx, hy) in keys {
+            if !crate::streaming::stream_allows_hx(world, hx, tc) {
+                self.props_cache.insert((hx, hy), air);
+                continue;
+            }
             let (rock_mid, alo, ahi) = *anchors
                 .entry(hx)
                 .or_insert_with(|| self.column_rock_anchors(world, hx));
@@ -2412,9 +2422,43 @@ fn column_surface_thermal(
 mod tests {
     use super::*;
     use crate::cell::Cell;
-    use crate::chunk::ChunkCoord;
+    use crate::chunk::{ChunkCoord, CHUNK_CELLS_W};
     use crate::climate::DEMO_DAY_TICKS;
+    use crate::streaming::StreamWindow;
     use crate::worldgen::WorldgenParams;
+
+    #[test]
+    fn props_refresh_uses_air_placeholder_outside_stream_window() {
+        // Wider than active (view + 2×halo ≈ 9 chunks) so the left edge freezes.
+        let width = CHUNK_CELLS_W as i32 * 32;
+        let mut w = World::new(1);
+        w.wrap_width = Some(width);
+        for gx in 0..width {
+            w.set_cell(gx, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(gx, 1, Cell::solid(MaterialId::Stone));
+        }
+        // Narrow view around ring centre — left edge is frozen.
+        w.stream_window = Some(StreamWindow::new(width / 2, CHUNK_CELLS_W as i32));
+        let mut t = Temperature::with_world_bounds(4, 0, 0, width, 64, 1, width, 16, true);
+        let h = Humidity::with_world_bounds(4, 0, 0, width, 64);
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        t.step(Some(&w), &h, 0, None);
+        let tc = 4;
+        let near_hx = (width / 2) / tc;
+        let far_hx = 0;
+        assert!(crate::streaming::stream_allows_hx(&w, near_hx, tc));
+        assert!(!crate::streaming::stream_allows_hx(&w, far_hx, tc));
+        let far = t.props_cache.get(&(far_hx, 0)).expect("far cached");
+        assert!(
+            matches!(far.layer, TileLayer::Air),
+            "far deep tile must not world-walk; air placeholder"
+        );
+        let near = t.props_cache.get(&(near_hx, 0)).expect("near cached");
+        assert!(
+            matches!(near.layer, TileLayer::Buried { .. }),
+            "active deep tile should still classify as buried"
+        );
+    }
 
     #[test]
     fn sample_bilinear_smooths_between_tiles() {
