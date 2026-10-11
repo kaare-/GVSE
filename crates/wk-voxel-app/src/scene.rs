@@ -4,8 +4,9 @@
 //! stack imports.
 
 use wk_voxel::{
-    stamp_world, CarbonBudget, CloudStore, GeotechMap, Humidity, LandscapeBodyStore, OrganismStore,
-    SimSnapshot, SupportMap, Temperature, Wind, World, WorldgenParams,
+    restore_all_from_store, stamp_world, CarbonBudget, CloudStore, GeotechMap, Humidity,
+    LandscapeBodyStore, OrganismStore, SimSnapshot, SupportMap, Temperature, Wind, World,
+    WorldgenParams,
 };
 
 /// Humidity / wind / temp tile side (world cells per sample).
@@ -92,7 +93,21 @@ impl Scene {
         }
     }
 
-    pub fn to_snapshot(&self) -> SimSnapshot {
+    /// Pull serde-skip streaming parks into serializable fields before F5.
+    ///
+    /// ChunkStore / SideMapStore / FrozenBacklog / organism `parked*` are
+    /// not postcard'd. Restoring into `World` maps + live atoms/corpses
+    /// makes the snapshot complete; the next stream tick re-parks.
+    pub fn flush_streaming_for_save(&mut self) {
+        let _ = restore_all_from_store(&mut self.world);
+        let _ = self
+            .organisms
+            .sync_organism_residency(self.world.wrap_width, None);
+        self.world.stream_window = None;
+    }
+
+    pub fn to_snapshot(&mut self) -> SimSnapshot {
+        self.flush_streaming_for_save();
         SimSnapshot::new(
             self.params,
             self.world.clone(),
@@ -174,5 +189,29 @@ mod tests {
         let s = Scene::new(WorldgenParams::default());
         assert!(s.wind.climate_vx > 0.0);
         assert!(!s.temperature.cells.is_empty());
+    }
+
+    #[test]
+    fn to_snapshot_flushes_parked_organisms() {
+        use wk_voxel::{Atom, StreamWindow, CHUNK_CELLS_W};
+        // Default Compact (16 chunks) fits inside the resident band — use a
+        // wider ring so far columns can actually park.
+        let mut params = WorldgenParams::default();
+        params.width_cols = 64 * CHUNK_CELLS_W as i32;
+        let mut s = Scene::new(params);
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        s.organisms.atoms.push(Atom::new(far_gx, 5, 40.0));
+        s.world.stream_window = Some(StreamWindow::new(0, 128));
+        s.organisms
+            .sync_organism_residency(s.world.wrap_width, s.world.stream_window);
+        assert_eq!(s.organisms.parked.len(), 1);
+        assert!(s.organisms.atoms.is_empty());
+        let snap = s.to_snapshot();
+        assert!(
+            s.organisms.parked.is_empty() && snap.organisms.parked.is_empty(),
+            "flush must clear park before serialize"
+        );
+        assert_eq!(snap.organisms.atoms.len(), 1);
+        assert_eq!(snap.organisms.atoms[0].gx, far_gx);
     }
 }

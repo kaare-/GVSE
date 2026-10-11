@@ -90,8 +90,8 @@ pub struct World {
     #[serde(skip, default)]
     pub stream_window: Option<crate::streaming::StreamWindow>,
     /// Postcard parking lot for chunks outside the resident band.
-    /// Not saved — F5 still captures only currently loaded chunks until
-    /// a follow-up flushes the store. See [`crate::chunk_store`].
+    /// Not saved directly — play `Scene::to_snapshot` flushes via
+    /// [`crate::chunk_store::restore_all_from_store`] first.
     #[serde(skip, default)]
     pub chunk_store: crate::chunk_store::ChunkStore,
     /// Parked sparse mass/heat side maps for far columns. See

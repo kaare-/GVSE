@@ -274,8 +274,9 @@ May include ring width / ceiling / streaming follow-ups from
   (pop / corpse caps include parked; straddlers stay until fully out).
   TRACKED soaks stay full-resident. Play can park under
   `saves/stream_chunks/{seed}` when Tab → Performance → Stream disk
-  chunk store is on (default). **OPEN:** flush organism park on F5;
-  prune stale seed chunk dirs.
+  chunk store is on (default). F5 / quit-save flushes chunk + side +
+  organism parks into the snapshot (re-parks next stream tick).
+  **OPEN:** prune stale seed chunk dirs; other ≥1 ms levers.
 
 ---
 
@@ -362,6 +363,7 @@ before coding.
 | 2026-10-11 | Stream body span | Park when all body cols outside resident; restore on any tip |
 | 2026-10-11 | ChunkStore disk | Opt-in directory backend (`enable_disk`); play wire still open |
 | 2026-10-11 | Stream disk play | Tab toggle; `saves/stream_chunks/{seed}` when streaming |
+| 2026-10-11 | F5 stream flush | to_snapshot restores ChunkStore/side/organism parks first |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
