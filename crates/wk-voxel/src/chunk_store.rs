@@ -9,7 +9,7 @@
 //! [`restore_all_from_store`] runs when streaming turns off. TRACKED soaks
 //! keep `stream_window = None` (no-op). Mass-carrying sparse side maps
 //! (steam, dissolved, pipe, …) park with chunks via [`SideMapStore`].
-//! WORLDGEN `FrozenBacklog` is still open.
+//! Living organisms park on [`crate::organism::OrganismStore`] (scene-owned).
 //!
 //! Far [`World::set_cell`](crate::grid::World::set_cell) reloads from the
 //! store or skips blank remint outside the resident band.
@@ -31,7 +31,7 @@ pub struct ChunkStore {
 /// Parked sparse `(gx, gy)` / column books for far resident eviction.
 ///
 /// Keeps TRACKED-ish mass ledgers + spatial mycelium / spore books from
-/// orphaning when cells leave RAM. Organism ECS parking still open.
+/// orphaning when cells leave RAM. Living atoms park on OrganismStore.
 #[derive(Debug, Clone, Default)]
 pub struct SideMapStore {
     pub steam: FxHashMap<(i32, i32), u8>,
