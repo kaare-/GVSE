@@ -145,9 +145,20 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 - Ice floes on full lake + surface film over full water; rise kept.
 - Default `max_ice_cells_per_column=64`, `enable_cull=false`.
 
+**Xvfb acceptance pass** (2026-10-08, tip of pulse + lake-heat stack)
+
+- Alpine-cold (T≈−0.8 °C) + F3 water/Ice paint; ~50 s unpaused soak.
+- Stills: `/opt/cursor/artifacts/phase3-ice-accept-03-lid-fresh.png` …
+  `07-soak-53s.png`, `10-final.png`.
+- Agent read: phase=on under subzero; no powder cascade in stills.
+  Painted lid is hard to resolve at this framing — **owner playtest**
+  remains the acceptance gate (pulse / deep-lake heat / “reads as ice”).
+- Glossary Phase line updated for partial-sat freeze + hysteresis.
+
 **Still open**
 
-- Formal “reads as ice” acceptance (Xvfb / playtest) after brittle pass.
+- Owner playtest gate: “reads as ice” / no lake lid pulse / deep lake
+  cools when `base_temp` dropped with overburden off.
 
 **Exit criteria**
 

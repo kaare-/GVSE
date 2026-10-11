@@ -402,9 +402,11 @@ const SKY: &[(&str, LineKind)] = &[
 
 const GROUND: &[(&str, LineKind)] = &[
     ("Phase (I)", LineKind::Head),
-    ("Freeze: only a full water cell becomes Ice (partial films would", LineKind::Body),
-    ("mint on thaw). Thaw returns Air + full sat. Slush is snow on", LineKind::Body),
-    ("water or rain on ice. Unsupported ice/snow falls as solids.", LineKind::Body),
+    ("Freeze: wet Air with sat ≥ min_to_freeze (default 64) becomes Ice", LineKind::Body),
+    ("banking thaw yield on Cell.sat (legacy sat=0 ⇒ full). Thaw restores", LineKind::Body),
+    ("that sat — no mint. Free-water T gates freeze; thaw needs a small", LineKind::Body),
+    ("hysteresis over freeze point. Slush is snow on water or rain on ice.", LineKind::Body),
+    ("Unsupported ice/snow falls as solids; thick lids refuse powder peel.", LineKind::Body),
     ("", LineKind::Blank),
     ("Karst (K)", LineKind::Head),
     ("Wet limestone neighbors can dissolve. Slow on purpose — Tab", LineKind::Body),
