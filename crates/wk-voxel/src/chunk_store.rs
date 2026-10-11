@@ -27,8 +27,8 @@ pub struct ChunkStore {
 
 /// Parked sparse `(gx, gy)` / column books for far resident eviction.
 ///
-/// Keeps TRACKED-ish mass ledgers from orphaning when cells leave RAM.
-/// Mycelium / spore / organism books stay live (follow-up).
+/// Keeps TRACKED-ish mass ledgers + spatial mycelium books from orphaning
+/// when cells leave RAM. Spore bank / organisms still live (follow-up).
 #[derive(Debug, Clone, Default)]
 pub struct SideMapStore {
     pub steam: FxHashMap<(i32, i32), u8>,
@@ -41,6 +41,9 @@ pub struct SideMapStore {
     pub pipe_res: FxHashMap<(i32, i32), u32>,
     pub pipe_steam_t: FxHashMap<(i32, i32), f32>,
     pub soft_litter: FxHashMap<i32, u16>,
+    pub mycelium_strains: FxHashMap<(i32, i32), Vec<(u32, u8)>>,
+    pub mycelium_energy: FxHashMap<(i32, i32), u8>,
+    pub mycelium_lineage: FxHashMap<(i32, i32), crate::fungi::MyceliumLineage>,
 }
 
 impl SideMapStore {
@@ -55,6 +58,9 @@ impl SideMapStore {
             && self.pipe_res.is_empty()
             && self.pipe_steam_t.is_empty()
             && self.soft_litter.is_empty()
+            && self.mycelium_strains.is_empty()
+            && self.mycelium_energy.is_empty()
+            && self.mycelium_lineage.is_empty()
     }
 
     pub fn entry_count(&self) -> usize {
@@ -68,6 +74,9 @@ impl SideMapStore {
             + self.pipe_res.len()
             + self.pipe_steam_t.len()
             + self.soft_litter.len()
+            + self.mycelium_strains.len()
+            + self.mycelium_energy.len()
+            + self.mycelium_lineage.len()
     }
 }
 
@@ -219,6 +228,14 @@ fn sync_side_maps(world: &mut World, win: StreamWindow) -> (usize, usize) {
     parked += park_xy(&mut world.pipe_res, &mut store.pipe_res, wrap, win);
     parked += park_xy(&mut world.pipe_steam_t, &mut store.pipe_steam_t, wrap, win);
     parked += park_col(&mut world.soft_litter, &mut store.soft_litter, wrap, win);
+    parked += park_xy(&mut world.mycelium_strains, &mut store.mycelium_strains, wrap, win);
+    parked += park_xy(&mut world.mycelium_energy, &mut store.mycelium_energy, wrap, win);
+    parked += park_xy(
+        &mut world.mycelium_lineage.cells,
+        &mut store.mycelium_lineage,
+        wrap,
+        win,
+    );
 
     restored += restore_xy(&mut world.steam, &mut store.steam, wrap, Some(win));
     restored += restore_xy(&mut world.cave_humidity, &mut store.cave_humidity, wrap, Some(win));
@@ -230,6 +247,24 @@ fn sync_side_maps(world: &mut World, win: StreamWindow) -> (usize, usize) {
     restored += restore_xy(&mut world.pipe_res, &mut store.pipe_res, wrap, Some(win));
     restored += restore_xy(&mut world.pipe_steam_t, &mut store.pipe_steam_t, wrap, Some(win));
     restored += restore_col(&mut world.soft_litter, &mut store.soft_litter, wrap, Some(win));
+    restored += restore_xy(
+        &mut world.mycelium_strains,
+        &mut store.mycelium_strains,
+        wrap,
+        Some(win),
+    );
+    restored += restore_xy(
+        &mut world.mycelium_energy,
+        &mut store.mycelium_energy,
+        wrap,
+        Some(win),
+    );
+    restored += restore_xy(
+        &mut world.mycelium_lineage.cells,
+        &mut store.mycelium_lineage,
+        wrap,
+        Some(win),
+    );
     world.side_map_store = store;
     (parked, restored)
 }
@@ -248,6 +283,14 @@ fn restore_all_side_maps(world: &mut World) -> usize {
     n += restore_xy(&mut world.pipe_res, &mut store.pipe_res, wrap, None);
     n += restore_xy(&mut world.pipe_steam_t, &mut store.pipe_steam_t, wrap, None);
     n += restore_col(&mut world.soft_litter, &mut store.soft_litter, wrap, None);
+    n += restore_xy(&mut world.mycelium_strains, &mut store.mycelium_strains, wrap, None);
+    n += restore_xy(&mut world.mycelium_energy, &mut store.mycelium_energy, wrap, None);
+    n += restore_xy(
+        &mut world.mycelium_lineage.cells,
+        &mut store.mycelium_lineage,
+        wrap,
+        None,
+    );
     world.side_map_store = store;
     n
 }
@@ -547,5 +590,30 @@ mod tests {
         assert_eq!(w.dissolved.get(&(far_gx, 8)), Some(&12));
         assert_eq!(w.soft_litter.get(&far_gx), Some(&3));
         assert!(w.side_map_store.steam.is_empty());
+    }
+
+    #[test]
+    fn sync_parks_and_restores_mycelium_books() {
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut w = ring_world(cols);
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        w.set_cell(far_gx, 8, Cell::solid(MaterialId::Organic));
+        w.mycelium_energy.insert((far_gx, 8), 90);
+        w.mycelium_strains
+            .insert((far_gx, 8), vec![(1, 200), (2, 55)]);
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        let stats = sync_residency(&mut w).expect("evict");
+        assert!(stats.side_parked >= 2, "{stats:?}");
+        assert!(!w.mycelium_energy.contains_key(&(far_gx, 8)));
+        assert!(!w.mycelium_strains.contains_key(&(far_gx, 8)));
+        assert_eq!(w.side_map_store.mycelium_energy.get(&(far_gx, 8)), Some(&90));
+
+        w.stream_window = Some(StreamWindow::new(far_gx, 128));
+        sync_residency(&mut w).expect("reload");
+        assert_eq!(w.mycelium_energy.get(&(far_gx, 8)), Some(&90));
+        assert_eq!(
+            w.mycelium_strains.get(&(far_gx, 8)).map(|v| v.len()),
+            Some(2)
+        );
     }
 }
