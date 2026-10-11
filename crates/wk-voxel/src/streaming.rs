@@ -1,0 +1,186 @@
+//! Camera-centered active window for Phase 4 streaming.
+//!
+//! WORLDGEN view / active / resident / evicted tiers. This module is the
+//! first slice: **active-only CA physics** on a still-full-resident ring.
+//! Non-active chunks stay in RAM with their dirty bits preserved until
+//! the camera brings them into the window (no eviction store / backlog yet).
+
+use crate::active::ActiveChunk;
+use crate::chunk::CHUNK_CELLS_W;
+use crate::grid::World;
+
+/// Halo chunks on each side of the view (WORLDGEN default ≈ 48 m).
+pub const HALO_CHUNKS: i32 = 3;
+
+/// Resident margin beyond active (documented; unused until eviction).
+#[allow(dead_code)]
+pub const RESIDENT_MARGIN_CHUNKS: i32 = 8;
+
+/// Inclusive wrap-aware span of chunk-x columns that may run CA physics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamWindow {
+    /// Focus column in world cells (wrapped when the world wraps).
+    pub focus_col: i32,
+    /// Visible column count (screen width / cell size).
+    pub view_cols: i32,
+    /// Halo on each side of the view, in chunks.
+    pub halo_chunks: i32,
+}
+
+impl StreamWindow {
+    pub fn new(focus_col: i32, view_cols: i32) -> Self {
+        Self {
+            focus_col,
+            view_cols: view_cols.max(1),
+            halo_chunks: HALO_CHUNKS,
+        }
+    }
+
+    /// Half-width of the active set in chunk columns (view/2 + halo).
+    pub fn active_half_chunks(&self) -> i32 {
+        let view_half = (self.view_cols + CHUNK_CELLS_W as i32 - 1) / (2 * CHUNK_CELLS_W as i32);
+        view_half.max(1) + self.halo_chunks.max(0)
+    }
+
+    fn span_x(world: &World) -> Option<i32> {
+        let w = world.wrap_width?;
+        if w <= 0 {
+            return None;
+        }
+        Some((w as i32 + CHUNK_CELLS_W as i32 - 1) / CHUNK_CELLS_W as i32)
+    }
+
+    fn wrap_cx(cx: i32, span: Option<i32>) -> i32 {
+        match span {
+            Some(n) if n > 0 => cx.rem_euclid(n),
+            _ => cx,
+        }
+    }
+
+    /// Center chunk-x of the focus column.
+    pub fn focus_cx(&self, world: &World) -> i32 {
+        let col = match world.wrap_width {
+            Some(w) if w > 0 => self.focus_col.rem_euclid(w),
+            _ => self.focus_col,
+        };
+        Self::wrap_cx(col.div_euclid(CHUNK_CELLS_W as i32), Self::span_x(world))
+    }
+
+    /// True when `cx` lies in the active band (wrap-aware).
+    pub fn contains_cx(&self, world: &World, cx: i32) -> bool {
+        let span = Self::span_x(world);
+        let half = self.active_half_chunks();
+        let focus = self.focus_cx(world);
+        let cx = Self::wrap_cx(cx, span);
+        match span {
+            Some(n) if n > 0 => {
+                // Full ring fits in the active band — no filter.
+                if half * 2 + 1 >= n {
+                    return true;
+                }
+                let mut d = (cx - focus).rem_euclid(n);
+                if d > n / 2 {
+                    d -= n;
+                }
+                d.abs() <= half
+            }
+            _ => (cx - focus).abs() <= half,
+        }
+    }
+
+    /// Count of distinct chunk-x columns in the active band.
+    pub fn active_chunk_count(&self, world: &World) -> i32 {
+        let span = Self::span_x(world);
+        let half = self.active_half_chunks();
+        let width = half * 2 + 1;
+        match span {
+            Some(n) if n > 0 => width.min(n),
+            _ => width,
+        }
+    }
+}
+
+/// Drop planned regions whose chunk-x is outside the world's stream window.
+///
+/// When [`World::stream_window`] is `None`, returns `plan` unchanged
+/// (full-resident / headless soak path).
+pub fn filter_plan_to_stream(world: &World, plan: Vec<ActiveChunk>) -> Vec<ActiveChunk> {
+    let Some(win) = world.stream_window else {
+        return plan;
+    };
+    plan.into_iter()
+        .filter(|a| win.contains_cx(world, a.coord.cx))
+        .collect()
+}
+
+/// Clear dirty only on chunks that were just planned.
+///
+/// Preserves dirty outside a stream window so frozen residents thaw with
+/// their backlog of wakes when the camera returns.
+pub fn clear_planned_dirty(world: &mut World, active: &[ActiveChunk]) {
+    for a in active {
+        if let Some(chunk) = world.chunks.get_mut(&a.coord) {
+            chunk.clear_dirty();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::ChunkCoord;
+    use crate::active::ActiveChunk;
+    use crate::chunk::Rect;
+
+    fn ring_world(cols: i32) -> World {
+        let mut w = World::new(1);
+        w.wrap_width = Some(cols);
+        w
+    }
+
+    #[test]
+    fn active_band_wraps_across_seam() {
+        // Compact 64 chunks; focus near x=0 so the band straddles the seam.
+        let w = ring_world(64 * CHUNK_CELLS_W as i32);
+        let win = StreamWindow::new(8, 320); // ~5 view chunks + halo
+        assert!(win.contains_cx(&w, 0));
+        assert!(win.contains_cx(&w, 63));
+        assert!(win.contains_cx(&w, 1));
+        // Far side of the ring stays frozen.
+        assert!(!win.contains_cx(&w, 32));
+    }
+
+    #[test]
+    fn narrow_world_disables_filter() {
+        let w = ring_world(8 * CHUNK_CELLS_W as i32);
+        let win = StreamWindow::new(0, 2000);
+        // View+halo covers the whole 8-chunk ring.
+        for cx in 0..8 {
+            assert!(win.contains_cx(&w, cx), "cx={cx}");
+        }
+    }
+
+    #[test]
+    fn filter_plan_keeps_only_active_cx() {
+        let mut w = ring_world(64 * CHUNK_CELLS_W as i32);
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        let plan = vec![
+            ActiveChunk::new(ChunkCoord::new(0, 0), Rect::full()),
+            ActiveChunk::new(ChunkCoord::new(32, 0), Rect::full()),
+            ActiveChunk::new(ChunkCoord::new(63, 0), Rect::full()),
+        ];
+        let filtered = filter_plan_to_stream(&w, plan);
+        let cxs: Vec<i32> = filtered.iter().map(|a| a.coord.cx).collect();
+        assert!(cxs.contains(&0));
+        assert!(cxs.contains(&63));
+        assert!(!cxs.contains(&32));
+    }
+
+    #[test]
+    fn no_window_passes_plan_through() {
+        let w = ring_world(64 * CHUNK_CELLS_W as i32);
+        let plan = vec![ActiveChunk::new(ChunkCoord::new(32, 0), Rect::full())];
+        let filtered = filter_plan_to_stream(&w, plan.clone());
+        assert_eq!(filtered, plan);
+    }
+}

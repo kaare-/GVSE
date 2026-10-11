@@ -84,6 +84,11 @@ pub struct World {
     /// `get_cell` / `set_cell` map every `gx` into `[0, w)`.
     /// Used by ring worldgen so the left edge joins the right.
     pub wrap_width: Option<i32>,
+    /// Optional camera-centered CA window (Phase 4 streaming).
+    /// `None` = full-resident physics (tests / headless soaks).
+    /// Not saved — the play app sets it each step from `cam_x`.
+    #[serde(skip, default)]
+    pub stream_window: Option<crate::streaming::StreamWindow>,
     /// Soft labile litter (Set E) keyed by wrapped world-x column.
     /// Death deposits units here; fungi digest them before Organic cells.
     ///
@@ -295,6 +300,7 @@ impl World {
             chunks: FxHashMap::default(),
             tick: 0,
             wrap_width: None,
+            stream_window: None,
             soft_litter: FxHashMap::default(),
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),

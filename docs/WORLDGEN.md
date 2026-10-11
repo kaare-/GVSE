@@ -379,14 +379,14 @@ local wetness once wetness is available.
 
 ## Chunk streaming: view / active / resident / evicted tiers
 
-**Phase 4 status (2026-10-10):** `wk-voxel` still **full-residency** —
-`stamp_world` loads the whole ring; there is no view/active/resident
-streamer, no eviction store, and no frozen-neighbour backlog. Compact
-(4096×1064) full-resident clocks **~19 sim-FPS** after Phase 4 CA cuts
-([`VOXEL_PERF.md`](VOXEL_PERF.md)). Per-tick cost therefore still scales
-with circumference. Owner fork: accept ~18–20 FPS full-resident Compact,
-or build the tiers below (first useful slice: **active-only physics**
-with resident frozen + in-memory store — no disk yet).
+**Phase 4 status (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
+as the full-resident gate. First streaming slice landed:
+**active-only CA physics** (`StreamWindow` on `World`, filter in
+`plan_active`, `clear_planned_dirty` so frozen dirty survives). Play
+app sets the window from `cam_x` + screen width (Tab → Performance
+toggle). Still **full RAM residency** — no eviction store, no
+`FrozenBacklog`, climate/field shell not yet windowed. Next: bound
+field-shell cost and/or in-memory resident store.
 
 Concretely, at any moment there are four sets of chunks:
 

@@ -379,7 +379,11 @@ re-profile.
 
 ### Next Phase 4 steps
 
-1. Accept Compact **~18–20 sim-FPS** as the full-resident gate for now,
-   or pursue streaming / residency (WORLDGEN) before more CA on bodies.
-2. Body undercut cost is gameplay-shaped — only cut with a playtest
+1. **Done (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
+   full-resident; started camera `StreamWindow` CA filter
+   ([`WORLDGEN.md`](WORLDGEN.md) streaming). Profile harness / soaks
+   stay full-resident (`stream_window = None`).
+2. Re-measure Compact play FPS with streaming on (CA bound by view+halo;
+   field shell still full-ring until windowed).
+3. Body undercut cost is gameplay-shaped — only cut with a playtest
    dial, not a blind skip.

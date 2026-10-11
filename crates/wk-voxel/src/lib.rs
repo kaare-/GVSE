@@ -41,6 +41,7 @@ pub mod sim_clock;
 pub mod sim_preset;
 pub mod spore_bank;
 pub mod steam;
+pub mod streaming;
 pub mod support_map;
 pub mod symbiosis;
 pub mod temperature;
@@ -51,6 +52,9 @@ pub mod world_step;
 pub mod worldgen;
 
 pub use active::{clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk};
+pub use streaming::{
+    clear_planned_dirty, filter_plan_to_stream, StreamWindow, HALO_CHUNKS, RESIDENT_MARGIN_CHUNKS,
+};
 pub use atmosphere_metrics::{
     apply_weather_rgb, carbon_ratio, cloud_sky_transmit, column_surface_lee, humidity_mean_norm,
     humidity_norm_at, lit_sky_at, occupied_sky_sample, precip_cover_fraction,

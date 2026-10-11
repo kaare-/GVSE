@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
+use crate::active::{partition_checkerboard, plan_active};
+use crate::streaming::clear_planned_dirty;
 use crate::grid::World;
 use crate::temperature::Temperature;
 
@@ -300,7 +301,7 @@ fn filter_loose_regions(
 /// alone and stay deterministic without weather / sediment.
 ///
 /// **Dirty / active chunks.** Each flow substep [`plan_active`]s from
-/// dirty rects (halo + neighbour wake), then [`clear_all_dirty`].
+/// dirty rects (halo + neighbour wake), then [`clear_planned_dirty`].
 /// Writes rebuild dirty for the next substep / tick. Seepage + grain
 /// settle prefer post-flow dirty; if water was quiet they reuse the last
 /// non-empty flow halo so F3-painted Organic / sand mid-air still falls.
@@ -523,7 +524,7 @@ fn tick_with_life_inner(
     for step in 0..max_steps {
         let t0 = profile.then(Instant::now);
         let active = plan_active(world);
-        clear_all_dirty(world);
+        clear_planned_dirty(world, &active);
         if let (true, Some(t0)) = (profile, t0) {
             local.plan_clear += t0.elapsed();
         }
