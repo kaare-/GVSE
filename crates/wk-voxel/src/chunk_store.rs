@@ -5,10 +5,13 @@
 //! can be postcard-encoded here and dropped from [`World::chunks`].
 //! Reloading restores cells; dirty bits are runtime-only (same as F5 saves).
 //!
-//! **Not wired into the play loop yet** — call [`sync_residency`] explicitly
-//! (or from a future settings flag). TRACKED soaks keep `stream_window =
-//! None` so this is a no-op. Side maps (steam, dissolved, …) stay
-//! full-resident; WORLDGEN `FrozenBacklog` is still open.
+//! Play app calls [`sync_residency`] when stream-active physics is on.
+//! [`restore_all_from_store`] runs when streaming turns off. TRACKED soaks
+//! keep `stream_window = None` (no-op). Side maps (steam, dissolved, …)
+//! stay full-resident; WORLDGEN `FrozenBacklog` is still open.
+//!
+//! Far [`World::set_cell`](crate::grid::World::set_cell) reloads from the
+//! store or skips blank remint outside the resident band.
 
 use crate::chunk::{Chunk, ChunkCoord};
 use crate::fasthash::FxHashMap;
@@ -108,8 +111,8 @@ pub fn sync_residency(world: &mut World) -> Result<SyncResidencyStats, String> {
         .collect();
     for coord in to_load {
         if world.chunks.contains_key(&coord) {
-            // Already present (reminted blank?) — leave store entry; do not
-            // overwrite live terrain. Caller / remint gate is a follow-up.
+            // Remint gate should prevent blank overlays; drop stale park.
+            world.chunk_store.bytes.remove(&coord);
             continue;
         }
         if let Some(chunk) = world.chunk_store.take_decode(coord)? {
@@ -122,6 +125,26 @@ pub fn sync_residency(world: &mut World) -> Result<SyncResidencyStats, String> {
     }
 
     Ok(stats)
+}
+
+/// Reload every parked chunk into [`World::chunks`] (stream off / full-resident).
+pub fn restore_all_from_store(world: &mut World) -> Result<usize, String> {
+    let keys: Vec<ChunkCoord> = world.chunk_store.bytes.keys().copied().collect();
+    let mut n = 0;
+    for coord in keys {
+        if world.chunks.contains_key(&coord) {
+            world.chunk_store.bytes.remove(&coord);
+            continue;
+        }
+        if let Some(chunk) = world.chunk_store.take_decode(coord)? {
+            world.chunks.insert(coord, chunk);
+            n += 1;
+        }
+    }
+    if n > 0 {
+        world.invalidate_chunk_cache_pub();
+    }
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -212,5 +235,79 @@ mod tests {
         let edge = active_half + 1;
         assert!(!win.contains_cx(&w, edge));
         assert!(win.contains_resident_cx(&w, edge));
+    }
+
+    #[test]
+    fn set_cell_skips_far_blank_remint_when_streaming() {
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut w = ring_world(cols);
+        w.set_cell(32 * CHUNK_CELLS_W as i32 + 8, 8, Cell::solid(MaterialId::Sand));
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        sync_residency(&mut w).expect("evict");
+        assert!(w
+            .get_cell(32 * CHUNK_CELLS_W as i32 + 8, 8)
+            .is_none());
+        // Far write must not mint a blank chunk over the park.
+        w.set_cell(
+            32 * CHUNK_CELLS_W as i32 + 8,
+            9,
+            Cell::solid(MaterialId::Stone),
+        );
+        assert!(
+            !w.chunks.keys().any(|c| c.cx == 32),
+            "far remint must be skipped"
+        );
+        // Store still holds sand.
+        w.stream_window = Some(StreamWindow::new(32 * CHUNK_CELLS_W as i32, 128));
+        sync_residency(&mut w).expect("reload");
+        assert_eq!(
+            w.get_cell(32 * CHUNK_CELLS_W as i32 + 8, 8)
+                .map(|c| c.material),
+            Some(MaterialId::Sand)
+        );
+    }
+
+    #[test]
+    fn set_cell_reloads_from_store_inside_resident() {
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut w = ring_world(cols);
+        let gx = 8;
+        w.set_cell(gx, 8, Cell::solid(MaterialId::Stone));
+        // Manually park cx=0 while keeping a window that still wants it resident.
+        let coord = ChunkCoord::new(0, 0);
+        let chunk = w.chunks.remove(&coord).expect("chunk");
+        w.chunk_store.encode_put(&chunk).expect("park");
+        w.invalidate_chunk_cache_pub();
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        assert!(w.get_cell(gx, 8).is_none());
+        // Write inside resident → reload-on-touch, then apply.
+        w.set_cell(gx, 9, Cell::solid(MaterialId::Sand));
+        assert_eq!(
+            w.get_cell(gx, 8).map(|c| c.material),
+            Some(MaterialId::Stone),
+            "reload-on-touch must restore parked stone"
+        );
+        assert_eq!(
+            w.get_cell(gx, 9).map(|c| c.material),
+            Some(MaterialId::Sand)
+        );
+    }
+
+    #[test]
+    fn restore_all_brings_parked_chunks_home() {
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut w = ring_world(cols);
+        w.set_cell(32 * CHUNK_CELLS_W as i32 + 8, 8, Cell::solid(MaterialId::Sand));
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        sync_residency(&mut w).expect("evict");
+        w.stream_window = None;
+        let n = restore_all_from_store(&mut w).expect("restore");
+        assert!(n >= 1);
+        assert!(w.chunk_store.is_empty());
+        assert_eq!(
+            w.get_cell(32 * CHUNK_CELLS_W as i32 + 8, 8)
+                .map(|c| c.material),
+            Some(MaterialId::Sand)
+        );
     }
 }

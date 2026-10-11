@@ -400,6 +400,6 @@ re-profile.
    ms/tick (~19 → **~45** sim-FPS). Log:
    `phase4-stretch-stream-steam-ab.log`. Body undercut is gameplay-shaped.
 4. **In-memory `ChunkStore`** + `sync_residency` (resident = active +
-   `RESIDENT_MARGIN_CHUNKS`). Opt-in API; play loop not wired. Next:
-   gate far remint / park side maps / `FrozenBacklog`, then enable sync
-   under stream play.
+   `RESIDENT_MARGIN_CHUNKS`). Play loop syncs when stream-active is on;
+   far `set_cell` reloads or skips blank remint. Next: park side maps /
+   `FrozenBacklog`.
