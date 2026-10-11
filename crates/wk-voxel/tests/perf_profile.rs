@@ -158,6 +158,15 @@ fn stretch_params() -> WorldgenParams {
     }
 }
 
+/// Phase 4 acceptance scale — 320 chunks / 20480 cols (~5.12 km @ 0.25 m/col).
+fn stretch_5km_params() -> WorldgenParams {
+    WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 320,
+        sky_ceiling_y: wk_voxel::TROPOSPHERE_TOP_Y + wk_voxel::STRATOSPHERE_CELLS,
+        ..WorldgenParams::default()
+    }
+}
+
 /// Pre-tropopause box — same width as demo, old 320-cell sky.
 fn short_sky_params() -> WorldgenParams {
     WorldgenParams {
