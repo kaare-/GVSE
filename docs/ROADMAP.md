@@ -271,7 +271,8 @@ May include ring width / ceiling / streaming follow-ups from
   `ChunkStore` + mass side-map parking + water `FrozenBacklog` under
   stream-active play; far remint gated. Stretch stream+evict ~19 →
   **~67** sim-FPS (chunks 1088 → 459). FrozenBacklog carries suspended
-  + dissolved loads. Mycelium parking still open.
+  + dissolved loads; spatial mycelium parks with SideMapStore. Spore /
+  organism parking still open.
 
 ---
 
@@ -350,6 +351,7 @@ before coding.
 | 2026-10-11 | FrozenBacklog water | Missing-dest flow books sat; thaw on reload; sat_totals counts it |
 | 2026-10-11 | Stream+evict A/B | Compact stretch wall 52→15 ms (~67 sim-FPS); chunks 1088→459 |
 | 2026-10-11 | FrozenBacklog loads | Suspended + dissolved ride absorbed water; audits count them |
+| 2026-10-11 | Stream myc park | Mycelium strains/energy/lineage stamps park with SideMapStore |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
