@@ -337,6 +337,19 @@ fn peel_airborne_loose(world: &World, gx: i32, start: i32, search: i32) -> i32 {
     y.max(0)
 }
 
+thread_local! {
+    static PEEL_SEATED_SNOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Toggle seated-snow peel for live-surface walks (soak `OFF=snowsurf`).
+///
+/// When set, every Snow cell peels from [`live_surface_y`] (as if still
+/// airborne). Physical snow still blocks evap; weather / free_air_hy /
+/// orographic crest ignore the pack.
+pub fn set_peel_seated_snow(on: bool) {
+    PEEL_SEATED_SNOW.with(|c| c.set(on));
+}
+
 /// Loose pack (snow / ice / organic) with empty or haze air under it.
 ///
 /// Full-sat air is a lake seat — floating ice and rafts stay a surface.
@@ -346,6 +359,10 @@ pub fn airborne_loose_at(world: &World, gx: i32, y: i32, cell: Cell) -> bool {
     // after a hill erase) with empty air under them are not the hill.
     if !falls_through_empty_air(cell.material) && !is_grain(cell.material) {
         return false;
+    }
+    // Hunt gate: treat all Snow as airborne so weather crest ignores pack.
+    if cell.material == MaterialId::Snow && PEEL_SEATED_SNOW.with(|c| c.get()) {
+        return true;
     }
     match world.get_cell(gx, y - 1) {
         Some(below) if below.material != MaterialId::Air => false,
@@ -434,11 +451,20 @@ pub fn column_top_loaded(world: &World, gx: i32, from_y: i32) -> i32 {
 /// without pulling `rules` into worldgen.
 pub fn live_skin_y(world: &World, gx: i32, rock_y: i32) -> i32 {
     let jx = world.wrap_x(gx);
+    let peel_snow = PEEL_SEATED_SNOW.with(|c| c.get());
     let mut y = rock_y;
     for _ in 0..96 {
         match world.get_cell(jx, y + 1) {
-            Some(c) if c.material != MaterialId::Air => y += 1,
+            Some(c)
+                if c.material != MaterialId::Air
+                    && !(peel_snow && c.material == MaterialId::Snow) =>
+            {
+                y += 1
+            }
             Some(c) if c.sat.0 > 32 => y += 1,
+            // Hunt `OFF=snowsurf`: do not climb onto Snow pack (or through
+            // it to a water film stacked above).
+            Some(c) if peel_snow && c.material == MaterialId::Snow => break,
             _ => break,
         }
     }

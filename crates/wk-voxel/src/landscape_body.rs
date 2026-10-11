@@ -181,6 +181,7 @@ fn gather_cargo(world: &World, rock: &HashSet<(i32, i32)>) -> Vec<(i32, i32, Cel
 }
 
 fn clear_cells(world: &mut World, cells: &[(i32, i32, Cell)]) {
+  let _scope = crate::budget::SnowSwapScope::landscape();
   for &(x, y, _) in cells {
     world.set_cell(x, y, Cell::air());
   }
@@ -189,6 +190,7 @@ fn clear_cells(world: &mut World, cells: &[(i32, i32, Cell)]) {
 /// Write body cells back into the grid, displacing (never deleting) any water
 /// they land in. Returns water units that need re-homing.
 fn stamp_cells_displacing(world: &mut World, cells: &[(i32, i32, Cell)]) -> u32 {
+  let _scope = crate::budget::SnowSwapScope::landscape();
   let mut water = 0u32;
   for &(x, y, _) in cells {
     water += take_free_water(world, x, y);

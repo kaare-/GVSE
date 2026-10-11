@@ -25,8 +25,8 @@ mod tests;
 
 pub use condensation::{
     apply_condensation_rain, apply_condensation_rain_phased,
-    apply_condensation_rain_with_orographic, precipitate_thermal_surplus, CondensationConfig,
-    OrographicConfig,
+    apply_condensation_rain_with_orographic, precipitate_thermal_surplus, snow_mint_probe_reset,
+    snow_mint_probe_snapshot, CondensationConfig, OrographicConfig, SnowMintProbe,
 };
 pub use evap::{
     apply_evaporation, apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate,
@@ -42,7 +42,7 @@ pub use competent_fall::{
 pub use grain::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_flow_erosion, apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
-    apply_snow_wind_drift, apply_airborne_snow_fall,
+    apply_snow_wind_drift, apply_airborne_snow_fall, apply_airborne_snow_fall_cfg,
     apply_grain_repose_regions, settle_loose_grains, settle_loose_grains_regions,
     settle_loose_grains_regions_ex,
     collect_floating_organic_columns, collect_floating_organic_columns_near,
@@ -71,8 +71,12 @@ pub use seepage::{
 };
 pub use spill::{apply_lateral_spill, apply_lateral_spill_regions};
 pub use tick::{
-    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
-    tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled, PerfConfig, PhysicsTimings,
-    FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN, SEEPAGE_EVERY,
+    set_skip_grain_settle, set_skip_gravity, set_skip_park_orphan, set_skip_seepage,
+    set_skip_surface_flow, tick,
+    tick_with_configs,
+    tick_with_configs_and_geotech, tick_with_life, tick_with_life_profiled, tick_with_perf,
+    tick_with_perf_profiled, PerfConfig, PhysicsTimings, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
+    FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN, SEEPAGE_EVERY,
 };
+pub(crate) use tick::skip_park_orphan;
 pub use water_flow::{apply_water_flow, apply_water_flow_regions, wake_confined_head};

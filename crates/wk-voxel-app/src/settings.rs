@@ -248,6 +248,7 @@ impl SimSettings {
                 rate_per_tick: 1,
                 dry_above_max: 200,
                 period_ticks: 5,
+                enable_orphan_boost: true,
             },
             cond,
             cond_rain_on: true,
@@ -1048,6 +1049,13 @@ impl SimSettings {
                         "Freeze point (C)",
                         -10.0..5.0,
                         &mut self.phase.freeze_point_c,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Thaw hysteresis (C above freeze)",
+                        0.0..3.0,
+                        &mut self.phase.thaw_hysteresis_c,
                     );
                     let mut min_freeze = self.phase.min_sat_to_freeze as f32;
                     let mut max_ice = self.phase.max_ice_cells_per_column as f32;

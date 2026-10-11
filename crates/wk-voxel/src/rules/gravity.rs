@@ -169,15 +169,19 @@ pub(crate) fn apply_gravity_fall_regions_loaded(
             }
             let ly_u = ly as usize;
             if ly_u < CHUNK_CELLS_H {
+                let prev = unsafe { (*own).get(lx as usize, ly_u) };
                 unsafe {
                     (*own).set(lx as usize, ly_u, cell);
                 }
+                crate::budget::note_gravity_set_cell(prev, cell);
             } else if ly_u == CHUNK_CELLS_H {
                 // Gravity only pulls one cell; seam write stays at local y=0.
                 if let Some(p) = above_ptr {
+                    let prev = unsafe { (*p).get(lx as usize, 0) };
                     unsafe {
                         (*p).set(lx as usize, 0, cell);
                     }
+                    crate::budget::note_gravity_set_cell(prev, cell);
                 }
             }
         };

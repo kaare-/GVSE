@@ -211,6 +211,7 @@ fn run_logged(ticks: u64, sample_period: u64, label: &str) -> SimLog {
         rate_per_tick: 1,
         dry_above_max: 200,
         period_ticks: 5,
+        enable_orphan_boost: true,
     };
     let mut cond = CondensationConfig::default();
     cond.top_y = SKY_CEILING_Y - 2;
