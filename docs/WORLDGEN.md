@@ -388,7 +388,7 @@ as the full-resident gate. Streaming slices landed:
    mix / oro skip tiles outside the window (mass stays put);
    `plan_active` skips frozen dirty **before** inflate (required — post-
    filter alone left Compact slower than full-resident). Compact
-   stretch ~19 → ~27 sim-FPS with view=320 ([`VOXEL_PERF.md`](VOXEL_PERF.md)).
+   stretch ~19 → **~32** sim-FPS with view=320 ([`VOXEL_PERF.md`](VOXEL_PERF.md)).
 
 Still **full RAM residency** — no eviction store, no `FrozenBacklog`.
 Temp / wind rebuild / steam / evap still full-ring. Next: window those
