@@ -305,6 +305,10 @@ hotspots.
 **~1.2**. Next pick without owner override: surgical bodies/seepage
 cut (≥1 ms) **or** width stretch if playable headroom is enough.
 
+- **2026-10-11:** Competent body wake/apply honors `StreamWindow`
+  (far float cadence skipped; out-of-band wakes deferred). Aim ≥1 ms
+  bodies cut on stretch stream+evict.
+
 ---
 
 ## Phase 5 — Biological system upgrade *(major)*

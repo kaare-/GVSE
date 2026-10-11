@@ -416,5 +416,7 @@ re-profile.
    wall **51.9 → 14.8** ms/tick (~19 → **~67** sim-FPS); chunks
    **1088 → 459** (store=629). Stream-on hotspots: rock bodies **4.3**,
    seepage **2.4**, temperature **2.6**, rain **1.4**, steam **1.2**.
-   Log: `phase4-stretch-stream-evict-ab-reprofile.log`. Next: width
-   stretch or ≥1 ms cut on bodies/seepage (see ROADMAP decision list).
+   Log: `phase4-stretch-stream-evict-ab-reprofile.log`. Competent body
+   wake/apply now honors `StreamWindow` (far float cadence skipped;
+   deferred wakes). Re-measure bodies after merge; then width stretch
+   or seepage cut.
