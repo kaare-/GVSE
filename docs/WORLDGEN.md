@@ -391,8 +391,9 @@ as the full-resident gate. Streaming slices landed:
    stretch ~19 → **~43** sim-FPS with view=320 after temp/wind/evap
    window ([`VOXEL_PERF.md`](VOXEL_PERF.md)).
 
-Steam boil + leftover cands windowed. Compact stretch stream ~19 →
-**~45** sim-FPS (view=320).
+Steam boil + leftover cands windowed. Compact stretch stream (CA/fields
+only) ~19 → **~45** sim-FPS (view=320). With `sync_residency` eviction:
+~19 → **~67** sim-FPS; loaded chunks **1088 → 459** (store=629).
 
 3. **In-memory `ChunkStore` + `SideMapStore`** — postcard park/reload for
    chunks outside the resident band; mass/heat sparse maps (steam,
