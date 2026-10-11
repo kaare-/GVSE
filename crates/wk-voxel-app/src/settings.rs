@@ -146,6 +146,9 @@ pub struct SimSettings {
     /// Default 12 — quiet ticks stay every frame; a soaked leftover
     /// yields one present so Tab / the mouse can move.
     pub sim_budget_ms: f32,
+    /// Camera-centered CA window (Phase 4 streaming). Off = full-resident
+    /// physics (legacy Compact cost). On = active band around the view.
+    pub stream_active_physics: bool,
     /// Geotech failure (Tab → Geotech). Roof collapse on by default.
     pub failure: FailureConfig,
     /// Competent rock rigid-body knobs (Tab → Geotech).
@@ -297,6 +300,7 @@ impl SimSettings {
             page: SettingsPage::World,
             perf: PerfConfig::default(),
             sim_budget_ms: 12.0,
+            stream_active_physics: true,
             failure: FailureConfig::default(),
             competent_fall: CompetentFallConfig::default(),
             max_roof_events: FailureConfig::default().max_roof_events as f32,
@@ -1385,6 +1389,15 @@ impl SimSettings {
                         &mut self.sim_budget_ms,
                     );
                     self.sim_budget_ms = self.sim_budget_ms.clamp(0.0, 32.0);
+                    ui.checkbox(
+                        hash!(),
+                        "Stream active physics (camera window)",
+                        &mut self.stream_active_physics,
+                    );
+                    ui.label(
+                        None,
+                        "  On: CA only near the view (+halo). Off: full-resident ring (Compact ~19 FPS).",
+                    );
                 });
                 ui.separator();
 

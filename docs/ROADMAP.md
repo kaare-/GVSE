@@ -221,12 +221,8 @@ re-profile + larger worlds. Ice model (option 2 A–C + brittle + sheet
 lock + lid chill) + TRACKED flat after roof-collapse Snow fix are the
 hard gates; remaining Xvfb framing weakness is not a Phase-3 blocker.
 
-**Still open (merge hygiene, not Phase 3 scope)**
-
-- Stack `#365`→`#373` CI-green / ready / CLEAN onto `park-bank` (2026-10-10
-  recheck: all `MERGEABLE` / `CLEAN`, `autoMergeRequest=null`). Agent
-  cannot Enable auto-merge from here — owner merge bottom-up. `#374`
-  (Phase 4 tip) stays draft until that stack lands under it.
+**Merge hygiene (done 2026-10-11)** — catch-up `#375` landed `#366`–`#373`
+on `park-bank`; `#374` Phase 4 tip merged after.
 
 ---
 
@@ -267,10 +263,11 @@ May include ring width / ceiling / streaming follow-ups from
 
 - Ice sticky-loose + seam-wake (+ small weep trim) landed
   ([`VOXEL_PERF.md`](VOXEL_PERF.md)). Stress **~34** sim-FPS; Compact
-  **~19**; 5k soak TRACKED flat / `park=0`.
-- Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t),
-  not quiet churn. Next: streaming / residency for km rings, or accept
-  ~18–20 FPS full-resident Compact.
+  **~19** full-resident; 5k soak TRACKED flat / `park=0`.
+- Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t).
+- **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate;
+  started streaming — camera `StreamWindow` filters CA `plan_active`
+  (frozen dirty kept). Field shell + eviction store still open.
 
 ---
 
@@ -338,6 +335,8 @@ before coding.
 | 2026-10-09 | Phase 3 closed | Owner: move to Phase 4; ice + TRACKED flat after roof Snow fix |
 | 2026-10-09 | Phase 4 start | Re-profile post-ice tip; then width stretch / ≥1 ms lever ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-09 | Phase 4 seam wake | Wet seam lowers + skip full↔full band; Compact wall **62→55** ms (~18 FPS) |
+| 2026-10-11 | Compact FPS gate | Accept **~19 sim-FPS** full-resident Compact; scale via streaming |
+| 2026-10-11 | Stream active CA | Camera window filters `plan_active`; RAM still full-resident |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

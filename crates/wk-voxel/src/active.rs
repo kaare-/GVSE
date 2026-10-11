@@ -430,7 +430,7 @@ pub fn plan_active(world: &World) -> Vec<ActiveChunk> {
             .cmp(&b.coord.cy)
             .then(a.coord.cx.cmp(&b.coord.cx))
     });
-    out
+    crate::streaming::filter_plan_to_stream(world, out)
 }
 
 /// Clear every chunk's dirty rect. Called at the start of [`crate::rules::tick`]
