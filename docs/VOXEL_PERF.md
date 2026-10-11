@@ -399,3 +399,7 @@ re-profile.
    still ~1.3 ms (scrub/assault). After steam slice: wall **52 → 22.4**
    ms/tick (~19 → **~45** sim-FPS). Log:
    `phase4-stretch-stream-steam-ab.log`. Body undercut is gameplay-shaped.
+4. **In-memory `ChunkStore`** + `sync_residency` (resident = active +
+   `RESIDENT_MARGIN_CHUNKS`). Opt-in API; play loop not wired. Next:
+   gate far remint / park side maps / `FrozenBacklog`, then enable sync
+   under stream play.

@@ -267,7 +267,9 @@ May include ring width / ceiling / streaming follow-ups from
 - Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t).
 - **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate;
   streaming — CA + climate/field shell + steam/leftover cands windowed.
-  Compact stretch ~19 → **~45** sim-FPS (view=320). Eviction store open.
+  Compact stretch ~19 → **~45** sim-FPS (view=320). In-memory
+  `ChunkStore` + `sync_residency` landed (opt-in; play loop not wired).
+  `FrozenBacklog` / side-map parking still open.
 
 ---
 
@@ -340,6 +342,7 @@ before coding.
 | 2026-10-11 | Stream field shell | Phase columns + humidity advect skip outside window |
 | 2026-10-11 | Stream temp/wind/evap | Window temp step, wind seats, evap chunks; Compact ~43 sim-FPS |
 | 2026-10-11 | Stream steam/leftover | Steam cadence + leftover cands windowed; Compact ~45 sim-FPS |
+| 2026-10-11 | ChunkStore (opt-in) | In-memory postcard eviction API; play sync not wired; FrozenBacklog open |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

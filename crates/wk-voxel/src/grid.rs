@@ -89,6 +89,11 @@ pub struct World {
     /// Not saved — the play app sets it each step from `cam_x`.
     #[serde(skip, default)]
     pub stream_window: Option<crate::streaming::StreamWindow>,
+    /// Postcard parking lot for chunks outside the resident band.
+    /// Not saved — F5 still captures only currently loaded chunks until
+    /// a follow-up flushes the store. See [`crate::chunk_store`].
+    #[serde(skip, default)]
+    pub chunk_store: crate::chunk_store::ChunkStore,
     /// Soft labile litter (Set E) keyed by wrapped world-x column.
     /// Death deposits units here; fungi digest them before Organic cells.
     ///
@@ -301,6 +306,7 @@ impl World {
             tick: 0,
             wrap_width: None,
             stream_window: None,
+            chunk_store: crate::chunk_store::ChunkStore::default(),
             soft_litter: FxHashMap::default(),
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),
@@ -415,6 +421,12 @@ impl World {
     #[inline]
     fn invalidate_chunk_cache(&mut self) {
         self.chunk_cache_id = ChunkCacheId::default();
+    }
+
+    /// Crate-visible cache bump for eviction / reload (`chunk_store`).
+    #[inline]
+    pub(crate) fn invalidate_chunk_cache_pub(&mut self) {
+        self.invalidate_chunk_cache();
     }
 
     #[inline]

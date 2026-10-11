@@ -1,9 +1,10 @@
 //! Camera-centered active window for Phase 4 streaming.
 //!
-//! WORLDGEN view / active / resident / evicted tiers. This module is the
-//! first slice: **active-only CA physics** on a still-full-resident ring.
-//! Non-active chunks stay in RAM with their dirty bits preserved until
-//! the camera brings them into the window (no eviction store / backlog yet).
+//! WORLDGEN view / active / resident / evicted tiers. Active-only CA /
+//! field shell filters run against [`StreamWindow`]. Eviction into
+//! [`crate::chunk_store::ChunkStore`] is available via
+//! [`crate::chunk_store::sync_residency`] (not auto-wired into play yet;
+//! FrozenBacklog still open).
 
 use crate::active::ActiveChunk;
 use crate::chunk::CHUNK_CELLS_W;
@@ -12,8 +13,7 @@ use crate::grid::World;
 /// Halo chunks on each side of the view (WORLDGEN default ≈ 48 m).
 pub const HALO_CHUNKS: i32 = 3;
 
-/// Resident margin beyond active (documented; unused until eviction).
-#[allow(dead_code)]
+/// Resident margin beyond active (WORLDGEN default ≈ 128 m).
 pub const RESIDENT_MARGIN_CHUNKS: i32 = 8;
 
 /// Inclusive wrap-aware span of chunk-x columns that may run CA physics.
@@ -42,6 +42,16 @@ impl StreamWindow {
         view_half.max(1) + self.halo_chunks.max(0)
     }
 
+    /// Half-width of the resident set (active + [`RESIDENT_MARGIN_CHUNKS`]).
+    pub fn resident_half_chunks(&self) -> i32 {
+        self.active_half_chunks() + RESIDENT_MARGIN_CHUNKS.max(0)
+    }
+
+    /// Wrap-ring chunk-x span, if the world wraps.
+    pub fn span_chunk_count(world: &World) -> Option<i32> {
+        Self::span_x(world)
+    }
+
     fn span_x(world: &World) -> Option<i32> {
         let w = world.wrap_width?;
         if w <= 0 {
@@ -68,13 +78,21 @@ impl StreamWindow {
 
     /// True when `cx` lies in the active band (wrap-aware).
     pub fn contains_cx(&self, world: &World, cx: i32) -> bool {
+        self.contains_band_cx(world, cx, self.active_half_chunks())
+    }
+
+    /// True when `cx` lies in the resident band (active + margin).
+    pub fn contains_resident_cx(&self, world: &World, cx: i32) -> bool {
+        self.contains_band_cx(world, cx, self.resident_half_chunks())
+    }
+
+    fn contains_band_cx(&self, world: &World, cx: i32, half: i32) -> bool {
         let span = Self::span_x(world);
-        let half = self.active_half_chunks();
         let focus = self.focus_cx(world);
         let cx = Self::wrap_cx(cx, span);
         match span {
             Some(n) if n > 0 => {
-                // Full ring fits in the active band — no filter.
+                // Full ring fits in the band — no filter.
                 if half * 2 + 1 >= n {
                     return true;
                 }
