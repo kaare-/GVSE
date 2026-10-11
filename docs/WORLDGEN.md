@@ -380,7 +380,8 @@ local wetness once wetness is available.
 ## Chunk streaming: view / active / resident / evicted tiers
 
 **Phase 4 status (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
-as the full-resident gate. Streaming slices landed:
+as the full-resident gate. **Streaming residency stack closed** (organism
+ECS parking + disk store still open). Slices landed:
 
 1. **Active-only CA** — `StreamWindow` filters `plan_active`;
    `clear_planned_dirty` keeps frozen dirty.
@@ -402,8 +403,9 @@ only) ~19 → **~45** sim-FPS (view=320). With `sync_residency` eviction:
    `restore_all_from_store` when it turns off. Far `set_cell` reloads
    or skips blank remint. Water-only `FrozenBacklog` absorbs flow into
    missing chunks and thaws on reload (`sat_totals` counts it).
-   Spatial mycelium + spore bank park with side maps. Organism ECS
-   parking still open. TRACKED soaks stay full-resident
+   Spatial mycelium + spore bank park with side maps. FrozenBacklog
+   carries water + suspended/dissolved. **OPEN:** organism ECS parking;
+   disk-backed store. TRACKED soaks stay full-resident
    (`stream_window = None`).
 
 Concretely, at any moment there are four sets of chunks:

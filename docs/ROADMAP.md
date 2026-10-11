@@ -265,14 +265,13 @@ May include ring width / ceiling / streaming follow-ups from
   ([`VOXEL_PERF.md`](VOXEL_PERF.md)). Stress **~34** sim-FPS; Compact
   **~19** full-resident; 5k soak TRACKED flat / `park=0`.
 - Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t).
-- **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate;
-  streaming — CA + climate/field shell + steam/leftover cands windowed.
-  Compact stretch ~19 → **~45** sim-FPS (view=320). In-memory
-  `ChunkStore` + mass side-map parking + water `FrozenBacklog` under
-  stream-active play; far remint gated. Stretch stream+evict ~19 →
-  **~67** sim-FPS (chunks 1088 → 459). FrozenBacklog carries suspended
-  + dissolved loads; mycelium + spore bank park with SideMapStore.
-  Organism ECS parking still open.
+- **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate.
+  **Streaming residency stack closed** (CA window → field shell →
+  steam/leftover → `ChunkStore` + remint gate → side maps → water
+  `FrozenBacklog` + loads → mycelium/spore park). Stretch stream+evict
+  ~19 → **~67** sim-FPS (chunks 1088 → 459). TRACKED soaks stay
+  full-resident. **OPEN:** organism ECS parking (atoms outside the
+  resident band); disk-backed chunk-store (WORLDGEN Phase 2).
 
 ---
 
@@ -353,6 +352,7 @@ before coding.
 | 2026-10-11 | FrozenBacklog loads | Suspended + dissolved ride absorbed water; audits count them |
 | 2026-10-11 | Stream myc park | Mycelium strains/energy/lineage stamps park with SideMapStore |
 | 2026-10-11 | Stream spore park | SporeBank cells park with SideMapStore under sync_residency |
+| 2026-10-11 | Stream residency close | CA→evict→backlog→side/myc/spore parked; ~67 sim-FPS; organism ECS open |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
