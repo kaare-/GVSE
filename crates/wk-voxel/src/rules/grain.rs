@@ -606,9 +606,41 @@ fn lake_under_film_ptrs(
     false
 }
 
-/// Ice floe seat: full grounded lake **or** haze/film over full lake water
-/// (ocean free surface). Avoids soft-pack freefall into the column while
-/// land mist (haze over rock, no full water below) still drops thin ice.
+/// True when Ice must not rise into wet Air at `(gx, gy)`.
+///
+/// Blocked seats: open free-surface film (sky / empty / partial Air
+/// above) **and** pack-interior gaps (Ice/Snow above). Ponded rain stays
+/// on the lid; under-lid water freezes in place via phase. Rising through
+/// either left a water stripe that freeze re-skinned (horizontal pulse).
+fn ice_rise_dest_blocked_world(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy + 1) {
+        None => true,
+        Some(up) if matches!(up.material, MaterialId::Ice | MaterialId::Snow) => true,
+        Some(up) if up.material == MaterialId::Air && !up.sat.is_full() => true,
+        _ => false,
+    }
+}
+
+fn ice_rise_dest_blocked_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    match unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy + 1) } {
+        None => true,
+        Some(up) if matches!(up.material, MaterialId::Ice | MaterialId::Snow) => true,
+        Some(up) if up.material == MaterialId::Air && !up.sat.is_full() => true,
+        _ => false,
+    }
+}
+
+/// Ice floe seat: full grounded lake, haze/film over lake, **or** a brief
+/// empty gap over still-present lake water / same-Y wet neighbour.
+///
+/// Cascade can drain the contact cell for a tick; falling into that hole
+/// left water on top of ice and a pulsing shore line. Land empty air
+/// (no lake below, no wet neighbour) still drops ice.
 fn ice_floe_seat_ptrs(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
@@ -616,14 +648,64 @@ fn ice_floe_seat_ptrs(
     gx: i32,
     gy: i32,
 ) -> bool {
-    if seat.material != MaterialId::Air || seat.sat.is_empty() {
+    if seat.material != MaterialId::Air {
         return false;
     }
-    if floats_on_air_seat_ptrs(ptrs, wrap_width, seat, gx, gy) {
-        return true;
+    if !seat.sat.is_empty() {
+        if floats_on_air_seat_ptrs(ptrs, wrap_width, seat, gx, gy) {
+            return true;
+        }
+        // Partial sat — only when a full lake cell remains below.
+        return lake_under_film_ptrs(ptrs, wrap_width, gx, gy);
     }
-    // Partial sat — only when a full lake cell remains below.
-    lake_under_film_ptrs(ptrs, wrap_width, gx, gy)
+    // Empty seat: hold if grounded full water is within a short drop, or
+    // a same-Y neighbour is still standing lake water (shore continuity).
+    lake_water_within_ptrs(ptrs, wrap_width, gx, gy, 3)
+        || lake_surface_neighbor_ptrs(ptrs, wrap_width, gx, gy)
+}
+
+/// Grounded `sat == FULL` Air within `max_down` cells at or below `gy`.
+fn lake_water_within_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+    max_down: i32,
+) -> bool {
+    for dy in 0..=max_down {
+        let y = gy - dy;
+        let Some(c) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, y) }) else {
+            return false;
+        };
+        if c.material != MaterialId::Air {
+            return false;
+        }
+        if c.sat.is_full() && water_column_grounded_ptrs(ptrs, wrap_width, gx, y) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Same-Y neighbour is standing full lake water (shore line continuity).
+fn lake_surface_neighbor_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    for dx in [-1_i32, 1] {
+        let Some(n) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx + dx, gy) }) else {
+            continue;
+        };
+        if n.material == MaterialId::Air
+            && n.sat.is_full()
+            && water_column_grounded_ptrs(ptrs, wrap_width, gx + dx, gy)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when `litter_y` is buoyant litter whose column reaches a grounded
@@ -1372,6 +1454,14 @@ pub fn apply_grain_fall_regions_ex(
                         continue;
                     }
                     if !floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
+                        continue;
+                    }
+                    // Ice lids: do not pop through the free-surface film
+                    // (ponded rain stays on ice). Submerged ice still
+                    // rises through deeper full water.
+                    if below.material == MaterialId::Ice
+                        && ice_rise_dest_blocked_ptrs(ptrs, wrap_width, gx, gy)
+                    {
                         continue;
                     }
                     unsafe {
@@ -2540,6 +2630,14 @@ fn rise_buoyant_litter_list(world: &mut World, litter: &mut [(i32, i32)]) {
             if !float_seat(world, above, gx, y) {
                 break;
             }
+            // Ice must not loft through the free-surface film (lid pump:
+            // freeze skin → film on ice → rise → gap → refreeze). Organic
+            // / Snow still occupy the surface cell as rafts.
+            if here.material == MaterialId::Ice
+                && ice_rise_dest_blocked_world(world, gx, y)
+            {
+                break;
+            }
             top = y;
         }
         if top > gy0 {
@@ -2719,6 +2817,13 @@ fn apply_repose_pass(
                     ) {
                         continue;
                     }
+                    if src.material == MaterialId::Ice
+                        && (ice_contacts_standing_water_ptrs(ptrs, wrap_width, sx, sy)
+                            || ice_contacts_standing_water_ptrs(ptrs, wrap_width, gx, gy)
+                            || (!dest.sat.is_empty() && dest.material == MaterialId::Air))
+                    {
+                        continue;
+                    }
                     match below_src {
                         Some(b) if b.material == MaterialId::Air => continue,
                         None => continue,
@@ -2896,7 +3001,13 @@ fn apply_repose_pass(
                         || src.material == MaterialId::Snow
                         || (src.material == MaterialId::Ice
                             && hillside_ice_support(below_src)
-                            && ice_thick < ice_carry_thickness);
+                            && ice_thick < ice_carry_thickness
+                            && !ice_contacts_standing_water_ptrs(
+                                ptrs, wrap_width, sx, sy,
+                            )
+                            && !ice_contacts_standing_water_ptrs(
+                                ptrs, wrap_width, gx, gy,
+                            ));
                     if !can_smear {
                         continue;
                     }
@@ -3306,6 +3417,34 @@ fn hillside_ice_support(below_src: Option<Cell>) -> bool {
         Some(_) => true,
         None => false,
     }
+}
+
+/// Thin hillside ice at a waterline must not peel into the basin.
+///
+/// Peel → fall → freeze left Ice/Water/Ice teeth at the shore (owner
+/// pulse). Inland glaze on dry rock can still slide.
+fn ice_contacts_standing_water_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    for dx in [-1_i32, 0, 1] {
+        for dy in [-1_i32, 0, 1] {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let Some(c) =
+                (unsafe { parallel::get_cell(ptrs, wrap_width, gx + dx, gy + dy) })
+            else {
+                continue;
+            };
+            if c.material == MaterialId::Air && c.sat.is_full() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn avalanche_source_ok(
