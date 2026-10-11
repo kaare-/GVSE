@@ -549,7 +549,9 @@ everything not in the explicit save.
 writes `{cx}_{cy}.pc` postcard files and drops the RAM copy
 (disk-primary). Rescans existing files on enable. Play enables
 `saves/stream_chunks/{seed}` when Tab → Performance → Stream disk
-chunk store is on (default with streaming).
+chunk store is on (default with streaming). F5 / quit-save calls
+`restore_all_from_store` + organism restore so serde-skip parks land
+in the snapshot; the next stream tick re-parks.
 
 **Determinism guarantee for regeneration**: a chunk that has never
 been simulated (or was evicted and its state discarded) can be
