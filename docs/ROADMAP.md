@@ -299,6 +299,12 @@ Pick one before more code (daily 09:00 Oslo lists continue):
 **Default if no pick:** (1) re-profile, then (2) or (3) from the new
 hotspots.
 
+**Re-profile done (2026-10-11):** stretch stream+evict still ~19 →
+**~67** sim-FPS (chunks 1088 → 459). Stream-on top costs: rock bodies
+**~4.3** ms, seepage **~2.4**, temp **~2.6**, rain **~1.4**, steam
+**~1.2**. Next pick without owner override: surgical bodies/seepage
+cut (≥1 ms) **or** width stretch if playable headroom is enough.
+
 ---
 
 ## Phase 5 — Biological system upgrade *(major)*
@@ -386,6 +392,7 @@ before coding.
 | 2026-10-11 | Stream disk play | Tab toggle; `saves/stream_chunks/{seed}` when streaming |
 | 2026-10-11 | F5 stream flush | to_snapshot restores ChunkStore/side/organism parks first |
 | 2026-10-11 | Stream chunk prune | Drop other seed dirs under saves/stream_chunks on reseed |
+| 2026-10-11 | Stream stack closed | Residency+disk+F5+prune done; next = re-profile / ≥1 ms / width |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
