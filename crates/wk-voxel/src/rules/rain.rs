@@ -88,6 +88,12 @@ pub fn apply_rain_with_temp(
     let seed = world.seed.0;
     let tick_no = world.tick;
     for gx in x0..=x1 {
+        // Phase 4 stream: far columns stay dry (CA/field shell already
+        // freezes them). Walking the full ring for flood/deposit was the
+        // 5 km harness's ~21 ms rain tax.
+        if !crate::streaming::stream_allows_world_x(world, gx) {
+            continue;
+        }
         let roll = hash_prob(seed, gx, tick_no, cfg.seed_salt);
         if roll >= cfg.prob_per_col_per_tick {
             continue;
