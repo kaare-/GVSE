@@ -634,6 +634,9 @@ pub struct OrganismStore {
     /// `serde(skip)` — same F5 gap as ChunkStore until a flush slice.
     #[serde(skip)]
     pub parked: Vec<Atom>,
+    /// Corpses parked outside the resident band (anchor `gx`).
+    #[serde(skip)]
+    pub parked_corpses: Vec<Corpse>,
     /// Latest organism-pass breakdown (see [`OrganismPassTimings`]).
     #[serde(skip)]
     pub last_pass: OrganismPassTimings,
@@ -654,6 +657,7 @@ impl Default for OrganismStore {
             fungi: FungiConfig::default(),
             spore_bank: SporeBankConfig::default(),
             parked: Vec::new(),
+            parked_corpses: Vec::new(),
             last_pass: OrganismPassTimings::default(),
             land_reseat_cooldown: 0,
         }
@@ -1409,26 +1413,35 @@ impl OrganismStore {
         self.corpses.len()
     }
 
+    /// Live + parked corpse count (cap pressure must include the park).
+    pub fn corpse_total(&self) -> usize {
+        self.corpses.len() + self.parked_corpses.len()
+    }
+
     /// Living pop ceiling (at least 1 so a lone spawn can land).
     pub fn atom_cap(&self) -> usize {
         self.max_atoms.max(1)
     }
 
-    /// Park living atoms whose wrapped anchor `gx` is outside the resident
-    /// band; restore parked atoms that re-enter. `win = None` restores all
-    /// (stream off / full-resident). Corpses stay live (follow-up slice).
+    /// Park living atoms + corpses whose wrapped anchor `gx` is outside the
+    /// resident band; restore parked entries that re-enter. `win = None`
+    /// restores all (stream off / full-resident).
     ///
     /// Anchor-only: multi-column bodies may straddle the edge; resident
-    /// margin (~8 chunks) covers typical spans.
+    /// margin (~8 chunks) covers typical spans. Returned counts sum atoms
+    /// and corpses moved this pass.
     pub fn sync_organism_residency(
         &mut self,
         wrap_width: Option<i32>,
         win: Option<StreamWindow>,
     ) -> (usize, usize) {
         let Some(win) = win else {
-            let n = self.parked.len();
-            if n > 0 {
+            let n = self.parked.len() + self.parked_corpses.len();
+            if !self.parked.is_empty() {
                 self.atoms.append(&mut self.parked);
+            }
+            if !self.parked_corpses.is_empty() {
+                self.corpses.append(&mut self.parked_corpses);
             }
             return (0, n);
         };
@@ -1438,9 +1451,12 @@ impl OrganismStore {
                 let span = (w + crate::chunk::CHUNK_CELLS_W as i32 - 1)
                     / crate::chunk::CHUNK_CELLS_W as i32;
                 if win.resident_half_chunks() * 2 + 1 >= span {
-                    let n = self.parked.len();
-                    if n > 0 {
+                    let n = self.parked.len() + self.parked_corpses.len();
+                    if !self.parked.is_empty() {
                         self.atoms.append(&mut self.parked);
+                    }
+                    if !self.parked_corpses.is_empty() {
+                        self.corpses.append(&mut self.parked_corpses);
                     }
                     return (0, n);
                 }
@@ -1461,6 +1477,19 @@ impl OrganismStore {
                 i += 1;
             }
         }
+        let mut ci = 0;
+        while ci < self.corpses.len() {
+            let gx = match wrap_width {
+                Some(w) if w > 0 => self.corpses[ci].gx.rem_euclid(w),
+                _ => self.corpses[ci].gx,
+            };
+            if win.world_x_outside_resident(wrap_width, gx) {
+                self.parked_corpses.push(self.corpses.swap_remove(ci));
+                parked_n += 1;
+            } else {
+                ci += 1;
+            }
+        }
 
         let mut restored = 0usize;
         let mut j = 0;
@@ -1474,6 +1503,19 @@ impl OrganismStore {
                 restored += 1;
             } else {
                 j += 1;
+            }
+        }
+        let mut cj = 0;
+        while cj < self.parked_corpses.len() {
+            let gx = match wrap_width {
+                Some(w) if w > 0 => self.parked_corpses[cj].gx.rem_euclid(w),
+                _ => self.parked_corpses[cj].gx,
+            };
+            if !win.world_x_outside_resident(wrap_width, gx) {
+                self.corpses.push(self.parked_corpses.swap_remove(cj));
+                restored += 1;
+            } else {
+                cj += 1;
             }
         }
         (parked_n, restored)
@@ -2273,12 +2315,15 @@ impl OrganismStore {
     }
 
     fn push_corpse(&mut self, world: &mut World, corpse: Corpse) {
-        if self.corpses.len() >= self.corpse_cap() {
-            // Cap pressure: dissolve oldest immediately into Organic.
+        if self.corpse_total() >= self.corpse_cap() {
+            // Cap pressure: dissolve oldest live corpse (parked stay frozen).
             if let Some(old) = self.corpses.first().cloned() {
                 dissolve_corpse_to_organic(world, old.gx, old.gy, &old.body);
+                self.corpses.remove(0);
+            } else if let Some(old) = self.parked_corpses.first().cloned() {
+                dissolve_corpse_to_organic(world, old.gx, old.gy, &old.body);
+                self.parked_corpses.remove(0);
             }
-            self.corpses.remove(0);
         }
         self.corpses.push(corpse);
     }
@@ -8683,5 +8728,61 @@ mod tests {
             Err(SpawnFail::PopCap),
             "parked far atom must still fill the cap"
         );
+    }
+
+    #[test]
+    fn sync_organism_residency_parks_and_restores_corpses() {
+        use crate::chunk::CHUNK_CELLS_W;
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        let mut store = OrganismStore::new();
+        store.corpses.push(Corpse::from_atom(&Atom::new(far_gx, 5, 40.0)));
+        store.corpses.push(Corpse::from_atom(&Atom::new(4, 5, 40.0)));
+        let (parked, restored) =
+            store.sync_organism_residency(Some(cols), Some(StreamWindow::new(0, 128)));
+        assert_eq!(parked, 1);
+        assert_eq!(restored, 0);
+        assert_eq!(store.corpses.len(), 1);
+        assert_eq!(store.corpses[0].gx, 4);
+        assert_eq!(store.parked_corpses.len(), 1);
+        assert_eq!(store.parked_corpses[0].gx, far_gx);
+        assert_eq!(store.corpse_total(), 2);
+
+        let (p2, r2) =
+            store.sync_organism_residency(Some(cols), Some(StreamWindow::new(far_gx, 128)));
+        assert_eq!(p2, 1);
+        assert_eq!(r2, 1);
+        assert_eq!(store.corpses[0].gx, far_gx);
+        assert_eq!(store.parked_corpses[0].gx, 4);
+
+        let (p0, r_all) = store.sync_organism_residency(Some(cols), None);
+        assert_eq!(p0, 0);
+        assert_eq!(r_all, 1);
+        assert!(store.parked_corpses.is_empty());
+        assert_eq!(store.corpses.len(), 2);
+    }
+
+    #[test]
+    fn parked_corpses_count_toward_corpse_cap() {
+        use crate::chunk::CHUNK_CELLS_W;
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        let mut w = World::new(1);
+        w.wrap_width = Some(cols);
+        let mut store = OrganismStore::new();
+        store.max_corpses = 1;
+        store.corpses.push(Corpse::from_atom(&Atom::new(far_gx, 5, 40.0)));
+        store.sync_organism_residency(Some(cols), Some(StreamWindow::new(0, 128)));
+        assert_eq!(store.corpses.len(), 0);
+        assert_eq!(store.parked_corpses.len(), 1);
+        store.push_corpse(&mut w, Corpse::from_atom(&Atom::new(4, 5, 40.0)));
+        assert_eq!(
+            store.corpse_total(),
+            1,
+            "push at cap must dissolve the parked corpse"
+        );
+        assert_eq!(store.corpses.len(), 1);
+        assert_eq!(store.corpses[0].gx, 4);
+        assert!(store.parked_corpses.is_empty());
     }
 }

@@ -621,6 +621,7 @@ async fn main() {
             } else if scene.world.stream_window.is_some()
                 || !scene.world.chunk_store.is_empty()
                 || !scene.organisms.parked.is_empty()
+                || !scene.organisms.parked_corpses.is_empty()
             {
                 scene.world.stream_window = None;
                 let _ = restore_all_from_store(&mut scene.world);
