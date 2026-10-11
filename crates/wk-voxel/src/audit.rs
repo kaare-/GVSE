@@ -165,7 +165,14 @@ pub fn mineral_total(world: &World) -> i64 {
             solid += crate::mineral::cell_mineral(*cell) as i64;
         }
     }
-    let load: i64 = world.dissolved.values().map(|&v| v as i64).sum();
+    let load: i64 = world.dissolved.values().map(|&v| v as i64).sum::<i64>()
+        + world
+            .side_map_store
+            .dissolved
+            .values()
+            .map(|&v| v as i64)
+            .sum::<i64>()
+        + crate::frozen_backlog::frozen_backlog_dissolved_total(world);
     solid + load
 }
 
@@ -181,7 +188,14 @@ pub fn sediment_total(world: &World) -> i64 {
             solid += crate::sediment::cell_sediment(*cell) as i64;
         }
     }
-    let load: i64 = world.suspended.values().map(|&v| v as i64).sum();
+    let load: i64 = world.suspended.values().map(|&v| v as i64).sum::<i64>()
+        + world
+            .side_map_store
+            .suspended
+            .values()
+            .map(|&v| v as i64)
+            .sum::<i64>()
+        + crate::frozen_backlog::frozen_backlog_sediment_total(world);
     solid + load
 }
 

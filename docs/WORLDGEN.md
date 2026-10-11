@@ -471,15 +471,17 @@ pub struct FrozenBacklog {
     pub water_in_left: i64,
     pub water_in_right: i64,
     pub water_other: i64, // vertical / interior of a missing slab
-    // sediment / moisture — deferred
+    pub sediment_in: i64, // suspended clay
+    pub dissolved_in: i64,
 }
 ```
 
-**Landed (water-only, 2026-10-11):** `commit_air_sat_xfers` books into
-`World::frozen_backlog` when the dest chunk is missing under a stream
-window (instead of reflecting). `sync_residency` / `restore_all_from_store`
-call `apply_frozen_backlog` after reload. `sat_totals` includes backlog
-(+ parked side-map steam/cave). Sediment/moisture backlog still open.
+**Landed (2026-10-11):** `commit_air_sat_xfers` books water + pro-rata
+suspended/dissolved into `World::frozen_backlog` when the dest chunk is
+missing under a stream window. `sync_residency` /
+`restore_all_from_store` call `apply_frozen_backlog` after reload.
+`sat_totals` / `sediment_total` / `mineral_total` count backlog (+ parked
+side maps). Moisture backlog still open.
 
 On thaw, water is painted onto edge Air columns (left/right) or any Air
 (`water_other`), then the entry is cleared (remainder stays booked if

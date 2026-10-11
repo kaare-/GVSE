@@ -406,5 +406,5 @@ re-profile.
    flow into missing chunks (thaw on reload). Stretch stream+evict A/B
    (`perf_profile_stretch_stream_ab`, view=320): wall **51.7 → 14.9**
    ms/tick (~19 → **~67** sim-FPS); loaded chunks **1088 → 459**
-   (store=629). Log: `phase4-stretch-stream-evict-ab.log`. Next:
-   sediment backlog / mycelium parking.
+   (store=629). Log: `phase4-stretch-stream-evict-ab.log`. FrozenBacklog
+   also carries suspended/dissolved loads. Next: mycelium parking.

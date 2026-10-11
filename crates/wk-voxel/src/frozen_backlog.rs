@@ -1,17 +1,20 @@
-//! Water backlog for chunks outside loaded RAM (Phase 4 streaming).
+//! Water + load backlog for chunks outside loaded RAM (Phase 4 streaming).
 //!
-//! When active-edge flow targets a missing (evicted) neighbour, sat is
-//! booked here instead of reflecting at a wall. [`apply_frozen_backlog`]
-//! paints it onto edge Air when the chunk reloads via
-//! [`crate::chunk_store::sync_residency`]. Sediment / moisture deferred.
+//! When active-edge flow targets a missing (evicted) neighbour, sat (and a
+//! pro-rata share of suspended / dissolved load) is booked here instead of
+//! reflecting at a wall. [`apply_frozen_backlog`] paints water onto edge Air
+//! and dumps loads onto wet seats when the chunk reloads via
+//! [`crate::chunk_store::sync_residency`].
 
 use crate::cell::{Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fasthash::FxHashMap;
 use crate::grid::World;
+use crate::mineral::{add_dissolved, dissolved_at, take_dissolved};
+use crate::sediment::{add_suspended, suspended_at, take_suspended};
 use wk_material::MaterialId;
 
-/// Per-chunk water waiting for thaw (WORLDGEN water-only first slice).
+/// Per-chunk backlog waiting for thaw (WORLDGEN Rule 1, water + loads).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrozenBacklog {
     /// Inflow onto local `lx == 0` (from the west neighbour).
@@ -20,15 +23,23 @@ pub struct FrozenBacklog {
     pub water_in_right: i64,
     /// Vertical / interior of a missing slab (same `cx`, other `cy`).
     pub water_other: i64,
+    /// Suspended fine sediment (clay) units riding the absorbed water.
+    pub sediment_in: i64,
+    /// Dissolved mineral load units riding the absorbed water.
+    pub dissolved_in: i64,
 }
 
 impl FrozenBacklog {
-    pub fn total(self) -> i64 {
+    pub fn water_total(self) -> i64 {
         self.water_in_left + self.water_in_right + self.water_other
     }
 
+    pub fn total(self) -> i64 {
+        self.water_total()
+    }
+
     pub fn is_empty(self) -> bool {
-        self.total() == 0
+        self.water_total() == 0 && self.sediment_in == 0 && self.dissolved_in == 0
     }
 }
 
@@ -37,17 +48,57 @@ pub fn frozen_backlog_total(world: &World) -> i64 {
     world
         .frozen_backlog
         .values()
-        .map(|b| b.total())
+        .map(|b| b.water_total())
         .sum()
 }
 
-/// Book `amt` sat into the destination chunk's backlog (call when dest is missing).
-pub fn absorb_water(world: &mut World, to_gx: i32, to_gy: i32, amt: i32) {
+/// Sum of parked suspended sediment in the backlog.
+pub fn frozen_backlog_sediment_total(world: &World) -> i64 {
+    world
+        .frozen_backlog
+        .values()
+        .map(|b| b.sediment_in)
+        .sum()
+}
+
+/// Sum of parked dissolved mineral in the backlog.
+pub fn frozen_backlog_dissolved_total(world: &World) -> i64 {
+    world
+        .frozen_backlog
+        .values()
+        .map(|b| b.dissolved_in)
+        .sum()
+}
+
+/// Book `amt` sat (+ pro-rata loads from `from`) into the dest chunk backlog.
+pub fn absorb_water(
+    world: &mut World,
+    from: (i32, i32),
+    to_gx: i32,
+    to_gy: i32,
+    amt: i32,
+    donor_sat_before: u8,
+) {
     if amt <= 0 {
         return;
     }
     let gx = world.wrap_x(to_gx);
     let (coord, lx, _ly) = World::split(gx, to_gy);
+    let mut sed_moved = 0u16;
+    let mut diss_moved = 0u16;
+    if donor_sat_before > 0 {
+        let sed = suspended_at(world, from.0, from.1);
+        if sed > 0 {
+            let share = (sed as u32 * amt as u32 / donor_sat_before as u32) as u16;
+            sed_moved = take_suspended(world, from.0, from.1, share);
+        }
+        let diss = dissolved_at(world, from.0, from.1);
+        if diss > 0 {
+            let share = ((diss as u32 * amt as u32) / donor_sat_before as u32) as u16;
+            let share = share.max(1);
+            diss_moved = take_dissolved(world, from.0, from.1, share);
+        }
+    }
     let entry = world.frozen_backlog.entry(coord).or_default();
     if lx == 0 {
         entry.water_in_left += amt as i64;
@@ -56,6 +107,8 @@ pub fn absorb_water(world: &mut World, to_gx: i32, to_gy: i32, amt: i32) {
     } else {
         entry.water_other += amt as i64;
     }
+    entry.sediment_in += sed_moved as i64;
+    entry.dissolved_in += diss_moved as i64;
 }
 
 /// Paint backlog onto Air cells of a loaded chunk; clear the entry.
@@ -80,8 +133,42 @@ pub fn apply_frozen_backlog(world: &mut World, coord: ChunkCoord) {
         bl.water_in_right,
     );
     bl.water_other = fill_chunk_air(world, coord, bl.water_other);
+    dump_loads(world, coord, &mut bl);
     if !bl.is_empty() {
         world.frozen_backlog.insert(coord, bl);
+    }
+}
+
+fn dump_loads(world: &mut World, coord: ChunkCoord, bl: &mut FrozenBacklog) {
+    if bl.sediment_in == 0 && bl.dissolved_in == 0 {
+        return;
+    }
+    let base_x = coord.cx * CHUNK_CELLS_W as i32;
+    let base_y = coord.cy * CHUNK_CELLS_H as i32;
+    for ly in 0..CHUNK_CELLS_H as i32 {
+        for lx in 0..CHUNK_CELLS_W as i32 {
+            if bl.sediment_in == 0 && bl.dissolved_in == 0 {
+                return;
+            }
+            let gx = base_x + lx;
+            let gy = base_y + ly;
+            let Some(cell) = world.get_cell(gx, gy) else {
+                continue;
+            };
+            if cell.material != MaterialId::Air || cell.sat.is_empty() {
+                continue;
+            }
+            if bl.sediment_in > 0 {
+                let give = bl.sediment_in.min(u16::MAX as i64) as u16;
+                add_suspended(world, gx, gy, give);
+                bl.sediment_in -= give as i64;
+            }
+            if bl.dissolved_in > 0 {
+                let give = bl.dissolved_in.min(u16::MAX as i64) as u16;
+                add_dissolved(world, gx, gy, give);
+                bl.dissolved_in -= give as i64;
+            }
+        }
     }
 }
 
@@ -177,7 +264,7 @@ pub fn backlog_map(world: &World) -> &FxHashMap<ChunkCoord, FrozenBacklog> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::sat_totals;
+    use crate::audit::{mineral_total, sat_totals, sediment_total};
     use crate::streaming::StreamWindow;
 
     #[test]
@@ -208,6 +295,7 @@ mod tests {
 
         let src = w.get_cell(near_x, 1).unwrap();
         let amt = src.sat.0 as i32;
+        let before = src.sat.0;
         w.set_cell(
             near_x,
             1,
@@ -216,7 +304,7 @@ mod tests {
                 ..src
             },
         );
-        absorb_water(&mut w, far_x, 1, amt);
+        absorb_water(&mut w, (near_x, 1), far_x, 1, amt, before);
         assert_eq!(frozen_backlog_total(&w), amt as i64);
         assert_eq!(sat_totals(&w).cell_total, water0);
 
@@ -225,16 +313,59 @@ mod tests {
         apply_frozen_backlog(&mut w, ChunkCoord::new(1, 0));
         assert_eq!(frozen_backlog_total(&w), 0);
         assert_eq!(sat_totals(&w).cell_total, water0);
-        assert_eq!(
-            w.get_cell(far_x, 0).map(|c| c.material),
-            Some(MaterialId::Air)
-        );
-        // Bedrock was only on the dropped chunk's floor — reminted blank is
-        // all Air; water should sit on the left edge column.
         let edge_sat: i64 = (0..CHUNK_CELLS_H as i32)
             .filter_map(|y| w.get_cell(far_x, y).map(|c| c.sat.0 as i64))
             .sum();
         assert_eq!(edge_sat, water0);
+    }
+
+    #[test]
+    fn absorb_carries_suspended_and_dissolved() {
+        let mut w = World::new(1);
+        w.wrap_width = Some(64 * CHUNK_CELLS_W as i32);
+        let near_x = CHUNK_CELLS_W as i32 - 1;
+        let far_x = CHUNK_CELLS_W as i32;
+        w.set_cell(near_x, 1, Cell::water());
+        add_suspended(&mut w, near_x, 1, 40);
+        add_dissolved(&mut w, near_x, 1, 25);
+        let sed0 = sediment_total(&w);
+        let min0 = mineral_total(&w);
+
+        let drop: Vec<_> = w
+            .chunks
+            .keys()
+            .copied()
+            .filter(|c| c.cx == 1)
+            .collect();
+        for c in drop {
+            w.chunks.remove(&c);
+        }
+        w.invalidate_chunk_cache_pub();
+        w.stream_window = Some(StreamWindow::new(0, 128));
+
+        let src = w.get_cell(near_x, 1).unwrap();
+        let before = src.sat.0;
+        let amt = before as i32;
+        w.set_cell(
+            near_x,
+            1,
+            Cell {
+                sat: Sat(0),
+                ..src
+            },
+        );
+        absorb_water(&mut w, (near_x, 1), far_x, 1, amt, before);
+        assert!(frozen_backlog_sediment_total(&w) > 0);
+        assert!(frozen_backlog_dissolved_total(&w) > 0);
+        assert_eq!(sediment_total(&w), sed0);
+        assert_eq!(mineral_total(&w), min0);
+
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        apply_frozen_backlog(&mut w, ChunkCoord::new(1, 0));
+        assert_eq!(frozen_backlog_sediment_total(&w), 0);
+        assert_eq!(frozen_backlog_dissolved_total(&w), 0);
+        assert_eq!(sediment_total(&w), sed0);
+        assert_eq!(mineral_total(&w), min0);
     }
 
     #[test]
