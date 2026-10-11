@@ -38,6 +38,14 @@ fn stress() -> WorldgenParams {
     }
 }
 
+fn stretch() -> WorldgenParams {
+    WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 64,
+        sky_ceiling_y: wk_voxel::TROPOSPHERE_TOP_Y + wk_voxel::STRATOSPHERE_CELLS,
+        ..WorldgenParams::default()
+    }
+}
+
 fn report(label: &str, params: WorldgenParams) {
     let mut world = World::new(params.seed);
     stamp_world(&mut world, &params);
@@ -119,4 +127,5 @@ fn report(label: &str, params: WorldgenParams) {
 fn seepage_cost_split() {
     report("demo", WorldgenParams::default());
     report("stress", stress());
+    report("stretch", stretch());
 }

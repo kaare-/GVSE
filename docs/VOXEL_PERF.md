@@ -252,3 +252,134 @@ shell — Phase 2 / owner discussion, not another CA dirty trim.
 - Coarsening weather / skipping condensation lottery / changing `live_surface_y`
 - Enabling rayon by default (still slower on narrow dirty)
 - Owner discussion on the candidates above before another Phase 1 CA pass
+
+---
+
+## Phase 4 baseline (post ice / mint stack)
+
+Same host / harness as Phase 1 (`perf_profile_demo_and_stress`), tip of
+`snow-mint-probe` + Phase 4 docs (`23daaee` parent), warm 40 / measure 200,
+`PerfConfig` FPS defaults, parallel **OFF** unless noted. Full log:
+`/opt/cursor/artifacts/phase4-perf-profile.log`.
+
+### Size sweep (0 plants unless noted)
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 18.9 | ~53 | 11.2 | 3.28 | 2.81 | 1.70 |
+| demo | 20.8 | ~48 | 12.1 | 2.87 | 4.80 | 2.02 |
+| stress (2048×1064) | 36.5 | ~27 | 20.1 | 5.15 | 5.95 | 4.75 |
+| demo + 48 plants | 22.5 | ~44 | 13.4 | 2.81 | 5.80 | 2.37 |
+| demo + 256 plants | 24.4 | ~41 | 14.1 | 2.92 | 6.37 | 2.38 |
+| stress + 256 plants | 36.7 | ~27 | 18.3 | 5.29 | 3.85 | 4.80 |
+
+Demo parallel A/B (0 plants): FPS OFF 20.8 / ON 22.1; full_feel OFF 52.2 / ON 50.6.
+Creature sweep (demo FPS): 0→20.4, 48→22.4, 128→23.1, 256→25.2 ms (org ≤3%).
+
+### Delta vs Phase 1 settle2 gate
+
+| Stamp | wall Δ | settle Δ | bodies Δ | seepage Δ |
+|-------|-------:|---------:|---------:|----------:|
+| short sky | +2.6 | **+2.3** | −0.1 | ~0 |
+| demo | +3.5 | **+4.0** | −0.3 | ~0 |
+| stress | +9.2 | **+5.6** | +0.9 | +0.2 |
+
+Stress dropped under the Phase 1 ≥30 FPS gate (~27). **Settle** is the
+clear regression (Phase 1 Air-dest left settle ≪1 ms; now 3–6 ms). New
+shell costs also show: phase ~0.5–1.3, steam ~1.2–1.4, temp amortized
+~1.0–2.3, humidity.advect ~1.7–3.5.
+
+### Phase 4 hotspot table (ms/tick)
+
+| Rank | Demo (0 plants) | Stress (0 plants) |
+|-----:|-----------------|-------------------|
+| 1 | settle **4.80** | settle **5.95** |
+| 2 | seepage 2.87 | seepage 5.15 |
+| 3 | rock bodies 2.02 | rock bodies 4.75 |
+| 4 | humidity.advect 1.69 | humidity.advect 3.52 |
+
+### First lever (chosen)
+
+Restore settle toward the Phase 1 Air-dest band before width stretch —
+a ≥1 ms surgical win without weather coarsen. Stretch past 2048 toward
+WORLDGEN Compact (4096 cols / ~1 km) only after stress is back ≥30
+sim-FPS (or a new gate is documented).
+
+### After Ice sticky-loose cut (tip `4458bba`)
+
+Ice removed from `material_is_loose` / wake `saw_loose`; thick packs
+early-out before `ice_floe_seat`; thin glaze uses dirty-halo
+`apply_airborne_thin_ice_fall`. Short `budget_soak` 5k: TRACKED
+**−0.01/t**, min **+0.04/t**, `park=0`. Log:
+`/opt/cursor/artifacts/phase4-perf-reprofile3.log`.
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|
+| short sky | 19.7 | ~51 | 11.4 | 3.32 | 2.86 | 1.71 |
+| demo | 21.1 | ~47 | 12.1 | 2.89 | 4.74 | 2.04 |
+| stress (2048×1064) | 33.5 | ~30 | 18.4 | 4.81 | 5.48 | 4.25 |
+
+Stress back to the Phase 1 ≥30 sim-FPS gate (~30). Settle is still
+**~4–5 ms** on demo (not the Phase 1 Air-dest ≪1 ms band) — leftover is
+real sand freefall / deep-settle (~9/200 ticks), not Ice lids. Host
+noise on wall is ~±1–2 ms across re-runs.
+
+### Stretch stamp (Compact 4096×1064, tip `ece4802`)
+
+`perf_profile_stretch_width`, same harness, 0 plants. Log:
+`/opt/cursor/artifacts/phase4-stretch-profile.log`.
+
+| Stamp | wall ms/tick | ~sim-FPS | physics | seepage | settle | bodies | advect |
+|-------|-------------:|---------:|--------:|--------:|-------:|-------:|-------:|
+| stretch (4096×1064) | 62.2 | ~16 | 30.6 | **10.3** | 2.38 | **9.19** | 6.37 |
+
+~2× cells vs stress → wall ~1.9× (33.5 → 62). Hotspots flip: seepage +
+bodies dominate; settle drops (fewer deep ticks: 2/200). Field shell
+also scales (temp amort 4.5, phase 3.3). **Compact is not ≥30 sim-FPS
+yet** — next Phase 4 levers are seepage wakes / bodies at this width
+(or streaming residency), not another settle trim.
+
+### After seam-wake cut (tip `7a7b2c0`)
+
+`wake_vertical_chunk_seam_pores`: wet-involved seam lowers only; both-at-
+capacity pore↔pore skips the 4-row band dirty (downward front only when
+the lower chunk still has unsaturated room). `seepage_split_probe`
+stretch seam_wake **7.8 → 0.54 ms/call**; active set roughly halves.
+5k soak: TRACKED **−0.01/t**, min **+0.01/t**, `park=0`.
+
+| Stamp | wall ms/tick | ~sim-FPS | seepage | settle | bodies | Δ wall vs prior |
+|-------|-------------:|---------:|--------:|-------:|-------:|----------------:|
+| demo | 18.6 | ~54 | 2.37 | 3.86 | 2.00 | **−2.5** |
+| stress | 29.2 | **~34** | 3.72 | 3.71 | 4.40 | **−4.3** |
+| stretch (4096) | 54.7 | ~18 | 7.86 | 1.41 | 9.16 | **−7.5** |
+
+Logs: `/opt/cursor/artifacts/phase4-demo-stress-after-seam.log`,
+`phase4-stretch-after-seam.log`, `phase4-seepage-split-after.log`.
+
+Stretch hotspots now: bodies **9.2**, seepage **7.9**, humidity.advect
+**6.3**. Weep wake (~3.8 ms/call) is the next seepage slice; bodies need
+a full `step_world` probe (tick-only probe shows ~0 — climate wakes).
+
+### Climatic body probe + weep trim (tip `05758f7`)
+
+`probe_body_climatic_stretch` (`step_world` + rain): Compact bodies
+**~9.9 ms/tick** with **~35 comps fell/tick** and solidity wakes
+**~362/tick** — real undercutting / peel, not quiet-world churn
+(tick-only probes still read ~0). Weep full-pore + open-Air path skips
+interior donor walks (probe 3.8→3.4 ms/call); wall noise-level on
+re-profile.
+
+| Stamp | wall ms/tick | ~sim-FPS | seepage | bodies |
+|-------|-------------:|---------:|--------:|-------:|
+| demo | 18.4 | ~54 | 2.37 | 1.98 |
+| stress | 29.6 | **~34** | 3.88 | 4.33 |
+| stretch (4096) | 53.4 | ~19 | 7.97 | **8.99** |
+
+5k soak: TRACKED **−0.01/t**, `park=0`.
+
+### Next Phase 4 steps
+
+1. Accept Compact **~18–20 sim-FPS** as the full-resident gate for now,
+   or pursue streaming / residency (WORLDGEN) before more CA on bodies.
+2. Body undercut cost is gameplay-shaped — only cut with a playtest
+   dial, not a blind skip.

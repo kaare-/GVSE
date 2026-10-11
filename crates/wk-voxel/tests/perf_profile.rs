@@ -148,6 +148,16 @@ fn stress_params() -> WorldgenParams {
     }
 }
 
+/// WORLDGEN Compact ring — 64 chunks / 4096 cols (~1 km at 0.25 m/col).
+/// Phase 4 scale probe past the 2048 stress stamp.
+fn stretch_params() -> WorldgenParams {
+    WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 64,
+        sky_ceiling_y: wk_voxel::TROPOSPHERE_TOP_Y + wk_voxel::STRATOSPHERE_CELLS,
+        ..WorldgenParams::default()
+    }
+}
+
 /// Pre-tropopause box — same width as demo, old 320-cell sky.
 fn short_sky_params() -> WorldgenParams {
     WorldgenParams {
@@ -693,6 +703,24 @@ fn perf_profile_demo_and_stress() {
         &format!("stress + {} plants", wk_voxel::MAX_ATOMS),
         stress_params(),
         wk_voxel::MAX_ATOMS,
+    );
+    run_profile(
+        "stretch (64-wide × 1064, 0 plants, ~1 km)",
+        stretch_params(),
+        0,
+    );
+}
+
+/// Phase 4 width stretch only (Compact 4096×1064). Faster than the full
+/// demo/stress suite when hunting wall vs cells.
+#[test]
+#[ignore]
+fn perf_profile_stretch_width() {
+    set_parallel_enabled(true);
+    run_profile(
+        "stretch (64-wide × 1064, 0 plants, ~1 km)",
+        stretch_params(),
+        0,
     );
 }
 

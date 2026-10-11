@@ -89,7 +89,7 @@ in sub-zero air deferred to Phase 3 (water-T).
 
 ---
 
-## Phase 3 — Ice revisit *(current)*
+## Phase 3 — Ice revisit *(done 2026-10-09)*
 
 **Goal:** Ice is an old material with quirks. Treat as a concentrated
 pass, not drive-by tweaks. **Design discussion first** — do not pre-commit
@@ -216,33 +216,61 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   **50k Phase 0 gate** tip `7838473`: TRACKED **−0.00/t**, min
   **+0.07/t**, `park=0` — rates still under 0.5/t with snow on.
 
-**Decision list** (2026-10-08 evening Oslo cycle)
+**Exit (met)** — owner closed Phase 3 (2026-10-09): move to Phase 4
+re-profile + larger worlds. Ice model (option 2 A–C + brittle + sheet
+lock + lid chill) + TRACKED flat after roof-collapse Snow fix are the
+hard gates; remaining Xvfb framing weakness is not a Phase-3 blocker.
 
-1. **Merge stack `#365`→`#370`?** All CI-green, ready, CLEAN. Bottom-up
-   onto `park-bank`. Agent cannot enable GitHub auto-merge from here.
-2. **Phase 3 exit?** Accept “reads as ice” after sheet-lock + lid-chill
-   playtest, or list remaining lid/heat issues.
-3. **Phase 4 start?** Only after (2). Goal: re-profile + larger worlds
-   (see below). No Phase 4 code until you close Phase 3.
+**Still open (merge hygiene, not Phase 3 scope)**
 
-**Still open**
-
-- Owner playtest gate on tip `#370`: “reads as ice” / no lake lid pulse /
-  sheet (not fingers) / deep lake cools under hard cold without vacuum.
-  Stack `#365`–`#370` is CI-green and ready to merge bottom-up.
-
-**Exit criteria**
-
-- Agreed ice model in docs + tests (option 2 A–C met).
-- Visual soak (Xvfb or playtest) accepted as “reads as ice”.
+- Stack `#365`→`#373` CI-green / ready / CLEAN onto `park-bank` (2026-10-10
+  recheck: all `MERGEABLE` / `CLEAN`, `autoMergeRequest=null`). Agent
+  cannot Enable auto-merge from here — owner merge bottom-up. `#374`
+  (Phase 4 tip) stays draft until that stack lands under it.
 
 ---
 
-## Phase 4 — Optimisation again + larger worlds
+## Phase 4 — Optimisation again + larger worlds *(current)*
 
 **Goal:** After ice/geyser churn, re-profile and push map scale.
 May include ring width / ceiling / streaming follow-ups from
-`WORLDGEN.md`.
+[`WORLDGEN.md`](WORLDGEN.md).
+
+**Entry**
+
+1. Close Phase 3 in this doc (done 2026-10-09).
+2. Re-profile tip after Phase 3 ice/heat/sheet + mint stack on the same
+   harness as Phase 1 (`perf_profile_*`, warm 40 / measure 200) — land
+   numbers in [`VOXEL_PERF.md`](VOXEL_PERF.md) § Phase 4 baseline.
+3. Compare hotspots to Phase 1 settle2 table (seepage / bodies / advect).
+   Prefer **width stretch** before another CA dirty trim unless a clear
+   ≥1 ms surgical win appears.
+
+**Acceptance (proposed)**
+
+- Phase 4 baseline table landed (short sky / demo / stress, 0 plants).
+- At least one scale or cost lever: grow past 2048 cols toward stretch
+  **5 km+ @ ~1064 h** (Phase 1 deferred), or a measured ≥1 ms/tick cut
+  that does **not** coarsen weather / lottery / `live_surface_y`.
+- Stress (or new stretch stamp) stays playable (≥**30 sim-FPS** or
+  documented new gate if width forces a revisit).
+- Short `budget_soak` still `park=0` and TRACKED near flat on the tip.
+
+**Out of scope**
+
+- Phase 5 organism rewrite.
+- Enabling rayon by default (still slower on narrow dirty unless
+  re-profile proves otherwise).
+- Weather coarsen / condensation lottery skip as a first lever.
+
+**Now**
+
+- Ice sticky-loose + seam-wake (+ small weep trim) landed
+  ([`VOXEL_PERF.md`](VOXEL_PERF.md)). Stress **~34** sim-FPS; Compact
+  **~19**; 5k soak TRACKED flat / `park=0`.
+- Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t),
+  not quiet churn. Next: streaming / residency for km rings, or accept
+  ~18–20 FPS full-resident Compact.
 
 ---
 
@@ -307,6 +335,10 @@ before coding.
 | 2026-10-08 | Phase 3 brittle | Ocean-like float; thin fragile / thick solid; relax column hardcap (water_temp melt) |
 | 2026-10-08 | Phase 3 Xvfb | Ice lid + water: film/wet band holds; no powder thrash in stills |
 | 2026-10-07 | Phase 3 ice option | **2 — water carries T** (sparse free-water ledger; melt + geyser cool) |
+| 2026-10-09 | Phase 3 closed | Owner: move to Phase 4; ice + TRACKED flat after roof Snow fix |
+| 2026-10-09 | Phase 4 start | Re-profile post-ice tip; then width stretch / ≥1 ms lever ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
+| 2026-10-09 | Phase 4 seam wake | Wet seam lowers + skip full↔full band; Compact wall **62→55** ms (~18 FPS) |
+| 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
 | 2026-10-07 | Geyser locality | Local pressure/pathfinding (+ hard seek limits); tune in play |
@@ -317,7 +349,7 @@ before coding.
 
 ## Clarifications later
 
-- Phase-1 stretch width / field-shell cuts deferred to Phase 4 (or revisit).
-- Phase 3 ice option 2 slices: A sparse map spike → B melt on ice → C geyser mouth cool.
+- Phase-1 stretch width / field-shell cuts: **Phase 4 now** (re-profile first).
+- Phase 3 ice option 2 slices A–C + brittle/sheet/lid: closed with Phase 3.
 - Phase-5 scoping agenda (plants/fungi vs creatures first — open until planning session).
 - Phase-8 shortlist of client stacks when that review starts.

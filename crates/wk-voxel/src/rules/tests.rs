@@ -1243,6 +1243,48 @@ fn thick_ice_does_not_soft_fall_through_land_haze() {
 }
 
 #[test]
+fn thick_ice_does_not_soft_fall_through_empty_air() {
+    let mut w = setup_column_world();
+    // Land empty Air under a 2-cell pack — brittle solid, not powder.
+    w.set_cell(3, 1, Cell::air());
+    w.set_cell(3, 2, Cell::solid(MaterialId::Ice));
+    w.set_cell(3, 3, Cell::solid(MaterialId::Ice));
+    apply_grain_fall(&mut w);
+    assert_eq!(
+        w.get_cell(3, 2).unwrap().material,
+        MaterialId::Ice,
+        "thick ice must not powder-fall through empty Air"
+    );
+    assert_eq!(w.get_cell(3, 3).unwrap().material, MaterialId::Ice);
+    assert_eq!(w.get_cell(3, 1).unwrap().material, MaterialId::Air);
+    // Once-per-tick thin-ice path must also refuse thick packs.
+    assert_eq!(apply_airborne_thin_ice_fall(&mut w), 0);
+    assert_eq!(w.get_cell(3, 2).unwrap().material, MaterialId::Ice);
+}
+
+#[test]
+fn thin_ice_airborne_fall_steps_through_empty_air() {
+    let mut w = setup_column_world();
+    w.set_cell(4, 1, Cell::air());
+    w.set_cell(4, 2, Cell::solid(MaterialId::Ice)); // 1-cell glaze
+    // Dirty-halo path — set_cell already dirties the written cells.
+    assert!(apply_airborne_thin_ice_fall(&mut w) >= 1);
+    assert_eq!(w.get_cell(4, 1).unwrap().material, MaterialId::Ice);
+    assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);
+}
+
+#[test]
+fn airborne_ice_does_not_count_as_unsupported_freefall() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 10, Cell::solid(MaterialId::Ice));
+    let active = plan_active(&w);
+    assert!(
+        !active_has_unsupported_grain(&w, &active),
+        "ice must not force the ×64 deep settle"
+    );
+}
+
+#[test]
 fn airborne_snow_does_not_count_as_unsupported_freefall() {
     let mut w = setup_column_world();
     w.set_cell(2, 10, Cell::solid(MaterialId::Snow));
