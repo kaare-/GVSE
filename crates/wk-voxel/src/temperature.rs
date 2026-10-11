@@ -1200,7 +1200,21 @@ impl Temperature {
                         .map(|w| tile_ice_frac(w, hx, hy, self.tile_cols.max(1)) >= 0.5)
                         .unwrap_or(false);
                     if props.free_water >= 0.5 || icy {
-                        t
+                        // Holding `t` forever (perf/geo skip) left deep-lake
+                        // hotspots after base_temp dumps: skin couple only
+                        // cools the top tile, and buoyancy needs a ΔT that
+                        // never forms in a uniformly warm column. Capacity-
+                        // damped climate relax tracks the cold without
+                        // painting rock geothermal into the water.
+                        let target = self.climate_from_land(land, self.tile_mid_y(hy));
+                        // Lighter inertia weight than surface skin — water
+                        // stack capacity is already large; full inertia left
+                        // mid-lake nearly frozen in place across soaks.
+                        let relax = (cfg.sky_relax * 0.35
+                            / (1.0
+                                + props.capacity.max(0.05) * cfg.inertia_scale * 0.2))
+                            .clamp(0.002, 0.06);
+                        t + (target - t) * relax
                     } else {
                         // Overburden from the live rock surface, every step.
                         // Cached depth would keep a deleted hill hot.
@@ -3239,6 +3253,65 @@ mod tests {
         assert!(
             (cliff_t - lake_t).abs() > 4.0,
             "lake must not lock to cliff geo isotherm (lake={lake_t:.1} cliff={cliff_t:.1} hy={hy})"
+        );
+    }
+
+    #[test]
+    fn deep_lake_cools_when_base_temp_drops_without_geothermal() {
+        // Owner: rock overburden heat off + base_temp −20 — rock cooled,
+        // lake mid-column stayed a hotspot (buried free water held `t`).
+        let sea: i32 = 40;
+        let bed: i32 = 4;
+        let mut world = World::new(5);
+        for y in 0..=sea + 8 {
+            world.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+        }
+        for x in 0..8 {
+            for y in 0..=bed {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            for y in (bed + 1)..=sea {
+                world.set_cell(x, y, Cell::water());
+            }
+        }
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 16, 80, 1, 16, sea, false);
+        t.config.base_temp_c = 18.0;
+        t.fill_initial(0);
+        t.config.base_temp_c = -20.0;
+        t.config.geothermal_relax = 0.0;
+        t.config.geothermal_flux_c = 0.0;
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.water_rock_couple = 0.0;
+        t.config.air_water_skin_couple = 0.0;
+        t.config.pore_water_couple = 0.0;
+        t.config.water_convect_bias = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.sky_relax = 0.20;
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 16, 80);
+        let tc = t.tile_cols.max(1);
+        let mid_y = (bed + sea) / 2;
+        let hy = mid_y.div_euclid(tc);
+        let before = t.at_tile(1, hy);
+        for i in 0..80 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let after = t.at_tile(1, hy);
+        assert!(
+            before > 5.0,
+            "precondition: mid-lake starts warm ({before:.1})"
+        );
+        assert!(
+            after < before - 3.0,
+            "deep lake must cool toward cold base_temp (before={before:.1} after={after:.1})"
+        );
+        assert!(
+            after < 10.0,
+            "mid-lake must leave the hotspot band (after={after:.1})"
         );
     }
 
