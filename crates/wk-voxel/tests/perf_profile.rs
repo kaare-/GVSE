@@ -158,6 +158,15 @@ fn stretch_params() -> WorldgenParams {
     }
 }
 
+/// Phase 4 acceptance scale — 320 chunks / 20480 cols (~5.12 km @ 0.25 m/col).
+fn stretch_5km_params() -> WorldgenParams {
+    WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 320,
+        sky_ceiling_y: wk_voxel::TROPOSPHERE_TOP_Y + wk_voxel::STRATOSPHERE_CELLS,
+        ..WorldgenParams::default()
+    }
+}
+
 /// Pre-tropopause box — same width as demo, old 320-cell sky.
 fn short_sky_params() -> WorldgenParams {
     WorldgenParams {
@@ -771,6 +780,48 @@ fn perf_profile_stretch_stream_ab() {
         print_physics_table(&phys, MEASURE_TICKS);
         eprintln!();
     }
+}
+
+/// 5 km ring under stream+evict only (full-resident would be ~5× Compact RAM).
+/// Phase 4 scale acceptance: playable ≥30 sim-FPS with view=320.
+#[test]
+#[ignore]
+fn perf_profile_stretch_5km_stream() {
+    set_parallel_enabled(true);
+    let params = stretch_5km_params();
+    let mut scene = stamp_scene(params);
+    scene.perf = PerfConfig::default();
+    let apply_stream = |s: &mut Scene| {
+        s.world.stream_window = Some(StreamWindow::new(s.params.width_cols / 2, 320));
+        let _ = sync_residency(&mut s.world);
+    };
+    for _ in 0..WARMUP_TICKS {
+        apply_stream(&mut scene);
+        one_stack_tick(&mut scene, None, None);
+    }
+    let mut accum = PassAccum::zero();
+    let mut phys = PhysicsTimings::default();
+    let wall = Instant::now();
+    for _ in 0..MEASURE_TICKS {
+        apply_stream(&mut scene);
+        one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+    }
+    let wall = wall.elapsed();
+    profile_label(
+        "stretch 5km stream view=320 + halo + evict",
+        &scene.params,
+        scene.world.chunks.len(),
+    );
+    eprintln!(
+        "  residency            chunks={}  store={}  side_entries={}  backlog_sat={}",
+        scene.world.chunks.len(),
+        scene.world.chunk_store.len(),
+        scene.world.side_map_store.entry_count(),
+        wk_voxel::frozen_backlog_total(&scene.world),
+    );
+    print_pass_table(&accum, MEASURE_TICKS, wall);
+    print_physics_table(&phys, MEASURE_TICKS);
+    eprintln!();
 }
 
 /// 320-cell box vs the 1064-cell tropopause default. No plants.
