@@ -319,12 +319,109 @@ pub struct BudgetProbe {
     /// `set_cell` sat/ice change when **material** changed (moves that
     /// keep the material are ignored — gravity / evap / seepage).
     pub water_swap: i64,
+    /// Subset of [`Self::water_swap`] when prev or next material is Snow.
+    pub water_swap_snow: i64,
+    /// World overlay Δ on not-Snow → Snow (nucleation + fall dest + …).
+    pub water_swap_snow_in: i64,
+    /// World overlay Δ on Snow → not-Snow (thaw / bare / fall src + …).
+    pub water_swap_snow_out: i64,
+    /// [`SnowSwapScope::Nucleate`] (`deposit_snow_in_air`) snow_in / snow_out.
+    pub snow_in_nucleate: i64,
+    pub snow_out_nucleate: i64,
+    /// [`SnowSwapScope::Surface`] (phase surface lid / frost snow).
+    pub snow_in_surface: i64,
+    pub snow_out_surface: i64,
+    /// [`SnowSwapScope::Fall`] (`apply_airborne_snow_fall` World swap).
+    pub snow_in_fall: i64,
+    pub snow_out_fall: i64,
+    /// [`SnowSwapScope::Drift`] (`apply_snow_wind_drift` World swap).
+    pub snow_in_drift: i64,
+    pub snow_out_drift: i64,
+    /// [`SnowSwapScope::Reloc`] (phase cull relocate seat).
+    pub snow_in_reloc: i64,
+    pub snow_out_reloc: i64,
+    /// [`SnowSwapScope::Rise`] (buoyant litter World swap).
+    pub snow_in_rise: i64,
+    pub snow_out_rise: i64,
+    /// [`SnowSwapScope::Punch`] (float cargo punch grain↔litter).
+    pub snow_in_punch: i64,
+    pub snow_out_punch: i64,
+    /// [`SnowSwapScope::Raft`] (wind/stream raft column drift).
+    pub snow_in_raft: i64,
+    pub snow_out_raft: i64,
+    /// [`SnowSwapScope::Landscape`] (landscape body clear/stamp).
+    pub snow_in_landscape: i64,
+    pub snow_out_landscape: i64,
+    /// [`SnowSwapScope::Competent`] (competent fall cell moves).
+    pub snow_in_competent: i64,
+    pub snow_out_competent: i64,
+    /// World snow_in / snow_out with no [`SnowSwapScope`] (editor / miss).
+    pub snow_in_other: i64,
+    pub snow_out_other: i64,
+    /// Untagged snow_in split by [`SnowOtherStage`] (residual A hunt).
+    pub snow_in_other_by_stage: [i64; SnowOtherStage::N],
+    pub snow_out_other_by_stage: [i64; SnowOtherStage::N],
+    /// [`Self::water_swap`] − [`Self::water_swap_snow`] (Sand/Organic/…).
+    pub water_swap_other: i64,
     /// `park_orphan_*` leftover the caller discarded.
     pub water_park: i64,
     /// Humidity `try_add` refused because the tile is outside bounds.
     pub water_hum_rej: i64,
     /// `Humidity::clamp_to_bounds` dropped vapour.
     pub water_clamp: i64,
+    /// Cumulative `Humidity::total_mass` Δ across `advect_with_surface`
+    /// (should be ~0; snow-onset mint hunt).
+    pub water_hum_advect: f64,
+    /// Cumulative `Humidity::total_mass` Δ across `diffuse` (should be ~0).
+    pub water_hum_diffuse: f64,
+    /// Evap path: cumulative humidity mass `try_add*` accepted (sat units).
+    pub water_evap_add: i64,
+    /// Evap path: cumulative free-air sat actually removed after try_add.
+    pub water_evap_debit: i64,
+    /// Evap path: sat removed from orphan-boosted surface films.
+    pub water_orphan_rm: i64,
+    /// Condensation liquid: free sat written by `deposit_water_in_air` / surface.
+    pub water_dep_add: i64,
+    /// Condensation liquid: humidity actually drained for that deposit.
+    pub water_dep_debit: i64,
+    /// Same-mat Air sat Δ inside surface-flow commit ([`FreeSatScope::Flow`]).
+    /// Closed transfers net ~0; a mint-sized positive means double-count write.
+    pub water_flow_air: i64,
+    /// Same-mat Air sat Δ inside seepage apply ([`FreeSatScope::Seep`]).
+    pub water_seep_air: i64,
+    /// Same-mat Air sat Δ inside `park_orphan_*` ([`FreeSatScope::Park`]).
+    pub water_park_air: i64,
+    /// Same-mat Air sat Δ **outside** flow/seep/park scopes (gravity,
+    /// leftover park, rain fill, etc.). Landed-pack mint hunt: if this
+    /// tracks `|TRACKED|` with `OFF=phase`, the writer is not flow/seep/park.
+    pub water_free_other: i64,
+    /// Free-Air sat Δ through [`crate::parallel::set_cell`] (grain fall /
+    /// repose). Misses [`note_set_cell`] — landed-pack free_in hunt.
+    pub water_par_air: i64,
+    /// Subset of [`Self::water_par_air`] when prev or next material is Snow.
+    pub water_par_snow: i64,
+    /// Free-Air sat Δ through gravity's chunk-direct `write_xy` (also
+    /// misses [`note_set_cell`]). Pair with soak `OFF=gravity`.
+    pub water_grav_air: i64,
+    /// Peak steam mass found on non-Air cells during soak samples
+    /// (parallel grain Air→Snow skips `evict_steam_seat`).
+    pub steam_on_solid: i64,
+    /// Snow cells leaving the snow book (`Snow` → not-`Snow`). Yield sum.
+    /// Includes grain-fall swap sources — pair with [`Self::snow_enter_yield`].
+    pub snow_exit_yield: i64,
+    /// Non-Snow → Snow yield (nucleation + fall swap destinations).
+    pub snow_enter_yield: i64,
+    /// Free/ice credit written into the destination on snow exits.
+    pub snow_exit_credit: i64,
+    /// Solid overwrite of Snow (Sand/Stone/…) — yield lost with no free credit.
+    /// `Snow`→`Air` is thaw or swap (not counted here); see net leave.
+    pub snow_exit_bare: i64,
+    /// Snow → Ice conversions (stay in phase book; yield moved).
+    pub snow_to_ice: i64,
+    /// Count of `Snow` → not-`Snow` material changes.
+    pub snow_exit_n: u64,
+    /// Count of not-`Snow` → `Snow` material changes.
+    pub snow_enter_n: u64,
     /// `set_cell` carbonate delta **outside** widen / scour / precip / emit.
     pub mineral_bare: i64,
     /// Same delta **inside** those ledger APIs (should be paired with load).
@@ -338,11 +435,17 @@ impl BudgetProbe {
         PROBE.with(|p| p.get())
     }
 
+    pub fn is_recording() -> bool {
+        probe_on()
+    }
+
     pub fn is_quiet(self) -> bool {
         self.water_swap == 0
             && self.water_park == 0
             && self.water_hum_rej == 0
             && self.water_clamp == 0
+            && self.water_hum_advect.abs() < 1e-3
+            && self.water_hum_diffuse.abs() < 1e-3
             && self.mineral_bare == 0
             && self.mineral_credit == 0
             && self.mineral_clip == 0
@@ -353,14 +456,252 @@ thread_local! {
     static PROBE_ON: StdCell<bool> = const { StdCell::new(false) };
     static PROBE: StdCell<BudgetProbe> = const { StdCell::new(BudgetProbe {
         water_swap: 0,
+        water_swap_snow: 0,
+        water_swap_snow_in: 0,
+        water_swap_snow_out: 0,
+        snow_in_nucleate: 0,
+        snow_out_nucleate: 0,
+        snow_in_surface: 0,
+        snow_out_surface: 0,
+        snow_in_fall: 0,
+        snow_out_fall: 0,
+        snow_in_drift: 0,
+        snow_out_drift: 0,
+        snow_in_reloc: 0,
+        snow_out_reloc: 0,
+        snow_in_rise: 0,
+        snow_out_rise: 0,
+        snow_in_punch: 0,
+        snow_out_punch: 0,
+        snow_in_raft: 0,
+        snow_out_raft: 0,
+        snow_in_landscape: 0,
+        snow_out_landscape: 0,
+        snow_in_competent: 0,
+        snow_out_competent: 0,
+        snow_in_other: 0,
+        snow_out_other: 0,
+        snow_in_other_by_stage: [0; SnowOtherStage::N],
+        snow_out_other_by_stage: [0; SnowOtherStage::N],
+        water_swap_other: 0,
         water_park: 0,
         water_hum_rej: 0,
         water_clamp: 0,
+        water_hum_advect: 0.0,
+        water_hum_diffuse: 0.0,
+        water_evap_add: 0,
+        water_evap_debit: 0,
+        water_orphan_rm: 0,
+        water_dep_add: 0,
+        water_dep_debit: 0,
+        water_flow_air: 0,
+        water_seep_air: 0,
+        water_park_air: 0,
+        water_free_other: 0,
+        water_par_air: 0,
+        water_par_snow: 0,
+        water_grav_air: 0,
+        steam_on_solid: 0,
+        snow_exit_yield: 0,
+        snow_enter_yield: 0,
+        snow_exit_credit: 0,
+        snow_exit_bare: 0,
+        snow_to_ice: 0,
+        snow_exit_n: 0,
+        snow_enter_n: 0,
         mineral_bare: 0,
         mineral_credit: 0,
         mineral_clip: 0,
     }) };
     static MINERAL_SCOPE: StdCell<u32> = const { StdCell::new(0) };
+    /// Bitmask: 1=flow, 2=seep, 4=park — nestable via refcount per bit.
+    static FREE_SAT_SCOPE: StdCell<u32> = const { StdCell::new(0) };
+    static FREE_SAT_FLOW_N: StdCell<u32> = const { StdCell::new(0) };
+    static FREE_SAT_SEEP_N: StdCell<u32> = const { StdCell::new(0) };
+    static FREE_SAT_PARK_N: StdCell<u32> = const { StdCell::new(0) };
+    /// Active [`SnowSwapScope`] bit (0 = untagged / other).
+    static SNOW_SWAP_SCOPE: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_NUCLEATE_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_SURFACE_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_FALL_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_DRIFT_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_RELOC_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_RISE_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_PUNCH_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_RAFT_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_LANDSCAPE_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_SWAP_COMPETENT_N: StdCell<u32> = const { StdCell::new(0) };
+    static SNOW_OTHER_STAGE: StdCell<u8> = const { StdCell::new(0) };
+}
+
+/// Coarse step section for untagged World snow overlay (when no [`SnowSwapScope`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnowOtherStage;
+impl SnowOtherStage {
+    pub const N: usize = 16;
+    pub const UNKNOWN: u8 = 0;
+    pub const COND: u8 = 1;
+    pub const RISE: u8 = 2;
+    pub const SETTLE: u8 = 3;
+    pub const FALL: u8 = 4;
+    pub const PUNCH: u8 = 5;
+    pub const COMPETENT: u8 = 6;
+    pub const DRIFT: u8 = 7;
+    pub const RAFT: u8 = 8;
+    pub const STEAM: u8 = 9;
+    pub const PHASE: u8 = 10;
+    pub const LANDSCAPE: u8 = 11;
+    pub const FLOW: u8 = 12;
+    pub const FAILURE: u8 = 13;
+    pub const EROSION: u8 = 14;
+    pub const MYCELIUM: u8 = 15;
+
+    pub const NAMES: [&'static str; Self::N] = [
+        "unknown",
+        "cond",
+        "rise",
+        "settle",
+        "fall",
+        "punch",
+        "competent",
+        "drift",
+        "raft",
+        "steam",
+        "phase",
+        "landscape",
+        "flow",
+        "failure",
+        "erosion",
+        "mycelium",
+    ];
+}
+
+/// RAII: mark the active step section for untagged snow_in/out attribution.
+pub struct SnowOtherStageGuard {
+    prev: u8,
+}
+
+impl SnowOtherStageGuard {
+    pub fn enter(stage: u8) -> Self {
+        let prev = SNOW_OTHER_STAGE.with(|c| {
+            let p = c.get();
+            c.set(stage);
+            p
+        });
+        Self { prev }
+    }
+}
+
+impl Drop for SnowOtherStageGuard {
+    fn drop(&mut self) {
+        SNOW_OTHER_STAGE.with(|c| c.set(self.prev));
+    }
+}
+
+/// Cumulative humidity mass change across one `advect_with_surface` call.
+#[inline]
+pub fn note_hum_advect_delta(delta: f32) {
+    if !probe_on() || delta.abs() < 1e-9 {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_hum_advect += f64::from(delta);
+        p.set(v);
+    });
+}
+
+/// Cumulative humidity mass change across one `diffuse` call.
+#[inline]
+pub fn note_hum_diffuse_delta(delta: f32) {
+    if !probe_on() || delta.abs() < 1e-9 {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_hum_diffuse += f64::from(delta);
+        p.set(v);
+    });
+}
+
+/// Evap → humidity `try_add*` accepted mass (integer sat units).
+#[inline]
+pub fn note_evap_hum_add(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_evap_add += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Free-air sat removed in the same evap apply step as [`note_evap_hum_add`].
+#[inline]
+pub fn note_evap_sat_debit(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_evap_debit += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Sat removed from an orphan-boosted surface film.
+#[inline]
+pub fn note_orphan_film_rm(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_orphan_rm += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Condensation liquid free-sat written (paired with [`note_dep_hum_debit`]).
+#[inline]
+pub fn note_dep_sat_add(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_dep_add += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Humidity drained for a condensation liquid deposit.
+#[inline]
+pub fn note_dep_hum_debit(units: i32) {
+    if units == 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_dep_debit += i64::from(units);
+        p.set(v);
+    });
+}
+
+/// Record steam mass currently seated on non-Air (peak over the soak).
+#[inline]
+pub fn note_steam_on_solid_peak(units: i64) {
+    if units <= 0 || !probe_on() {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        if units > v.steam_on_solid {
+            v.steam_on_solid = units;
+        }
+        p.set(v);
+    });
 }
 
 fn probe_set_on(on: bool) {
@@ -370,6 +711,22 @@ fn probe_set_on(on: bool) {
 fn probe_reset() {
     PROBE.with(|p| p.set(BudgetProbe::default()));
     MINERAL_SCOPE.with(|s| s.set(0));
+    FREE_SAT_SCOPE.with(|s| s.set(0));
+    FREE_SAT_FLOW_N.with(|n| n.set(0));
+    FREE_SAT_SEEP_N.with(|n| n.set(0));
+    FREE_SAT_PARK_N.with(|n| n.set(0));
+    SNOW_SWAP_SCOPE.with(|s| s.set(0));
+    SNOW_SWAP_NUCLEATE_N.with(|n| n.set(0));
+    SNOW_SWAP_SURFACE_N.with(|n| n.set(0));
+    SNOW_SWAP_FALL_N.with(|n| n.set(0));
+    SNOW_SWAP_DRIFT_N.with(|n| n.set(0));
+    SNOW_SWAP_RELOC_N.with(|n| n.set(0));
+    SNOW_SWAP_RISE_N.with(|n| n.set(0));
+    SNOW_SWAP_PUNCH_N.with(|n| n.set(0));
+    SNOW_SWAP_RAFT_N.with(|n| n.set(0));
+    SNOW_SWAP_LANDSCAPE_N.with(|n| n.set(0));
+    SNOW_SWAP_COMPETENT_N.with(|n| n.set(0));
+    SNOW_OTHER_STAGE.with(|c| c.set(0));
 }
 
 #[inline]
@@ -384,18 +741,194 @@ fn overlay_water_units(cell: Cell) -> i64 {
     }
 }
 
+/// Snow book enter/exit (World `set_cell` or parallel grain writes).
+///
+/// Grain-fall swaps both exit (source→Air) and enter (dest→Snow); net
+/// `exit_yield − enter_yield` is true book leave (thaw / bare overwrite).
+/// `bare` is only solid overwrite (not Snow→Air).
+#[inline]
+pub fn note_snow_book_exit(prev: Cell, next: Cell) {
+    if !probe_on() {
+        return;
+    }
+    if prev.material != MaterialId::Snow && next.material == MaterialId::Snow {
+        let yield_u = crate::cell::frozen_thaw_sat(next) as i64;
+        PROBE.with(|p| {
+            let mut v = p.get();
+            v.snow_enter_n = v.snow_enter_n.saturating_add(1);
+            v.snow_enter_yield += yield_u;
+            p.set(v);
+        });
+        return;
+    }
+    if prev.material != MaterialId::Snow || next.material == MaterialId::Snow {
+        return;
+    }
+    let yield_u = crate::cell::frozen_thaw_sat(prev) as i64;
+    let credit = match next.material {
+        MaterialId::Ice => crate::cell::frozen_thaw_sat(next) as i64,
+        MaterialId::Air => next.sat.0 as i64,
+        _ => 0,
+    };
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.snow_exit_n = v.snow_exit_n.saturating_add(1);
+        v.snow_exit_yield += yield_u;
+        v.snow_exit_credit += credit;
+        if next.material == MaterialId::Ice {
+            v.snow_to_ice += yield_u;
+        } else if next.material != MaterialId::Air {
+            // Solid overwrite — yield leaves with no free/ice credit.
+            v.snow_exit_bare += yield_u;
+        }
+        p.set(v);
+    });
+}
+
+/// Free-water units on a cell (Air sat only — Ice/Snow bank elsewhere).
+#[inline]
+fn free_air_units(cell: Cell) -> i64 {
+    if cell.material == MaterialId::Air {
+        cell.sat.0 as i64
+    } else {
+        0
+    }
+}
+
+/// Chunk-direct write probe for [`crate::parallel::set_cell`].
+///
+/// Closed grain swaps net ~0. A soak-sized positive means free sat was
+/// minted (or double-applied) without going through [`note_set_cell`].
+#[inline]
+pub fn note_parallel_set_cell(prev: Cell, next: Cell) {
+    if !probe_on() {
+        return;
+    }
+    let d = free_air_units(next) - free_air_units(prev);
+    if d == 0 {
+        return;
+    }
+    let snow = prev.material == MaterialId::Snow || next.material == MaterialId::Snow;
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_par_air += d;
+        if snow {
+            v.water_par_snow += d;
+        }
+        p.set(v);
+    });
+}
+
+/// Chunk-direct write probe for gravity `write_xy`.
+#[inline]
+pub fn note_gravity_set_cell(prev: Cell, next: Cell) {
+    if !probe_on() {
+        return;
+    }
+    let d = free_air_units(next) - free_air_units(prev);
+    if d == 0 {
+        return;
+    }
+    PROBE.with(|p| {
+        let mut v = p.get();
+        v.water_grav_air += d;
+        p.set(v);
+    });
+}
+
 /// Called from [`World::set_cell`](crate::grid::World::set_cell) when `B` is on.
 #[inline]
 pub fn note_set_cell(prev: Cell, next: Cell) {
     if !probe_on() {
         return;
     }
+    note_snow_book_exit(prev, next);
     if prev.material != next.material {
         let d = overlay_water_units(next) - overlay_water_units(prev);
         if d != 0 {
+            let snow_in = next.material == MaterialId::Snow
+                && prev.material != MaterialId::Snow;
+            let snow_out = prev.material == MaterialId::Snow
+                && next.material != MaterialId::Snow;
+            let scope = SNOW_SWAP_SCOPE.with(|s| s.get());
             PROBE.with(|p| {
                 let mut v = p.get();
                 v.water_swap += d;
+                if snow_in || snow_out {
+                    v.water_swap_snow += d;
+                    if snow_in {
+                        v.water_swap_snow_in += d;
+                        match scope {
+                            SnowSwapScope::NUCLEATE => v.snow_in_nucleate += d,
+                            SnowSwapScope::SURFACE => v.snow_in_surface += d,
+                            SnowSwapScope::FALL => v.snow_in_fall += d,
+                            SnowSwapScope::DRIFT => v.snow_in_drift += d,
+                            SnowSwapScope::RELOC => v.snow_in_reloc += d,
+                            SnowSwapScope::RISE => v.snow_in_rise += d,
+                            SnowSwapScope::PUNCH => v.snow_in_punch += d,
+                            SnowSwapScope::RAFT => v.snow_in_raft += d,
+                            SnowSwapScope::LANDSCAPE => v.snow_in_landscape += d,
+                            SnowSwapScope::COMPETENT => v.snow_in_competent += d,
+                            _ => {
+                                v.snow_in_other += d;
+                                let st = SNOW_OTHER_STAGE.with(|c| c.get()) as usize;
+                                if st < SnowOtherStage::N {
+                                    v.snow_in_other_by_stage[st] += d;
+                                }
+                            }
+                        }
+                    }
+                    if snow_out {
+                        v.water_swap_snow_out += d;
+                        match scope {
+                            SnowSwapScope::NUCLEATE => v.snow_out_nucleate += d,
+                            SnowSwapScope::SURFACE => v.snow_out_surface += d,
+                            SnowSwapScope::FALL => v.snow_out_fall += d,
+                            SnowSwapScope::DRIFT => v.snow_out_drift += d,
+                            SnowSwapScope::RELOC => v.snow_out_reloc += d,
+                            SnowSwapScope::RISE => v.snow_out_rise += d,
+                            SnowSwapScope::PUNCH => v.snow_out_punch += d,
+                            SnowSwapScope::RAFT => v.snow_out_raft += d,
+                            SnowSwapScope::LANDSCAPE => v.snow_out_landscape += d,
+                            SnowSwapScope::COMPETENT => v.snow_out_competent += d,
+                            _ => {
+                                v.snow_out_other += d;
+                                let st = SNOW_OTHER_STAGE.with(|c| c.get()) as usize;
+                                if st < SnowOtherStage::N {
+                                    v.snow_out_other_by_stage[st] += d;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    v.water_swap_other += d;
+                }
+                p.set(v);
+            });
+        }
+    } else if prev.material == MaterialId::Air {
+        // Same-mat Air sat writes (flow merge / seep weep / park). Net
+        // under a closed scope should be ~0; mint shows as a surplus.
+        let d = next.sat.0 as i64 - prev.sat.0 as i64;
+        if d != 0 {
+            let bits = FREE_SAT_SCOPE.with(|s| s.get());
+            PROBE.with(|p| {
+                let mut v = p.get();
+                if bits != 0 {
+                    if bits & FreeSatScope::FLOW != 0 {
+                        v.water_flow_air += d;
+                    }
+                    if bits & FreeSatScope::SEEP != 0 {
+                        v.water_seep_air += d;
+                    }
+                    if bits & FreeSatScope::PARK != 0 {
+                        v.water_park_air += d;
+                    }
+                } else {
+                    // Gravity pull, rain `fill_air_sat`, steam→liquid park,
+                    // leftover restore, etc.
+                    v.water_free_other += d;
+                }
                 p.set(v);
             });
         }
@@ -475,6 +1008,190 @@ impl MineralLedgerScope {
 impl Drop for MineralLedgerScope {
     fn drop(&mut self) {
         MINERAL_SCOPE.with(|s| s.set(s.get().saturating_sub(1)));
+    }
+}
+
+/// RAII: attribute same-mat Air sat Δ to flow / seep / park (snow-mint hunt).
+pub struct FreeSatScope {
+    bit: u32,
+}
+
+impl FreeSatScope {
+    pub const FLOW: u32 = 1;
+    pub const SEEP: u32 = 2;
+    pub const PARK: u32 = 4;
+
+    pub fn enter(bit: u32) -> Self {
+        match bit {
+            Self::FLOW => FREE_SAT_FLOW_N.with(|n| {
+                if n.get() == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() | Self::FLOW));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            Self::SEEP => FREE_SAT_SEEP_N.with(|n| {
+                if n.get() == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() | Self::SEEP));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            Self::PARK => FREE_SAT_PARK_N.with(|n| {
+                if n.get() == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() | Self::PARK));
+                }
+                n.set(n.get().saturating_add(1));
+            }),
+            _ => {}
+        }
+        Self { bit }
+    }
+
+    pub fn flow() -> Self {
+        Self::enter(Self::FLOW)
+    }
+
+    pub fn seep() -> Self {
+        Self::enter(Self::SEEP)
+    }
+
+    pub fn park() -> Self {
+        Self::enter(Self::PARK)
+    }
+}
+
+impl Drop for FreeSatScope {
+    fn drop(&mut self) {
+        match self.bit {
+            Self::FLOW => FREE_SAT_FLOW_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() & !Self::FLOW));
+                }
+            }),
+            Self::SEEP => FREE_SAT_SEEP_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() & !Self::SEEP));
+                }
+            }),
+            Self::PARK => FREE_SAT_PARK_N.with(|n| {
+                let next = n.get().saturating_sub(1);
+                n.set(next);
+                if next == 0 {
+                    FREE_SAT_SCOPE.with(|s| s.set(s.get() & !Self::PARK));
+                }
+            }),
+            _ => {}
+        }
+    }
+}
+
+/// RAII: attribute World `snow_in` / `snow_out` overlay to a call site.
+///
+/// Residual A hunt: which Air→Snow path leaves unpaired overlay vs paid
+/// H debit or a matching Snow leave. Parallel grain settle does not use
+/// [`note_set_cell`] — only World writers land here.
+pub struct SnowSwapScope {
+    bit: u32,
+}
+
+impl SnowSwapScope {
+    pub const NUCLEATE: u32 = 1;
+    pub const SURFACE: u32 = 2;
+    pub const FALL: u32 = 4;
+    pub const DRIFT: u32 = 8;
+    pub const RELOC: u32 = 16;
+    pub const RISE: u32 = 32;
+    pub const PUNCH: u32 = 64;
+    pub const RAFT: u32 = 128;
+    pub const LANDSCAPE: u32 = 256;
+    pub const COMPETENT: u32 = 512;
+
+    fn nest(counter: &'static std::thread::LocalKey<StdCell<u32>>, bit: u32) {
+        counter.with(|n| {
+            if n.get() == 0 {
+                SNOW_SWAP_SCOPE.with(|s| s.set(bit));
+            }
+            n.set(n.get().saturating_add(1));
+        });
+    }
+
+    fn unnest(counter: &'static std::thread::LocalKey<StdCell<u32>>) {
+        counter.with(|n| {
+            let next = n.get().saturating_sub(1);
+            n.set(next);
+            if next == 0 {
+                SNOW_SWAP_SCOPE.with(|s| s.set(0));
+            }
+        });
+    }
+
+    fn enter(bit: u32) -> Self {
+        match bit {
+            Self::NUCLEATE => Self::nest(&SNOW_SWAP_NUCLEATE_N, bit),
+            Self::SURFACE => Self::nest(&SNOW_SWAP_SURFACE_N, bit),
+            Self::FALL => Self::nest(&SNOW_SWAP_FALL_N, bit),
+            Self::DRIFT => Self::nest(&SNOW_SWAP_DRIFT_N, bit),
+            Self::RELOC => Self::nest(&SNOW_SWAP_RELOC_N, bit),
+            Self::RISE => Self::nest(&SNOW_SWAP_RISE_N, bit),
+            Self::PUNCH => Self::nest(&SNOW_SWAP_PUNCH_N, bit),
+            Self::RAFT => Self::nest(&SNOW_SWAP_RAFT_N, bit),
+            Self::LANDSCAPE => Self::nest(&SNOW_SWAP_LANDSCAPE_N, bit),
+            Self::COMPETENT => Self::nest(&SNOW_SWAP_COMPETENT_N, bit),
+            _ => {}
+        }
+        Self { bit }
+    }
+
+    pub fn nucleate() -> Self {
+        Self::enter(Self::NUCLEATE)
+    }
+    pub fn surface() -> Self {
+        Self::enter(Self::SURFACE)
+    }
+    pub fn fall() -> Self {
+        Self::enter(Self::FALL)
+    }
+    pub fn drift() -> Self {
+        Self::enter(Self::DRIFT)
+    }
+    pub fn reloc() -> Self {
+        Self::enter(Self::RELOC)
+    }
+    pub fn rise() -> Self {
+        Self::enter(Self::RISE)
+    }
+    pub fn punch() -> Self {
+        Self::enter(Self::PUNCH)
+    }
+    pub fn raft() -> Self {
+        Self::enter(Self::RAFT)
+    }
+    pub fn landscape() -> Self {
+        Self::enter(Self::LANDSCAPE)
+    }
+    pub fn competent() -> Self {
+        Self::enter(Self::COMPETENT)
+    }
+}
+
+impl Drop for SnowSwapScope {
+    fn drop(&mut self) {
+        match self.bit {
+            Self::NUCLEATE => Self::unnest(&SNOW_SWAP_NUCLEATE_N),
+            Self::SURFACE => Self::unnest(&SNOW_SWAP_SURFACE_N),
+            Self::FALL => Self::unnest(&SNOW_SWAP_FALL_N),
+            Self::DRIFT => Self::unnest(&SNOW_SWAP_DRIFT_N),
+            Self::RELOC => Self::unnest(&SNOW_SWAP_RELOC_N),
+            Self::RISE => Self::unnest(&SNOW_SWAP_RISE_N),
+            Self::PUNCH => Self::unnest(&SNOW_SWAP_PUNCH_N),
+            Self::RAFT => Self::unnest(&SNOW_SWAP_RAFT_N),
+            Self::LANDSCAPE => Self::unnest(&SNOW_SWAP_LANDSCAPE_N),
+            Self::COMPETENT => Self::unnest(&SNOW_SWAP_COMPETENT_N),
+            _ => {}
+        }
     }
 }
 

@@ -116,6 +116,13 @@ pub fn park_orphan_water(world: &mut World, gx: i32, gy: i32, mut units: u32) ->
   if units == 0 {
     return 0;
   }
+  // Soak hunt `OFF=park`: refuse placement so free-sat park beside Snow
+  // cannot mint; leftover is noted as `water_park` drop.
+  if crate::rules::skip_park_orphan() {
+    crate::budget::note_unplaced_water(units);
+    return units;
+  }
+  let _free_scope = crate::budget::FreeSatScope::park();
   let gx = world.wrap_x(gx);
   for dy in 0..16 {
     if units == 0 {

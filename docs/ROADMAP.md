@@ -46,6 +46,10 @@ flat 120-tick run).
 | `park` | **0** |
 | wall | ~66 min |
 
+**Reconfirm (2026-10-09)** — 50k after roof-collapse Snow mint fix, tip
+`7838473`: TRACKED **−0.00/t** (d=−6), min.tot **+0.07/t** (d=+3405),
+`park=0`. Gate still holds with snow precip on.
+
 ---
 
 ## Phase 1 — Performance for larger worlds & long soaks *(done 2026-10-07)*
@@ -131,6 +135,13 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
   (legacy `sat==0` ⇒ 255). Near-full wet-air pockets under/around lids
   freeze mass-flat instead of pulsing as free Air through ice.
 
+**Landed (lake ice lid pulse)**
+- Freeze gates on `water_temp_at` (not tile alone); Ice buoyancy does not
+  pop through the free-surface film **or** under-pack gaps.
+- Freeze/thaw **hysteresis** (`thaw_hysteresis_c` default 0.75 °C).
+- Cold film on ice **seals** into the lid; cascade will not peel lid film;
+  thin hillside ice does not peel at a waterline.
+
 **Landed (brittle solid pass)**
 
 - Thick Ice (`ice_column_thickness ≥ ice_carry_thickness`) refuses haze
@@ -138,9 +149,87 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 - Ice floes on full lake + surface film over full water; rise kept.
 - Default `max_ice_cells_per_column=64`, `enable_cull=false`.
 
+**Xvfb acceptance pass** (2026-10-08, tip of pulse + lake-heat stack)
+
+- Alpine-cold (T≈−0.8 °C) + F3 water/Ice paint; ~50 s unpaused soak.
+- Stills: `/opt/cursor/artifacts/phase3-ice-accept-03-lid-fresh.png` …
+  `07-soak-53s.png`, `10-final.png`.
+- Agent read: phase=on under subzero; no powder cascade in stills.
+  Painted lid is hard to resolve at this framing — **owner playtest**
+  remains the acceptance gate (pulse / deep-lake heat / “reads as ice”).
+- Glossary Phase line updated for partial-sat freeze + hysteresis.
+
+**Landed (alpine-cold cull + lid chill)** (2026-10-08 playtest)
+
+- `alpine-cold` preset still had `enable_cull=true` / `max_ice=12` —
+  thickening lids relocated laterally (“pulling hard”). Now matches
+  brittle defaults (`cull=false`, `max_ice=64`).
+- Ice lids report `free_water≈0`, so buoyancy never sank skin cold into
+  the column; deep lake stayed still near −5 under −30 °C air. Skin
+  couple now quenches free-water tiles under the lid; buried free-water
+  climate relax slightly stronger.
+
+**Landed (ice sheet lock)** (2026-10-08 playtest)
+
+- Under-lid freeze may not deepen more than one cell past a wet
+  neighbour’s ice bottom (empty air / shore do not block). Heat quench
+  retuned milder after owner “dumping heat” note.
+
+**Xvfb sheet tip** (2026-10-08, `#370` tip)
+
+- Stills: `/opt/cursor/artifacts/phase3-sheet-03-lid-fresh.png` …
+  `09-final.png`. Agent framing again weak for lid geometry; owner
+  playtest remains the gate.
+
+**Headless 5k soak** (tip `#370`, `short_budget_soak`)
+
+- `park=0`, mineral ~flat (`+0.06/t`). Test passed.
+- TRACKED `+136/t` with UNEXPL-W/M flags still lighting — not a Phase 0
+  flat gate. Isolation (2026-10-08): killed by `enable_snow_precip=false`
+  (`GVSE_SOAK_OFF=snow` → TRACKED `−0.01/t`); flake H-debit itself is
+  clean (`under=0`). Dual-axis H flux over-donate fixed (real, unit-tested)
+  but **5k still +131/t** after that fix — not the soak mint. Soak
+  `hum_adv`≈0 → not advect; diffuse / orphan / evap add=debit ruled out
+  (5k OFF table in VOXEL_BUDGET_SOAK). Descent gate: `OFF=snowfall` →
+  **+15.66/t** (baseline +131); `snowwet`/`slush` still +135/+140 — not
+  haze swap or slush. `snowraft`/`snowsurf` still +159/+141 — not lake
+  float lid or weather crest. Condensation liquid stale-`take_around`
+  underpay fixed (unit mint; live clamp) but 5k still **+130.86/t**
+  (`dep_add=debit=534`) — not the soak leftover. Free writers beside
+  Snow (`OFF=flow` **+196**, `seep` **+145**, `park` **+133**; units
+  TRACKED-flat) ruled out — not flow/seep/park. **A vs B split:**
+  `OFF=phase` still **+111/t** (`paid≈Δsnow`, bare≈0) = residual **A**
+  post-descent; phase ON only **~+20/t** more (**B**). Thaw units
+  TRACKED-flat; baseline free↑ ≈ snow leave — thaw credits OK.
+  `paid−phase`~+640k ≈ total mint, not B (coincidence with A). Residual
+  **A** remeasure: `phase` vs `phase,snowfall` late triad isolates
+  **~+91/t** landed-pack; `phase,cond` still **+93**, `phase,steam`
+  **+102**, `phase,gravity` **+109** — not lottery/steam/gravity.
+  `free_other+evap≈+80k` ≪ free_in — mint not in scoped World::set_cell
+  Air writers. Chunk miss probes: `par_air≈0`, `grav_air` sink only.
+  `OFF=settle` → **+43/t** (cuts ~⅔ of A); `TRACKED≈swap_snow−paid`.
+  Call-site: fall/drift/nucleate paired; **failure** other net ≈ TRACKED.
+  **Fixed:** Ice/Snow excluded from roof collapse (thaw-sat dump mint).
+  5k after: baseline **−0.01/t**, `phase` **−0.01**, `phase,settle`
+  **−0.01**, `phase,snowfall` **−0.04**. Residual A closed (full soak
+  flat). Kill: `OFF=snow`.
+  **50k Phase 0 gate** tip `7838473`: TRACKED **−0.00/t**, min
+  **+0.07/t**, `park=0` — rates still under 0.5/t with snow on.
+
+**Decision list** (2026-10-08 evening Oslo cycle)
+
+1. **Merge stack `#365`→`#370`?** All CI-green, ready, CLEAN. Bottom-up
+   onto `park-bank`. Agent cannot enable GitHub auto-merge from here.
+2. **Phase 3 exit?** Accept “reads as ice” after sheet-lock + lid-chill
+   playtest, or list remaining lid/heat issues.
+3. **Phase 4 start?** Only after (2). Goal: re-profile + larger worlds
+   (see below). No Phase 4 code until you close Phase 3.
+
 **Still open**
 
-- Formal “reads as ice” acceptance (Xvfb / playtest) after brittle pass.
+- Owner playtest gate on tip `#370`: “reads as ice” / no lake lid pulse /
+  sheet (not fingers) / deep lake cools under hard cold without vacuum.
+  Stack `#365`–`#370` is CI-green and ready to merge bottom-up.
 
 **Exit criteria**
 
@@ -210,6 +299,7 @@ before coding.
 | 2026-10-07 | Phase 0 rate eps | Tight: `\|rate W\|` and `\|rate M\|` &lt; **0.5/t** on 50k+ headless |
 | 2026-10-07 | Phase 0 organisms | **Off** until Phase 5 bio rewrite |
 | 2026-10-07 | Phase 0 closed | 50k headless: TRACKED **0.03/t**, min **+0.12/t**, park=0 (#351) |
+| 2026-10-09 | Phase 0 reconfirm | 50k after roof-collapse Snow fix (`7838473`): TRACKED **−0.00/t**, min **+0.07/t**, park=0 |
 | 2026-10-07 | Phase 1 FPS / size | ≥**30 FPS**; grow size until diminishing returns; stretch **5 km+ @ ~1064 h** |
 | 2026-10-07 | Phase 1 stress gate | Met after settle Air-dest: stress **~37 FPS** (27.3 ms); no clear ≥1 ms CA win left — discuss seepage wakes / bodies / fields ([`VOXEL_PERF.md`](VOXEL_PERF.md)) |
 | 2026-10-07 | Phase 1 closed | Owner: close Phase 1; move to Phase 2 geysers (stretch width / leftover CA deferred) |

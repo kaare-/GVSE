@@ -1,10 +1,48 @@
 //! Humidity condensation drizzle (+ orographic boost).
 
+use std::cell::Cell as StdCell;
+
 use serde::{Deserialize, Serialize};
 
 use crate::grid::World;
 
 use super::util::hash_prob;
+
+/// Cumulative flake accounting for the snow TRACKED-mint hunt.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SnowMintProbe {
+    pub seated: u64,
+    pub paid: f64,
+    pub under: f64,
+}
+
+thread_local! {
+    static SNOW_MINT_PROBE: StdCell<SnowMintProbe> = const {
+        StdCell::new(SnowMintProbe {
+            seated: 0,
+            paid: 0.0,
+            under: 0.0,
+        })
+    };
+}
+
+pub fn snow_mint_probe_reset() {
+    SNOW_MINT_PROBE.with(|c| c.set(SnowMintProbe::default()));
+}
+
+pub fn snow_mint_probe_snapshot() -> SnowMintProbe {
+    SNOW_MINT_PROBE.with(|c| c.get())
+}
+
+fn snow_mint_probe_note(snowed: f32, paid: f32) {
+    SNOW_MINT_PROBE.with(|c| {
+        let mut v = c.get();
+        v.seated = v.seated.saturating_add(1);
+        v.paid += f64::from(paid);
+        v.under += f64::from((snowed - paid).max(0.0));
+        c.set(v);
+    });
+}
 
 /// Condensation-rain parameters for [`apply_condensation_rain`].
 ///
@@ -170,7 +208,9 @@ fn try_snow_from_parcel(
     if snowed <= 0.0 {
         return 0.0;
     }
-    humidity.take_around(gx, gy, snowed)
+    let paid = humidity.take_around(gx, gy, snowed);
+    snow_mint_probe_note(snowed, paid);
+    paid
 }
 
 /// Turn vapour the local air can no longer hold into precip.
@@ -223,12 +263,40 @@ pub fn precipitate_thermal_surplus(
             }
             continue;
         }
-        let landed = super::deposit_water_in_air(world, gx, gy, take);
-        if landed <= 0.0 {
-            continue;
-        }
-        humidity.drain_tile(hx, hy, landed);
+        // Live `mass` already re-read above; snow take_around on an
+        // earlier surplus hit can empty this tile — never deposit more
+        // than the tile still holds.
+        let landed = deposit_liquid_paid(world, humidity, gx, gy, hx, hy, take);
+        let _ = landed;
     }
+}
+
+/// Seat liquid rain and drain humidity by what actually landed.
+///
+/// Re-reads the tile before deposit so a prior snow [`Humidity::take_around`]
+/// in the same pass cannot leave a stale want that mints free sat.
+fn deposit_liquid_paid(
+    world: &mut World,
+    humidity: &mut crate::humidity::Humidity,
+    gx: i32,
+    gy: i32,
+    hx: i32,
+    hy: i32,
+    want: f32,
+) -> f32 {
+    let avail = humidity.at_tile(hx, hy);
+    let budget = want.min(avail);
+    if budget <= 0.0 {
+        return 0.0;
+    }
+    let landed = super::deposit_water_in_air(world, gx, gy, budget);
+    if landed <= 0.0 {
+        return 0.0;
+    }
+    let paid = humidity.drain_tile(hx, hy, landed);
+    crate::budget::note_dep_sat_add(landed.round() as i32);
+    crate::budget::note_dep_hum_debit(paid.round() as i32);
+    paid.min(landed)
 }
 
 /// Precipitation feedback: humidity tiles that hold enough
@@ -451,28 +519,48 @@ pub fn apply_condensation_rain_phased(
             }
             continue;
         }
+        // Snapshot `mass` / `take_mass` can be stale: a heavier freezing
+        // neighbour may already have `take_around`'d this tile. Live clamp.
+        let avail = humidity.at_tile(hx, hy);
+        if avail <= 0.0 {
+            continue;
+        }
+        let take_mass = take_mass.min(avail);
         let mut landed = if take_mass >= crate::phase::PRECIP_IN_AIR_MIN {
-            super::deposit_water_in_air(world, centre_gx, centre_gy, take_mass)
+            deposit_liquid_paid(
+                world,
+                humidity,
+                centre_gx,
+                centre_gy,
+                hx,
+                hy,
+                take_mass,
+            )
         } else {
             0.0
         };
         // Warm frost is unused; this retry is for a refused in-air seat
         // that still has a full cell on the tile (surface glaze).
-        if landed <= 0.0 && mass >= u8::MAX as f32 {
-            landed = crate::phase::deposit_condensate_on_surface(
-                world,
-                centre_gx,
-                cfg.top_y,
-                u8::MAX as f32,
-                temp,
-                phase,
-            );
+        if landed <= 0.0 && avail >= u8::MAX as f32 {
+            let want = (u8::MAX as f32).min(humidity.at_tile(hx, hy));
+            if want >= u8::MAX as f32 {
+                let seated = crate::phase::deposit_condensate_on_surface(
+                    world,
+                    centre_gx,
+                    cfg.top_y,
+                    want,
+                    temp,
+                    phase,
+                );
+                if seated > 0.0 {
+                    let paid = humidity.drain_tile(hx, hy, seated);
+                    crate::budget::note_dep_sat_add(seated.round() as i32);
+                    crate::budget::note_dep_hum_debit(paid.round() as i32);
+                    landed = paid.min(seated);
+                }
+            }
         }
-        if landed <= 0.0 {
-            continue;
-        }
-        // Drain the humidity tile by the mass that landed (clamp to tile).
-        humidity.drain_tile(hx, hy, landed);
+        let _ = landed;
     }
 }
 
@@ -872,6 +960,55 @@ mod tests {
     }
 
     #[test]
+    fn seating_n_flakes_keeps_tracked_flat() {
+        use crate::budget::BudgetSnap;
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(9);
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..40 {
+            for x in 0..32 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut h = Humidity::new(4);
+        // Eight separated parcels so each can pay a full flake.
+        for (i, hx) in [0i32, 2, 4, 6, 1, 3, 5, 7].into_iter().enumerate() {
+            h.cells.insert((hx, 8), FLAKE_MASS + 10.0 + i as f32);
+        }
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -20.0;
+        }
+        temp.rebuild_row_means();
+        let before = BudgetSnap::capture(&w, &h).tracked();
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, None);
+        let after = BudgetSnap::capture(&w, &h).tracked();
+        assert!(
+            (after - before).abs() < 1.0,
+            "flake H debit must match snow yield (TRACKED {before} → {after})"
+        );
+        let flakes = (0..32)
+            .filter(|&x| {
+                (1..40).any(|y| {
+                    w.get_cell(x, y)
+                        .is_some_and(|c| c.material == MaterialId::Snow)
+                })
+            })
+            .count();
+        assert!(flakes > 0, "expected at least one flake");
+    }
+
+    #[test]
     fn below_freezing_leftover_does_not_rain() {
         use crate::cell::Cell;
         use crate::chunk::ChunkCoord;
@@ -1101,6 +1238,92 @@ mod tests {
             (h.at_tile(1, 8) - 400.0).abs() < 1e-3,
             "a refused deposit must leave the vapour (left {})",
             h.at_tile(1, 8)
+        );
+    }
+
+    #[test]
+    fn liquid_deposit_after_neighbor_snow_take_stays_tracked_flat() {
+        // Post-descent mint hunt: lottery used a snapshot `mass` for liquid
+        // want, while an earlier freezing hit's take_around already emptied
+        // that tile → free sat written with no H debit (TRACKED mint).
+        use crate::budget::BudgetSnap;
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::phase::deposit_snow_in_air;
+
+        let mut w = World::new(11);
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..40 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut h = Humidity::new(4);
+        // Flake centre cannot pay alone; take_around spills into the
+        // liquid neighbour tile — the lottery race that minted free sat.
+        h.cells.insert((0, 8), 10.0);
+        h.cells.insert((1, 8), FLAKE_MASS);
+        let snow_gx = 2; // tile 0 centre
+        let snow_gy = 34;
+        let liq_hx = 1;
+        let liq_hy = 8;
+        let liq_gx = 6;
+        let liq_gy = 34;
+
+        let snowed = deposit_snow_in_air(&mut w, snow_gx, snow_gy, FLAKE_MASS);
+        assert!(snowed > 0.0, "flake must seat");
+        let paid = h.take_around(snow_gx, snow_gy, snowed);
+        assert!(
+            (paid - FLAKE_MASS).abs() < 1e-3,
+            "flake must drain the parcel (paid={paid})"
+        );
+        assert!(
+            h.at_tile(liq_hx, liq_hy) < 20.0,
+            "take_around must mostly empty the liquid neighbour (left {})",
+            h.at_tile(liq_hx, liq_hy)
+        );
+
+        // Stale-snapshot path (pre-fix): deposit full cell, drain underpays.
+        let mut w_stale = w.clone();
+        let mut h_stale = h.clone();
+        let before_stale = BudgetSnap::capture(&w_stale, &h_stale).tracked();
+        let stale_want = FLAKE_MASS;
+        let landed_stale =
+            super::super::deposit_water_in_air(&mut w_stale, liq_gx, liq_gy, stale_want);
+        assert!(
+            (landed_stale - FLAKE_MASS).abs() < 1e-3,
+            "stale path writes a full free cell"
+        );
+        let drained_stale = h_stale.drain_tile(liq_hx, liq_hy, landed_stale);
+        assert!(
+            drained_stale + 1.0 < landed_stale,
+            "stale drain underpays after take_around (drained={drained_stale} landed={landed_stale})"
+        );
+        let after_stale = BudgetSnap::capture(&w_stale, &h_stale).tracked();
+        assert!(
+            after_stale - before_stale > 200.0,
+            "stale snapshot must mint TRACKED (Δ={})",
+            after_stale - before_stale
+        );
+
+        // Fixed path: live clamp deposits only remaining avail (TRACKED flat).
+        let before = BudgetSnap::capture(&w, &h).tracked();
+        let avail = h.at_tile(liq_hx, liq_hy);
+        let landed = deposit_liquid_paid(&mut w, &mut h, liq_gx, liq_gy, liq_hx, liq_hy, FLAKE_MASS);
+        assert!(
+            (landed - avail).abs() < 1.0,
+            "live clamp must seat only remaining avail (landed={landed} avail={avail})"
+        );
+        let after = BudgetSnap::capture(&w, &h).tracked();
+        assert!(
+            (after - before).abs() < 1.0,
+            "live liquid debit must stay TRACKED flat (Δ={})",
+            after - before
         );
     }
 

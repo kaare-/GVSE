@@ -95,6 +95,7 @@
   },
   "phase": {
     "freeze_point_c": 0.0,
+    "thaw_hysteresis_c": 0.75,
     "min_sat_to_freeze": 64,
     "max_freeze_cells_per_column_per_tick": 1,
     "max_thaw_cells_per_column_per_tick": 1,

@@ -67,8 +67,8 @@ pub use blueprint::{
     BODY_MUTATION_MAX_EDITS, BODY_MUTATION_MAX_MODULES,
 };
 pub use budget::{
-    BudgetDelta, BudgetLedger, BudgetProbe, BudgetSnap, BUDGET_SAMPLE_PERIOD,
-    BUDGET_UNEXPLAINED_EPS,
+    BudgetDelta, BudgetLedger, BudgetProbe, BudgetSnap, FreeSatScope, SnowOtherStage,
+    SnowOtherStageGuard, SnowSwapScope, BUDGET_SAMPLE_PERIOD, BUDGET_UNEXPLAINED_EPS,
 };
 pub use carbon::{
     gate_algae_photo, gate_plant_photo, step_carbon_budget, CarbonBudget, CarbonConfig,
@@ -191,7 +191,8 @@ pub use plant::{
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use rules::{
-    active_has_unsupported_grain, apply_airborne_snow_fall, apply_cold_avalanche,
+    active_has_unsupported_grain, apply_airborne_snow_fall, apply_airborne_snow_fall_cfg,
+    apply_cold_avalanche,
     apply_cold_avalanche_bound, apply_competent_fall_regions, apply_competent_fall_wake,
     apply_condensation_rain, apply_condensation_rain_phased,
     apply_condensation_rain_with_orographic, apply_evaporation, apply_evaporation_into_humidity,
@@ -206,16 +207,19 @@ pub use rules::{
     drift_floating_organic_columns_cfg, floating_organic_column_at, is_standing_water,
     precipitate_thermal_surplus, punch_through_floating_rafts, rise_and_soak_buoyant_litter,
     rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter, settle_loose_grains,
-    settle_loose_grains_regions, shove_floating_organic_columns,
-    shove_floating_organic_with_current, soak_floating_litter,
-    soak_floating_litter_cfg, tick, tick_with_configs, tick_with_configs_and_geotech,
-    tick_with_life, tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled,
-    wake_competent_bodies, wake_competent_bodies_all, wake_competent_bodies_regions,
-    wake_confined_head, wake_floating_competent, wake_grains_for_settle,
-    wake_grains_for_settle_coords, wake_lake_bed_pores, wake_pore_weep_into_air,
-    wake_unstable_slopes, wake_unsupported_grains, wake_vertical_chunk_seam_pores,
-    CompetentFallConfig, CompetentFallStats, CondensationConfig, EvapConfig, GrainConfig,
-    GrainWake, KarstConfig, OrographicConfig, PerfConfig, PhysicsTimings, RainConfig,
+    set_skip_grain_settle, set_skip_gravity, set_skip_park_orphan, set_skip_seepage,
+    set_skip_surface_flow,
+    settle_loose_grains_regions,
+    shove_floating_organic_columns, shove_floating_organic_with_current, snow_mint_probe_reset,
+    snow_mint_probe_snapshot, soak_floating_litter, soak_floating_litter_cfg, tick,
+    tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_life_profiled,
+    tick_with_perf, tick_with_perf_profiled, wake_competent_bodies, wake_competent_bodies_all,
+    wake_competent_bodies_regions, wake_confined_head, wake_floating_competent,
+    wake_grains_for_settle, wake_grains_for_settle_coords, wake_lake_bed_pores,
+    wake_pore_weep_into_air, wake_unstable_slopes, wake_unsupported_grains,
+    wake_vertical_chunk_seam_pores, CompetentFallConfig, CompetentFallStats, CondensationConfig,
+    EvapConfig, GrainConfig, GrainWake, KarstConfig, OrographicConfig, PerfConfig, PhysicsTimings,
+    RainConfig, SnowMintProbe,
     COMPETENT_FALL_PASSES, COMPETENT_FALL_PASSES_FPS, COMPETENT_TOPOLOGY_PASSES, FLOW_QUIET_AREA,
     FLOW_SUBSTEPS, FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN, GRAIN_REPOSE_HAZE_MAX,
     GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES, GRAIN_SETTLE_PASSES_SHALLOW, MYCELIUM_EROSION_BIND,
@@ -251,6 +255,6 @@ pub use world_step::{step_world, WorldStep, WorldStepConfig, WorldStepOutcome, W
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{
     airborne_loose_at, continental_surface_y, live_skin_y, live_surface_at, live_surface_y,
-    stamp_world, WorldgenParams, DEFAULT_SEA_LEVEL_Y, LIVE_SURFACE_DESCENT_MAX,
-    LIVE_SURFACE_SEARCH, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
+    set_peel_seated_snow, stamp_world, WorldgenParams, DEFAULT_SEA_LEVEL_Y,
+    LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
