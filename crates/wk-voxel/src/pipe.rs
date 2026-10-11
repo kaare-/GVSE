@@ -2253,7 +2253,15 @@ fn collect_boiler_cands(
     let mut tiles: Vec<(i32, i32, f32)> = temp
         .cells
         .iter()
-        .filter_map(|(&(hx, hy), &t)| (t >= boil).then_some((hx, hy, t)))
+        .filter_map(|(&(hx, hy), &t)| {
+            if t < boil {
+                return None;
+            }
+            if !crate::streaming::stream_allows_hx(world, hx, tc) {
+                return None;
+            }
+            Some((hx, hy, t))
+        })
         .collect();
     tiles.sort_by_key(|&(hx, hy, _)| (hy, hx));
     // (body size, root, tile T)

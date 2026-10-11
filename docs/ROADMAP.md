@@ -266,9 +266,8 @@ May include ring width / ceiling / streaming follow-ups from
   **~19** full-resident; 5k soak TRACKED flat / `park=0`.
 - Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t).
 - **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate;
-  streaming — CA + phase + humidity + avalanche/erosion + temp/wind/
-  evap windowed. Compact stretch ~19 → **~43** sim-FPS (view=320).
-  Steam/leftover + eviction store still open.
+  streaming — CA + climate/field shell + steam/leftover cands windowed.
+  Compact stretch ~19 → **~45** sim-FPS (view=320). Eviction store open.
 
 ---
 
@@ -339,6 +338,8 @@ before coding.
 | 2026-10-11 | Compact FPS gate | Accept **~19 sim-FPS** full-resident Compact; scale via streaming |
 | 2026-10-11 | Stream active CA | Camera window filters `plan_active`; RAM still full-resident |
 | 2026-10-11 | Stream field shell | Phase columns + humidity advect skip outside window |
+| 2026-10-11 | Stream temp/wind/evap | Window temp step, wind seats, evap chunks; Compact ~43 sim-FPS |
+| 2026-10-11 | Stream steam/leftover | Steam cadence + leftover cands windowed; Compact ~45 sim-FPS |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

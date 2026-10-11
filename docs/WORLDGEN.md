@@ -392,8 +392,8 @@ as the full-resident gate. Streaming slices landed:
    window ([`VOXEL_PERF.md`](VOXEL_PERF.md)).
 
 Still **full RAM residency** — no eviction store, no `FrozenBacklog`.
-Steam / leftover still full-ring. Next: window those or add
-in-memory resident store.
+Steam boil + leftover cands windowed; eviction store still open.
+Compact stretch stream ~19 → **~45** sim-FPS (view=320).
 
 Concretely, at any moment there are four sets of chunks:
 
