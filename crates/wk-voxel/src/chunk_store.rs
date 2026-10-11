@@ -1,4 +1,5 @@
-//! In-memory eviction store for Phase 4 streaming (WORLDGEN Phase 1).
+//! Eviction store for Phase 4 streaming (WORLDGEN Phase 1 in-memory;
+//! Phase 2 optional disk directory).
 //!
 //! When a camera [`StreamWindow`](crate::streaming::StreamWindow) is set,
 //! chunks outside the **resident** band (active + [`RESIDENT_MARGIN_CHUNKS`])
@@ -11,13 +12,18 @@
 //! (steam, dissolved, pipe, …) park with chunks via [`SideMapStore`].
 //! Living organisms park on [`crate::organism::OrganismStore`] (scene-owned).
 //!
+//! Opt-in [`ChunkStore::enable_disk`] writes parked postcard bytes under a
+//! directory (`{cx}_{cy}.pc`) and drops the RAM copy (disk-primary). Play
+//! is not wired yet — tests / future settings only.
+//!
 //! Far [`World::set_cell`](crate::grid::World::set_cell) reloads from the
 //! store or skips blank remint outside the resident band.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::chunk::{Chunk, ChunkCoord};
-use crate::fasthash::FxHashMap;
+use crate::fasthash::{FxHashMap, FxHashSet};
 use crate::grid::World;
 use crate::spore_bank::DormantSpore;
 use crate::streaming::StreamWindow;
@@ -26,6 +32,11 @@ use crate::streaming::StreamWindow;
 #[derive(Debug, Clone, Default)]
 pub struct ChunkStore {
     bytes: FxHashMap<ChunkCoord, Vec<u8>>,
+    /// When set, [`Self::encode_put`] writes `{cx}_{cy}.pc` and keeps only
+    /// the coord in [`Self::disk_index`] (no RAM copy).
+    disk_root: Option<PathBuf>,
+    /// Coords present on disk (disk-primary mode).
+    disk_index: FxHashSet<ChunkCoord>,
 }
 
 /// Parked sparse `(gx, gy)` / column books for far resident eviction.
@@ -102,32 +113,137 @@ impl ChunkStore {
     }
 
     pub fn len(&self) -> usize {
-        self.bytes.len()
+        self.bytes.len() + self.disk_index.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.bytes.is_empty() && self.disk_index.is_empty()
     }
 
     pub fn contains(&self, coord: ChunkCoord) -> bool {
-        self.bytes.contains_key(&coord)
+        self.bytes.contains_key(&coord) || self.disk_index.contains(&coord)
+    }
+
+    /// Opt-in disk directory for parked chunks (WORLDGEN Phase 2). Creates
+    /// `root` if missing and indexes any existing `*.pc` files. Subsequent
+    /// [`Self::encode_put`] calls are disk-primary (RAM not retained).
+    pub fn enable_disk(&mut self, root: impl Into<PathBuf>) -> Result<(), String> {
+        let root = root.into();
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        self.disk_root = Some(root);
+        self.rescan_disk_index()?;
+        // Flush any in-RAM parks to disk so len/contains stay consistent.
+        let pending: Vec<(ChunkCoord, Vec<u8>)> = self.bytes.drain().collect();
+        for (coord, bytes) in pending {
+            self.write_disk(coord, &bytes)?;
+            self.disk_index.insert(coord);
+        }
+        Ok(())
+    }
+
+    pub fn disk_enabled(&self) -> bool {
+        self.disk_root.is_some()
+    }
+
+    /// All parked coords (RAM and/or disk index).
+    pub fn parked_coords(&self) -> Vec<ChunkCoord> {
+        let mut out: Vec<ChunkCoord> = self.bytes.keys().copied().collect();
+        out.extend(self.disk_index.iter().copied());
+        out
+    }
+
+    /// Drop a parked entry without decoding (stale remint / already resident).
+    pub fn discard(&mut self, coord: ChunkCoord) -> Result<(), String> {
+        self.bytes.remove(&coord);
+        if self.disk_index.remove(&coord) {
+            if let Some(path) = self.disk_path(coord) {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Encode `chunk` and park it under `chunk.coord`.
     pub fn encode_put(&mut self, chunk: &Chunk) -> Result<(), String> {
         let bytes = postcard::to_allocvec(chunk).map_err(|e| e.to_string())?;
-        self.bytes.insert(chunk.coord, bytes);
+        if self.disk_root.is_some() {
+            self.write_disk(chunk.coord, &bytes)?;
+            self.disk_index.insert(chunk.coord);
+            self.bytes.remove(&chunk.coord);
+        } else {
+            self.bytes.insert(chunk.coord, bytes);
+        }
         Ok(())
     }
 
     /// Take and decode one parked chunk. Missing → `Ok(None)`.
     pub fn take_decode(&mut self, coord: ChunkCoord) -> Result<Option<Chunk>, String> {
-        let Some(bytes) = self.bytes.remove(&coord) else {
-            return Ok(None);
-        };
-        let chunk: Chunk = postcard::from_bytes(&bytes).map_err(|e| e.to_string())?;
-        Ok(Some(chunk))
+        if let Some(bytes) = self.bytes.remove(&coord) {
+            let chunk: Chunk = postcard::from_bytes(&bytes).map_err(|e| e.to_string())?;
+            return Ok(Some(chunk));
+        }
+        if self.disk_index.remove(&coord) {
+            let path = self
+                .disk_path(coord)
+                .ok_or_else(|| "disk root missing".to_string())?;
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            }
+            let chunk: Chunk = postcard::from_bytes(&bytes).map_err(|e| e.to_string())?;
+            return Ok(Some(chunk));
+        }
+        Ok(None)
     }
+
+    fn disk_path(&self, coord: ChunkCoord) -> Option<PathBuf> {
+        self.disk_root
+            .as_ref()
+            .map(|root| root.join(format!("{}_{}.pc", coord.cx, coord.cy)))
+    }
+
+    fn write_disk(&self, coord: ChunkCoord, bytes: &[u8]) -> Result<(), String> {
+        let path = self
+            .disk_path(coord)
+            .ok_or_else(|| "disk root missing".to_string())?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())
+    }
+
+    fn rescan_disk_index(&mut self) -> Result<(), String> {
+        self.disk_index.clear();
+        let Some(root) = self.disk_root.clone() else {
+            return Ok(());
+        };
+        let rd = match std::fs::read_dir(&root) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        };
+        for entry in rd {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(coord) = parse_disk_chunk_name(&name) {
+                self.disk_index.insert(coord);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn parse_disk_chunk_name(name: &str) -> Option<ChunkCoord> {
+    let stem = name.strip_suffix(".pc")?;
+    let (cx, cy) = stem.split_once('_')?;
+    Some(ChunkCoord::new(cx.parse().ok()?, cy.parse().ok()?))
 }
 
 fn park_xy_keys(
@@ -396,15 +512,14 @@ pub fn sync_residency(world: &mut World) -> Result<SyncResidencyStats, String> {
     // --- reload ---
     let to_load: Vec<ChunkCoord> = world
         .chunk_store
-        .bytes
-        .keys()
-        .copied()
+        .parked_coords()
+        .into_iter()
         .filter(|c| win.contains_resident_cx(world, c.cx))
         .collect();
     for coord in to_load {
         if world.chunks.contains_key(&coord) {
             // Remint gate should prevent blank overlays; drop stale park.
-            world.chunk_store.bytes.remove(&coord);
+            world.chunk_store.discard(coord)?;
             continue;
         }
         if let Some(chunk) = world.chunk_store.take_decode(coord)? {
@@ -435,11 +550,11 @@ pub fn sync_residency(world: &mut World) -> Result<SyncResidencyStats, String> {
 
 /// Reload every parked chunk + side map (stream off / full-resident).
 pub fn restore_all_from_store(world: &mut World) -> Result<usize, String> {
-    let keys: Vec<ChunkCoord> = world.chunk_store.bytes.keys().copied().collect();
+    let keys = world.chunk_store.parked_coords();
     let mut n = 0;
     for coord in keys {
         if world.chunks.contains_key(&coord) {
-            world.chunk_store.bytes.remove(&coord);
+            world.chunk_store.discard(coord)?;
             continue;
         }
         if let Some(chunk) = world.chunk_store.take_decode(coord)? {
@@ -715,5 +830,79 @@ mod tests {
             Some(1)
         );
         assert!(w.side_map_store.spore_bank.is_empty());
+    }
+
+    #[test]
+    fn disk_store_round_trip_and_residency() {
+        let dir = std::env::temp_dir().join(format!(
+            "gvse-chunk-disk-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut w = ring_world(cols);
+        w.chunk_store.enable_disk(&dir).expect("enable disk");
+        assert!(w.chunk_store.disk_enabled());
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        w.set_cell(far_gx, 8, Cell::solid(MaterialId::Stone));
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        let stats = sync_residency(&mut w).expect("evict");
+        assert!(stats.evicted > 0, "{stats:?}");
+        assert!(w.chunk_store.bytes.is_empty(), "disk-primary keeps no RAM");
+        assert!(!w.chunk_store.disk_index.is_empty());
+        let far_coord = ChunkCoord::new(
+            far_gx.div_euclid(CHUNK_CELLS_W as i32),
+            8_i32.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+        );
+        assert!(
+            dir.join(format!("{}_{}.pc", far_coord.cx, far_coord.cy))
+                .is_file(),
+            "postcard file should exist"
+        );
+        assert!(
+            w.get_cell(far_gx, 8).is_none(),
+            "far cell not resident after disk eviction"
+        );
+
+        w.stream_window = Some(StreamWindow::new(far_gx, 128));
+        let stats2 = sync_residency(&mut w).expect("reload");
+        assert!(stats2.reloaded > 0, "{stats2:?}");
+        assert_eq!(
+            w.get_cell(far_gx, 8).map(|c| c.material),
+            Some(MaterialId::Stone)
+        );
+        assert!(w.chunk_store.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disk_enable_rescans_existing_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "gvse-chunk-rescan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = ChunkCoord::new(3, -1);
+        let mut chunk = Chunk::new(coord);
+        chunk.set(4, 5, Cell::solid(MaterialId::Sand));
+        let bytes = postcard::to_allocvec(&chunk).unwrap();
+        std::fs::write(dir.join("3_-1.pc"), bytes).unwrap();
+
+        let mut store = ChunkStore::new();
+        store.enable_disk(&dir).expect("enable");
+        assert!(store.contains(coord));
+        let loaded = store.take_decode(coord).unwrap().expect("present");
+        assert_eq!(loaded.get(4, 5).material, MaterialId::Sand);
+        assert!(store.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
