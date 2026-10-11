@@ -286,7 +286,8 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
                         continue;
                     }
                 }
-                if snowflake_is_airborne(world, gx, gy) {
+                // Wind drift: lake rafts are seated (float on), not sky flakes.
+                if snowflake_is_airborne(world, gx, gy, true) {
                     candidates.push((gx, gy));
                 }
             }
@@ -333,6 +334,7 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
     }
 
     let mut moved = 0u32;
+    let _scope = crate::budget::SnowSwapScope::drift();
     for (gx, gy, nx) in planned {
         let Some(flake) = world.get_cell(gx, gy) else {
             continue;
@@ -356,10 +358,21 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
 /// (that forced the ×64 deep path and killed FPS). This walk is the
 /// same `has_snow` scan as drift: one roll, one cell, no repose.
 pub fn apply_airborne_snow_fall(world: &mut World) -> u32 {
+    apply_airborne_snow_fall_cfg(world, &GrainConfig::default())
+}
+
+/// [`apply_airborne_snow_fall`] with live [`GrainConfig`] snow-fall gates
+/// (`enable_airborne_snow_fall` / `enable_snow_wet_fall`).
+pub fn apply_airborne_snow_fall_cfg(world: &mut World, grain: &GrainConfig) -> u32 {
+    if !grain.enable_airborne_snow_fall {
+        return 0;
+    }
     let any_snow = world.chunks.values().any(|c| c.has_snow);
     if !any_snow {
         return 0;
     }
+    let allow_wet = grain.enable_snow_wet_fall;
+    let allow_float = grain.enable_snow_float;
     let seed = world.seed.0;
     let tick_no = world.tick;
     let mut candidates: Vec<(i32, i32)> = Vec::new();
@@ -383,7 +396,7 @@ pub fn apply_airborne_snow_fall(world: &mut World) -> u32 {
                 }
                 let gx = x0 + lx as i32;
                 let gy = y0 + ly as i32;
-                if snowflake_is_airborne(world, gx, gy) {
+                if snowflake_is_airborne(world, gx, gy, allow_float) {
                     candidates.push((gx, gy));
                 }
             }
@@ -416,18 +429,28 @@ pub fn apply_airborne_snow_fall(world: &mut World) -> u32 {
             continue;
         }
         // Float on a grounded lake; drop through empty / haze air.
+        // Hunt `OFF=snowraft`: sink through full water instead of rafting.
         if dest.sat.is_full() {
+            if allow_float {
+                continue;
+            }
+            // Sink: swap into the lake cell.
+        } else if !allow_wet && !dest.sat.is_empty() {
+            // Hunt gate: refuse haze/film swaps (empty Air only).
             continue;
         }
         claimed.insert((gx, dest_y));
-        world.set_cell(gx, dest_y, flake);
-        world.set_cell(gx, gy, dest);
+        {
+            let _scope = crate::budget::SnowSwapScope::fall();
+            world.set_cell(gx, dest_y, flake);
+            world.set_cell(gx, gy, dest);
+        }
         moved += 1;
     }
     moved
 }
 
-fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
+fn snowflake_is_airborne(world: &World, gx: i32, gy: i32, allow_float: bool) -> bool {
     let Some(below) = world.get_cell(gx, gy - 1) else {
         return false;
     };
@@ -436,6 +459,10 @@ fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
     }
     // Empty / haze air is not a lake seat — skip the 512-cell grounding walk.
     if !below.sat.is_full() {
+        return true;
+    }
+    // Raft disabled: full water is still a fall-through gap.
+    if !allow_float {
         return true;
     }
     !floats_on_air_seat_world(world, below, gx, gy - 1)
@@ -852,7 +879,10 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
             continue;
         }
         // Grain ↔ litter — cream + strain shares ride with each host.
-        swap_cells_preserving_mycelium(world, gx, gy - 1, gx, gy);
+        {
+            let _scope = crate::budget::SnowSwapScope::punch();
+            swap_cells_preserving_mycelium(world, gx, gy - 1, gx, gy);
+        }
         // Keep the water seat awake so the next fall pass sinks cargo.
         if let Some(seat) = world.get_cell(gx, gy - 2) {
             if seat.material == MaterialId::Air {
@@ -1171,7 +1201,14 @@ pub fn settle_loose_grains_regions(
     rooted: Option<&HashSet<(i32, i32)>>,
     max_passes: u32,
 ) {
-    settle_loose_grains_regions_ex(world, initial, rooted, max_passes, true);
+    settle_loose_grains_regions_ex(
+        world,
+        initial,
+        rooted,
+        max_passes,
+        true,
+        &GrainConfig::default(),
+    );
 }
 
 /// Like [`settle_loose_grains_regions`] with optional in-fall buoyancy.
@@ -1247,12 +1284,14 @@ pub fn settle_loose_grains_regions_ex(
     rooted: Option<&HashSet<(i32, i32)>>,
     max_passes: u32,
     allow_buoyancy: bool,
+    grain: &GrainConfig,
 ) {
     // Caller usually pre-filters sticky-loose; Air trim still applies so
     // seepage pore dirty inside sand/shore chunks is not re-walked ×N.
     // Leave global dirty intact — multi-pass re-plans filter via
     // [`settle_scan_regions`] instead of clearing the wet-pore halo.
     let mut cur: Vec<ActiveChunk> = keep_air_dest_regions(world, initial);
+    let snow_gate = SnowFallGate::from_grain(grain);
     for settle_i in 0..max_passes {
         if cur.is_empty() {
             break;
@@ -1264,7 +1303,13 @@ pub fn settle_loose_grains_regions_ex(
         // is outside this colour's ptr map.
         for pass in &partition_checkerboard(&cur) {
             if !pass.is_empty() {
-                moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy, settle_i);
+                moved += apply_grain_fall_regions_ex(
+                    world,
+                    pass,
+                    allow_buoyancy,
+                    settle_i,
+                    snow_gate,
+                );
             }
         }
         // Re-plan is global dirty, which on a wet world is dominated by pore
@@ -1326,8 +1371,26 @@ fn snowflake_holds_position(seed: u64, tick: u64, pass: u32, gx: i32, gy: i32) -
 const SNOWFALL_STEP_ODDS: f32 = 0.38;
 const SNOWFALL_SALT: u64 = 0x5F04_FA11;
 
+/// Snow descent gates for grain fall / airborne roll (soak OFF hooks).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SnowFallGate {
+    enable: bool,
+    allow_wet: bool,
+    allow_float: bool,
+}
+
+impl SnowFallGate {
+    fn from_grain(grain: &GrainConfig) -> Self {
+        Self {
+            enable: grain.enable_airborne_snow_fall,
+            allow_wet: grain.enable_snow_wet_fall,
+            allow_float: grain.enable_snow_float,
+        }
+    }
+}
+
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
-    apply_grain_fall_regions_ex(world, active, true, 0)
+    apply_grain_fall_regions_ex(world, active, true, 0, SnowFallGate::from_grain(&GrainConfig::default()))
 }
 
 /// [`apply_grain_fall_regions`] with optional buoyancy pull.
@@ -1341,6 +1404,7 @@ pub fn apply_grain_fall_regions_ex(
     active: &[ActiveChunk],
     allow_buoyancy: bool,
     fall_pass: u32,
+    snow_gate: SnowFallGate,
 ) -> u32 {
     let moves = std::sync::atomic::AtomicU32::new(0);
     // Parallel cell writes can't touch `World::mycelium_strains`; replay
@@ -1382,10 +1446,21 @@ pub fn apply_grain_fall_regions_ex(
                     //
                     // Only while airborne: once it lands it is snowpack and behaves
                     // as any other loose material, which is what lets drifts build.
-                    if above.material == MaterialId::Snow
-                        && snowflake_holds_position(seed, tick_no, fall_pass, gx, gy)
-                    {
-                        continue;
+                    if above.material == MaterialId::Snow {
+                        if !snow_gate.enable
+                            || snowflake_holds_position(seed, tick_no, fall_pass, gx, gy)
+                        {
+                            continue;
+                        }
+                        // Hunt gate: empty Air only (no haze/film swap),
+                        // unless snowraft is off and this is a full lake seat
+                        // we are sinking through.
+                        if !snow_gate.allow_wet && !cur.sat.is_empty() {
+                            let sinking_lake = !snow_gate.allow_float && cur.sat.is_full();
+                            if !sinking_lake {
+                                continue;
+                            }
+                        }
                     }
                     // Snow / Ice / Organic: drop through empty Air, haze,
                     // and *suspended* full-sat blobs. Float only on
@@ -1395,6 +1470,7 @@ pub fn apply_grain_fall_regions_ex(
                     let ice_floats = above.material == MaterialId::Ice
                         && ice_floe_seat_ptrs(ptrs, wrap_width, cur, gx, gy);
                     let litter_floats = above.material != MaterialId::Ice
+                        && !(above.material == MaterialId::Snow && !snow_gate.allow_float)
                         && floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy);
                     if (ice_floats || litter_floats) && !above.is_waterlogged_organic() {
                         // Floating raft cannot carry dense cargo. Walk up
@@ -1622,11 +1698,20 @@ pub fn rise_and_soak_buoyant_litter(world: &mut World) {
     rise_and_soak_buoyant_litter_cfg(world, &GrainConfig::default());
 }
 
-/// [`rise_and_soak_buoyant_litter`] with live [`GrainConfig`] waterlog rate.
+/// [`rise_and_soak_buoyant_litter`] with live [`GrainConfig`] waterlog rate
+/// and snow-float gate (`enable_snow_float` / soak `OFF=snowraft`).
 pub fn rise_and_soak_buoyant_litter_cfg(world: &mut World, grain: &GrainConfig) {
     let mut litter = collect_buoyant_litter(world);
     if litter.is_empty() {
         return;
+    }
+    if !grain.enable_snow_float {
+        litter.retain(|&(gx, gy)| {
+            world
+                .get_cell(gx, gy)
+                .map(|c| c.material != MaterialId::Snow)
+                .unwrap_or(true)
+        });
     }
     rise_buoyant_litter_list(world, &mut litter);
     soak_floating_litter_list(world, &litter, grain.organic_waterlog_rate);
@@ -1925,6 +2010,7 @@ fn raft_column_push(world: &World, gx: i32, waterline_y: i32, wind_push: f32) ->
 }
 
 fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx: i32) {
+    let _scope = crate::budget::SnowSwapScope::raft();
     for dy in (0..height).rev() {
         let y = bottom_y + dy;
         if world.get_cell(gx, y).is_none() || world.get_cell(nx, y).is_none() {
@@ -2591,6 +2677,7 @@ fn rise_buoyant_litter_list(world: &mut World, litter: &mut [(i32, i32)]) {
     if litter.is_empty() {
         return;
     }
+    let _scope = crate::budget::SnowSwapScope::rise();
     // Memoize grounded lake seats for this rise pass (flooded Organic used
     // to re-walk ≤512 cells per step × rise max).
     let mut grounded: HashMap<(i32, i32), bool> = HashMap::new();
@@ -3491,6 +3578,22 @@ pub struct GrainConfig {
     /// Higher values make Organic mats stick to plants and form perched
     /// water bladders on slopes.
     pub raft_root_bind_radius: i32,
+    /// Once-per-tick airborne snow step + gentle grain-fall flake descent.
+    /// Soak `OFF=snowfall` clears this so flakes nucleate but stay put.
+    #[serde(default = "default_true")]
+    pub enable_airborne_snow_fall: bool,
+    /// When false, flakes only swap into empty Air (`sat == 0`) — no
+    /// haze/film ride. Soak `OFF=snowwet` for snow↔standing-water mint hunt.
+    #[serde(default = "default_true")]
+    pub enable_snow_wet_fall: bool,
+    /// When false, Snow sinks through standing water (no lake raft / lid).
+    /// Soak `OFF=snowraft` for post-descent free+hum mint hunt.
+    #[serde(default = "default_true")]
+    pub enable_snow_float: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for GrainConfig {
@@ -3506,6 +3609,9 @@ impl Default for GrainConfig {
             organic_waterlog_rate: 0.002,
             // Body-span bind only — no neighbour dilation (was 1).
             raft_root_bind_radius: 0,
+            enable_airborne_snow_fall: true,
+            enable_snow_wet_fall: true,
+            enable_snow_float: true,
         }
     }
 }

@@ -17,14 +17,32 @@
 //! - `GVSE_BUDGET_PERIOD` — sample every N ticks (default 60)
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
 //! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `leftover`, `cadence`,
-//!   `karst`, `competent`, `phase`, `cull`, `failure`
+//!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`, `surplus`,
+//!   `diffuse` (α=0), `orphan` (evap crest-film 8× off),
+//!   `snowfall` (flakes nucleate but do not descend), `snowwet` (no haze/film
+//!   snow swap), `slush` (`PhaseConfig::enable_slush = false`),
+//!   `snowraft` (Snow sinks through lakes — no float lid),
+//!   `snowsurf` (live_surface peels seated Snow; weather ignores pack),
+//!   `flow` (skip surface cascade / equalise / throughflow / confined),
+//!   `seep` (skip pore seepage + contact wet + seam),
+//!   `park` (`park_orphan_water` discards — free-sat park off),
+//!   `gravity` (skip free-water / infiltration gravity pulls),
+//!   `settle` (skip multi-pass grain fall/repose; airborne snow roll stays)
+//!   (`snow` → `PhaseConfig::enable_snow_precip = false`; TRACKED mint kill)
+//!
+//! Residual A probes (print in summary): `swap_snow` / `snow_in` / `snow_out`,
+//! `par_air` / `par_snow` (parallel::set_cell free miss), `grav_air`.
+//! Call-site tags on World snow_in/out: nucleate / surface / fall / drift /
+//! reloc / other (`SnowSwapScope`).
 
 use wk_voxel::{
+    set_peel_seated_snow, set_skip_grain_settle, set_skip_gravity, set_skip_park_orphan,
+    set_skip_seepage, set_skip_surface_flow, snow_mint_probe_reset, snow_mint_probe_snapshot,
     stamp_world, step_world, BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig,
     CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
     FungiConfig, GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrographicConfig,
-    PerfConfig, PhaseConfig, SteamConfig, Temperature, Wind, World, WorldStep, WorldStepConfig,
-    WorldgenParams,
+    PerfConfig, PhaseConfig, SnowOtherStage, SteamConfig, Temperature, Wind, World, WorldStep,
+    WorldStepConfig, WorldgenParams,
 };
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -131,8 +149,55 @@ fn print_budget(led: &BudgetLedger, land: usize, label: &str) {
         d.d_min_solid, d.d_min_load, d.d_min_body, d.d_min_total
     );
     eprintln!(
-        "probe-W swap={:+} park={:+} rej={:+} clamp={:+}",
-        p.water_swap, p.water_park, p.water_hum_rej, p.water_clamp
+        "probe-W swap={:+} swap_snow={:+} snow_in={:+} snow_out={:+} swap_other={:+} park={:+} rej={:+} clamp={:+} hum_adv={:+.0} hum_dif={:+.0} evap_add={:+} evap_debit={:+} orphan_rm={:+} dep_add={:+} dep_debit={:+} flow_air={:+} seep_air={:+} park_air={:+} free_other={:+} par_air={:+} par_snow={:+} grav_air={:+} steam_solid={:+}",
+        p.water_swap,
+        p.water_swap_snow,
+        p.water_swap_snow_in,
+        p.water_swap_snow_out,
+        p.water_swap_other,
+        p.water_park,
+        p.water_hum_rej,
+        p.water_clamp,
+        p.water_hum_advect,
+        p.water_hum_diffuse,
+        p.water_evap_add,
+        p.water_evap_debit,
+        p.water_orphan_rm,
+        p.water_dep_add,
+        p.water_dep_debit,
+        p.water_flow_air,
+        p.water_seep_air,
+        p.water_park_air,
+        p.water_free_other,
+        p.water_par_air,
+        p.water_par_snow,
+        p.water_grav_air,
+        p.steam_on_solid
+    );
+    eprintln!(
+        "snow_in-by-site nucleate={:+}/{:+} surface={:+}/{:+} fall={:+}/{:+} drift={:+}/{:+} reloc={:+}/{:+} rise={:+}/{:+} punch={:+}/{:+} raft={:+}/{:+} land={:+}/{:+} comp={:+}/{:+} other={:+}/{:+}  (in/out)",
+        p.snow_in_nucleate,
+        p.snow_out_nucleate,
+        p.snow_in_surface,
+        p.snow_out_surface,
+        p.snow_in_fall,
+        p.snow_out_fall,
+        p.snow_in_drift,
+        p.snow_out_drift,
+        p.snow_in_reloc,
+        p.snow_out_reloc,
+        p.snow_in_rise,
+        p.snow_out_rise,
+        p.snow_in_punch,
+        p.snow_out_punch,
+        p.snow_in_raft,
+        p.snow_out_raft,
+        p.snow_in_landscape,
+        p.snow_out_landscape,
+        p.snow_in_competent,
+        p.snow_out_competent,
+        p.snow_in_other,
+        p.snow_out_other,
     );
     eprintln!(
         "probe-M bare={:+} credit={:+} clip={:+}",
@@ -161,6 +226,19 @@ fn soak_off(flag: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Clears soak hunt TLS gates when the soak returns (or panics).
+struct HuntGateGuard;
+impl Drop for HuntGateGuard {
+    fn drop(&mut self) {
+        set_peel_seated_snow(false);
+        set_skip_surface_flow(false);
+        set_skip_seepage(false);
+        set_skip_park_orphan(false);
+        set_skip_gravity(false);
+        set_skip_grain_settle(false);
+    }
+}
+
 fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, BudgetProbe) {
     let mut s = stamped_demo();
     let perf = PerfConfig::default();
@@ -170,7 +248,10 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         failure.enable_shear_weaken = false;
         failure.enable_compaction = false;
     }
-    let evap = EvapConfig::default();
+    let mut evap = EvapConfig::default();
+    if soak_off("orphan") {
+        evap.enable_orphan_boost = false;
+    }
     let cond = CondensationConfig {
         top_y: s.params.sky_ceiling_y - 2,
         ..CondensationConfig::default()
@@ -189,6 +270,14 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     if soak_off("cull") {
         phase.enable_cull = false;
     }
+    if soak_off("snow") {
+        // Airborne flake paths (cond lottery + thermal surplus) refuse Snow.
+        // 5k soak: TRACKED ~+136/t → ~0 with this flag (see VOXEL_BUDGET_SOAK).
+        phase.enable_snow_precip = false;
+    }
+    if soak_off("slush") {
+        phase.enable_slush = false;
+    }
     let mut steam = SteamConfig::default();
     if soak_off("steam") {
         steam.enabled = false;
@@ -204,7 +293,28 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     }
     let climate = ClimateConfig::default();
     let carbon_cfg = CarbonConfig::default();
-    let grain = GrainConfig::default();
+    let mut grain = GrainConfig::default();
+    if soak_off("snowfall") {
+        // Nucleation stays on; airborne roll + grain-fall flake descent off.
+        grain.enable_airborne_snow_fall = false;
+    }
+    if soak_off("snowwet") {
+        // Flakes only swap into empty Air — no haze/film ride.
+        grain.enable_snow_wet_fall = false;
+    }
+    if soak_off("snowraft") {
+        // Snow sinks through standing water — no lake raft / evap lid.
+        grain.enable_snow_float = false;
+    }
+    // Weather crest ignores seated snow (physical lid still blocks evap).
+    set_peel_seated_snow(soak_off("snowsurf"));
+    // Free-sat writers beside landed Snow (post-descent mint hunt).
+    set_skip_surface_flow(soak_off("flow"));
+    set_skip_seepage(soak_off("seep"));
+    set_skip_park_orphan(soak_off("park"));
+    set_skip_gravity(soak_off("gravity"));
+    set_skip_grain_settle(soak_off("settle"));
+    let _hunt_guard = HuntGateGuard;
     let fungi = FungiConfig::default();
     let mut competent = CompetentFallConfig::default();
     if soak_off("competent") {
@@ -226,7 +336,7 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         grain: &grain,
         fungi: &fungi,
         competent: &competent,
-        humidity_diffusion_alpha: 0.15,
+        humidity_diffusion_alpha: if soak_off("diffuse") { 0.0 } else { 0.15 },
         sea_level_y: s.params.sea_level_y,
         sky_ceiling_y: s.params.sky_ceiling_y,
         evap_on: !soak_off("evap"),
@@ -257,7 +367,21 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
     let mut led = BudgetLedger::default();
     led.period = period;
     led.enable_with(&s.world, &s.humidity, Some(&s.landscape));
+    snow_mint_probe_reset();
 
+    // Optional windowed attribution: GVSE_SOAK_WINDOW=N prints per-window
+    // ΔTRACKED / Δsnow / Δhum so mint onset (~2k→5k) is visible without a
+    // full mark remake. Default 0 = off.
+    let window = env_u64("GVSE_SOAK_WINDOW", 0);
+    let mut win_mark = if window > 0 {
+        Some(wk_voxel::BudgetSnap::capture_with(
+            &s.world,
+            &s.humidity,
+            Some(&s.landscape),
+        ))
+    } else {
+        None
+    };
     for i in 1..=ticks {
         let _ = step_world(
             WorldStep {
@@ -276,6 +400,48 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
             None,
         );
         led.sample_if_due_with(&s.world, &s.humidity, Some(&s.landscape));
+        // Peak steam sitting on non-Air (parallel grain Air→Snow skips evict).
+        if period > 0 && i % period == 0 {
+            let mut on_solid = 0i64;
+            for (&(gx, gy), &amt) in s.world.steam.iter() {
+                if amt == 0 {
+                    continue;
+                }
+                if !matches!(
+                    s.world.get_cell(gx, gy).map(|c| c.material),
+                    Some(wk_material::MaterialId::Air)
+                ) {
+                    on_solid += i64::from(amt);
+                }
+            }
+            wk_voxel::budget::note_steam_on_solid_peak(on_solid);
+        }
+        if let (Some(mark), w) = (win_mark.as_ref(), window) {
+            if w > 0 && i % w == 0 {
+                let now = wk_voxel::BudgetSnap::capture_with(
+                    &s.world,
+                    &s.humidity,
+                    Some(&s.landscape),
+                );
+                let d = now.delta(*mark);
+                let dt = d.ticks.max(1) as f64;
+                let triad = d.d_free as f64 + d.d_pore as f64 + d.d_humidity + d.d_snow as f64;
+                eprintln!(
+                    "win t={}: TRACKED {:+.0} ({:+.2}/t) snow={:+} ice={:+} hum={:+.0} free={:+} pore={:+} steam={:+} triad(f+p+h+s)={:+.0}",
+                    now.tick,
+                    d.d_tracked,
+                    d.d_tracked / dt,
+                    d.d_snow,
+                    d.d_ice,
+                    d.d_humidity,
+                    d.d_free,
+                    d.d_pore,
+                    d.d_steam,
+                    triad
+                );
+                win_mark = Some(now);
+            }
+        }
         if i == ticks || (period > 0 && i % (period * 20).max(1) == 0) {
             led.refresh_with(&s.world, &s.humidity, Some(&s.landscape));
             print_budget(&led, s.landscape.len(), label);
@@ -289,6 +455,17 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         &format!("{label} final"),
     );
     let d = led.delta().expect("ledger on");
+    let snow = snow_mint_probe_snapshot();
+    let phase_store = d.d_ice + d.d_snow;
+    eprintln!(
+        "snow-mint-probe seated={} paid={:.0} under={:.0} Δsnow+ice={:+} ΔTRACKED={:+.0} paid−phase={:+.0}",
+        snow.seated,
+        snow.paid,
+        snow.under,
+        phase_store,
+        d.d_tracked,
+        snow.paid - phase_store as f64,
+    );
     (d.d_min_total, d.d_tracked as i64, BudgetProbe::snapshot())
 }
 
@@ -304,14 +481,100 @@ fn short_budget_soak() {
         format!("short/{ticks}/OFF={off}")
     };
     let (d_min, d_tracked, probe) = run_soak(ticks, warm, period, &label);
-    assert_eq!(probe.water_park, 0, "park leftover must stay closed");
+    // OFF=park deliberately discards orphan water — park leftover is the signal.
+    if !soak_off("park") {
+        assert_eq!(probe.water_park, 0, "park leftover must stay closed");
+    }
     assert_eq!(probe.water_clamp, 0, "humidity clamp must stay closed");
     assert_eq!(probe.mineral_clip, 0, "dissolved clip must stay closed");
     // Absolute leftover over short windows is noisy; rates are the signal.
+    let snow_net = probe.snow_exit_yield - probe.snow_enter_yield;
+    let snow = snow_mint_probe_snapshot();
+    let paid = snow.paid as i64;
+    let site = |name: &str, inn: i64, out: i64| {
+        let net = inn + out;
+        eprintln!(
+            "  snow_site {name}: in={inn:+} out={out:+} net={net:+} in−paid={:+} net−paid={:+}",
+            inn - paid,
+            net - paid,
+        );
+    };
     eprintln!(
-        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={}",
+        "short soak summary: ticks={ticks} off={off:?} d_tracked={d_tracked} ({:+.2}/t) d_min={d_min} park={} swap={} swap_snow={} snow_in={} snow_out={} swap_other={} flow_air={} seep_air={} park_air={} free_other={} par_air={} par_snow={} grav_air={} steam_solid={} snow_enter={} exit_n={} enter_y={} exit_y={} net_leave={} credit={} bare={} to_ice={}",
         d_tracked as f64 / ticks.max(1) as f64,
-        probe.water_park
+        probe.water_park,
+        probe.water_swap,
+        probe.water_swap_snow,
+        probe.water_swap_snow_in,
+        probe.water_swap_snow_out,
+        probe.water_swap_other,
+        probe.water_flow_air,
+        probe.water_seep_air,
+        probe.water_park_air,
+        probe.water_free_other,
+        probe.water_par_air,
+        probe.water_par_snow,
+        probe.water_grav_air,
+        probe.steam_on_solid,
+        probe.snow_enter_n,
+        probe.snow_exit_n,
+        probe.snow_enter_yield,
+        probe.snow_exit_yield,
+        snow_net,
+        probe.snow_exit_credit,
+        probe.snow_exit_bare,
+        probe.snow_to_ice,
+    );
+    eprintln!(
+        "snow_site table (TRACKED={d_tracked:+} paid={paid} swap_snow−paid={:+}):",
+        probe.water_swap_snow - paid,
+    );
+    site("nucleate", probe.snow_in_nucleate, probe.snow_out_nucleate);
+    site("surface", probe.snow_in_surface, probe.snow_out_surface);
+    site("fall", probe.snow_in_fall, probe.snow_out_fall);
+    site("drift", probe.snow_in_drift, probe.snow_out_drift);
+    site("reloc", probe.snow_in_reloc, probe.snow_out_reloc);
+    site("rise", probe.snow_in_rise, probe.snow_out_rise);
+    site("punch", probe.snow_in_punch, probe.snow_out_punch);
+    site("raft", probe.snow_in_raft, probe.snow_out_raft);
+    site("landscape", probe.snow_in_landscape, probe.snow_out_landscape);
+    site("competent", probe.snow_in_competent, probe.snow_out_competent);
+    site("other", probe.snow_in_other, probe.snow_out_other);
+    eprintln!("snow_other_by_stage (in/out/net):");
+    for i in 0..SnowOtherStage::N {
+        let inn = probe.snow_in_other_by_stage[i];
+        let out = probe.snow_out_other_by_stage[i];
+        if inn == 0 && out == 0 {
+            continue;
+        }
+        eprintln!(
+            "  stage {}: in={inn:+} out={out:+} net={:+}",
+            SnowOtherStage::NAMES[i],
+            inn + out
+        );
+    }
+    // Closed swaps: net≈0; unpaired mint ≈ site_net (or in−paid for nucleate).
+    let sites = [
+        ("nucleate", probe.snow_in_nucleate + probe.snow_out_nucleate - paid),
+        ("fall", probe.snow_in_fall + probe.snow_out_fall),
+        ("drift", probe.snow_in_drift + probe.snow_out_drift),
+        ("rise", probe.snow_in_rise + probe.snow_out_rise),
+        ("punch", probe.snow_in_punch + probe.snow_out_punch),
+        ("raft", probe.snow_in_raft + probe.snow_out_raft),
+        ("landscape", probe.snow_in_landscape + probe.snow_out_landscape),
+        ("competent", probe.snow_in_competent + probe.snow_out_competent),
+        ("other", probe.snow_in_other + probe.snow_out_other),
+    ];
+    let mut best = ("?", i64::MAX);
+    for &(name, net) in &sites {
+        let err = (net - d_tracked).abs();
+        if err < best.1 {
+            best = (name, err);
+        }
+    }
+    eprintln!(
+        "snow_site match: best={} err={} TRACKED={d_tracked:+} (site_net≈TRACKED)",
+        best.0, best.1
     );
 }
 

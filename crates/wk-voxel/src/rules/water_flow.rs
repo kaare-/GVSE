@@ -212,6 +212,7 @@ fn commit_air_sat_xfers(world: &mut World, xfers: &mut [((i32, i32), (i32, i32),
     if xfers.is_empty() {
         return;
     }
+    let _free_scope = crate::budget::FreeSatScope::flow();
     let mut by_source: FxHashMap<(i32, i32), Vec<usize>> = FxHashMap::default();
     for (i, (from, _, _)) in xfers.iter().enumerate() {
         by_source.entry(*from).or_default().push(i);

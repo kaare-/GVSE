@@ -248,6 +248,7 @@ impl SimSettings {
                 rate_per_tick: 1,
                 dry_above_max: 200,
                 period_ticks: 5,
+                enable_orphan_boost: true,
             },
             cond,
             cond_rain_on: true,
