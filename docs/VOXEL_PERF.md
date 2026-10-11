@@ -384,7 +384,12 @@ re-profile.
    ([`WORLDGEN.md`](WORLDGEN.md) streaming). Profile harness / soaks
    stay full-resident (`stream_window = None`).
 2. **Done (2026-10-11):** Phase + humidity advect/lift/mix/oro skip
-   outside the window (far mass stays put). Re-measure Compact play
-   FPS with streaming on; temp/wind/steam/evap still full-ring.
-3. Body undercut cost is gameplay-shaped — only cut with a playtest
-   dial, not a blind skip.
+   outside the window; `plan_active` skips frozen dirty before inflate;
+   cold-avalanche / flow-erosion gated to the window (no full-ring
+   fallback when streaming). Compact stretch A/B
+   (`perf_profile_stretch_stream_ab`, view=320): wall **53.6 → 31.6**
+   ms/tick (~19 → **~32** sim-FPS); advect **6.3 → 1.8**; phase
+   **3.2 → 0.66**; plan+clear **1.7 → 0.07**. Log:
+   `/opt/cursor/artifacts/phase4-stretch-stream-ab.log`.
+3. Temp / wind rebuild / steam / evap still full-ring. Body undercut
+   cost is gameplay-shaped — only cut with a playtest dial.

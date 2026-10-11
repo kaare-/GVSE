@@ -398,6 +398,14 @@ pub fn plan_active(world: &World) -> Vec<ActiveChunk> {
     let mut bits_map: HashMap<ChunkCoord, DirtyBits> = HashMap::default();
     let mut rect_map: HashMap<ChunkCoord, Rect> = HashMap::default();
     for (coord, chunk) in &world.chunks {
+        // Phase 4 streaming: skip frozen residents before inflate/dilate.
+        // Their dirty bits stay until the camera returns; walking them
+        // every tick made Compact stream slower than full-resident.
+        if let Some(win) = world.stream_window {
+            if !win.contains_cx(world, coord.cx) {
+                continue;
+            }
+        }
         let Some(rect) = chunk.dirty else {
             continue;
         };
@@ -430,6 +438,7 @@ pub fn plan_active(world: &World) -> Vec<ActiveChunk> {
             .cmp(&b.coord.cy)
             .then(a.coord.cx.cmp(&b.coord.cx))
     });
+    // Halo inflate can wake a frozen neighbour chunk-x — drop those.
     crate::streaming::filter_plan_to_stream(world, out)
 }
 

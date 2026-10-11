@@ -385,8 +385,10 @@ as the full-resident gate. Streaming slices landed:
 1. **Active-only CA** — `StreamWindow` filters `plan_active`;
    `clear_planned_dirty` keeps frozen dirty.
 2. **Field shell (partial)** — phase columns + humidity advect / lift /
-   mix / oro skip tiles outside the window (mass stays put). Play app
-   sets the window from `cam_x` + screen width (Tab → Performance).
+   mix / oro skip tiles outside the window (mass stays put);
+   `plan_active` skips frozen dirty **before** inflate (required — post-
+   filter alone left Compact slower than full-resident). Compact
+   stretch ~19 → ~27 sim-FPS with view=320 ([`VOXEL_PERF.md`](VOXEL_PERF.md)).
 
 Still **full RAM residency** — no eviction store, no `FrozenBacklog`.
 Temp / wind rebuild / steam / evap still full-ring. Next: window those
