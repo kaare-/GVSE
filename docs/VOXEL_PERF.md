@@ -388,8 +388,11 @@ re-profile.
    cold-avalanche / flow-erosion gated to the window (no full-ring
    fallback when streaming). Compact stretch A/B
    (`perf_profile_stretch_stream_ab`, view=320): wall **53.6 → 31.6**
-   ms/tick (~19 → **~32** sim-FPS); advect **6.3 → 1.8**; phase
-   **3.2 → 0.66**; plan+clear **1.7 → 0.07**. Log:
-   `/opt/cursor/artifacts/phase4-stretch-stream-ab.log`.
-3. Temp / wind rebuild / steam / evap still full-ring. Body undercut
-   cost is gameplay-shaped — only cut with a playtest dial.
+   ms/tick (~19 → **~32** sim-FPS) before temp/wind/evap window.
+   After temp/wind/evap window: wall **52.2 → 23.4** ms/tick
+   (~19 → **~43** sim-FPS); temp amort **4.4 → 2.9**; wind **1.7 → 0.23**;
+   evap **1.5 → 0.14**. Logs:
+   `/opt/cursor/artifacts/phase4-stretch-stream-ab.log`,
+   `phase4-stretch-stream-temp-ab.log`.
+3. Steam / leftover still full-ring. Body undercut cost is
+   gameplay-shaped — only cut with a playtest dial.
