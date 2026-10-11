@@ -192,6 +192,14 @@ pub fn wake_lake_bed_pores(world: &mut World) {
     let mut standing_updates: Vec<(ChunkCoord, bool)> = Vec::new();
     let mut unsat_updates: Vec<(ChunkCoord, bool)> = Vec::new();
     for ac in &regions {
+        // Stream-active: far resident lakes freeze until the camera returns
+        // (dirty already planned outside the band is preserved by
+        // clear_planned_dirty).
+        if let Some(win) = world.stream_window {
+            if !win.contains_cx(world, ac.coord.cx) {
+                continue;
+            }
+        }
         let Some(chunk) = world.chunks.get(&ac.coord) else {
             continue;
         };
@@ -377,6 +385,11 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
     let lowers: Vec<ChunkCoord> = {
         let mut set = std::collections::HashSet::new();
         for (&coord, c) in &world.chunks {
+            if let Some(win) = world.stream_window {
+                if !win.contains_cx(world, coord.cx) {
+                    continue;
+                }
+            }
             if !(c.has_wet_pores || c.has_wet_air) {
                 continue;
             }
@@ -394,6 +407,11 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         v
     };
     for coord in lowers {
+        if let Some(win) = world.stream_window {
+            if !win.contains_cx(world, coord.cx) {
+                continue;
+            }
+        }
         let above = ChunkCoord::new(coord.cx, coord.cy + 1);
         if !world.chunks.contains_key(&above) {
             continue;
@@ -519,6 +537,11 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
     let mut out: Vec<ActiveChunk> = Vec::new();
     let coords: Vec<_> = world.chunks.keys().copied().collect();
     for coord in coords {
+        if let Some(win) = world.stream_window {
+            if !win.contains_cx(world, coord.cx) {
+                continue;
+            }
+        }
         let above = ChunkCoord::new(coord.cx, coord.cy + 1);
         if !world.chunks.contains_key(&above) {
             continue;
@@ -752,7 +775,7 @@ fn diagonal_is_a_shortcut(
 
 /// Cross-seam pore coupling every tick (not cadence-gated).
 pub fn apply_seepage_seam_coupling(world: &mut World) {
-    let regions = seam_seepage_regions(world);
+    let regions = crate::streaming::filter_plan_to_stream(world, seam_seepage_regions(world));
     if regions.is_empty() {
         return;
     }
@@ -1504,6 +1527,11 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         .map(|(&coord, _)| coord)
         .collect();
     for coord in coords {
+        if let Some(win) = world.stream_window {
+            if !win.contains_cx(world, coord.cx) {
+                continue;
+            }
+        }
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
@@ -1962,5 +1990,60 @@ mod tests {
             seepage_face_clamp(&w, ChunkCoord::new(0, 0), stone).is_none(),
             "once pores wet, the full chunk walks again"
         );
+    }
+
+    #[test]
+    fn stream_window_skips_far_seam_wake() {
+        use crate::streaming::StreamWindow;
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut w = World::new(1);
+        w.wrap_width = Some(cols);
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        let near_gx = 8;
+        // Wet sand under standing air at near + far vertical seams.
+        for gx in [near_gx, far_gx] {
+            let cy0 = 0;
+            let cy1 = 1;
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                cy0,
+            ));
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                cy1,
+            ));
+            w.set_cell(gx, CHUNK_CELLS_H as i32 - 1, {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat = Sat(200);
+                c
+            });
+            w.set_cell(gx, CHUNK_CELLS_H as i32, Cell::water());
+        }
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        // Clear any remint dirties from set_cell.
+        for c in w.chunks.values_mut() {
+            c.clear_dirty();
+        }
+        wake_vertical_chunk_seam_pores(&mut w);
+        let near_coord = ChunkCoord::new(
+            near_gx.div_euclid(CHUNK_CELLS_W as i32),
+            0,
+        );
+        let far_coord = ChunkCoord::new(
+            far_gx.div_euclid(CHUNK_CELLS_W as i32),
+            0,
+        );
+        let far_dirty = !w.chunks[&far_coord].dirty_bits.is_empty()
+            || w.chunks
+                .get(&ChunkCoord::new(far_coord.cx, 1))
+                .map(|c| !c.dirty_bits.is_empty())
+                .unwrap_or(false);
+        assert!(!far_dirty, "far seam must stay quiet under stream window");
+        let near_dirty = !w.chunks[&near_coord].dirty_bits.is_empty()
+            || w.chunks
+                .get(&ChunkCoord::new(near_coord.cx, 1))
+                .map(|c| !c.dirty_bits.is_empty())
+                .unwrap_or(false);
+        assert!(near_dirty, "near seam wake must still dirty in-window columns");
     }
 }

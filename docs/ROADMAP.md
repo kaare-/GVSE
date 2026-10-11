@@ -309,6 +309,10 @@ cut (≥1 ms) **or** width stretch if playable headroom is enough.
   (far float cadence skipped; out-of-band wakes deferred). Stretch
   stream+evict wall **14.8 → 11.9** ms (~67 → **~84** sim-FPS); bodies
   **4.3 → 2.1** ms.
+- **2026-10-11:** Seepage lake-bed / seam / weep wakes + seam coupling
+  honor active `StreamWindow` (far resident aquifers freeze). Stretch
+  stream+evict wall **11.9 → 10.9** ms (~84 → **~91** sim-FPS);
+  seepage **2.4 → 0.79** ms.
 
 ---
 
@@ -399,6 +403,7 @@ before coding.
 | 2026-10-11 | Stream chunk prune | Drop other seed dirs under saves/stream_chunks on reseed |
 | 2026-10-11 | Stream stack closed | Residency+disk+F5+prune done; next = re-profile / ≥1 ms / width |
 | 2026-10-11 | Body stream gate | Competent float wake + wake regions honor active StreamWindow |
+| 2026-10-11 | Seep stream gate | Lake-bed/seam/weep wakes + seam couple honor StreamWindow |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
