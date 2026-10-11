@@ -3081,6 +3081,10 @@ pub fn apply_cold_avalanche_bound(
         if temp.mean() > freeze_point_c {
             return;
         }
+        // Streaming: empty window dirty ≠ "scan the whole ring".
+        if world.stream_window.is_some() {
+            return;
+        }
         regions_loose_moore(world)
     } else {
         let loose = regions_loose_moore(world);
@@ -3097,12 +3101,19 @@ pub fn apply_cold_avalanche_bound(
                 if temp.mean() > freeze_point_c {
                     return;
                 }
+                if world.stream_window.is_some() {
+                    return;
+                }
                 loose
             } else {
                 filtered
             }
         }
     };
+    let regions = crate::streaming::filter_plan_to_stream(world, regions);
+    if regions.is_empty() {
+        return;
+    }
     let carry = ice_carry_thickness.max(1);
     for pass in partition_checkerboard(&regions) {
         apply_repose_pass(world, &pass, Some(temp), freeze_point_c, carry, rooted);
@@ -3964,7 +3975,12 @@ pub fn apply_flow_erosion_bound(
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| {
+        .filter(|(coord, c)| {
+            if let Some(win) = world.stream_window {
+                if !win.contains_cx(world, coord.cx) {
+                    return false;
+                }
+            }
             if cfg.min_flow_sat >= STANDING_AIR_SAT {
                 c.has_standing_air
             } else {

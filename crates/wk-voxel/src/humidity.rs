@@ -1357,6 +1357,12 @@ impl Humidity {
                 }
                 let hx = hx_min + ix as i32;
                 let hy = b.hy_min + iy as i32;
+                // Phase 4 streaming: leave far humidity put (no climate rewrite).
+                if let Some((_, world, _)) = surface {
+                    if !crate::streaming::stream_allows_hx(world, hx, self.tile_cols) {
+                        continue;
+                    }
+                }
                 let (vx, vy) = match surface {
                     Some(_) => vectors
                         .get(i)
@@ -1517,6 +1523,9 @@ impl Humidity {
                 }
                 let hx = b.hx_min + ix as i32;
                 let hy = b.hy_min + iy as i32;
+                if !crate::streaming::stream_allows_hx(world, hx, self.tile_cols) {
+                    continue;
+                }
                 let air = self.air_row(wind, world, hx, cache, air_cols, hx_min);
                 if hy >= air {
                     continue;
@@ -1583,6 +1592,11 @@ impl Humidity {
                 let val = work[i];
                 let hx = b.hx_min + ix as i32;
                 let hy = b.hy_min + iy as i32;
+                if let Some((_, world, _)) = surface {
+                    if !crate::streaming::stream_allows_hx(world, hx, self.tile_cols) {
+                        continue;
+                    }
+                }
                 // Sparse mix runs after retain(|v| > 1e-6). Sink uses a
                 // looser floor. One scan, mix then sink, same add order
                 // as the old two passes when rows run bottom to top.
@@ -1652,6 +1666,11 @@ impl Humidity {
         let mut any_lift = false;
         for ix in 0..w {
             let hx = b.hx_min + ix as i32;
+            if let Some(wld) = world {
+                if !crate::streaming::stream_allows_hx(wld, hx, self.tile_cols) {
+                    continue;
+                }
+            }
             let lift = wind.orographic_lift(world, hx);
             if lift > 1e-5 {
                 any_lift = true;
@@ -1958,6 +1977,11 @@ impl Humidity {
             if mass.abs() < 1e-9 {
                 continue;
             }
+            if let Some((_, world, _)) = surface {
+                if !crate::streaming::stream_allows_hx(world, hx, self.tile_cols) {
+                    continue;
+                }
+            }
             let (vx, vy) = match surface {
                 Some((wind, world, _)) => vectors
                     .and_then(|v| v.get(i).copied())
@@ -2019,6 +2043,11 @@ impl Humidity {
         let mut deltas: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         deltas.reserve(self.cells.len());
         for (&(hx, hy), &val) in &self.cells {
+            if let Some((_, world, _)) = surface {
+                if !crate::streaming::stream_allows_hx(world, hx, self.tile_cols) {
+                    continue;
+                }
+            }
             let above = (hx, hy + 1);
             if !self.accepts(above.0, above.1) {
                 continue;
@@ -2042,6 +2071,11 @@ impl Humidity {
             for (&(hx, hy), &val) in &self.cells {
                 if val <= 1e-9 {
                     continue;
+                }
+                if let Some((_, world, _)) = surface {
+                    if !crate::streaming::stream_allows_hx(world, hx, self.tile_cols) {
+                        continue;
+                    }
                 }
                 let below = hy - 1;
                 if !self.accepts(hx, below) {
@@ -2115,6 +2149,9 @@ impl Humidity {
         let keys: Vec<((i32, i32), f32)> = self.cells.iter().map(|(&k, &v)| (k, v)).collect();
         let mut moves: Vec<((i32, i32), (i32, i32), f32)> = Vec::new();
         for ((hx, hy), mass) in keys {
+            if !crate::streaming::stream_allows_hx(world, hx, self.tile_cols) {
+                continue;
+            }
             let air = self.free_air_cached(wind, world, hx, cache);
             if hy >= air {
                 continue;
@@ -2164,6 +2201,11 @@ impl Humidity {
         let mut lift_by_hx: FxHashMap<i32, f32> = FxHashMap::default();
         let mut any_lift = false;
         for hx in self.occupied_columns() {
+            if let Some(wld) = world {
+                if !crate::streaming::stream_allows_hx(wld, hx, self.tile_cols) {
+                    continue;
+                }
+            }
             let lift = wind.orographic_lift(world, hx);
             if lift > 1e-5 {
                 any_lift = true;
@@ -2178,6 +2220,11 @@ impl Humidity {
         for (&(hx, hy), &mass) in &self.cells {
             if mass <= 0.0 {
                 continue;
+            }
+            if let Some(wld) = world {
+                if !crate::streaming::stream_allows_hx(wld, hx, self.tile_cols) {
+                    continue;
+                }
             }
             let lift = *lift_by_hx.get(&hx).unwrap_or(&0.0);
             if lift <= 1e-5 {
@@ -3652,6 +3699,42 @@ mod convection_tests {
         assert_ne!(
             h.rock_hy_topo, topo,
             "Air↔solid carve must drop the rock memo"
+        );
+    }
+
+    #[test]
+    fn stream_window_leaves_far_humidity_put() {
+        use crate::chunk::CHUNK_CELLS_W;
+        use crate::grid::World;
+        use crate::streaming::StreamWindow;
+        use crate::wind::Wind;
+
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut world = World::new(1);
+        world.wrap_width = Some(cols);
+        world.stream_window = Some(StreamWindow::new(0, 128));
+
+        let mut h = Humidity::with_world_bounds(4, 0, 0, cols, 64);
+        h.wrap_x = true;
+        h.add(8, 8, 100.0); // hx=2, active
+        h.add(2048 + 2, 8, 100.0); // hx=512, frozen mid-ring
+        let far_before = h.at_tile(512, 2);
+        let total_before = h.total_mass();
+        let wind = Wind::climate(4, 1.0, 1, cols, 32, 0, 64, true);
+        h.advect_with_surface(1.0, 0.0, &wind, &world);
+        assert!(
+            (h.at_tile(512, 2) - far_before).abs() < 1e-3,
+            "frozen band humidity must not advect (before={far_before} after={})",
+            h.at_tile(512, 2)
+        );
+        assert!(
+            (h.total_mass() - total_before).abs() < 1e-2,
+            "TRACKED-friendly: mass conserved under stream skip"
+        );
+        // Active parcel should still move.
+        assert!(
+            h.at_tile(2, 2) < 100.0 || h.at_tile(3, 2) > 0.0,
+            "near band must still advect"
         );
     }
 }

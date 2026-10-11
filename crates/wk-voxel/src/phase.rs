@@ -295,6 +295,12 @@ fn column_xs(world: &World) -> Vec<i32> {
     let mut xs = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for coord in coords {
+        // Phase 4 streaming: skip whole chunk-x outside the camera band.
+        if let Some(win) = world.stream_window {
+            if !win.contains_cx(world, coord.cx) {
+                continue;
+            }
+        }
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         for lx in 0..CHUNK_CELLS_W as i32 {
             let gx = world.wrap_x(x0 + lx);
@@ -1246,6 +1252,10 @@ fn thaw_airborne_snow(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) 
         .chunks
         .iter()
         .filter(|(_, c)| c.has_snow)
+        .filter(|(coord, _)| crate::streaming::stream_allows_world_x(
+            world,
+            coord.cx * CHUNK_CELLS_W as i32,
+        ))
         .map(|(&coord, _)| coord)
         .collect();
     let mut melt: Vec<(i32, i32)> = Vec::new();
@@ -1382,6 +1392,10 @@ fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig
         .chunks
         .iter()
         .filter(|(_, c)| c.has_snow || c.has_ice)
+        .filter(|(coord, _)| crate::streaming::stream_allows_world_x(
+            world,
+            coord.cx * CHUNK_CELLS_W as i32,
+        ))
         .map(|(&coord, _)| coord)
         .collect();
     let mut melt: Vec<(i32, i32)> = Vec::new();

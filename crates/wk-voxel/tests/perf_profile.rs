@@ -23,8 +23,8 @@ use wk_voxel::{
     CarbonConfig, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig,
     EvapConfig, FailureConfig, FungiConfig, Genome, GrainConfig, Humidity, KarstConfig,
     OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, PhysicsTimings,
-    RainConfig, SteamConfig, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldStepTimings,
-    WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_SUBSTEPS,
+    RainConfig, SteamConfig, StreamWindow, Temperature, Wind, World, WorldStep, WorldStepConfig,
+    WorldStepTimings, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_SUBSTEPS,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -722,6 +722,45 @@ fn perf_profile_stretch_width() {
         stretch_params(),
         0,
     );
+}
+
+/// Compact stretch with camera `StreamWindow` on vs full-resident.
+/// Play-app default view ≈ screen/PX; use 320 cols (~5 chunks) + halo.
+#[test]
+#[ignore]
+fn perf_profile_stretch_stream_ab() {
+    set_parallel_enabled(true);
+    let params = stretch_params();
+    for (label, stream_on) in [
+        ("stretch full-resident (stream off)", false),
+        ("stretch stream view=320 + halo", true),
+    ] {
+        let mut scene = stamp_scene(params);
+        scene.perf = PerfConfig::default();
+        let apply_stream = |s: &mut Scene| {
+            if stream_on {
+                s.world.stream_window = Some(StreamWindow::new(s.params.width_cols / 2, 320));
+            } else {
+                s.world.stream_window = None;
+            }
+        };
+        for _ in 0..WARMUP_TICKS {
+            apply_stream(&mut scene);
+            one_stack_tick(&mut scene, None, None);
+        }
+        let mut accum = PassAccum::zero();
+        let mut phys = PhysicsTimings::default();
+        let wall = Instant::now();
+        for _ in 0..MEASURE_TICKS {
+            apply_stream(&mut scene);
+            one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+        }
+        let wall = wall.elapsed();
+        profile_label(label, &scene.params, scene.world.chunks.len());
+        print_pass_table(&accum, MEASURE_TICKS, wall);
+        print_physics_table(&phys, MEASURE_TICKS);
+        eprintln!();
+    }
 }
 
 /// 320-cell box vs the 1064-cell tropopause default. No plants.
