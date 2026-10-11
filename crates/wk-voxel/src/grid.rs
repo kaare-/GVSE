@@ -94,6 +94,10 @@ pub struct World {
     /// a follow-up flushes the store. See [`crate::chunk_store`].
     #[serde(skip, default)]
     pub chunk_store: crate::chunk_store::ChunkStore,
+    /// Parked sparse mass/heat side maps for far columns. See
+    /// [`crate::chunk_store::SideMapStore`].
+    #[serde(skip, default)]
+    pub side_map_store: crate::chunk_store::SideMapStore,
     /// Soft labile litter (Set E) keyed by wrapped world-x column.
     /// Death deposits units here; fungi digest them before Organic cells.
     ///
@@ -307,6 +311,7 @@ impl World {
             wrap_width: None,
             stream_window: None,
             chunk_store: crate::chunk_store::ChunkStore::default(),
+            side_map_store: crate::chunk_store::SideMapStore::default(),
             soft_litter: FxHashMap::default(),
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),

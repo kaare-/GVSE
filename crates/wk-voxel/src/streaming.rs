@@ -49,11 +49,11 @@ impl StreamWindow {
 
     /// Wrap-ring chunk-x span, if the world wraps.
     pub fn span_chunk_count(world: &World) -> Option<i32> {
-        Self::span_x(world)
+        Self::span_x(world.wrap_width)
     }
 
-    fn span_x(world: &World) -> Option<i32> {
-        let w = world.wrap_width?;
+    fn span_x(wrap_width: Option<i32>) -> Option<i32> {
+        let w = wrap_width?;
         if w <= 0 {
             return None;
         }
@@ -67,28 +67,48 @@ impl StreamWindow {
         }
     }
 
+    fn wrap_col(wrap_width: Option<i32>, col: i32) -> i32 {
+        match wrap_width {
+            Some(w) if w > 0 => col.rem_euclid(w),
+            _ => col,
+        }
+    }
+
     /// Center chunk-x of the focus column.
     pub fn focus_cx(&self, world: &World) -> i32 {
-        let col = match world.wrap_width {
-            Some(w) if w > 0 => self.focus_col.rem_euclid(w),
-            _ => self.focus_col,
-        };
-        Self::wrap_cx(col.div_euclid(CHUNK_CELLS_W as i32), Self::span_x(world))
+        self.focus_cx_wrap(world.wrap_width)
+    }
+
+    pub fn focus_cx_wrap(&self, wrap_width: Option<i32>) -> i32 {
+        let col = Self::wrap_col(wrap_width, self.focus_col);
+        Self::wrap_cx(col.div_euclid(CHUNK_CELLS_W as i32), Self::span_x(wrap_width))
     }
 
     /// True when `cx` lies in the active band (wrap-aware).
     pub fn contains_cx(&self, world: &World, cx: i32) -> bool {
-        self.contains_band_cx(world, cx, self.active_half_chunks())
+        self.contains_band_cx(world.wrap_width, cx, self.active_half_chunks())
     }
 
     /// True when `cx` lies in the resident band (active + margin).
     pub fn contains_resident_cx(&self, world: &World, cx: i32) -> bool {
-        self.contains_band_cx(world, cx, self.resident_half_chunks())
+        self.contains_band_cx(world.wrap_width, cx, self.resident_half_chunks())
     }
 
-    fn contains_band_cx(&self, world: &World, cx: i32, half: i32) -> bool {
-        let span = Self::span_x(world);
-        let focus = self.focus_cx(world);
+    /// Resident-band test without borrowing [`World`] (side-map park helpers).
+    pub fn contains_resident_cx_wrap(&self, wrap_width: Option<i32>, cx: i32) -> bool {
+        self.contains_band_cx(wrap_width, cx, self.resident_half_chunks())
+    }
+
+    /// True when wrapped world-x is outside the resident band.
+    pub fn world_x_outside_resident(&self, wrap_width: Option<i32>, gx: i32) -> bool {
+        let gx = Self::wrap_col(wrap_width, gx);
+        let cx = gx.div_euclid(CHUNK_CELLS_W as i32);
+        !self.contains_resident_cx_wrap(wrap_width, cx)
+    }
+
+    fn contains_band_cx(&self, wrap_width: Option<i32>, cx: i32, half: i32) -> bool {
+        let span = Self::span_x(wrap_width);
+        let focus = self.focus_cx_wrap(wrap_width);
         let cx = Self::wrap_cx(cx, span);
         match span {
             Some(n) if n > 0 => {
@@ -108,7 +128,7 @@ impl StreamWindow {
 
     /// Count of distinct chunk-x columns in the active band.
     pub fn active_chunk_count(&self, world: &World) -> i32 {
-        let span = Self::span_x(world);
+        let span = Self::span_x(world.wrap_width);
         let half = self.active_half_chunks();
         let width = half * 2 + 1;
         match span {
