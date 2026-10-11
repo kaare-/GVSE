@@ -381,7 +381,7 @@ local wetness once wetness is available.
 
 **Phase 4 status (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
 as the full-resident gate. **Streaming residency stack closed** (living
-atoms + corpses park by anchor; disk store still open). Slices landed:
+atoms + corpses park by body span; disk store still open). Slices landed:
 
 1. **Active-only CA** — `StreamWindow` filters `plan_active`;
    `clear_planned_dirty` keeps frozen dirty.
