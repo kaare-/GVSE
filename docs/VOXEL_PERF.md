@@ -422,4 +422,14 @@ re-profile.
    `phase4-stretch-body-stream-ab.log`. Seepage wakes + seam couple
    stream-gated: wall **11.9 → 10.9** ms (~84 → **~91** sim-FPS);
    seepage **2.4 → 0.79** ms. Log: `phase4-stretch-seep-stream-ab.log`.
-   Next: width stretch or temp/rain ≥1 ms.
+5. **Width stretch 5 km (2026-10-11):** `perf_profile_stretch_5km_stream`
+   — 320 chunks / 20480×1064 (~5.12 km), stream+evict view=320 only
+   (full-resident skipped). Residency **chunks=459 store=4981**. Wall
+   **62.5** ms/tick (~**16** sim-FPS) — **fails ≥30** gate. Physics
+   band stays cheap (**6.3** ms); killers are full-ring field shell:
+   **temperature.step 32.0** ms/tick (641 ms/call ×10) and **rain 21.4**
+   ms/tick (`apply_rain` open faucet over all 20480 cols). Compact
+   stretch stream-on was temp **2.6** / rain **1.4**. Log:
+   `/opt/cursor/artifacts/phase4-stretch-5km-stream.log`. Next: stream-
+   gate temp props refresh + dense slab work, and clamp rain `x_range`
+   to the active window.
