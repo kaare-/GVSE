@@ -63,8 +63,8 @@ use wk_voxel::{
     celestial_local_cfg, celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg,
     day_night_factor_cfg, is_daytime_cfg, plan_active, pore_wetness_with, resolve_organism_draw_cells,
     step_world, wake_competent_bodies_all, wake_unsupported_grains, wake_unstable_slopes,
-    CanopyIndex, GeotechOverlayMode, SimClock, SimSnapshot, StreamWindow, WorldStep,
-    WorldStepConfig, WorldgenParams,
+    restore_all_from_store, sync_residency, CanopyIndex, GeotechOverlayMode, SimClock,
+    SimSnapshot, StreamWindow, WorldStep, WorldStepConfig, WorldgenParams,
 };
 
 use crate::atmosphere::{
@@ -604,7 +604,7 @@ async fn main() {
         sim_clock.set_budget_ms(settings.sim_budget_ms);
         let mut sim_skipped = false;
         if !hard_pause && sim_clock.allow_steps() > 0 {
-            // Phase 4 streaming: CA active band around the camera view.
+            // Phase 4 streaming: CA active band + resident ChunkStore eviction.
             // Headless soaks leave `stream_window = None` (full resident).
             if settings.stream_active_physics && scene.params.wrap_x {
                 let view_cols = (screen_width() / PX_PER_CELL).ceil().max(1.0) as i32;
@@ -612,6 +612,13 @@ async fn main() {
                     + scene.params.width_cols as f32 * 0.5)
                     .floor() as i32;
                 scene.world.stream_window = Some(StreamWindow::new(focus_col, view_cols));
+                // Park far chunks; reload on pan. Side maps stay full-resident.
+                let _ = sync_residency(&mut scene.world);
+            } else if scene.world.stream_window.is_some()
+                || !scene.world.chunk_store.is_empty()
+            {
+                scene.world.stream_window = None;
+                let _ = restore_all_from_store(&mut scene.world);
             } else {
                 scene.world.stream_window = None;
             }

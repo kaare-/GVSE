@@ -395,9 +395,11 @@ Steam boil + leftover cands windowed. Compact stretch stream ~19 →
 **~45** sim-FPS (view=320).
 
 3. **In-memory `ChunkStore`** — postcard park/reload for chunks outside
-   the resident band (`sync_residency`). API + tests landed; **not
-   auto-wired** into the play loop yet (far remint / side-map /
-   `FrozenBacklog` follow-ups). TRACKED soaks stay full-resident.
+   the resident band. Play app calls `sync_residency` when stream-active
+   physics is on; `restore_all_from_store` when it turns off. Far
+   `set_cell` reloads from the store or skips blank remint outside the
+   resident band. Side-map parking + `FrozenBacklog` still open.
+   TRACKED soaks stay full-resident (`stream_window = None`).
 
 Concretely, at any moment there are four sets of chunks:
 

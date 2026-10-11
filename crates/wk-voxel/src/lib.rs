@@ -53,7 +53,9 @@ pub mod world_step;
 pub mod worldgen;
 
 pub use active::{clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk};
-pub use chunk_store::{sync_residency, ChunkStore, SyncResidencyStats};
+pub use chunk_store::{
+    restore_all_from_store, sync_residency, ChunkStore, SyncResidencyStats,
+};
 pub use streaming::{
     clear_planned_dirty, filter_plan_to_stream, stream_allows_hx, stream_allows_world_x,
     StreamWindow, HALO_CHUNKS, RESIDENT_MARGIN_CHUNKS,

@@ -2,9 +2,9 @@
 //!
 //! WORLDGEN view / active / resident / evicted tiers. Active-only CA /
 //! field shell filters run against [`StreamWindow`]. Eviction into
-//! [`crate::chunk_store::ChunkStore`] is available via
-//! [`crate::chunk_store::sync_residency`] (not auto-wired into play yet;
-//! FrozenBacklog still open).
+//! [`crate::chunk_store::ChunkStore`] via
+//! [`crate::chunk_store::sync_residency`] (play app when stream-active);
+//! FrozenBacklog still open.
 
 use crate::active::ActiveChunk;
 use crate::chunk::CHUNK_CELLS_W;

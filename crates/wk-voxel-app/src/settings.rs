@@ -1396,7 +1396,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "  On: CA only near the view (+halo). Off: full-resident ring (Compact ~19 FPS).",
+                        "  On: CA near the view (+halo); far chunks park in RAM store. Off: full-resident (~19 FPS Compact).",
                     );
                 });
                 ui.separator();

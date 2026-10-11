@@ -499,6 +499,11 @@ impl World {
             }
             return;
         }
+        // Streaming: reload from ChunkStore, or refuse blank remint outside
+        // the resident band (far rain/organisms must not wipe parked terrain).
+        if !self.prepare_chunk_for_write(coord) {
+            return;
+        }
         if !self.chunks.contains_key(&coord) {
             self.invalidate_chunk_cache();
         }
@@ -522,6 +527,38 @@ impl World {
             }
         } else {
             self.note_sky_topo(gx, gy, wk_material::MaterialId::Air, cell.material);
+        }
+    }
+
+    /// Ensure `coord` is loaded before a write, or refuse far remint.
+    ///
+    /// Outside the resident band while streaming: skip entirely (do not
+    /// pull from [`Self::chunk_store`] — far rain must not thrash eviction).
+    /// Inside the band: reload from the store if parked, else allow blank mint.
+    fn prepare_chunk_for_write(&mut self, coord: ChunkCoord) -> bool {
+        if self.chunks.contains_key(&coord) {
+            return true;
+        }
+        if let Some(win) = self.stream_window {
+            if !win.contains_resident_cx(self, coord.cx) {
+                return false;
+            }
+        }
+        if self.reload_chunk_from_store(coord) {
+            return true;
+        }
+        true
+    }
+
+    /// Pull one parked chunk into [`Self::chunks`]. Returns true if loaded.
+    pub(crate) fn reload_chunk_from_store(&mut self, coord: ChunkCoord) -> bool {
+        match self.chunk_store.take_decode(coord) {
+            Ok(Some(chunk)) => {
+                self.invalidate_chunk_cache();
+                self.chunks.insert(coord, chunk);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -632,6 +669,11 @@ impl World {
     }
 
     pub fn ensure_chunk(&mut self, coord: ChunkCoord) -> &mut Chunk {
+        if !self.chunks.contains_key(&coord) {
+            // Prefer parked state over a blank mint (worldgen / tests still
+            // mint when the store is empty and stream_window is None).
+            let _ = self.reload_chunk_from_store(coord);
+        }
         if !self.chunks.contains_key(&coord) {
             self.invalidate_chunk_cache();
         }
