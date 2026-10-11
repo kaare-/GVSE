@@ -863,7 +863,12 @@ mod tests {
             "below freeze surplus must snow, not rain (sat={})",
             cell.sat.0
         );
-        assert_eq!(cell.sat.0, 0, "a flake does not carry sat");
+        // Snow banks full thaw yield on Cell.sat (legacy sat==0 ⇒ 255).
+        assert_eq!(
+            cell.sat.0,
+            u8::MAX,
+            "flake banks full thaw yield (not free-water sat)"
+        );
     }
 
     #[test]

@@ -26,11 +26,12 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::cell::{is_grain, Cell, Sat};
+use crate::cell::{frozen_thaw_sat, is_grain, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
+use crate::water_temp::clear_water_temp;
 use crate::worldgen::live_surface_at;
 
 /// Visible in-air **rain** drop. Terrain and the H shaft ignore Air sat
@@ -44,10 +45,12 @@ pub struct PhaseConfig {
     /// Free water freezes at or below this skin temperature (°C).
     /// Ice/Snow thaw when warmer than this.
     pub freeze_point_c: f32,
-    /// Minimum Air sat before a free-surface cell may become Ice.
-    /// Must be a (near-)full cell: thaw always yields `Air+FULL`, so
-    /// freezing partial sat would mint water on the next thaw.
-    /// Default `255` — only standing water / full under-lid cells freeze.
+    /// Minimum Air sat before a free-surface / under-lid cell may become
+    /// Ice. Thaw restores the banked yield on the Ice cell (`Cell.sat`),
+    /// so partial films freeze as frozen condensate without minting.
+    /// Default `64` — near-full wet-air pockets (and thicker films) lock
+    /// into the lid instead of pulsing through ice; mist below this
+    /// stays free Air.
     pub min_sat_to_freeze: u8,
     /// Max free-surface cells converted to Ice **per column per tick**.
     pub max_freeze_cells_per_column_per_tick: u8,
@@ -58,8 +61,9 @@ pub struct PhaseConfig {
     /// Max unsupported Ice/Snow cells that may break **per column per tick**.
     pub max_break_cells_per_column_per_tick: u8,
     /// Minimum precip budget to place one Snow / frost Ice cell. A flake
-    /// is a whole cell (`255`): thaw yields `Air+FULL`, so a cheaper seat
-    /// mints water. Shortfall below freeze → hold, not liquid rain.
+    /// is a whole cell (`255`) with banked thaw yield `255`. A cheaper
+    /// seat would mint water on thaw. Shortfall below freeze → hold, not
+    /// liquid rain.
     pub min_budget_to_snow: f32,
     /// Soft cap on Ice+Snow cells stacked in one column. New freeze /
     /// snow seating refuse past the cap; when [`Self::enable_cull`] is
@@ -122,7 +126,7 @@ impl Default for PhaseConfig {
     fn default() -> Self {
         Self {
             freeze_point_c: 0.0,
-            min_sat_to_freeze: 255,
+            min_sat_to_freeze: 64,
             max_freeze_cells_per_column_per_tick: 1,
             max_thaw_cells_per_column_per_tick: 1,
             max_slush_cells_per_column_per_tick: 1,
@@ -303,22 +307,58 @@ fn is_wet_air(cell: Cell) -> bool {
 }
 
 fn ice_cell() -> Cell {
+    ice_with_yield(u8::MAX)
+}
+
+fn snow_cell() -> Cell {
+    snow_with_yield(u8::MAX)
+}
+
+/// Ice that thaws back to `yield_sat` (mass-flat frozen condensate).
+fn ice_with_yield(yield_sat: u8) -> Cell {
     Cell {
         material: MaterialId::Ice,
-        sat: Sat::EMPTY,
+        sat: Sat(yield_sat.max(1)),
         flags: Default::default(),
         _pad: 0,
         pore: 128,
     }
 }
 
-fn snow_cell() -> Cell {
+/// Snow that thaws back to `yield_sat`.
+fn snow_with_yield(yield_sat: u8) -> Cell {
     Cell {
         material: MaterialId::Snow,
-        sat: Sat::EMPTY,
+        sat: Sat(yield_sat.max(1)),
         flags: Default::default(),
         _pad: 0,
         pore: 128,
+    }
+}
+
+/// Melt Ice/Snow into Air carrying the banked thaw yield.
+fn thaw_to_air(cell: Cell) -> Cell {
+    let y = frozen_thaw_sat(cell);
+    if y >= u8::MAX {
+        Cell::water()
+    } else {
+        Cell {
+            material: MaterialId::Air,
+            sat: Sat(y),
+            flags: Default::default(),
+            _pad: 0,
+            pore: 128,
+        }
+    }
+}
+
+/// Preserve material + banked yield when relocating a frozen cell.
+fn frozen_lid_from(cell: Cell) -> Cell {
+    let y = frozen_thaw_sat(cell);
+    if cell.material == MaterialId::Snow {
+        snow_with_yield(y)
+    } else {
+        ice_with_yield(y)
     }
 }
 
@@ -618,7 +658,10 @@ fn seat_frozen_lid_on_air(world: &mut World, gx: i32, gy: i32, lid: Cell) -> f32
         return 0.0;
     }
     let film = f32::from(air.sat.0);
+    // Frost / snow seats always bank a full-cell yield (humidity pays the
+    // shortfall). Partial freeze is only the phase freeze path.
     world.set_cell(gx, gy, lid);
+    clear_water_temp(world, gx, gy);
     (u8::MAX as f32 - film).max(0.0)
 }
 
@@ -697,7 +740,7 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
             if let Some(above) = world.get_cell(gx, y + 1) {
                 if is_wet_air(above) {
                     if free_water_temp_c(world, temp, gx, y + 1) > freeze {
-                        world.set_cell(gx, y, Cell::water());
+                        world.set_cell(gx, y, thaw_to_air(cell));
                         left -= 1;
                     }
                     continue;
@@ -716,18 +759,19 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
                     if is_wet_air(above)
                         && free_water_temp_c(world, temp, gx, y + 1) > freeze
                     {
-                        world.set_cell(gx, y, Cell::water());
+                        world.set_cell(gx, y, thaw_to_air(cell));
                         left -= 1;
                     }
                 }
                 continue;
             }
             if free_water_temp_c(world, temp, gx, y - 1) > freeze {
-                world.set_cell(gx, y, Cell::water());
+                world.set_cell(gx, y, thaw_to_air(cell));
                 left -= 1;
             } else if below.sat.0 >= cfg.min_sat_to_freeze {
-                // Full water under snow → ice (conversion, not mint).
-                world.set_cell(gx, y - 1, ice_cell());
+                // Wet Air under snow → ice (bank sat; conversion, not mint).
+                world.set_cell(gx, y - 1, ice_with_yield(below.sat.0));
+                clear_water_temp(world, gx, y - 1);
                 left -= 1;
             }
         }
@@ -766,7 +810,7 @@ fn break_unsupported_frozen(world: &mut World, gx: i32, cfg: &PhaseConfig) {
         ) {
             continue;
         }
-        world.set_cell(gx, y, Cell::water());
+        world.set_cell(gx, y, thaw_to_air(cell));
         left -= 1;
     }
 }
@@ -863,7 +907,7 @@ fn break_overloaded_ice(world: &mut World, gx: i32, cfg: &PhaseConfig) {
         if thick >= carry {
             continue;
         }
-        world.set_cell(gx, y, Cell::water());
+        world.set_cell(gx, y, thaw_to_air(cell));
         left -= 1;
     }
 }
@@ -884,13 +928,13 @@ fn cull_frozen_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &Phas
         return;
     };
     let max_cells = cfg.max_ice_cells_per_column as usize;
-    let mut frozen_ys: Vec<(i32, MaterialId)> = Vec::new();
+    let mut frozen_ys: Vec<(i32, Cell)> = Vec::new();
     for y in y0..=y1 {
         let Some(cell) = world.get_cell(gx, y) else {
             continue;
         };
         if is_frozen_solid(cell.material) {
-            frozen_ys.push((y, cell.material));
+            frozen_ys.push((y, cell));
         }
     }
     if frozen_ys.len() <= max_cells {
@@ -901,12 +945,8 @@ fn cull_frozen_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &Phas
     let excess = frozen_ys.len() - max_cells;
     let radius = cfg.snow_spread_radius.max(0);
     let freeze = cfg.freeze_point_c;
-    for &(y, mat) in frozen_ys.iter().take(excess) {
-        let lid = if mat == MaterialId::Snow {
-            snow_cell()
-        } else {
-            ice_cell()
-        };
+    for &(y, src) in frozen_ys.iter().take(excess) {
+        let lid = frozen_lid_from(src);
         let mut candidates = cull_relocate_candidates(world, gx, temp, freeze, max_cells, radius);
         if candidates.is_empty() {
             // No thinner cold seat — leave the tower (mass-flat hold).
@@ -1044,6 +1084,8 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         // Otherwise a fallen / submerged flake leaves a water gap and a
         // second skin freezes above it — the flake looks like it "floated
         // up" after breaking/falling (shore pump).
+        // Partial films (≥ min_sat) may freeze under a lid or as open
+        // condensate when they already read as standing water.
         let open_surface = is_standing_water(world, gx, y)
             && open_sky_above(world, gx, y)
             && !below_is_frozen(world, gx, y)
@@ -1055,7 +1097,9 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         if t_c > cfg.freeze_point_c {
             continue;
         }
-        world.set_cell(gx, y, ice_cell());
+        // Bank sat on Ice so thaw restores the same amount (no mint).
+        world.set_cell(gx, y, ice_with_yield(cell.sat.0));
+        clear_water_temp(world, gx, y);
         freezes_left -= 1;
         frozen_count += 1;
     }
@@ -1150,7 +1194,7 @@ fn thaw_airborne_snow(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) 
         if cell.material != MaterialId::Snow {
             continue;
         }
-        world.set_cell(gx, gy, Cell::water());
+        world.set_cell(gx, gy, thaw_to_air(cell));
     }
 }
 
@@ -1165,7 +1209,7 @@ fn snow_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
     !is_standing_water(world, gx, gy - 1)
 }
 
-/// Melt exposed Ice/Snow into `Air + FULL` water when warm.
+/// Melt exposed Ice/Snow into Air carrying the banked thaw yield.
 ///
 /// Top-down, rate-limited — a sudden warm snap cannot dump a whole
 /// ice cliff into the basin in one tick (mass stays one cell at a time).
@@ -1203,8 +1247,8 @@ fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig
         if t_c <= freeze && !contact_warm {
             continue;
         }
-        // Whole-cell thaw → one full water cell. No fractional sat minting.
-        world.set_cell(gx, y, Cell::water());
+        // Restore banked yield (full or partial) — no mint.
+        world.set_cell(gx, y, thaw_to_air(cell));
         thaws_left -= 1;
     }
 }
@@ -1296,7 +1340,7 @@ fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig
             continue;
         }
         if temp.at_cell_packed(gx, gy) > hot {
-            world.set_cell(gx, gy, Cell::water());
+            world.set_cell(gx, gy, thaw_to_air(cell));
         }
     }
     for (gx, gy) in mild {
@@ -1312,7 +1356,7 @@ fn thaw_scalding_frozen(world: &mut World, temp: &Temperature, cfg: &PhaseConfig
         if !frozen_contact_is_warm(world, gx, gy, temp, freeze) {
             continue;
         }
-        world.set_cell(gx, gy, Cell::water());
+        world.set_cell(gx, gy, thaw_to_air(cell));
     }
     for coord in clear_ice {
         if let Some(chunk) = world.chunks.get_mut(&coord) {
@@ -1857,8 +1901,9 @@ mod tests {
     }
 
     #[test]
-    fn partial_sat_does_not_freeze_then_thaw_into_extra_water() {
-        // Freeze of sat=100 then thaw to FULL would mint ~155 sat.
+    fn partial_sat_freezes_as_condensate_and_thaws_mass_flat() {
+        // Near-full wet Air under a lid used to pulse forever (freeze
+        // required sat=255). Bank yield on Ice so thaw restores sat.
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
@@ -1873,17 +1918,74 @@ mod tests {
                 pore: 128,
             },
         );
-        // Open-sky standing film on bedrock.
+        w.set_cell(1, 2, ice_cell()); // lid so under-lid freeze applies
         let temp = cold_temp(16, 16, -10.0);
-        let cfg = PhaseConfig::default();
-        assert_eq!(cfg.min_sat_to_freeze, 255);
+        let cfg = PhaseConfig {
+            enable_thaw: false,
+            enable_slush: false,
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        assert_eq!(cfg.min_sat_to_freeze, 64);
+        let hum = crate::humidity::Humidity::new(16);
+        let before = crate::budget::BudgetSnap::capture(&w, &hum).tracked();
         apply_phase(&mut w, &temp, &cfg);
+        let ice = w.get_cell(1, 1).unwrap();
+        assert_eq!(ice.material, MaterialId::Ice, "partial under-lid must freeze");
+        assert_eq!(ice.sat.0, 100, "bank the Air sat on Ice");
         assert_eq!(
-            w.get_cell(1, 1).unwrap().material,
-            MaterialId::Air,
-            "partial sat must not become ice (thaw would mint a full cell)"
+            crate::budget::BudgetSnap::capture(&w, &hum).tracked(),
+            before,
+            "freeze is a store move"
         );
-        assert_eq!(w.get_cell(1, 1).unwrap().sat.0, 100);
+        // Warm thaw restores the same sat — no mint.
+        let warm = cold_temp(16, 16, 12.0);
+        let thaw_cfg = PhaseConfig {
+            enable_freeze: false,
+            enable_slush: false,
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &warm, &thaw_cfg);
+        // Top lid peels first; force another tick for the condensate cell.
+        apply_phase(&mut w, &warm, &thaw_cfg);
+        let melted = w.get_cell(1, 1).unwrap();
+        assert_eq!(melted.material, MaterialId::Air);
+        assert_eq!(melted.sat.0, 100, "thaw restores banked yield");
+        assert_eq!(
+            crate::budget::BudgetSnap::capture(&w, &hum).tracked(),
+            before,
+            "thaw must not mint"
+        );
+    }
+
+    #[test]
+    fn mist_below_min_sat_does_not_freeze() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(
+            1,
+            1,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(32),
+                flags: Default::default(),
+                _pad: 0,
+                pore: 128,
+            },
+        );
+        w.set_cell(1, 2, ice_cell());
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig {
+            enable_thaw: false,
+            enable_slush: false,
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(w.get_cell(1, 1).unwrap().material, MaterialId::Air);
+        assert_eq!(w.get_cell(1, 1).unwrap().sat.0, 32);
     }
 
     #[test]

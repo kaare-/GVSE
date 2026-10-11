@@ -126,6 +126,11 @@ Artifacts: `/opt/cursor/artifacts/phase3-ice-13-water-on-ice.png`,
 - With `water_temp` melt: **drop / greatly relax** Ice+Snow column hardcap
   so packs can thicken for real.
 
+**Landed (partial-sat freeze / frozen condensate)**
+- `min_sat_to_freeze` default **64**; Ice/Snow bank thaw yield on `Cell.sat`
+  (legacy `sat==0` ⇒ 255). Near-full wet-air pockets under/around lids
+  freeze mass-flat instead of pulsing as free Air through ice.
+
 **Landed (brittle solid pass)**
 
 - Thick Ice (`ice_column_thickness ≥ ice_carry_thickness`) refuses haze
