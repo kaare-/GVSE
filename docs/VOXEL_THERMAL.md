@@ -124,6 +124,8 @@ Acceptance sketches (tests / HUD, not photoreal):
 - Buried free-water / ice tiles **must not hold `t` forever** — they get a
   capacity-damped climate relax (no rock geo). Holding `t` after skipping
   geothermal left deep-lake hotspots when `base_temp` was dumped cold.
+  Relax is a bit stronger after owner −30 °C soaks still left mid-lake
+  near −5 while air raced ahead.
 - Geothermal overburden is **rock surface only** — standing water does
   not count as crust cover (avoids painting lakes as a static hot bed).
 - Diffuse is gated at free-water ↔ rock faces so cliff geo isotherms are
@@ -154,6 +156,9 @@ sinking while warm rises / skin drifts.
 - Watery surface tiles mix with the Air tile above
   (`TempConfig::air_water_skin_couple`, default 0.18).
 - Cold air cools the water skin; warm water warms a thin air band.
+- After the skin cools, **quench free-water tiles under it** (ice lids
+  report `free_water≈0`, so T2 buoyancy alone never sank lid chill into
+  the deep column — owner “deep lake still” under a thrashing lid).
 - Complements the existing one-way air→ground near-surface couple.
 - Closes the surface half of the loop with weather already in
   [`VOXEL_WEATHER.md`](VOXEL_WEATHER.md).
