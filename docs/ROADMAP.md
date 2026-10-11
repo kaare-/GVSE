@@ -268,10 +268,11 @@ May include ring width / ceiling / streaming follow-ups from
 - **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate.
   **Streaming residency stack closed** (CA window → field shell →
   steam/leftover → `ChunkStore` + remint gate → side maps → water
-  `FrozenBacklog` + loads → mycelium/spore park). Stretch stream+evict
-  ~19 → **~67** sim-FPS (chunks 1088 → 459). TRACKED soaks stay
-  full-resident. **OPEN:** organism ECS parking (atoms outside the
-  resident band); disk-backed chunk-store (WORLDGEN Phase 2).
+  `FrozenBacklog` + loads → mycelium/spore park → living-atom park).
+  Stretch stream+evict ~19 → **~67** sim-FPS (chunks 1088 → 459).
+  Living atoms park by anchor `gx` on `OrganismStore` (pop caps include
+  parked). TRACKED soaks stay full-resident. **OPEN:** corpse park;
+  disk-backed chunk-store (WORLDGEN Phase 2).
 
 ---
 
@@ -353,6 +354,7 @@ before coding.
 | 2026-10-11 | Stream myc park | Mycelium strains/energy/lineage stamps park with SideMapStore |
 | 2026-10-11 | Stream spore park | SporeBank cells park with SideMapStore under sync_residency |
 | 2026-10-11 | Stream residency close | CA→evict→backlog→side/myc/spore parked; ~67 sim-FPS; organism ECS open |
+| 2026-10-11 | Stream org park | Living atoms park by anchor gx; pop caps include parked; corpses open |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

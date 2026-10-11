@@ -37,6 +37,7 @@ use crate::temperature::Temperature;
 use crate::fasthash::FxHashMap;
 use crate::grid::World;
 use crate::humidity::Humidity;
+use crate::streaming::StreamWindow;
 use crate::cell::is_competent_rock;
 use crate::plant::{
     apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
@@ -627,6 +628,12 @@ pub struct OrganismStore {
     /// Hibernating spore bank knobs (Tab → Life). Synced from settings.
     #[serde(skip)]
     pub spore_bank: SporeBankConfig,
+    /// Living atoms parked outside the stream resident band (anchor `gx`).
+    ///
+    /// Scene-owned sidecar (not [`crate::chunk_store::SideMapStore`]).
+    /// `serde(skip)` — same F5 gap as ChunkStore until a flush slice.
+    #[serde(skip)]
+    pub parked: Vec<Atom>,
     /// Latest organism-pass breakdown (see [`OrganismPassTimings`]).
     #[serde(skip)]
     pub last_pass: OrganismPassTimings,
@@ -646,6 +653,7 @@ impl Default for OrganismStore {
             growth_caps: PlantGrowthCaps::default(),
             fungi: FungiConfig::default(),
             spore_bank: SporeBankConfig::default(),
+            parked: Vec::new(),
             last_pass: OrganismPassTimings::default(),
             land_reseat_cooldown: 0,
         }
@@ -1370,6 +1378,11 @@ impl OrganismStore {
         self.atoms.len()
     }
 
+    /// Live + parked living count (pop caps must include the park).
+    pub fn living_count(&self) -> usize {
+        self.atoms.len() + self.parked.len()
+    }
+
     /// Living habit breakdown: `(plants, fungi, atoms)`.
     /// HUD uses this so a fungus spore bloom isn't mistaken for "invisible plants".
     pub fn habit_counts(&self) -> (usize, usize, usize) {
@@ -1401,6 +1414,71 @@ impl OrganismStore {
         self.max_atoms.max(1)
     }
 
+    /// Park living atoms whose wrapped anchor `gx` is outside the resident
+    /// band; restore parked atoms that re-enter. `win = None` restores all
+    /// (stream off / full-resident). Corpses stay live (follow-up slice).
+    ///
+    /// Anchor-only: multi-column bodies may straddle the edge; resident
+    /// margin (~8 chunks) covers typical spans.
+    pub fn sync_organism_residency(
+        &mut self,
+        wrap_width: Option<i32>,
+        win: Option<StreamWindow>,
+    ) -> (usize, usize) {
+        let Some(win) = win else {
+            let n = self.parked.len();
+            if n > 0 {
+                self.atoms.append(&mut self.parked);
+            }
+            return (0, n);
+        };
+        // Whole ring fits — keep everyone live.
+        if let Some(w) = wrap_width {
+            if w > 0 {
+                let span = (w + crate::chunk::CHUNK_CELLS_W as i32 - 1)
+                    / crate::chunk::CHUNK_CELLS_W as i32;
+                if win.resident_half_chunks() * 2 + 1 >= span {
+                    let n = self.parked.len();
+                    if n > 0 {
+                        self.atoms.append(&mut self.parked);
+                    }
+                    return (0, n);
+                }
+            }
+        }
+
+        let mut parked_n = 0usize;
+        let mut i = 0;
+        while i < self.atoms.len() {
+            let gx = match wrap_width {
+                Some(w) if w > 0 => self.atoms[i].gx.rem_euclid(w),
+                _ => self.atoms[i].gx,
+            };
+            if win.world_x_outside_resident(wrap_width, gx) {
+                self.parked.push(self.atoms.swap_remove(i));
+                parked_n += 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        let mut restored = 0usize;
+        let mut j = 0;
+        while j < self.parked.len() {
+            let gx = match wrap_width {
+                Some(w) if w > 0 => self.parked[j].gx.rem_euclid(w),
+                _ => self.parked[j].gx,
+            };
+            if !win.world_x_outside_resident(wrap_width, gx) {
+                self.atoms.push(self.parked.swap_remove(j));
+                restored += 1;
+            } else {
+                j += 1;
+            }
+        }
+        (parked_n, restored)
+    }
+
     /// Corpse list ceiling (at least 1).
     pub fn corpse_cap(&self) -> usize {
         self.max_corpses.max(1)
@@ -1425,7 +1503,7 @@ impl OrganismStore {
             let gx_w = world.wrap_x(gx);
             if let Some(gy) = find_wet_slot(world, gx_w, y0, y1) {
                 let h = hash_u64(seed, gx_w as u64, ATOM_SEED_SALT);
-                if h % 3 == 0 && self.atoms.len() < self.atom_cap() {
+                if h % 3 == 0 && self.living_count() < self.atom_cap() {
                     self.atoms.push(Atom::new(gx_w, gy, energy_max));
                 }
             }
@@ -1519,7 +1597,7 @@ impl OrganismStore {
         energy_max: f32,
         genome: Genome,
     ) -> bool {
-        if self.atoms.len() >= self.atom_cap() || body.is_empty() {
+        if self.living_count() >= self.atom_cap() || body.is_empty() {
             return false;
         }
         let gx = world.wrap_x(gx);
@@ -1577,7 +1655,7 @@ impl OrganismStore {
         energy_max: f32,
         genome: Genome,
     ) -> Result<(), SpawnFail> {
-        if self.atoms.len() >= self.atom_cap() {
+        if self.living_count() >= self.atom_cap() {
             return Err(SpawnFail::PopCap);
         }
         if body.is_empty() || !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
@@ -1738,7 +1816,8 @@ impl OrganismStore {
         let mut spore_releases: Vec<SporeRelease> = Vec::new();
         let mut stats = OrganismStepStats::default();
         let fallen_before: Vec<bool> = self.atoms.iter().map(|a| a.fallen).collect();
-        let pop = self.atoms.len();
+        // Cap room includes parked far atoms so streaming is not a free spawn slot.
+        let pop = self.living_count();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
         let fungi_cfg = self.fungi;
@@ -1792,7 +1871,7 @@ impl OrganismStore {
         // (and corpse settle). Spores need a living body afterward.
         if self.atoms.is_empty() {
             if self.corpses.is_empty() {
-                let room = births.len() < atom_cap;
+                let room = self.living_count() + births.len() < atom_cap;
                 if let Some(child) =
                     try_emergent_fruiting(world, &fungus_cols, tick, room)
                 {
@@ -1808,7 +1887,7 @@ impl OrganismStore {
             }
             let t0 = Instant::now();
             self.step_corpses(world, tick, wind_vx);
-            let room = self.atoms.len() < atom_cap;
+            let room = self.living_count() < atom_cap;
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
                 stats.bump_birth(&child);
                 stats.emergent_fruiting += 1;
@@ -2101,7 +2180,7 @@ impl OrganismStore {
             .filter(|a| is_fungus(a))
             .map(|a| a.gx)
             .collect();
-        if self.atoms.len() < atom_cap {
+        if self.living_count() < atom_cap {
             if let Some(child) =
                 try_emergent_fruiting(world, &fungus_cols_now, tick, true)
             {
@@ -2124,7 +2203,7 @@ impl OrganismStore {
             .filter(|a| is_fungus(a))
             .map(|a| a.gx)
             .collect();
-        let room = atom_cap.saturating_sub(self.atoms.len());
+        let room = atom_cap.saturating_sub(self.living_count());
         let mut bank = std::mem::take(&mut world.spore_bank);
         let woken = bank.step(
             world,
@@ -8543,6 +8622,66 @@ mod tests {
         assert!(
             posed.iter().any(|p| p.mid == ModuleId::Nucleus),
             "nucleus outside the rock still draws"
+        );
+    }
+
+    #[test]
+    fn sync_organism_residency_parks_and_restores_by_anchor() {
+        use crate::chunk::CHUNK_CELLS_W;
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        let mut store = OrganismStore::new();
+        store.atoms.push(Atom::new(far_gx, 5, 40.0));
+        store.atoms.push(Atom::new(4, 5, 40.0));
+        let win = StreamWindow::new(0, 128);
+        let (parked, restored) = store.sync_organism_residency(Some(cols), Some(win));
+        assert_eq!(parked, 1);
+        assert_eq!(restored, 0);
+        assert_eq!(store.atoms.len(), 1);
+        assert_eq!(store.atoms[0].gx, 4);
+        assert_eq!(store.parked.len(), 1);
+        assert_eq!(store.parked[0].gx, far_gx);
+        assert_eq!(store.living_count(), 2);
+
+        let win_far = StreamWindow::new(far_gx, 128);
+        let (parked2, restored2) = store.sync_organism_residency(Some(cols), Some(win_far));
+        assert_eq!(parked2, 1, "near atom leaves when focus pans away");
+        assert_eq!(restored2, 1, "far atom returns");
+        assert_eq!(store.atoms.len(), 1);
+        assert_eq!(store.atoms[0].gx, far_gx);
+        assert_eq!(store.parked[0].gx, 4);
+
+        let (p0, r_all) = store.sync_organism_residency(Some(cols), None);
+        assert_eq!(p0, 0);
+        assert_eq!(r_all, 1);
+        assert!(store.parked.is_empty());
+        assert_eq!(store.atoms.len(), 2);
+    }
+
+    #[test]
+    fn parked_atoms_count_toward_pop_cap() {
+        use crate::chunk::CHUNK_CELLS_W;
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        let mut w = World::new(1);
+        w.wrap_width = Some(cols);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut store = OrganismStore::new();
+        store.max_atoms = 1;
+        store.atoms.push(Atom::new(far_gx, 5, 40.0));
+        store.sync_organism_residency(Some(cols), Some(StreamWindow::new(0, 128)));
+        assert_eq!(store.atoms.len(), 0);
+        assert_eq!(store.parked.len(), 1);
+        let body = crate::blueprint::Blueprint::atom().modules_relative_to_nucleus();
+        assert_eq!(
+            store.spawn_blueprint_free(&w, 2, 3, body, 40.0, Genome::default()),
+            Err(SpawnFail::PopCap),
+            "parked far atom must still fill the cap"
         );
     }
 }

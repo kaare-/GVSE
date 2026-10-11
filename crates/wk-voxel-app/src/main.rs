@@ -612,13 +612,21 @@ async fn main() {
                     + scene.params.width_cols as f32 * 0.5)
                     .floor() as i32;
                 scene.world.stream_window = Some(StreamWindow::new(focus_col, view_cols));
-                // Park far chunks; reload on pan. Side maps stay full-resident.
+                // Park far chunks + side maps; living atoms by anchor gx.
                 let _ = sync_residency(&mut scene.world);
+                let _ = scene.organisms.sync_organism_residency(
+                    scene.world.wrap_width,
+                    scene.world.stream_window,
+                );
             } else if scene.world.stream_window.is_some()
                 || !scene.world.chunk_store.is_empty()
+                || !scene.organisms.parked.is_empty()
             {
                 scene.world.stream_window = None;
                 let _ = restore_all_from_store(&mut scene.world);
+                let _ = scene
+                    .organisms
+                    .sync_organism_residency(scene.world.wrap_width, None);
             } else {
                 scene.world.stream_window = None;
             }
