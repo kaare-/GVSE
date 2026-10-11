@@ -381,7 +381,7 @@ local wetness once wetness is available.
 
 **Phase 4 status (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
 as the full-resident gate. **Streaming residency stack closed** (living
-atoms + corpses park by anchor; disk store still open). Slices landed:
+atoms + corpses park by body span; disk store still open). Slices landed:
 
 1. **Active-only CA** — `StreamWindow` filters `plan_active`;
    `clear_planned_dirty` keeps frozen dirty.
@@ -405,8 +405,9 @@ only) ~19 → **~45** sim-FPS (view=320). With `sync_residency` eviction:
    missing chunks and thaws on reload (`sat_totals` counts it).
    Spatial mycelium + spore bank park with side maps. FrozenBacklog
    carries water + suspended/dissolved. Living organisms + corpses park
-   on `OrganismStore` by wrapped anchor `gx`. **OPEN:** body-span
-   policy; disk-backed store. TRACKED soaks stay full-resident
+   on `OrganismStore` by body column span (straddlers stay live until
+   fully outside). **OPEN:** disk-backed store. TRACKED soaks stay
+   full-resident
    (`stream_window = None`).
 
 Concretely, at any moment there are four sets of chunks:

@@ -1423,13 +1423,14 @@ impl OrganismStore {
         self.max_atoms.max(1)
     }
 
-    /// Park living atoms + corpses whose wrapped anchor `gx` is outside the
-    /// resident band; restore parked entries that re-enter. `win = None`
-    /// restores all (stream off / full-resident).
+    /// Park living atoms + corpses whose **entire** body column span is
+    /// outside the resident band; restore when any column re-enters.
+    /// `win = None` restores all (stream off / full-resident).
     ///
-    /// Anchor-only: multi-column bodies may straddle the edge; resident
-    /// margin (~8 chunks) covers typical spans. Returned counts sum atoms
-    /// and corpses moved this pass.
+    /// Body-span (anchor + each module `gx + local_x`): straddlers stay
+    /// live until every column clears the resident edge; parked life
+    /// wakes as soon as any column intersects again. Returned counts sum
+    /// atoms and corpses moved this pass.
     pub fn sync_organism_residency(
         &mut self,
         wrap_width: Option<i32>,
@@ -1466,11 +1467,12 @@ impl OrganismStore {
         let mut parked_n = 0usize;
         let mut i = 0;
         while i < self.atoms.len() {
-            let gx = match wrap_width {
-                Some(w) if w > 0 => self.atoms[i].gx.rem_euclid(w),
-                _ => self.atoms[i].gx,
-            };
-            if win.world_x_outside_resident(wrap_width, gx) {
+            if body_fully_outside_resident(
+                self.atoms[i].gx,
+                &self.atoms[i].body,
+                wrap_width,
+                win,
+            ) {
                 self.parked.push(self.atoms.swap_remove(i));
                 parked_n += 1;
             } else {
@@ -1479,11 +1481,12 @@ impl OrganismStore {
         }
         let mut ci = 0;
         while ci < self.corpses.len() {
-            let gx = match wrap_width {
-                Some(w) if w > 0 => self.corpses[ci].gx.rem_euclid(w),
-                _ => self.corpses[ci].gx,
-            };
-            if win.world_x_outside_resident(wrap_width, gx) {
+            if body_fully_outside_resident(
+                self.corpses[ci].gx,
+                &self.corpses[ci].body,
+                wrap_width,
+                win,
+            ) {
                 self.parked_corpses.push(self.corpses.swap_remove(ci));
                 parked_n += 1;
             } else {
@@ -1494,11 +1497,12 @@ impl OrganismStore {
         let mut restored = 0usize;
         let mut j = 0;
         while j < self.parked.len() {
-            let gx = match wrap_width {
-                Some(w) if w > 0 => self.parked[j].gx.rem_euclid(w),
-                _ => self.parked[j].gx,
-            };
-            if !win.world_x_outside_resident(wrap_width, gx) {
+            if !body_fully_outside_resident(
+                self.parked[j].gx,
+                &self.parked[j].body,
+                wrap_width,
+                win,
+            ) {
                 self.atoms.push(self.parked.swap_remove(j));
                 restored += 1;
             } else {
@@ -1507,11 +1511,12 @@ impl OrganismStore {
         }
         let mut cj = 0;
         while cj < self.parked_corpses.len() {
-            let gx = match wrap_width {
-                Some(w) if w > 0 => self.parked_corpses[cj].gx.rem_euclid(w),
-                _ => self.parked_corpses[cj].gx,
-            };
-            if !win.world_x_outside_resident(wrap_width, gx) {
+            if !body_fully_outside_resident(
+                self.parked_corpses[cj].gx,
+                &self.parked_corpses[cj].body,
+                wrap_width,
+                win,
+            ) {
                 self.corpses.push(self.parked_corpses.swap_remove(cj));
                 restored += 1;
             } else {
@@ -5046,6 +5051,35 @@ fn find_air_near(world: &World, gx: i32, gy: i32) -> Option<i32> {
 }
 
 const ATOM_SEED_SALT: u64 = 0xA701_5EED;
+
+fn wrap_org_col(wrap_width: Option<i32>, gx: i32) -> i32 {
+    match wrap_width {
+        Some(w) if w > 0 => gx.rem_euclid(w),
+        _ => gx,
+    }
+}
+
+/// True when every column of the body (anchor + each module local-x) lies
+/// outside the stream resident band.
+fn body_fully_outside_resident(
+    anchor_gx: i32,
+    body: &[BodyModule],
+    wrap_width: Option<i32>,
+    win: StreamWindow,
+) -> bool {
+    let mut all_out = true;
+    let mut any = false;
+    for gx in std::iter::once(anchor_gx).chain(body.iter().map(|&(lx, _, _)| anchor_gx + lx as i32))
+    {
+        any = true;
+        let gx = wrap_org_col(wrap_width, gx);
+        if !win.world_x_outside_resident(wrap_width, gx) {
+            all_out = false;
+            break;
+        }
+    }
+    any && all_out
+}
 
 fn hash_u64(seed: u64, a: u64, salt: u64) -> u64 {
     let mut x = seed
@@ -8784,5 +8818,53 @@ mod tests {
         assert_eq!(store.corpses.len(), 1);
         assert_eq!(store.corpses[0].gx, 4);
         assert!(store.parked_corpses.is_empty());
+    }
+
+    #[test]
+    fn body_span_keeps_straddler_and_restores_on_tip() {
+        use crate::chunk::CHUNK_CELLS_W;
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        // Resident ≈ focus±12 chunks with view=128. Anchor at cx=13 is
+        // outside; a Root at local_x=-80 reaches cx=11 (still resident).
+        let edge_gx = 13 * CHUNK_CELLS_W as i32;
+        let mut store = OrganismStore::new();
+        let mut straddler = Atom::from_body(
+            edge_gx,
+            5,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (-80, 0, ModuleId::Root),
+            ],
+        );
+        store.atoms.push(straddler.clone());
+        let win = StreamWindow::new(0, 128);
+        assert!(
+            win.world_x_outside_resident(Some(cols), edge_gx),
+            "anchor alone must be outside resident"
+        );
+        let (parked, _) = store.sync_organism_residency(Some(cols), Some(win));
+        assert_eq!(parked, 0, "body tip still in band must keep the atom live");
+        assert_eq!(store.atoms.len(), 1);
+
+        // Park once the whole span clears, then wake when only the tip re-enters.
+        straddler.gx = 32 * CHUNK_CELLS_W as i32; // cx=32; tip at gx-80 → cx=30
+        store.atoms.clear();
+        store.atoms.push(straddler.clone());
+        let (p2, _) = store.sync_organism_residency(Some(cols), Some(win));
+        assert_eq!(p2, 1);
+        assert_eq!(store.parked.len(), 1);
+        // focus_cx=18 → resident [6,30]: tip cx=30 in, anchor cx=32 out.
+        let tip_focus = 18 * CHUNK_CELLS_W as i32;
+        assert!(
+            StreamWindow::new(tip_focus, 128)
+                .world_x_outside_resident(Some(cols), straddler.gx),
+            "anchor still outside at tip-focus"
+        );
+        let (p3, r3) =
+            store.sync_organism_residency(Some(cols), Some(StreamWindow::new(tip_focus, 128)));
+        assert_eq!(p3, 0);
+        assert_eq!(r3, 1, "module tip intersecting resident must restore");
+        assert_eq!(store.atoms.len(), 1);
     }
 }
