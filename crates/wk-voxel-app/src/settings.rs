@@ -149,6 +149,9 @@ pub struct SimSettings {
     /// Camera-centered CA window (Phase 4 streaming). Off = full-resident
     /// physics (legacy Compact cost). On = active band around the view.
     pub stream_active_physics: bool,
+    /// When streaming, park evicted chunks under `saves/stream_chunks/{seed}`
+    /// (disk-primary). Off = in-RAM ChunkStore only.
+    pub stream_disk_chunks: bool,
     /// Geotech failure (Tab → Geotech). Roof collapse on by default.
     pub failure: FailureConfig,
     /// Competent rock rigid-body knobs (Tab → Geotech).
@@ -301,6 +304,7 @@ impl SimSettings {
             perf: PerfConfig::default(),
             sim_budget_ms: 12.0,
             stream_active_physics: true,
+            stream_disk_chunks: true,
             failure: FailureConfig::default(),
             competent_fall: CompetentFallConfig::default(),
             max_roof_events: FailureConfig::default().max_roof_events as f32,
@@ -1396,7 +1400,16 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "  On: CA near the view (+halo); far chunks park in RAM store. Off: full-resident (~19 FPS Compact).",
+                        "  On: CA near the view (+halo); far chunks park / reload. Off: full-resident (~19 FPS Compact).",
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Stream disk chunk store",
+                        &mut self.stream_disk_chunks,
+                    );
+                    ui.label(
+                        None,
+                        "  On with streaming: park under saves/stream_chunks/{seed} (disk-primary). Off: RAM only.",
                     );
                 });
                 ui.separator();

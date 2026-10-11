@@ -272,9 +272,10 @@ May include ring width / ceiling / streaming follow-ups from
   Stretch stream+evict ~19 → **~67** sim-FPS (chunks 1088 → 459).
   Living atoms + corpses park by body column span on `OrganismStore`
   (pop / corpse caps include parked; straddlers stay until fully out).
-  TRACKED soaks stay full-resident. Opt-in `ChunkStore::enable_disk`
-  (directory of `{cx}_{cy}.pc`, disk-primary) — play not wired yet.
-  **OPEN:** wire disk store in play / settings; flush organism park on F5.
+  TRACKED soaks stay full-resident. Play can park under
+  `saves/stream_chunks/{seed}` when Tab → Performance → Stream disk
+  chunk store is on (default). **OPEN:** flush organism park on F5;
+  prune stale seed chunk dirs.
 
 ---
 
@@ -360,6 +361,7 @@ before coding.
 | 2026-10-11 | Stream corpse park | Corpses park by anchor gx with atoms; corpse_total fills cap |
 | 2026-10-11 | Stream body span | Park when all body cols outside resident; restore on any tip |
 | 2026-10-11 | ChunkStore disk | Opt-in directory backend (`enable_disk`); play wire still open |
+| 2026-10-11 | Stream disk play | Tab toggle; `saves/stream_chunks/{seed}` when streaming |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

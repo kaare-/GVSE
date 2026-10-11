@@ -381,8 +381,8 @@ local wetness once wetness is available.
 
 **Phase 4 status (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
 as the full-resident gate. **Streaming residency stack closed** (living
-atoms + corpses park by body span; opt-in disk ChunkStore API landed,
-play wire still open). Slices landed:
+atoms + corpses park by body span; disk ChunkStore wired in play via
+Tab → Performance). Slices landed:
 
 1. **Active-only CA** — `StreamWindow` filters `plan_active`;
    `clear_planned_dirty` keeps frozen dirty.
@@ -407,9 +407,9 @@ only) ~19 → **~45** sim-FPS (view=320). With `sync_residency` eviction:
    Spatial mycelium + spore bank park with side maps. FrozenBacklog
    carries water + suspended/dissolved. Living organisms + corpses park
    on `OrganismStore` by body column span (straddlers stay live until
-   fully outside). Opt-in `ChunkStore::enable_disk` (WORLDGEN Phase 2
-   directory of postcard files; play not wired). TRACKED soaks stay
-   full-resident
+   fully outside). `ChunkStore::enable_disk` under
+   `saves/stream_chunks/{seed}` when stream disk is on in play.
+   TRACKED soaks stay full-resident
    (`stream_window = None`).
 
 Concretely, at any moment there are four sets of chunks:
@@ -547,8 +547,9 @@ everything not in the explicit save.
 
 **Phase 2**: disk-backed chunk-store. `ChunkStore::enable_disk(root)`
 writes `{cx}_{cy}.pc` postcard files and drops the RAM copy
-(disk-primary). Rescans existing files on enable. Same `encode_put` /
-`take_decode` / `sync_residency` path. Play / settings wire still open.
+(disk-primary). Rescans existing files on enable. Play enables
+`saves/stream_chunks/{seed}` when Tab → Performance → Stream disk
+chunk store is on (default with streaming).
 
 **Determinism guarantee for regeneration**: a chunk that has never
 been simulated (or was evicted and its state discarded) can be
