@@ -405,8 +405,9 @@ only) ~19 → **~45** sim-FPS (view=320). With `sync_residency` eviction:
    missing chunks and thaws on reload (`sat_totals` counts it).
    Spatial mycelium + spore bank park with side maps. FrozenBacklog
    carries water + suspended/dissolved. Living organisms + corpses park
-   on `OrganismStore` by wrapped anchor `gx`. **OPEN:** body-span
-   policy; disk-backed store. TRACKED soaks stay full-resident
+   on `OrganismStore` by body column span (straddlers stay live until
+   fully outside). **OPEN:** disk-backed store. TRACKED soaks stay
+   full-resident
    (`stream_window = None`).
 
 Concretely, at any moment there are four sets of chunks:

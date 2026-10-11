@@ -409,5 +409,5 @@ re-profile.
    (store=629). Log: `phase4-stretch-stream-evict-ab.log`. FrozenBacklog
    also carries suspended/dissolved loads; mycelium + spore bank park
    with SideMapStore. **Streaming residency closed** at ~67 sim-FPS
-   stretch+evict; living atoms + corpses park by anchor `gx`. Next
-   Phase 4: other ≥1 ms levers; disk store deferred.
+   stretch+evict; organisms park by body column span. Next Phase 4:
+   other ≥1 ms levers; disk store deferred.
