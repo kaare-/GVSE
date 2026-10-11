@@ -14,9 +14,12 @@
 //! Far [`World::set_cell`](crate::grid::World::set_cell) reloads from the
 //! store or skips blank remint outside the resident band.
 
+use std::collections::HashMap;
+
 use crate::chunk::{Chunk, ChunkCoord};
 use crate::fasthash::FxHashMap;
 use crate::grid::World;
+use crate::spore_bank::DormantSpore;
 use crate::streaming::StreamWindow;
 
 /// Postcard bytes for chunks that left the resident band.
@@ -27,8 +30,8 @@ pub struct ChunkStore {
 
 /// Parked sparse `(gx, gy)` / column books for far resident eviction.
 ///
-/// Keeps TRACKED-ish mass ledgers + spatial mycelium books from orphaning
-/// when cells leave RAM. Spore bank / organisms still live (follow-up).
+/// Keeps TRACKED-ish mass ledgers + spatial mycelium / spore books from
+/// orphaning when cells leave RAM. Organism ECS parking still open.
 #[derive(Debug, Clone, Default)]
 pub struct SideMapStore {
     pub steam: FxHashMap<(i32, i32), u8>,
@@ -44,6 +47,8 @@ pub struct SideMapStore {
     pub mycelium_strains: FxHashMap<(i32, i32), Vec<(u32, u8)>>,
     pub mycelium_energy: FxHashMap<(i32, i32), u8>,
     pub mycelium_lineage: FxHashMap<(i32, i32), crate::fungi::MyceliumLineage>,
+    /// Same `HashMap` shape as [`crate::spore_bank::SporeBank::cells`].
+    pub spore_bank: HashMap<(i32, i32), Vec<DormantSpore>>,
 }
 
 impl SideMapStore {
@@ -61,6 +66,7 @@ impl SideMapStore {
             && self.mycelium_strains.is_empty()
             && self.mycelium_energy.is_empty()
             && self.mycelium_lineage.is_empty()
+            && self.spore_bank.is_empty()
     }
 
     pub fn entry_count(&self) -> usize {
@@ -77,6 +83,7 @@ impl SideMapStore {
             + self.mycelium_strains.len()
             + self.mycelium_energy.len()
             + self.mycelium_lineage.len()
+            + self.spore_bank.len()
     }
 }
 
@@ -123,17 +130,36 @@ impl ChunkStore {
     }
 }
 
+fn park_xy_keys(
+    keys: impl IntoIterator<Item = (i32, i32)>,
+    wrap_width: Option<i32>,
+    win: StreamWindow,
+) -> Vec<(i32, i32)> {
+    keys.into_iter()
+        .filter(|&(gx, _)| win.world_x_outside_resident(wrap_width, gx))
+        .collect()
+}
+
+fn restore_xy_keys(
+    keys: impl IntoIterator<Item = (i32, i32)>,
+    wrap_width: Option<i32>,
+    win: Option<StreamWindow>,
+) -> Vec<(i32, i32)> {
+    keys.into_iter()
+        .filter(|&(gx, _)| match win {
+            None => true,
+            Some(w) => !w.world_x_outside_resident(wrap_width, gx),
+        })
+        .collect()
+}
+
 fn park_xy<V>(
     live: &mut FxHashMap<(i32, i32), V>,
     park: &mut FxHashMap<(i32, i32), V>,
     wrap_width: Option<i32>,
     win: StreamWindow,
 ) -> usize {
-    let keys: Vec<(i32, i32)> = live
-        .keys()
-        .copied()
-        .filter(|&(gx, _)| win.world_x_outside_resident(wrap_width, gx))
-        .collect();
+    let keys = park_xy_keys(live.keys().copied(), wrap_width, win);
     let mut n = 0;
     for k in keys {
         if let Some(v) = live.remove(&k) {
@@ -150,14 +176,41 @@ fn restore_xy<V>(
     wrap_width: Option<i32>,
     win: Option<StreamWindow>,
 ) -> usize {
-    let keys: Vec<(i32, i32)> = park
-        .keys()
-        .copied()
-        .filter(|&(gx, _)| match win {
-            None => true,
-            Some(w) => !w.world_x_outside_resident(wrap_width, gx),
-        })
-        .collect();
+    let keys = restore_xy_keys(park.keys().copied(), wrap_width, win);
+    let mut n = 0;
+    for k in keys {
+        if let Some(v) = park.remove(&k) {
+            live.insert(k, v);
+            n += 1;
+        }
+    }
+    n
+}
+
+fn park_xy_std<V>(
+    live: &mut std::collections::HashMap<(i32, i32), V>,
+    park: &mut std::collections::HashMap<(i32, i32), V>,
+    wrap_width: Option<i32>,
+    win: StreamWindow,
+) -> usize {
+    let keys = park_xy_keys(live.keys().copied(), wrap_width, win);
+    let mut n = 0;
+    for k in keys {
+        if let Some(v) = live.remove(&k) {
+            park.insert(k, v);
+            n += 1;
+        }
+    }
+    n
+}
+
+fn restore_xy_std<V>(
+    live: &mut std::collections::HashMap<(i32, i32), V>,
+    park: &mut std::collections::HashMap<(i32, i32), V>,
+    wrap_width: Option<i32>,
+    win: Option<StreamWindow>,
+) -> usize {
+    let keys = restore_xy_keys(park.keys().copied(), wrap_width, win);
     let mut n = 0;
     for k in keys {
         if let Some(v) = park.remove(&k) {
@@ -236,6 +289,7 @@ fn sync_side_maps(world: &mut World, win: StreamWindow) -> (usize, usize) {
         wrap,
         win,
     );
+    parked += park_xy_std(&mut world.spore_bank.cells, &mut store.spore_bank, wrap, win);
 
     restored += restore_xy(&mut world.steam, &mut store.steam, wrap, Some(win));
     restored += restore_xy(&mut world.cave_humidity, &mut store.cave_humidity, wrap, Some(win));
@@ -265,6 +319,12 @@ fn sync_side_maps(world: &mut World, win: StreamWindow) -> (usize, usize) {
         wrap,
         Some(win),
     );
+    restored += restore_xy_std(
+        &mut world.spore_bank.cells,
+        &mut store.spore_bank,
+        wrap,
+        Some(win),
+    );
     world.side_map_store = store;
     (parked, restored)
 }
@@ -291,6 +351,7 @@ fn restore_all_side_maps(world: &mut World) -> usize {
         wrap,
         None,
     );
+    n += restore_xy_std(&mut world.spore_bank.cells, &mut store.spore_bank, wrap, None);
     world.side_map_store = store;
     n
 }
@@ -615,5 +676,44 @@ mod tests {
             w.mycelium_strains.get(&(far_gx, 8)).map(|v| v.len()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn sync_parks_and_restores_spore_bank() {
+        use crate::spore_bank::{DormantSpore, SporeKind};
+        use crate::Genome;
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut w = ring_world(cols);
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        w.set_cell(far_gx, 8, Cell::solid(MaterialId::Sand));
+        w.spore_bank.cells.insert(
+            (far_gx, 8),
+            vec![DormantSpore {
+                kind: SporeKind::Plant,
+                genome: Genome::default(),
+                body: Vec::new(),
+                growth_target: Vec::new(),
+                energy: 1.0,
+                deposited_tick: 0,
+                prefer_surface: false,
+            }],
+        );
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        sync_residency(&mut w).expect("evict");
+        assert!(!w.spore_bank.cells.contains_key(&(far_gx, 8)));
+        assert_eq!(
+            w.side_map_store
+                .spore_bank
+                .get(&(far_gx, 8))
+                .map(|v| v.len()),
+            Some(1)
+        );
+        w.stream_window = Some(StreamWindow::new(far_gx, 128));
+        sync_residency(&mut w).expect("reload");
+        assert_eq!(
+            w.spore_bank.cells.get(&(far_gx, 8)).map(|v| v.len()),
+            Some(1)
+        );
+        assert!(w.side_map_store.spore_bank.is_empty());
     }
 }
