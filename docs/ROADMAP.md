@@ -310,7 +310,9 @@ cut (≥1 ms) **or** width stretch if playable headroom is enough.
   stream+evict wall **14.8 → 11.9** ms (~67 → **~84** sim-FPS); bodies
   **4.3 → 2.1** ms.
 - **2026-10-11:** Seepage lake-bed / seam / weep wakes + seam coupling
-  honor active `StreamWindow` (far resident aquifers freeze).
+  honor active `StreamWindow` (far resident aquifers freeze). Stretch
+  stream+evict wall **11.9 → 10.9** ms (~84 → **~91** sim-FPS);
+  seepage **2.4 → 0.79** ms.
 
 ---
 

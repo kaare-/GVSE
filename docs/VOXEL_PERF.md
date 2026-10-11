@@ -420,4 +420,6 @@ re-profile.
    wake/apply stream-gated: stretch stream+evict wall **14.8 → 11.9**
    ms/tick (~67 → **~84** sim-FPS); bodies **4.3 → 2.1** ms. Log:
    `phase4-stretch-body-stream-ab.log`. Seepage wakes + seam couple
-   stream-gated next (measure after merge); then width stretch.
+   stream-gated: wall **11.9 → 10.9** ms (~84 → **~91** sim-FPS);
+   seepage **2.4 → 0.79** ms. Log: `phase4-stretch-seep-stream-ab.log`.
+   Next: width stretch or temp/rain ≥1 ms.
