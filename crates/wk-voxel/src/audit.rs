@@ -118,14 +118,31 @@ pub fn sat_totals(world: &World) -> SatTotals {
         }
     }
     // Conduit cavity humidity (wire: steam) + sealed ambient cave humidity —
-    // same mass units as sat.
-    let steam: i64 = world.steam.values().map(|&v| v as i64).sum();
-    let cave_h: i64 = world.cave_humidity.values().map(|&v| v as i64).sum();
+    // same mass units as sat. Include SideMapStore parks + FrozenBacklog.
+    let steam: i64 = world.steam.values().map(|&v| v as i64).sum::<i64>()
+        + world
+            .side_map_store
+            .steam
+            .values()
+            .map(|&v| v as i64)
+            .sum::<i64>();
+    let cave_h: i64 = world
+        .cave_humidity
+        .values()
+        .map(|&v| v as i64)
+        .sum::<i64>()
+        + world
+            .side_map_store
+            .cave_humidity
+            .values()
+            .map(|&v| v as i64)
+            .sum::<i64>();
     let pipe = crate::pipe::pipe_mass_sat(world);
+    let backlog = crate::frozen_backlog::frozen_backlog_total(world);
     SatTotals {
         free_air,
         pore,
-        cell_total: free_air + pore + steam + cave_h + pipe,
+        cell_total: free_air + pore + steam + cave_h + pipe + backlog,
         humidity: 0.0,
         clouds: 0.0,
     }

@@ -253,6 +253,23 @@ fn commit_air_sat_xfers(world: &mut World, xfers: &mut [((i32, i32), (i32, i32),
             continue;
         };
         let Some(dst) = world.get_cell(to.0, to.1) else {
+            // Streaming: book into FrozenBacklog instead of reflecting.
+            if src.material == MaterialId::Air
+                && crate::frozen_backlog::should_absorb_missing(world, to.0, to.1)
+            {
+                let give = amt.min(src.sat.0 as i32);
+                if give > 0 {
+                    world.set_cell(
+                        from.0,
+                        from.1,
+                        Cell {
+                            sat: Sat(src.sat.0 - give as u8),
+                            ..src
+                        },
+                    );
+                    crate::frozen_backlog::absorb_water(world, to.0, to.1, give);
+                }
+            }
             continue;
         };
         if src.material != MaterialId::Air {

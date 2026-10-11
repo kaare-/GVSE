@@ -268,8 +268,9 @@ May include ring width / ceiling / streaming follow-ups from
 - **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate;
   streaming — CA + climate/field shell + steam/leftover cands windowed.
   Compact stretch ~19 → **~45** sim-FPS (view=320). In-memory
-  `ChunkStore` + mass side-map parking under stream-active play; far
-  remint gated. `FrozenBacklog` / mycelium parking still open.
+  `ChunkStore` + mass side-map parking + water `FrozenBacklog` under
+  stream-active play; far remint gated. Sediment backlog / mycelium
+  parking still open.
 
 ---
 
@@ -345,6 +346,7 @@ before coding.
 | 2026-10-11 | ChunkStore (opt-in) | In-memory postcard eviction API; play sync not wired; FrozenBacklog open |
 | 2026-10-11 | Stream remint gate | Far set_cell skips blank mint; sync_residency in play; FrozenBacklog open |
 | 2026-10-11 | Stream side maps | Park steam/dissolved/pipe/litter with ChunkStore; FrozenBacklog open |
+| 2026-10-11 | FrozenBacklog water | Missing-dest flow books sat; thaw on reload; sat_totals counts it |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

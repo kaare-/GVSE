@@ -402,4 +402,6 @@ re-profile.
 4. **In-memory `ChunkStore` + `SideMapStore`** + `sync_residency`
    (resident = active + `RESIDENT_MARGIN_CHUNKS`). Play loop syncs when
    stream-active is on; far `set_cell` reloads or skips blank remint;
-   mass/heat sparse maps park with chunks. Next: `FrozenBacklog`.
+   mass/heat sparse maps park with chunks. Water `FrozenBacklog` absorbs
+   flow into missing chunks (thaw on reload). Next: sediment backlog /
+   mycelium parking.
