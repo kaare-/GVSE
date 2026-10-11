@@ -114,6 +114,37 @@ fn hud_height(show_hud: bool) -> f32 {
     }
 }
 
+/// Drop `saves/stream_chunks/{seed}` dirs that are not `keep_seed`.
+///
+/// Regen / R / load leave orphan postcard parks otherwise.
+fn prune_stale_stream_chunk_dirs(keep_seed: u64) -> usize {
+    let root = PathBuf::from(SIM_SAVE_DIR).join("stream_chunks");
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return 0;
+    };
+    let keep = keep_seed.to_string();
+    let mut n = 0usize;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.as_ref() == keep {
+            continue;
+        }
+        // Only prune numeric seed dirs — leave stray files alone.
+        if name.parse::<u64>().is_err() {
+            continue;
+        }
+        if std::fs::remove_dir_all(&path).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Smoothed FPS — EMA of `get_frame_time()` (steadier than raw
 /// `get_fps()`, same approach as column-GVSE).
 fn fps_smoothed() -> f32 {
@@ -441,6 +472,7 @@ async fn main() {
                 Some(path) => match SimSnapshot::load_from_disk(&path) {
                     Ok(snap) => {
                         scene = Scene::from_snapshot(snap);
+                        let _ = prune_stale_stream_chunk_dirs(scene.params.seed);
                         settings.on_world_reseed(&scene.params);
                         settings.sync_caps_from_organisms(&scene.organisms);
                         // Pipe units are saved at `world.pipe_expand`. Tab
@@ -469,6 +501,7 @@ async fn main() {
             settings.request_regen = false;
             let params = settings.draft_world_params(&scene.params);
             scene = Scene::new(params);
+            let _ = prune_stale_stream_chunk_dirs(scene.params.seed);
             settings.on_world_reseed(&scene.params);
             ridges.invalidate();
             inspect = None;
@@ -498,6 +531,7 @@ async fn main() {
                     seed: new_seed,
                     ..scene.params
                 });
+                let _ = prune_stale_stream_chunk_dirs(scene.params.seed);
                 settings.on_world_reseed(&scene.params);
                 ridges.invalidate();
                 inspect = None;
@@ -615,6 +649,7 @@ async fn main() {
                 scene.world.stream_window = Some(StreamWindow::new(focus_col, view_cols));
                 // Disk-primary park when enabled (once per World lifetime).
                 if settings.stream_disk_chunks && !scene.world.chunk_store.disk_enabled() {
+                    let _ = prune_stale_stream_chunk_dirs(scene.params.seed);
                     let root = PathBuf::from(SIM_SAVE_DIR)
                         .join("stream_chunks")
                         .join(scene.params.seed.to_string());
@@ -1946,5 +1981,32 @@ async fn main() {
         }
 
         next_frame().await;
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn prune_stale_stream_chunk_dirs_keeps_current_seed() {
+        let root = PathBuf::from(SIM_SAVE_DIR).join("stream_chunks");
+        let keep = 4242u64;
+        let stale = 99u64;
+        let keep_dir = root.join(keep.to_string());
+        let stale_dir = root.join(stale.to_string());
+        let _ = std::fs::remove_dir_all(&keep_dir);
+        let _ = std::fs::remove_dir_all(&stale_dir);
+        std::fs::create_dir_all(&keep_dir).unwrap();
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(keep_dir.join("marker"), b"keep").unwrap();
+        std::fs::write(stale_dir.join("marker"), b"drop").unwrap();
+
+        let n = prune_stale_stream_chunk_dirs(keep);
+        assert!(n >= 1, "should remove at least the stale seed dir");
+        assert!(keep_dir.is_dir());
+        assert!(!stale_dir.exists());
+
+        let _ = std::fs::remove_dir_all(&keep_dir);
     }
 }

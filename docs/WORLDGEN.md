@@ -551,7 +551,8 @@ writes `{cx}_{cy}.pc` postcard files and drops the RAM copy
 `saves/stream_chunks/{seed}` when Tab → Performance → Stream disk
 chunk store is on (default with streaming). F5 / quit-save calls
 `restore_all_from_store` + organism restore so serde-skip parks land
-in the snapshot; the next stream tick re-parks.
+in the snapshot; the next stream tick re-parks. Reseed / load / first
+disk enable prune other numeric dirs under `saves/stream_chunks/`.
 
 **Determinism guarantee for regeneration**: a chunk that has never
 been simulated (or was evicted and its state discarded) can be

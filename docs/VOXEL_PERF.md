@@ -410,5 +410,5 @@ re-profile.
    also carries suspended/dissolved loads; mycelium + spore bank park
    with SideMapStore. **Streaming residency closed** at ~67 sim-FPS
    stretch+evict; organisms park by body column span; play disk
-   ChunkStore under `saves/stream_chunks/{seed}`; F5 flushes parks.
-   Next Phase 4: other ≥1 ms levers; prune stale seed chunk dirs.
+   ChunkStore under `saves/stream_chunks/{seed}`; F5 flushes parks;
+   stale seed dirs prune on reseed. Next Phase 4: other ≥1 ms levers.
