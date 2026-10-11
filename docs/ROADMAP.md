@@ -338,6 +338,8 @@ before coding.
 | 2026-10-11 | Compact FPS gate | Accept **~19 sim-FPS** full-resident Compact; scale via streaming |
 | 2026-10-11 | Stream active CA | Camera window filters `plan_active`; RAM still full-resident |
 | 2026-10-11 | Stream field shell | Phase columns + humidity advect skip outside window |
+| 2026-10-11 | Stream temp/wind/evap | Window temp step, wind seats, evap chunks; Compact ~43 sim-FPS |
+| 2026-10-11 | Stream steam/leftover | Steam cadence + leftover cands windowed; Compact ~45 sim-FPS |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
