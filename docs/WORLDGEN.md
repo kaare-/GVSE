@@ -379,10 +379,11 @@ local wetness once wetness is available.
 
 ## Chunk streaming: view / active / resident / evicted tiers
 
-**Phase 4 status (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
-as the full-resident gate. **Streaming residency stack closed** (living
-atoms + corpses park by body span; disk ChunkStore wired in play via
-Tab → Performance). Slices landed:
+**Phase 4 status (2026-10-11, closed):** Owner accepted Compact **~19
+sim-FPS** as the full-resident gate. **Streaming residency stack
+closed** (living atoms + corpses park by body span; disk ChunkStore
+wired in play via Tab → Performance). **5 km stream-on ≥30 met** (~74
+sim-FPS after temp+rain gates). Slices landed:
 
 1. **Active-only CA** — `StreamWindow` filters `plan_active`;
    `clear_planned_dirty` keeps frozen dirty.

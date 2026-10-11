@@ -441,5 +441,7 @@ re-profile.
    stream+evict wall **10.9 → 8.7** ms (~91 → **~115** sim-FPS); rain
    **1.4 → 0.20**; temp **2.6 → 1.5**. Logs:
    `phase4-stretch-5km-after-temp-rain.log`,
-   `phase4-stretch-temp-rain-ab.log`. Next: wind.rebuild / rock bodies
-   on 5 km, or park Phase 4.
+   `phase4-stretch-temp-rain-ab.log`. **Phase 4 closed** (2026-10-11):
+   ≥30 at 5 km stream-on met; optional leftovers wind.rebuild /
+   rock bodies only if owner wants more headroom. Next: Phase 5
+   planning ([`ROADMAP.md`](ROADMAP.md)).

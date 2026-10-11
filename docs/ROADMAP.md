@@ -226,7 +226,7 @@ on `park-bank`; `#374` Phase 4 tip merged after.
 
 ---
 
-## Phase 4 — Optimisation again + larger worlds *(current)*
+## Phase 4 — Optimisation again + larger worlds *(closed)*
 
 **Goal:** After ice/geyser churn, re-profile and push map scale.
 May include ring width / ceiling / streaming follow-ups from
@@ -242,80 +242,42 @@ May include ring width / ceiling / streaming follow-ups from
    Prefer **width stretch** before another CA dirty trim unless a clear
    ≥1 ms surgical win appears.
 
-**Acceptance (proposed)**
+**Acceptance (met)**
 
 - Phase 4 baseline table landed (short sky / demo / stress, 0 plants).
-- At least one scale or cost lever: grow past 2048 cols toward stretch
-  **5 km+ @ ~1064 h** (Phase 1 deferred), or a measured ≥1 ms/tick cut
-  that does **not** coarsen weather / lottery / `live_surface_y`.
-- Stress (or new stretch stamp) stays playable (≥**30 sim-FPS** or
-  documented new gate if width forces a revisit).
-- Short `budget_soak` still `park=0` and TRACKED near flat on the tip.
+- Scale lever: stretch **5.12 km @ ~1064 h** under stream+evict
+  (view=320) at **~74** sim-FPS after temp+rain gates (`#399`–`#400`).
+- Compact stretch stream+evict **~115** sim-FPS; full-resident Compact
+  gate stays ~19 (owner-accepted).
+- Streaming residency + organism park + disk/F5/prune closed (`#388`–
+  `#395`); body/seep stream gates (`#397`–`#398`).
 
-**Out of scope**
+**Out of scope (still deferred)**
 
 - Phase 5 organism rewrite.
-- Enabling rayon by default (still slower on narrow dirty unless
-  re-profile proves otherwise).
+- Enabling rayon by default.
 - Weather coarsen / condensation lottery skip as a first lever.
+- Optional 5 km leftover trims (wind.rebuild ~1.5 ms, rock bodies
+  ~3.7 ms) — not required for the ≥30 gate.
 
-**Now**
+**Landed (summary)**
 
-- Ice sticky-loose + seam-wake (+ small weep trim) landed
-  ([`VOXEL_PERF.md`](VOXEL_PERF.md)). Stress **~34** sim-FPS; Compact
-  **~19** full-resident; 5k soak TRACKED flat / `park=0`.
-- Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t).
-- **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate.
-  **Streaming residency stack closed** (CA window → field shell →
-  steam/leftover → `ChunkStore` + remint gate → side maps → water
-  `FrozenBacklog` + loads → mycelium/spore park → living-atom park).
-  Stretch stream+evict ~19 → **~67** sim-FPS (chunks 1088 → 459).
-  Living atoms + corpses park by body column span on `OrganismStore`
-  (pop / corpse caps include parked; straddlers stay until fully out).
-  TRACKED soaks stay full-resident. Play can park under
-  `saves/stream_chunks/{seed}` when Tab → Performance → Stream disk
-  chunk store is on (default). F5 / quit-save flushes chunk + side +
-  organism parks into the snapshot (re-parks next stream tick).
-  Stale `saves/stream_chunks/{seed}` dirs prune on R / regen / load /
-  first disk enable. **Streaming residency + disk park hygiene closed**
-  (through `#395`).
+- Owner accepted Compact ~19 FPS full-resident; scale via streaming.
+- Streaming stack: CA window → field shell → steam/leftover →
+  `ChunkStore` + remint → side maps → `FrozenBacklog` → mycelium/spore
+  → organism park by body span → disk / F5 / prune.
+- Compact stretch stream+evict ~19 → **~67** → (body/seep) **~91** →
+  (temp/rain) **~115** sim-FPS.
+- 5 km stream+evict: residency chunks **459** / store **4981**; wall
+  **~74** sim-FPS (≥30 **pass**).
 
-### Decision list — next Phase 4 lever *(2026-10-11)*
-
-Pick one before more code (daily 09:00 Oslo lists continue):
-
-1. ~~**Re-profile stretch stream+evict tip**~~ — done (~67 → ~91 after
-   body/seep gates).
-2. ~~**Width stretch toward 5 km+**~~ — probe + gate: **~74** sim-FPS
-   (≥30 **pass**) after temp+rain stream gate.
-3. ~~**Stream-gate temperature + rain**~~ — done; 5 km wall **62.5 →
-   13.6** ms; Compact stream+evict ~91 → **~115** sim-FPS.
-4. **Park Phase 4 / open Phase 5 planning** — or trim 5 km leftovers
-   (wind.rebuild ~1.5 ms, rock bodies ~3.7 ms) if more headroom wanted.
-
-**Default if no pick:** (4) park Phase 4 / open Phase 5, unless owner
-wants more 5 km FPS.
-
-- **2026-10-11:** Competent body wake/apply honors `StreamWindow`
-  (far float cadence skipped; out-of-band wakes deferred). Stretch
-  stream+evict wall **14.8 → 11.9** ms (~67 → **~84** sim-FPS); bodies
-  **4.3 → 2.1** ms.
-- **2026-10-11:** Seepage lake-bed / seam / weep wakes + seam coupling
-  honor active `StreamWindow` (far resident aquifers freeze). Stretch
-  stream+evict wall **11.9 → 10.9** ms (~84 → **~91** sim-FPS);
-  seepage **2.4 → 0.79** ms.
-- **2026-10-11:** Width stretch probe — 5.12 km ring under stream+evict
-  (view=320): wall **62.5** ms (~**16** sim-FPS), chunks **459** /
-  store **4981**. Physics **6.3** ms; **temperature.step 32** + **rain
-  21** dominate (full-ring). Gate: **fail ≥30**.
-- **2026-10-11:** Temp props refresh + rain honor `StreamWindow`. 5 km
-  wall **62.5 → 13.6** ms (~16 → **~74** sim-FPS) — **pass ≥30**. Rain
-  **21 → 0.30** ms; temp **32 → 4.3** ms. Compact stream+evict ~91 →
-  **~115** sim-FPS.
+**Exit (met)** — decision-list default (2026-10-11): park Phase 4 /
+open Phase 5 planning. Width + streaming goals closed; leftover FPS
+trims are optional follow-ups, not Phase-4 blockers.
 
 ---
 
-## Phase 5 — Biological system upgrade *(major)*
+## Phase 5 — Biological system upgrade *(next — planning)*
 
 **Goal:** Big organism/ecology pass. Lots of **fundamental changes** to
 the system we have — not a thin skin. **Requires its own major planning
@@ -325,7 +287,8 @@ Headless soaks for this phase turn **organisms on** (Phase 0 gate stays
 organisms-off).
 
 Do not start coding until a Phase-5 scope PR exists with acceptance
-tests and soak hooks.
+tests and soak hooks. Daily 09:00 Oslo lists continue for Phase-5
+scoping picks.
 
 ---
 
@@ -405,6 +368,7 @@ before coding.
 | 2026-10-11 | Seep stream gate | Lake-bed/seam/weep wakes + seam couple honor StreamWindow |
 | 2026-10-11 | 5 km stream probe | 20480×1064 stream+evict ~16 sim-FPS (fail ≥30); temp 32 + rain 21 ms |
 | 2026-10-11 | Temp+rain stream | 5 km ~16→**~74** sim-FPS (pass ≥30); Compact stream ~91→**~115** |
+| 2026-10-11 | Phase 4 closed | Width+streaming goals met; park Phase 4 / open Phase 5 planning |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
@@ -416,7 +380,8 @@ before coding.
 
 ## Clarifications later
 
-- Phase-1 stretch width / field-shell cuts: **Phase 4 now** (re-profile first).
+- Phase-1 stretch width / field-shell cuts: **closed with Phase 4** (5 km stream-on).
 - Phase 3 ice option 2 slices A–C + brittle/sheet/lid: closed with Phase 3.
+- Optional Phase-4 leftovers (5 km wind.rebuild / rock bodies): only if owner wants more FPS.
 - Phase-5 scoping agenda (plants/fungi vs creatures first — open until planning session).
 - Phase-8 shortlist of client stacks when that review starts.
