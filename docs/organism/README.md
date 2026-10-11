@@ -59,6 +59,7 @@ Live Set A / Set D organisms are implemented in `wk-voxel`
 | [`FUNGI.md`](FUNGI.md) | Litter fungi, mycelium field, Symbiont trade, spore bank |
 | [`LANES.md`](LANES.md) | Fore / Mid / Back depth-lane occupancy for future animals |
 | [`CORE_FEATURES.md`](CORE_FEATURES.md) | Feature Sets A–E lock and explicit non-goals |
+| [`PHASE5_SCOPE.md`](PHASE5_SCOPE.md) | Phase 5 upgrade scope draft + owner decision picks |
 | [`GENES.md`](GENES.md) | Gene table with tradeoffs; merge notes vs the column-era grazer `Genome` |
 | [`FIELDS.md`](FIELDS.md) | Petri fields (light, temp, chem, moisture, organic, substrate, stem wetness) |
 | [`SCENARIOS.md`](SCENARIOS.md) | Falsification scenes (E30–E45 skeletons; column E1–E17 archived) |
