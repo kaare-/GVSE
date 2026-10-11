@@ -411,4 +411,6 @@ re-profile.
    with SideMapStore. **Streaming residency closed** at ~67 sim-FPS
    stretch+evict; organisms park by body column span; play disk
    ChunkStore under `saves/stream_chunks/{seed}`; F5 flushes parks;
-   stale seed dirs prune on reseed. Next Phase 4: other ≥1 ms levers.
+   stale seed dirs prune on reseed. **Streaming stack closed** (`#388`–
+   `#395`). Next Phase 4 decision list in [`ROADMAP.md`](ROADMAP.md):
+   re-profile tip → width stretch or ≥1 ms surgical cut.

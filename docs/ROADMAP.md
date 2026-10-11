@@ -277,7 +277,27 @@ May include ring width / ceiling / streaming follow-ups from
   chunk store is on (default). F5 / quit-save flushes chunk + side +
   organism parks into the snapshot (re-parks next stream tick).
   Stale `saves/stream_chunks/{seed}` dirs prune on R / regen / load /
-  first disk enable. **OPEN:** other ≥1 ms Phase 4 levers.
+  first disk enable. **Streaming residency + disk park hygiene closed**
+  (through `#395`).
+
+### Decision list — next Phase 4 lever *(2026-10-11)*
+
+Pick one before more code (daily 09:00 Oslo lists continue):
+
+1. **Re-profile stretch stream+evict tip** after organism park + disk
+   wire — confirm ~67 sim-FPS still holds; capture new hotspot table
+   (bodies / seepage / steam / organism step).
+2. **Width stretch toward 5 km+** at stream-on (WORLDGEN scale goal) —
+   only after (1) if FPS headroom remains.
+3. **≥1 ms surgical CA/field cut** without weather coarsen — candidates
+   from settle2 table: seepage seam_wake, rock bodies leftover,
+   humidity.advect (see [`VOXEL_PERF.md`](VOXEL_PERF.md)). Prefer
+   measured A/B before shipping.
+4. **Park Phase 4 / open Phase 5 planning** — only if owner wants bio
+   major next instead of more scale/FPS.
+
+**Default if no pick:** (1) re-profile, then (2) or (3) from the new
+hotspots.
 
 ---
 
