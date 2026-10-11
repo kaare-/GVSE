@@ -490,6 +490,11 @@ impl Wind {
         }
         let mut humid = vec![false; n];
         humidity.for_each_occupied(|(hx, hy), _| {
+            if let Some(wld) = world {
+                if !crate::streaming::stream_allows_hx(wld, hx, self.tile_cols) {
+                    return;
+                }
+            }
             let hx = self.wrap_tile_hx(hx, bounds);
             if bounds.contains(hx, hy) {
                 humid[bounds.index(w, hx, hy)] = true;
@@ -520,6 +525,12 @@ impl Wind {
         let tc = self.tile_cols.max(1);
         let mut hx = bounds.hx_min;
         while hx <= bounds.hx_max {
+            if let Some(wld) = world {
+                if !crate::streaming::stream_allows_hx(wld, hx, self.tile_cols) {
+                    hx += 2;
+                    continue;
+                }
+            }
             let gx = hx * tc + tc / 2;
             let sy = self.cache_surface(world, gx);
             let shy = sy.div_euclid(tc);

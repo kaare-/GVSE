@@ -164,7 +164,14 @@ fn collect_evap_deltas(
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_standing_air || (c.has_wet_air && c.has_solid))
+        .filter(|(coord, c)| {
+            if let Some(win) = world.stream_window {
+                if !win.contains_cx(world, coord.cx) {
+                    return false;
+                }
+            }
+            c.has_standing_air || (c.has_wet_air && c.has_solid)
+        })
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));

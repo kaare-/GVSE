@@ -1057,12 +1057,20 @@ impl Temperature {
         // to call this twice per air tile (couple + climate).
         let mut surf_by_hx: FxHashMap<i32, i32> = FxHashMap::default();
         let mut land_by_hx: FxHashMap<i32, f32> = FxHashMap::default();
+        let tile_cols = self.tile_cols;
+        let stream_ok = |hx: i32| match world {
+            Some(w) => crate::streaming::stream_allows_hx(w, hx, tile_cols),
+            None => true,
+        };
         if dense {
             if let Some(b) = bounds {
                 let cols = (b.hx_max - b.hx_min + 1).max(0) as usize;
                 self.surf_col.clear();
                 self.surf_col.resize(cols, self.sea_level_y);
                 for hx in b.hx_min..=b.hx_max {
+                    if !stream_ok(hx) {
+                        continue;
+                    }
                     let surf = self.column_surface_y_estimate(world, hx);
                     surf_by_hx.insert(hx, surf);
                     land_by_hx.insert(hx, Self::land_from_surface(surf, self.sea_level_y));
@@ -1072,6 +1080,9 @@ impl Temperature {
             }
         } else {
             for &(hx, _) in &keys {
+                if !stream_ok(hx) {
+                    continue;
+                }
                 if surf_by_hx.contains_key(&hx) {
                     continue;
                 }
@@ -1083,6 +1094,9 @@ impl Temperature {
         self.surf_cache.clone_from(&surf_by_hx);
         let slab_w = bounds.map(TileBounds::dims).map(|(w, _)| w).unwrap_or(0);
         for (hx, hy) in keys {
+            if !stream_ok(hx) {
+                continue;
+            }
             let props = self
                 .props_cache
                 .get(&(hx, hy))
@@ -1263,15 +1277,15 @@ impl Temperature {
         if dense {
             if let Some(b) = bounds {
                 if self.slab.len() == b.tile_capacity() {
-                    self.diffuse_slab(alpha, b);
+                    self.diffuse_slab(world, alpha, b);
                 } else {
-                    self.diffuse(alpha);
+                    self.diffuse_stream(world, alpha);
                 }
             } else {
-                self.diffuse(alpha);
+                self.diffuse_stream(world, alpha);
             }
         } else {
-            self.diffuse(alpha);
+            self.diffuse_stream(world, alpha);
         }
         if let Some(w) = wind {
             self.advect_air(world, w);
@@ -1324,6 +1338,11 @@ impl Temperature {
         let mut seats: Vec<(i32, i32)> = Vec::with_capacity(wind.field_len());
         wind.for_each_field(|(hx, hy), _| seats.push((hx, hy)));
         for &(hx, hy) in &seats {
+            if let Some(w) = world {
+                if !crate::streaming::stream_allows_hx(w, hx, self.tile_cols) {
+                    continue;
+                }
+            }
             let t = *snap.get(&(hx, hy)).unwrap_or(&self.config.base_temp_c);
             match self.props_cache.get(&(hx, hy)).map(|p| p.layer) {
                 Some(TileLayer::Buried { .. }) | Some(TileLayer::Surface { .. }) => continue,
@@ -1864,6 +1883,11 @@ impl Temperature {
     /// cannot drain lakes, but warm bedrock still leaks heat upward.
     /// Pair conductivity is weighted by material `thermal_diffusivity`.
     pub fn diffuse(&mut self, alpha: f32) {
+        self.diffuse_stream(None, alpha);
+    }
+
+    /// [`Self::diffuse`] with optional Phase 4 stream window (far columns stay put).
+    fn diffuse_stream(&mut self, world: Option<&World>, alpha: f32) {
         let alpha = alpha.clamp(0.0, 0.25);
         if alpha == 0.0 || self.cells.is_empty() {
             return;
@@ -1873,14 +1897,15 @@ impl Temperature {
         // was leftover on 1000-cell columns already on the lapse.
         if let Some(b) = self.bounds {
             if self.is_dense_filled() {
-                self.diffuse_dense(alpha, b);
+                self.pack_slab(b);
+                self.diffuse_slab(world, alpha, b);
                 return;
             }
         }
-        self.diffuse_sparse(alpha);
+        self.diffuse_sparse(world, alpha);
     }
 
-    fn diffuse_sparse(&mut self, alpha: f32) {
+    fn diffuse_sparse(&mut self, world: Option<&World>, alpha: f32) {
         // Snapshot so mid-walk inserts do not disturb the read set.
         // Keys are unique — sort+dedup was leftover; +x/+y visits keep
         // pairs commutative.
@@ -1890,6 +1915,11 @@ impl Temperature {
         let base = self.config.base_temp_c;
         let free_sky = |hx: i32, hy: i32| -> bool { self.tile_is_free_sky(hx, hy) };
         for &(hx, hy) in &sources {
+            if let Some(w) = world {
+                if !crate::streaming::stream_allows_hx(w, hx, self.tile_cols) {
+                    continue;
+                }
+            }
             let val = *snap.get(&(hx, hy)).unwrap_or(&base);
             let here_sky = free_sky(hx, hy);
             let k_here = self
@@ -1976,14 +2006,9 @@ impl Temperature {
         hy * self.tile_cols.max(1) + self.tile_cols.max(1) / 2 > surf + 16
     }
 
-    fn diffuse_dense(&mut self, alpha: f32, b: TileBounds) {
-        self.pack_slab(b);
-        self.diffuse_slab(alpha, b);
-    }
-
     /// Pair stencil on [`Self::slab`]. Caller packed (or couple already
     /// wrote) the slab. Write back only deltas.
-    fn diffuse_slab(&mut self, alpha: f32, b: TileBounds) {
+    fn diffuse_slab(&mut self, world: Option<&World>, alpha: f32, b: TileBounds) {
         let (w, h) = b.dims();
         let n = w.saturating_mul(h);
         if w == 0 || h == 0 || self.slab.len() != n {
@@ -1997,6 +2022,11 @@ impl Temperature {
         let mut any = false;
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
+                if let Some(wld) = world {
+                    if !crate::streaming::stream_allows_hx(wld, hx, self.tile_cols) {
+                        continue;
+                    }
+                }
                 let i = b.index(w, hx, hy);
                 let val = self.slab[i];
                 let here_sky = self.tile_is_free_sky(hx, hy);
@@ -3533,8 +3563,10 @@ mod tests {
         dense.cells.insert((1, 3), 40.0);
         dense.surf_cache.insert(1, 8);
         let mut sparse = dense.clone();
-        dense.diffuse_dense(0.1, dense.bounds.expect("bounds"));
-        sparse.diffuse_sparse(0.1);
+        let b = dense.bounds.expect("bounds");
+        dense.pack_slab(b);
+        dense.diffuse_slab(None, 0.1, b);
+        sparse.diffuse_sparse(None, 0.1);
         for (k, &a) in &dense.cells {
             let b = sparse.cells.get(k).copied().unwrap_or(f32::NAN);
             assert!(
