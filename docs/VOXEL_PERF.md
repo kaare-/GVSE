@@ -403,5 +403,8 @@ re-profile.
    (resident = active + `RESIDENT_MARGIN_CHUNKS`). Play loop syncs when
    stream-active is on; far `set_cell` reloads or skips blank remint;
    mass/heat sparse maps park with chunks. Water `FrozenBacklog` absorbs
-   flow into missing chunks (thaw on reload). Next: sediment backlog /
-   mycelium parking.
+   flow into missing chunks (thaw on reload). Stretch stream+evict A/B
+   (`perf_profile_stretch_stream_ab`, view=320): wall **51.7 → 14.9**
+   ms/tick (~19 → **~67** sim-FPS); loaded chunks **1088 → 459**
+   (store=629). Log: `phase4-stretch-stream-evict-ab.log`. Next:
+   sediment backlog / mycelium parking.
