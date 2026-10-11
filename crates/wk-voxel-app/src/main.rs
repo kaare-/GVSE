@@ -55,6 +55,7 @@ mod temp_overlay;
 mod terrain;
 mod terrain_atlas;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use macroquad::prelude::*;
@@ -64,7 +65,7 @@ use wk_voxel::{
     day_night_factor_cfg, is_daytime_cfg, plan_active, pore_wetness_with, resolve_organism_draw_cells,
     step_world, wake_competent_bodies_all, wake_unsupported_grains, wake_unstable_slopes,
     restore_all_from_store, sync_residency, CanopyIndex, GeotechOverlayMode, SimClock,
-    SimSnapshot, StreamWindow, WorldStep, WorldStepConfig, WorldgenParams,
+    SimSnapshot, StreamWindow, WorldStep, WorldStepConfig, WorldgenParams, SIM_SAVE_DIR,
 };
 
 use crate::atmosphere::{
@@ -612,7 +613,14 @@ async fn main() {
                     + scene.params.width_cols as f32 * 0.5)
                     .floor() as i32;
                 scene.world.stream_window = Some(StreamWindow::new(focus_col, view_cols));
-                // Park far chunks + side maps; living atoms by anchor gx.
+                // Disk-primary park when enabled (once per World lifetime).
+                if settings.stream_disk_chunks && !scene.world.chunk_store.disk_enabled() {
+                    let root = PathBuf::from(SIM_SAVE_DIR)
+                        .join("stream_chunks")
+                        .join(scene.params.seed.to_string());
+                    let _ = scene.world.chunk_store.enable_disk(root);
+                }
+                // Park far chunks + side maps; organisms by body span.
                 let _ = sync_residency(&mut scene.world);
                 let _ = scene.organisms.sync_organism_residency(
                     scene.world.wrap_width,
