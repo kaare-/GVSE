@@ -306,8 +306,9 @@ hotspots.
 cut (≥1 ms) **or** width stretch if playable headroom is enough.
 
 - **2026-10-11:** Competent body wake/apply honors `StreamWindow`
-  (far float cadence skipped; out-of-band wakes deferred). Aim ≥1 ms
-  bodies cut on stretch stream+evict.
+  (far float cadence skipped; out-of-band wakes deferred). Stretch
+  stream+evict wall **14.8 → 11.9** ms (~67 → **~84** sim-FPS); bodies
+  **4.3 → 2.1** ms.
 
 ---
 

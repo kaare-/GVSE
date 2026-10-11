@@ -417,6 +417,7 @@ re-profile.
    **1088 → 459** (store=629). Stream-on hotspots: rock bodies **4.3**,
    seepage **2.4**, temperature **2.6**, rain **1.4**, steam **1.2**.
    Log: `phase4-stretch-stream-evict-ab-reprofile.log`. Competent body
-   wake/apply now honors `StreamWindow` (far float cadence skipped;
-   deferred wakes). Re-measure bodies after merge; then width stretch
-   or seepage cut.
+   wake/apply stream-gated: stretch stream+evict wall **14.8 → 11.9**
+   ms/tick (~67 → **~84** sim-FPS); bodies **4.3 → 2.1** ms. Log:
+   `phase4-stretch-body-stream-ab.log`. Next: seepage stream gate or
+   width stretch.
