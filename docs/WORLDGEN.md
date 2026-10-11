@@ -397,9 +397,9 @@ Steam boil + leftover cands windowed. Compact stretch stream (CA/fields
 only) ~19 → **~45** sim-FPS (view=320). With `sync_residency` eviction:
 ~19 → **~67** sim-FPS; loaded chunks **1088 → 459** (store=629). Body
 + seepage stream gates → **~91** sim-FPS on Compact stretch. **5 km
-probe** (320 chunks, view=320 + evict): residency still **459** resident
-/ **4981** parked, but wall **~16** sim-FPS — temperature + rain still
-walk the full ring (see [`VOXEL_PERF.md`](VOXEL_PERF.md)).
+probe** (320 chunks, view=320 + evict): residency **459** / store
+**4981**; after temp props + rain stream gates wall **~74** sim-FPS
+(≥30 **pass**; was ~16). See [`VOXEL_PERF.md`](VOXEL_PERF.md).
 
 3. **In-memory `ChunkStore` + `SideMapStore`** — postcard park/reload for
    chunks outside the resident band; mass/heat sparse maps (steam,
