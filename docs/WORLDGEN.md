@@ -391,9 +391,13 @@ as the full-resident gate. Streaming slices landed:
    stretch ~19 → **~43** sim-FPS with view=320 after temp/wind/evap
    window ([`VOXEL_PERF.md`](VOXEL_PERF.md)).
 
-Still **full RAM residency** — no eviction store, no `FrozenBacklog`.
-Steam boil + leftover cands windowed; eviction store still open.
-Compact stretch stream ~19 → **~45** sim-FPS (view=320).
+Steam boil + leftover cands windowed. Compact stretch stream ~19 →
+**~45** sim-FPS (view=320).
+
+3. **In-memory `ChunkStore`** — postcard park/reload for chunks outside
+   the resident band (`sync_residency`). API + tests landed; **not
+   auto-wired** into the play loop yet (far remint / side-map /
+   `FrozenBacklog` follow-ups). TRACKED soaks stay full-resident.
 
 Concretely, at any moment there are four sets of chunks:
 
