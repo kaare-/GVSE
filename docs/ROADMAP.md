@@ -305,6 +305,11 @@ hotspots.
 **~1.2**. Next pick without owner override: surgical bodies/seepage
 cut (≥1 ms) **or** width stretch if playable headroom is enough.
 
+- **2026-10-11:** Competent body wake/apply honors `StreamWindow`
+  (far float cadence skipped; out-of-band wakes deferred). Stretch
+  stream+evict wall **14.8 → 11.9** ms (~67 → **~84** sim-FPS); bodies
+  **4.3 → 2.1** ms.
+
 ---
 
 ## Phase 5 — Biological system upgrade *(major)*
@@ -393,6 +398,7 @@ before coding.
 | 2026-10-11 | F5 stream flush | to_snapshot restores ChunkStore/side/organism parks first |
 | 2026-10-11 | Stream chunk prune | Drop other seed dirs under saves/stream_chunks on reseed |
 | 2026-10-11 | Stream stack closed | Residency+disk+F5+prune done; next = re-profile / ≥1 ms / width |
+| 2026-10-11 | Body stream gate | Competent float wake + wake regions honor active StreamWindow |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

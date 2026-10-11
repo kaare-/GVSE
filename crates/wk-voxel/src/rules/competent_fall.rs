@@ -2695,6 +2695,10 @@ fn unsupported_settled_floater_cluster(
 /// Cheap floating-only wake across loaded chunks. Air-below competent rock is
 /// always dynamic — without this, F1 defers to competent fall and quiet chunks
 /// never dirty, so sky-painted boulders hang forever.
+///
+/// When [`World::stream_window`] is set, only **active**-band chunk-x is
+/// scanned (far resident floaters wait until the camera returns — same
+/// contract as frozen water dirty).
 pub fn wake_floating_competent(world: &mut World) {
   let cw = CHUNK_CELLS_W as i32;
   let ch = CHUNK_CELLS_H as i32;
@@ -2707,6 +2711,11 @@ pub fn wake_floating_competent(world: &mut World) {
   // leftover bodies cost on a 1000-cell troposphere. A false flag
   // is a skip, not a reason to walk the world.
   for coord in coords {
+    if let Some(win) = world.stream_window {
+      if !win.contains_cx(world, coord.cx) {
+        continue;
+      }
+    }
     let Some(chunk) = world.chunks.get(&coord) else {
       continue;
     };
@@ -3042,6 +3051,10 @@ pub const SEED_PAD_Y: i32 = 6;
 ///
 /// Empty means no rock needs looking at — which is the common case on a
 /// world where only water is moving.
+///
+/// With a stream window: only wake cells in the active band expand into
+/// apply regions; out-of-window wakes are put back on
+/// [`World::competent_wake`] (frozen until the camera returns).
 pub fn competent_wake_regions(world: &mut World, drop_budget: i32) -> Vec<ActiveChunk> {
   if world.competent_wake.is_empty() {
     return Vec::new();
@@ -3049,8 +3062,29 @@ pub fn competent_wake_regions(world: &mut World, drop_budget: i32) -> Vec<Active
   let mut cells = std::mem::take(&mut world.competent_wake);
   cells.sort_unstable();
   cells.dedup();
+  let cells = if let Some(win) = world.stream_window {
+    let mut active = Vec::new();
+    let mut frozen = Vec::new();
+    for (gx, gy) in cells {
+      if win.contains_world_x(world, gx) {
+        active.push((gx, gy));
+      } else {
+        frozen.push((gx, gy));
+      }
+    }
+    if !frozen.is_empty() {
+      world.competent_wake.extend(frozen);
+    }
+    active
+  } else {
+    cells
+  };
+  if cells.is_empty() {
+    return Vec::new();
+  }
   probe::add(&probe::wake_cells, cells.len() as u64);
   let out = expand_regions_to_cells(world, &cells, drop_budget);
+  let out = crate::streaming::filter_plan_to_stream(world, out);
   probe::add(
     &probe::region_cells,
     out
@@ -6149,5 +6183,56 @@ mod tests {
         "fallen stone at ({x},{y}) must be MOBILE_ROCK"
       );
     }
+  }
+
+  #[test]
+  fn stream_window_defers_far_competent_wake() {
+    use crate::streaming::StreamWindow;
+    let cols = 64 * CHUNK_CELLS_W as i32;
+    let mut w = World::new(1);
+    w.wrap_width = Some(cols);
+    let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+    let near_gx = 8;
+    w.set_cell(far_gx, 20, Cell::solid(MaterialId::Stone));
+    w.set_cell(near_gx, 20, Cell::solid(MaterialId::Stone));
+    // Air below both.
+    w.set_cell(far_gx, 19, Cell::air());
+    w.set_cell(near_gx, 19, Cell::air());
+    w.stream_window = Some(StreamWindow::new(0, 128));
+    w.competent_wake_push(far_gx, 20);
+    w.competent_wake_push(near_gx, 20);
+    let regions = competent_wake_regions(&mut w, SEED_PAD_Y);
+    assert!(
+      regions.iter().all(|ac| {
+        let win = w.stream_window.unwrap();
+        win.contains_cx(&w, ac.coord.cx)
+      }),
+      "apply regions must stay in the active band"
+    );
+    assert!(
+      w.competent_wake.iter().any(|&(gx, _)| gx == far_gx),
+      "far wake must remain queued until the camera returns"
+    );
+    assert!(
+      !w.competent_wake.iter().any(|&(gx, _)| gx == near_gx),
+      "near wake should have been consumed into regions"
+    );
+  }
+
+  #[test]
+  fn stream_window_skips_far_floating_cadence_wake() {
+    use crate::streaming::StreamWindow;
+    let cols = 64 * CHUNK_CELLS_W as i32;
+    let mut w = World::new(1);
+    w.wrap_width = Some(cols);
+    let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+    w.set_cell(far_gx, 20, Cell::solid(MaterialId::Stone));
+    w.set_cell(far_gx, 19, Cell::air());
+    w.stream_window = Some(StreamWindow::new(0, 128));
+    wake_floating_competent(&mut w);
+    assert!(
+      w.competent_wake.is_empty(),
+      "far floater must not enter the wake list outside the active band"
+    );
   }
 }
