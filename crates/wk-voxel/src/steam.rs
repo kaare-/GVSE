@@ -780,7 +780,7 @@ fn rebuild_press_field(world: &World, memo: &mut PressMemo) {
     }
     let budget = VOID_FLOOD_BUDGET;
     let mut visited: FxHashSet<(i32, i32)> = FxHashSet::default();
-    let seeds: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let seeds = steam_keys_in_stream(world);
     for (sx, sy) in seeds {
         let sx = world.wrap_x(sx);
         if !visited.insert((sx, sy)) {
@@ -1384,11 +1384,21 @@ pub(crate) fn apply_steam_cadence(
     }
 }
 
+/// Steam seats inside the camera stream band (or all seats when unset).
+fn steam_keys_in_stream(world: &World) -> Vec<(i32, i32)> {
+    world
+        .steam
+        .keys()
+        .copied()
+        .filter(|&(gx, _)| crate::streaming::stream_allows_world_x(world, gx))
+        .collect()
+}
+
 fn recondense_cool(world: &mut World, temp: &Temperature, recondense_below: f32) {
     if world.steam.is_empty() {
         return;
     }
-    let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let keys = steam_keys_in_stream(world);
     for (gx, gy) in keys {
         if temp.at_cell(gx, gy) >= recondense_below {
             continue;
@@ -1470,7 +1480,7 @@ fn flood_equalize_steam(world: &mut World, cfg: &SteamConfig, max_cells: usize) 
     }
     let budget = cfg.void_flood_budget.max(8) as usize;
     let open_plume_max = budget.min(32);
-    let seeds: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let seeds = steam_keys_in_stream(world);
     let mut visited: FxHashSet<(i32, i32)> = FxHashSet::default();
 
     for (sx, sy) in seeds {
@@ -1730,7 +1740,7 @@ pub fn steam_haze_wash(world: &World, temp: Option<&Temperature>) -> Vec<SteamHa
     // 2) Confined / connected voids: ensure the whole pocket's tiles carry
     //    the equalized mass so a cave washes as one vapour field at 4×4.
     let budget = VOID_FLOOD_BUDGET;
-    let seeds: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let seeds = steam_keys_in_stream(world);
     let mut visited: FxHashSet<(i32, i32)> = FxHashSet::default();
     for (sx, sy) in seeds {
         let sx = world.wrap_x(sx);
@@ -2149,6 +2159,11 @@ fn boil_hot_air(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, ma
         .chunks
         .iter()
         .filter(|(coord, c)| {
+            if let Some(win) = world.stream_window {
+                if !win.contains_cx(world, coord.cx) {
+                    return false;
+                }
+            }
             (c.has_wet_air || c.has_standing_air) && chunk_overlaps_hot(temp, **coord, boil)
         })
         .map(|(k, _)| *k)
@@ -2320,7 +2335,14 @@ fn boil_hot_pores(world: &mut World, temp: &mut Temperature, cfg: &SteamConfig, 
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
+        .filter(|(coord, c)| {
+            if let Some(win) = world.stream_window {
+                if !win.contains_cx(world, coord.cx) {
+                    return false;
+                }
+            }
+            c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil)
+        })
         .map(|(k, _)| *k)
         .collect();
     for coord in coords {
@@ -2466,7 +2488,7 @@ fn leak_choked_boiler_mouth(
     }
     let boil = cfg.boil_point_c;
     let expand = cfg.phase_expansion_drive.max(1);
-    let keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let keys = steam_keys_in_stream(world);
     let mut leaked = 0u8;
     for (gx, gy) in keys {
         if leaked >= cfg.max_escapes_per_tick.max(1) {
@@ -3216,7 +3238,7 @@ fn escape_pressurized(
         return 0;
     }
     let min_p = cfg.escape_pressure_min.clamp(0.02, 0.95);
-    let mut keys: Vec<(i32, i32)> = world.steam.keys().copied().collect();
+    let mut keys = steam_keys_in_stream(world);
     keys.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut escapes = 0u8;
     let max_esc = cfg.max_escapes_per_tick.max(1);

@@ -266,9 +266,8 @@ May include ring width / ceiling / streaming follow-ups from
   **~19** full-resident; 5k soak TRACKED flat / `park=0`.
 - Climatic body probe: Compact **~9 ms** bodies are real falls (~35/t).
 - **2026-10-11:** Owner accepted Compact ~19 FPS full-resident gate;
-  streaming — CA + phase + humidity + avalanche/erosion + temp/wind/
-  evap windowed. Compact stretch ~19 → **~43** sim-FPS (view=320).
-  Steam/leftover + eviction store still open.
+  streaming — CA + climate/field shell + steam/leftover cands windowed.
+  Compact stretch ~19 → **~45** sim-FPS (view=320). Eviction store open.
 
 ---
 

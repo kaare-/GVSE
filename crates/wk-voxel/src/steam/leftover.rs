@@ -2486,7 +2486,14 @@ fn rebuild_leftover_field(
     let coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(coord, c)| c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil))
+        .filter(|(coord, c)| {
+            if let Some(win) = world.stream_window {
+                if !win.contains_cx(world, coord.cx) {
+                    return false;
+                }
+            }
+            c.has_wet_pores && chunk_overlaps_hot(temp, **coord, boil)
+        })
         .map(|(k, _)| *k)
         .collect();
     let t_cands = Instant::now();

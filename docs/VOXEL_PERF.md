@@ -394,5 +394,8 @@ re-profile.
    evap **1.5 → 0.14**. Logs:
    `/opt/cursor/artifacts/phase4-stretch-stream-ab.log`,
    `phase4-stretch-stream-temp-ab.log`.
-3. Steam / leftover still full-ring. Body undercut cost is
-   gameplay-shaped — only cut with a playtest dial.
+3. Steam boil/flood/escape + leftover cand scan now honor `StreamWindow`
+   (leftover **0.58 → 0.20** ms on stretch stream A/B). Steam cadence
+   still ~1.3 ms (scrub/assault). After steam slice: wall **52 → 22.4**
+   ms/tick (~19 → **~45** sim-FPS). Log:
+   `phase4-stretch-stream-steam-ab.log`. Body undercut is gameplay-shaped.
