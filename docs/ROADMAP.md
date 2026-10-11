@@ -284,26 +284,18 @@ May include ring width / ceiling / streaming follow-ups from
 
 Pick one before more code (daily 09:00 Oslo lists continue):
 
-1. **Re-profile stretch stream+evict tip** after organism park + disk
-   wire — confirm ~67 sim-FPS still holds; capture new hotspot table
-   (bodies / seepage / steam / organism step).
-2. **Width stretch toward 5 km+** at stream-on (WORLDGEN scale goal) —
-   only after (1) if FPS headroom remains.
-3. **≥1 ms surgical CA/field cut** without weather coarsen — candidates
-   from settle2 table: seepage seam_wake, rock bodies leftover,
-   humidity.advect (see [`VOXEL_PERF.md`](VOXEL_PERF.md)). Prefer
-   measured A/B before shipping.
+1. ~~**Re-profile stretch stream+evict tip**~~ — done (~67 → ~91 after
+   body/seep gates).
+2. ~~**Width stretch toward 5 km+**~~ — probe done; **fails ≥30**
+   (~16 sim-FPS). Blockers: temp **32** + rain **21** ms full-ring.
+3. **Stream-gate temperature + rain** under `StreamWindow` — required
+   for 5 km playable; props refresh / dense slab still walk full width;
+   `apply_rain` `x_range` is full ring. Re-measure
+   `perf_profile_stretch_5km_stream` after.
 4. **Park Phase 4 / open Phase 5 planning** — only if owner wants bio
    major next instead of more scale/FPS.
 
-**Default if no pick:** (1) re-profile, then (2) or (3) from the new
-hotspots.
-
-**Re-profile done (2026-10-11):** stretch stream+evict still ~19 →
-**~67** sim-FPS (chunks 1088 → 459). Stream-on top costs: rock bodies
-**~4.3** ms, seepage **~2.4**, temp **~2.6**, rain **~1.4**, steam
-**~1.2**. Next pick without owner override: surgical bodies/seepage
-cut (≥1 ms) **or** width stretch if playable headroom is enough.
+**Default if no pick:** (3) temp+rain stream gate, then re-run 5 km.
 
 - **2026-10-11:** Competent body wake/apply honors `StreamWindow`
   (far float cadence skipped; out-of-band wakes deferred). Stretch
