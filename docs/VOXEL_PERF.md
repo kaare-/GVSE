@@ -380,10 +380,11 @@ re-profile.
 ### Next Phase 4 steps
 
 1. **Done (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
-   full-resident; started camera `StreamWindow` CA filter
+   full-resident; camera `StreamWindow` CA filter
    ([`WORLDGEN.md`](WORLDGEN.md) streaming). Profile harness / soaks
    stay full-resident (`stream_window = None`).
-2. Re-measure Compact play FPS with streaming on (CA bound by view+halo;
-   field shell still full-ring until windowed).
+2. **Done (2026-10-11):** Phase + humidity advect/lift/mix/oro skip
+   outside the window (far mass stays put). Re-measure Compact play
+   FPS with streaming on; temp/wind/steam/evap still full-ring.
 3. Body undercut cost is gameplay-shaped — only cut with a playtest
    dial, not a blind skip.

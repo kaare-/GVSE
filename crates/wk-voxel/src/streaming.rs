@@ -98,6 +98,40 @@ impl StreamWindow {
             _ => width,
         }
     }
+
+    /// True when world column `gx` lies in the active band (wrap-aware).
+    pub fn contains_world_x(&self, world: &World, gx: i32) -> bool {
+        let gx = match world.wrap_width {
+            Some(w) if w > 0 => gx.rem_euclid(w),
+            _ => gx,
+        };
+        self.contains_cx(world, gx.div_euclid(CHUNK_CELLS_W as i32))
+    }
+
+    /// True when humidity/temp tile column `hx` overlaps the active band.
+    pub fn contains_hx(&self, world: &World, hx: i32, tile_cols: i32) -> bool {
+        let tc = tile_cols.max(1);
+        // Tile centre in world cells — same band as CA chunk filter.
+        self.contains_world_x(world, hx * tc + tc / 2)
+    }
+}
+
+/// `true` when there is no stream window, or `gx` is inside it.
+#[inline]
+pub fn stream_allows_world_x(world: &World, gx: i32) -> bool {
+    match world.stream_window {
+        Some(win) => win.contains_world_x(world, gx),
+        None => true,
+    }
+}
+
+/// `true` when there is no stream window, or humidity tile `hx` is inside it.
+#[inline]
+pub fn stream_allows_hx(world: &World, hx: i32, tile_cols: i32) -> bool {
+    match world.stream_window {
+        Some(win) => win.contains_hx(world, hx, tile_cols),
+        None => true,
+    }
 }
 
 /// Drop planned regions whose chunk-x is outside the world's stream window.
@@ -182,5 +216,22 @@ mod tests {
         let plan = vec![ActiveChunk::new(ChunkCoord::new(32, 0), Rect::full())];
         let filtered = filter_plan_to_stream(&w, plan.clone());
         assert_eq!(filtered, plan);
+    }
+
+    #[test]
+    fn world_x_and_hx_match_chunk_band() {
+        let w = ring_world(64 * CHUNK_CELLS_W as i32);
+        let win = StreamWindow::new(0, 128);
+        assert!(win.contains_world_x(&w, 10));
+        assert!(win.contains_world_x(&w, 64 * CHUNK_CELLS_W as i32 - 1));
+        assert!(!win.contains_world_x(&w, 32 * CHUNK_CELLS_W as i32));
+        // tile_cols=4 → hx=0 centre at world x=2 (active); hx=512 at x=2048+2 (frozen).
+        assert!(win.contains_hx(&w, 0, 4));
+        assert!(!win.contains_hx(&w, 512, 4));
+        assert!(stream_allows_world_x(&w, 32 * CHUNK_CELLS_W as i32)); // no window on w
+        let mut w2 = w;
+        w2.stream_window = Some(win);
+        assert!(!stream_allows_world_x(&w2, 32 * CHUNK_CELLS_W as i32));
+        assert!(!stream_allows_hx(&w2, 512, 4));
     }
 }

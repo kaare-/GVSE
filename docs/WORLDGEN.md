@@ -380,13 +380,17 @@ local wetness once wetness is available.
 ## Chunk streaming: view / active / resident / evicted tiers
 
 **Phase 4 status (2026-10-11):** Owner accepted Compact **~19 sim-FPS**
-as the full-resident gate. First streaming slice landed:
-**active-only CA physics** (`StreamWindow` on `World`, filter in
-`plan_active`, `clear_planned_dirty` so frozen dirty survives). Play
-app sets the window from `cam_x` + screen width (Tab → Performance
-toggle). Still **full RAM residency** — no eviction store, no
-`FrozenBacklog`, climate/field shell not yet windowed. Next: bound
-field-shell cost and/or in-memory resident store.
+as the full-resident gate. Streaming slices landed:
+
+1. **Active-only CA** — `StreamWindow` filters `plan_active`;
+   `clear_planned_dirty` keeps frozen dirty.
+2. **Field shell (partial)** — phase columns + humidity advect / lift /
+   mix / oro skip tiles outside the window (mass stays put). Play app
+   sets the window from `cam_x` + screen width (Tab → Performance).
+
+Still **full RAM residency** — no eviction store, no `FrozenBacklog`.
+Temp / wind rebuild / steam / evap still full-ring. Next: window those
+or add in-memory resident store.
 
 Concretely, at any moment there are four sets of chunks:
 

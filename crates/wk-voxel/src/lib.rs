@@ -53,7 +53,8 @@ pub mod worldgen;
 
 pub use active::{clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk};
 pub use streaming::{
-    clear_planned_dirty, filter_plan_to_stream, StreamWindow, HALO_CHUNKS, RESIDENT_MARGIN_CHUNKS,
+    clear_planned_dirty, filter_plan_to_stream, stream_allows_hx, stream_allows_world_x,
+    StreamWindow, HALO_CHUNKS, RESIDENT_MARGIN_CHUNKS,
 };
 pub use atmosphere_metrics::{
     apply_weather_rgb, carbon_ratio, cloud_sky_transmit, column_surface_lee, humidity_mean_norm,
