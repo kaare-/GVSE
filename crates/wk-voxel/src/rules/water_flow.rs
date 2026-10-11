@@ -257,7 +257,8 @@ fn commit_air_sat_xfers(world: &mut World, xfers: &mut [((i32, i32), (i32, i32),
             if src.material == MaterialId::Air
                 && crate::frozen_backlog::should_absorb_missing(world, to.0, to.1)
             {
-                let give = amt.min(src.sat.0 as i32);
+                let donor_before = src.sat.0;
+                let give = amt.min(donor_before as i32);
                 if give > 0 {
                     world.set_cell(
                         from.0,
@@ -267,7 +268,14 @@ fn commit_air_sat_xfers(world: &mut World, xfers: &mut [((i32, i32), (i32, i32),
                             ..src
                         },
                     );
-                    crate::frozen_backlog::absorb_water(world, to.0, to.1, give);
+                    crate::frozen_backlog::absorb_water(
+                        world,
+                        from,
+                        to.0,
+                        to.1,
+                        give,
+                        donor_before,
+                    );
                 }
             }
             continue;

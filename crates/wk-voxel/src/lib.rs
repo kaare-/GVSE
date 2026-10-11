@@ -58,7 +58,8 @@ pub use chunk_store::{
     restore_all_from_store, sync_residency, ChunkStore, SideMapStore, SyncResidencyStats,
 };
 pub use frozen_backlog::{
-    absorb_water, apply_frozen_backlog, frozen_backlog_total, should_absorb_missing, FrozenBacklog,
+    absorb_water, apply_frozen_backlog, frozen_backlog_dissolved_total, frozen_backlog_sediment_total,
+    frozen_backlog_total, should_absorb_missing, FrozenBacklog,
 };
 pub use streaming::{
     clear_planned_dirty, filter_plan_to_stream, stream_allows_hx, stream_allows_world_x,
