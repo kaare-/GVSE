@@ -399,7 +399,7 @@ re-profile.
    still ~1.3 ms (scrub/assault). After steam slice: wall **52 → 22.4**
    ms/tick (~19 → **~45** sim-FPS). Log:
    `phase4-stretch-stream-steam-ab.log`. Body undercut is gameplay-shaped.
-4. **In-memory `ChunkStore`** + `sync_residency` (resident = active +
-   `RESIDENT_MARGIN_CHUNKS`). Play loop syncs when stream-active is on;
-   far `set_cell` reloads or skips blank remint. Next: park side maps /
-   `FrozenBacklog`.
+4. **In-memory `ChunkStore` + `SideMapStore`** + `sync_residency`
+   (resident = active + `RESIDENT_MARGIN_CHUNKS`). Play loop syncs when
+   stream-active is on; far `set_cell` reloads or skips blank remint;
+   mass/heat sparse maps park with chunks. Next: `FrozenBacklog`.

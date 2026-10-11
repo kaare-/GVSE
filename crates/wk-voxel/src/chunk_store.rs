@@ -7,8 +7,9 @@
 //!
 //! Play app calls [`sync_residency`] when stream-active physics is on.
 //! [`restore_all_from_store`] runs when streaming turns off. TRACKED soaks
-//! keep `stream_window = None` (no-op). Side maps (steam, dissolved, …)
-//! stay full-resident; WORLDGEN `FrozenBacklog` is still open.
+//! keep `stream_window = None` (no-op). Mass-carrying sparse side maps
+//! (steam, dissolved, pipe, …) park with chunks via [`SideMapStore`].
+//! WORLDGEN `FrozenBacklog` is still open.
 //!
 //! Far [`World::set_cell`](crate::grid::World::set_cell) reloads from the
 //! store or skips blank remint outside the resident band.
@@ -24,11 +25,59 @@ pub struct ChunkStore {
     bytes: FxHashMap<ChunkCoord, Vec<u8>>,
 }
 
+/// Parked sparse `(gx, gy)` / column books for far resident eviction.
+///
+/// Keeps TRACKED-ish mass ledgers from orphaning when cells leave RAM.
+/// Mycelium / spore / organism books stay live (follow-up).
+#[derive(Debug, Clone, Default)]
+pub struct SideMapStore {
+    pub steam: FxHashMap<(i32, i32), u8>,
+    pub cave_humidity: FxHashMap<(i32, i32), u8>,
+    pub dissolved: FxHashMap<(i32, i32), u16>,
+    pub suspended: FxHashMap<(i32, i32), u16>,
+    pub pore_ice: FxHashMap<(i32, i32), u8>,
+    pub water_temp: FxHashMap<(i32, i32), f32>,
+    pub pipe_steam: FxHashMap<(i32, i32), u32>,
+    pub pipe_res: FxHashMap<(i32, i32), u32>,
+    pub pipe_steam_t: FxHashMap<(i32, i32), f32>,
+    pub soft_litter: FxHashMap<i32, u16>,
+}
+
+impl SideMapStore {
+    pub fn is_empty(&self) -> bool {
+        self.steam.is_empty()
+            && self.cave_humidity.is_empty()
+            && self.dissolved.is_empty()
+            && self.suspended.is_empty()
+            && self.pore_ice.is_empty()
+            && self.water_temp.is_empty()
+            && self.pipe_steam.is_empty()
+            && self.pipe_res.is_empty()
+            && self.pipe_steam_t.is_empty()
+            && self.soft_litter.is_empty()
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.steam.len()
+            + self.cave_humidity.len()
+            + self.dissolved.len()
+            + self.suspended.len()
+            + self.pore_ice.len()
+            + self.water_temp.len()
+            + self.pipe_steam.len()
+            + self.pipe_res.len()
+            + self.pipe_steam_t.len()
+            + self.soft_litter.len()
+    }
+}
+
 /// Counts from one [`sync_residency`] pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyncResidencyStats {
     pub evicted: usize,
     pub reloaded: usize,
+    pub side_parked: usize,
+    pub side_restored: usize,
 }
 
 impl ChunkStore {
@@ -65,8 +114,147 @@ impl ChunkStore {
     }
 }
 
+fn park_xy<V>(
+    live: &mut FxHashMap<(i32, i32), V>,
+    park: &mut FxHashMap<(i32, i32), V>,
+    wrap_width: Option<i32>,
+    win: StreamWindow,
+) -> usize {
+    let keys: Vec<(i32, i32)> = live
+        .keys()
+        .copied()
+        .filter(|&(gx, _)| win.world_x_outside_resident(wrap_width, gx))
+        .collect();
+    let mut n = 0;
+    for k in keys {
+        if let Some(v) = live.remove(&k) {
+            park.insert(k, v);
+            n += 1;
+        }
+    }
+    n
+}
+
+fn restore_xy<V>(
+    live: &mut FxHashMap<(i32, i32), V>,
+    park: &mut FxHashMap<(i32, i32), V>,
+    wrap_width: Option<i32>,
+    win: Option<StreamWindow>,
+) -> usize {
+    let keys: Vec<(i32, i32)> = park
+        .keys()
+        .copied()
+        .filter(|&(gx, _)| match win {
+            None => true,
+            Some(w) => !w.world_x_outside_resident(wrap_width, gx),
+        })
+        .collect();
+    let mut n = 0;
+    for k in keys {
+        if let Some(v) = park.remove(&k) {
+            live.insert(k, v);
+            n += 1;
+        }
+    }
+    n
+}
+
+fn park_col<V>(
+    live: &mut FxHashMap<i32, V>,
+    park: &mut FxHashMap<i32, V>,
+    wrap_width: Option<i32>,
+    win: StreamWindow,
+) -> usize {
+    let keys: Vec<i32> = live
+        .keys()
+        .copied()
+        .filter(|&gx| win.world_x_outside_resident(wrap_width, gx))
+        .collect();
+    let mut n = 0;
+    for k in keys {
+        if let Some(v) = live.remove(&k) {
+            park.insert(k, v);
+            n += 1;
+        }
+    }
+    n
+}
+
+fn restore_col<V>(
+    live: &mut FxHashMap<i32, V>,
+    park: &mut FxHashMap<i32, V>,
+    wrap_width: Option<i32>,
+    win: Option<StreamWindow>,
+) -> usize {
+    let keys: Vec<i32> = park
+        .keys()
+        .copied()
+        .filter(|&gx| match win {
+            None => true,
+            Some(w) => !w.world_x_outside_resident(wrap_width, gx),
+        })
+        .collect();
+    let mut n = 0;
+    for k in keys {
+        if let Some(v) = park.remove(&k) {
+            live.insert(k, v);
+            n += 1;
+        }
+    }
+    n
+}
+
+fn sync_side_maps(world: &mut World, win: StreamWindow) -> (usize, usize) {
+    let wrap = world.wrap_width;
+    let mut parked = 0;
+    let mut restored = 0;
+    let mut store = std::mem::take(&mut world.side_map_store);
+    parked += park_xy(&mut world.steam, &mut store.steam, wrap, win);
+    parked += park_xy(&mut world.cave_humidity, &mut store.cave_humidity, wrap, win);
+    parked += park_xy(&mut world.dissolved, &mut store.dissolved, wrap, win);
+    parked += park_xy(&mut world.suspended, &mut store.suspended, wrap, win);
+    parked += park_xy(&mut world.pore_ice, &mut store.pore_ice, wrap, win);
+    parked += park_xy(&mut world.water_temp, &mut store.water_temp, wrap, win);
+    parked += park_xy(&mut world.pipe_steam, &mut store.pipe_steam, wrap, win);
+    parked += park_xy(&mut world.pipe_res, &mut store.pipe_res, wrap, win);
+    parked += park_xy(&mut world.pipe_steam_t, &mut store.pipe_steam_t, wrap, win);
+    parked += park_col(&mut world.soft_litter, &mut store.soft_litter, wrap, win);
+
+    restored += restore_xy(&mut world.steam, &mut store.steam, wrap, Some(win));
+    restored += restore_xy(&mut world.cave_humidity, &mut store.cave_humidity, wrap, Some(win));
+    restored += restore_xy(&mut world.dissolved, &mut store.dissolved, wrap, Some(win));
+    restored += restore_xy(&mut world.suspended, &mut store.suspended, wrap, Some(win));
+    restored += restore_xy(&mut world.pore_ice, &mut store.pore_ice, wrap, Some(win));
+    restored += restore_xy(&mut world.water_temp, &mut store.water_temp, wrap, Some(win));
+    restored += restore_xy(&mut world.pipe_steam, &mut store.pipe_steam, wrap, Some(win));
+    restored += restore_xy(&mut world.pipe_res, &mut store.pipe_res, wrap, Some(win));
+    restored += restore_xy(&mut world.pipe_steam_t, &mut store.pipe_steam_t, wrap, Some(win));
+    restored += restore_col(&mut world.soft_litter, &mut store.soft_litter, wrap, Some(win));
+    world.side_map_store = store;
+    (parked, restored)
+}
+
+fn restore_all_side_maps(world: &mut World) -> usize {
+    let wrap = world.wrap_width;
+    let mut store = std::mem::take(&mut world.side_map_store);
+    let mut n = 0;
+    n += restore_xy(&mut world.steam, &mut store.steam, wrap, None);
+    n += restore_xy(&mut world.cave_humidity, &mut store.cave_humidity, wrap, None);
+    n += restore_xy(&mut world.dissolved, &mut store.dissolved, wrap, None);
+    n += restore_xy(&mut world.suspended, &mut store.suspended, wrap, None);
+    n += restore_xy(&mut world.pore_ice, &mut store.pore_ice, wrap, None);
+    n += restore_xy(&mut world.water_temp, &mut store.water_temp, wrap, None);
+    n += restore_xy(&mut world.pipe_steam, &mut store.pipe_steam, wrap, None);
+    n += restore_xy(&mut world.pipe_res, &mut store.pipe_res, wrap, None);
+    n += restore_xy(&mut world.pipe_steam_t, &mut store.pipe_steam_t, wrap, None);
+    n += restore_col(&mut world.soft_litter, &mut store.soft_litter, wrap, None);
+    world.side_map_store = store;
+    n
+}
+
 /// Evict chunks outside the resident band; reload parked ones that re-enter.
 ///
+/// Also parks / restores mass-carrying sparse side maps ([`SideMapStore`]).
 /// No-op when [`World::stream_window`] is `None` (headless / TRACKED path)
 /// or when the active band already covers the whole ring.
 pub fn sync_residency(world: &mut World) -> Result<SyncResidencyStats, String> {
@@ -124,10 +312,14 @@ pub fn sync_residency(world: &mut World) -> Result<SyncResidencyStats, String> {
         world.invalidate_chunk_cache_pub();
     }
 
+    let (side_parked, side_restored) = sync_side_maps(world, win);
+    stats.side_parked = side_parked;
+    stats.side_restored = side_restored;
+
     Ok(stats)
 }
 
-/// Reload every parked chunk into [`World::chunks`] (stream off / full-resident).
+/// Reload every parked chunk + side map (stream off / full-resident).
 pub fn restore_all_from_store(world: &mut World) -> Result<usize, String> {
     let keys: Vec<ChunkCoord> = world.chunk_store.bytes.keys().copied().collect();
     let mut n = 0;
@@ -144,6 +336,7 @@ pub fn restore_all_from_store(world: &mut World) -> Result<usize, String> {
     if n > 0 {
         world.invalidate_chunk_cache_pub();
     }
+    n += restore_all_side_maps(world);
     Ok(n)
 }
 
@@ -309,5 +502,31 @@ mod tests {
                 .map(|c| c.material),
             Some(MaterialId::Sand)
         );
+    }
+
+    #[test]
+    fn sync_parks_and_restores_far_steam() {
+        let cols = 64 * CHUNK_CELLS_W as i32;
+        let mut w = ring_world(cols);
+        let far_gx = 32 * CHUNK_CELLS_W as i32 + 8;
+        w.set_cell(far_gx, 8, Cell::solid(MaterialId::Stone));
+        w.steam.insert((far_gx, 10), 40);
+        w.dissolved.insert((far_gx, 8), 12);
+        w.soft_litter.insert(far_gx, 3);
+        w.stream_window = Some(StreamWindow::new(0, 128));
+        let stats = sync_residency(&mut w).expect("evict");
+        assert!(stats.side_parked >= 3, "steam+dissolved+litter: {stats:?}");
+        assert!(!w.steam.contains_key(&(far_gx, 10)));
+        assert!(!w.dissolved.contains_key(&(far_gx, 8)));
+        assert!(!w.soft_litter.contains_key(&far_gx));
+        assert_eq!(w.side_map_store.steam.get(&(far_gx, 10)), Some(&40));
+
+        w.stream_window = Some(StreamWindow::new(far_gx, 128));
+        let stats2 = sync_residency(&mut w).expect("reload");
+        assert!(stats2.side_restored >= 3, "{stats2:?}");
+        assert_eq!(w.steam.get(&(far_gx, 10)), Some(&40));
+        assert_eq!(w.dissolved.get(&(far_gx, 8)), Some(&12));
+        assert_eq!(w.soft_litter.get(&far_gx), Some(&3));
+        assert!(w.side_map_store.steam.is_empty());
     }
 }

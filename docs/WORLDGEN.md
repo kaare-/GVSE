@@ -394,12 +394,13 @@ as the full-resident gate. Streaming slices landed:
 Steam boil + leftover cands windowed. Compact stretch stream ~19 →
 **~45** sim-FPS (view=320).
 
-3. **In-memory `ChunkStore`** — postcard park/reload for chunks outside
-   the resident band. Play app calls `sync_residency` when stream-active
-   physics is on; `restore_all_from_store` when it turns off. Far
-   `set_cell` reloads from the store or skips blank remint outside the
-   resident band. Side-map parking + `FrozenBacklog` still open.
-   TRACKED soaks stay full-resident (`stream_window = None`).
+3. **In-memory `ChunkStore` + `SideMapStore`** — postcard park/reload for
+   chunks outside the resident band; mass/heat sparse maps (steam,
+   dissolved, pipe, soft litter, …) park with them. Play app calls
+   `sync_residency` when stream-active physics is on;
+   `restore_all_from_store` when it turns off. Far `set_cell` reloads
+   or skips blank remint. Mycelium/spore parking + `FrozenBacklog`
+   still open. TRACKED soaks stay full-resident (`stream_window = None`).
 
 Concretely, at any moment there are four sets of chunks:
 
