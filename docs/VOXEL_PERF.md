@@ -408,4 +408,6 @@ re-profile.
    ms/tick (~19 → **~67** sim-FPS); loaded chunks **1088 → 459**
    (store=629). Log: `phase4-stretch-stream-evict-ab.log`. FrozenBacklog
    also carries suspended/dissolved loads; mycelium + spore bank park
-   with SideMapStore. Next: organism ECS parking.
+   with SideMapStore. **Streaming residency closed** at ~67 sim-FPS
+   stretch+evict. Next Phase 4: organism ECS parking (or other ≥1 ms
+   levers); disk store deferred.
