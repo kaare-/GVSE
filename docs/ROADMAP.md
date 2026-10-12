@@ -387,5 +387,6 @@ before coding.
 - Phase-1 stretch width / field-shell cuts: **closed with Phase 4** (5 km stream-on).
 - Phase 3 ice option 2 slices A–C + brittle/sheet/lid: closed with Phase 3.
 - Optional Phase-4 leftovers (5 km wind.rebuild / rock bodies): only if owner wants more FPS.
-- Phase-5 scoping agenda — draft in [`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md); owner pick before code.
+- Phase-5 E2 remaining: epiphytes + ghost-root fill
+  ([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)).
 - Phase-8 shortlist of client stacks when that review starts.
