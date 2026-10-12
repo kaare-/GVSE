@@ -339,9 +339,9 @@ rock stale drop; soak park=0 / preferential=0.
 **Exit criteria (proposed):** visual acceptance on Xvfb/playtest;
 no sim-mass regressions from lighting-only work.
 
-**Wedge A–B closed (2026-10-12).** **Wedge C (2026-10-12):**
-[`PHASE7_SCOPE.md`](PHASE7_SCOPE.md) — season dial (sky day-length +
-tint; sim clock unchanged). Owner may redirect (E2 / D).
+**Wedges A–C closed (2026-10-12).** Season dial sky-only + Xvfb +
+3k soak park=0. Default next wedge **D** (water glitter) or owner
+redirect (E2). See [`PHASE7_SCOPE.md`](PHASE7_SCOPE.md).
 
 ---
 
@@ -419,6 +419,7 @@ before coding.
 | 2026-10-12 | Phase 7 B locked | Sundown cast / terrain lee (agent default) |
 | 2026-10-12 | Phase 7 B closed | Low-sun cast + terrain lee + warm key; 3k soak park=0; next C |
 | 2026-10-12 | Phase 7 C locked | Season dial (sky-only day length + tint) |
+| 2026-10-12 | Phase 7 C closed | Summer/winter Xvfb + 3k soak park=0; next D |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

@@ -36,10 +36,10 @@ over sim rewrites. Kernel stays MS Paint 1×.
 - [x] Wedges A–B closed.
 - [x] Wedge C locked (agent default).
 - [x] Slices 1–4 landed with unit tests where cheap.
-- [ ] At least one Xvfb winter/summer pair.
-- [ ] No sim-mass regressions (short soak park=0 still green).
+- [x] Xvfb winter/summer pair under `/opt/cursor/artifacts/`.
+- [x] Short soak park=0 (3000t: TRACKED −0.02/t, min +0.02/t, park=0).
 
-## Landed (wedge C code)
+## Landed (wedge C)
 
 | Slice | Where |
 |-------|--------|
@@ -48,6 +48,13 @@ over sim rewrites. Kernel stays MS Paint 1×.
 | Seasonal sky tint | `apply_season_sky_tint` + winter star density |
 | Tab dial | auto + manual; `GVSE_FORCE_SEASON` for stills |
 
+### Xvfb evidence (2026-10-12)
+
+| Still | Season | Reads |
+|-------|--------|-------|
+| `phase7-season-01-summer.png` | 0.25 | Warmer/brighter day sky |
+| `phase7-season-02-winter.png` | 0.75 | Cooler day sky |
+
 ## Non-goals
 
 Water glitter (D), Phase 8 client, seasonal leaf drop / wood rings,
@@ -55,6 +62,7 @@ sim temperature season amp — see [`ROADMAP.md`](ROADMAP.md).
 
 ## Decision list (2026-10-12)
 
-1. **Wedge C in progress** — season dial (sky-only).
+1. **Wedge C closed for agent** — season dial + Xvfb + soak; default
+   next wedge **D** (water glitter) or owner pick.
 2. Optional: E2 tipped grey-log owner visual (Phase 5 leftover).
-3. Optional: wedge D after C parks or owner redirects.
+3. Optional: wedge D after owner redirect.
