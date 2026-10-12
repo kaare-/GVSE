@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 use wk_voxel::{
     apply_season_sky_tint, celestial_local_cfg, climate_with_season, day_night_factor_cfg,
     is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, season_fraction_cfg,
-    sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, step_world, CarbonBudget, CarbonConfig,
-    ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig,
-    FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity, KarstConfig, LandscapeBodyStore,
-    OrganismStore, PerfConfig, PhaseConfig, SteamConfig, StreamWindow, SupportMap, Temperature,
-    Wind, World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W,
+    sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, step_world, sync_residency,
+    CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig,
+    CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity,
+    KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SteamConfig,
+    StreamWindow, SupportMap, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams,
+    CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
@@ -27,6 +28,8 @@ const HUMIDITY_TILE_COLS: i32 = 4;
 const CLIMATE_WIND_VX: f32 = 0.05;
 /// Default max sim rate while the viewer presents (~20 Hz).
 pub const DEFAULT_STEP_PERIOD_MS: u64 = 50;
+/// Camera window width for Compact stream (matches Phase 6 stream probes).
+pub const COMPACT_VIEW_COLS: i32 = 320;
 
 /// Camera-window RGBA strip (row-major, y=0 at top / high world-y).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,8 +147,8 @@ pub struct Host {
     product_step: bool,
 }
 
-/// Small ring world for the client host (fast stamp; not Compact soak size).
-pub fn client_worldgen_params() -> WorldgenParams {
+/// Tiny ring for unit tests / fast CI (not Compact).
+pub fn client_dev_worldgen_params() -> WorldgenParams {
     WorldgenParams {
         seed: 0xC1A_5E08,
         width_cols: (CHUNK_CELLS_W as i32) * 4,
@@ -160,13 +163,32 @@ pub fn client_worldgen_params() -> WorldgenParams {
     }
 }
 
+/// WORLDGEN Compact ring — 64 chunks / 4096 cols × tropopause (~1 km).
+///
+/// Same shape as the soak / perf Compact stretch. Viewer streams a
+/// [`COMPACT_VIEW_COLS`] window and parks far chunks via `sync_residency`.
+pub fn compact_worldgen_params() -> WorldgenParams {
+    WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 64,
+        sky_ceiling_y: TROPOSPHERE_TOP_Y + STRATOSPHERE_CELLS,
+        ..WorldgenParams::default()
+    }
+}
+
 impl Default for Host {
     fn default() -> Self {
-        Self::new(client_worldgen_params())
+        Self::new(compact_worldgen_params())
     }
 }
 
 impl Host {
+    /// Fast host for unit tests (small stamp; no Compact RAM).
+    pub fn for_tests() -> Self {
+        let mut host = Self::new(client_dev_worldgen_params());
+        host.step_period = Duration::ZERO;
+        host
+    }
+
     pub fn new(params: WorldgenParams) -> Self {
         let mut world = World::new(params.seed);
         stamp_world(&mut world, &params);
@@ -204,6 +226,7 @@ impl Host {
         let mut support = SupportMap::new();
         support.rebuild(&world);
         let focus_col = params.width_cols / 2;
+        let compact = params.width_cols >= (CHUNK_CELLS_W as i32) * 64;
         let climate = climate_with_season(
             &ClimateConfig {
                 day_ticks: 180,
@@ -211,7 +234,12 @@ impl Host {
             },
             0.35,
         );
-        Self {
+        let view_cols = if compact {
+            COMPACT_VIEW_COLS.min(params.width_cols)
+        } else {
+            96.min(params.width_cols)
+        };
+        let mut host = Self {
             world,
             params,
             humidity,
@@ -238,7 +266,7 @@ impl Host {
             competent: CompetentFallConfig::default(),
             paused: false,
             focus_col,
-            view_cols: 96,
+            view_cols,
             quit_requested: false,
             step_period: Duration::from_millis(DEFAULT_STEP_PERIOD_MS),
             next_ack_id: 1,
@@ -248,7 +276,21 @@ impl Host {
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
             product_step: true,
+        };
+        // Compact stamp is full-width; park far chunks before the first frame.
+        if compact {
+            host.arm_stream_window();
+            let _ = sync_residency(&mut host.world);
         }
+        host
+    }
+
+    fn arm_stream_window(&mut self) {
+        let half = self.view_cols / 2;
+        self.world.stream_window = Some(StreamWindow::new(
+            self.focus_col.wrapping_sub(half),
+            self.view_cols.max(1),
+        ));
     }
 
     pub fn world_height(&self) -> i32 {
@@ -314,13 +356,15 @@ impl Host {
         }
     }
 
+    pub fn is_compact(&self) -> bool {
+        self.params.width_cols >= (CHUNK_CELLS_W as i32) * 64
+    }
+
     fn step_once(&mut self) {
         let t0 = Instant::now();
-        let half = self.view_cols / 2;
-        self.world.stream_window = Some(StreamWindow::new(
-            self.focus_col.wrapping_sub(half),
-            self.view_cols.max(1),
-        ));
+        self.arm_stream_window();
+        // Park far chunks under the camera window (Compact RAM).
+        let _ = sync_residency(&mut self.world);
         let _ = step_world(
             WorldStep {
                 world: &mut self.world,
@@ -385,10 +429,22 @@ impl Host {
 
     fn extract_terrain(&self, sky: &SkyPresent) -> TerrainStrip {
         let cols = self.view_cols.max(1) as u32;
-        let rows = self.world_height() as u32;
+        // Full column height for small worlds; Compact extracts a band
+        // around sea level so the strip stays viewer-sized (~view×384).
+        let (origin_y, rows) = if self.is_compact() {
+            let band = 384i32;
+            let mid = self.params.sea_level_y;
+            let lo = (mid - band / 2).max(self.params.bedrock_floor_y);
+            let hi = (lo + band).min(self.params.sky_ceiling_y);
+            (lo, (hi - lo).max(1) as u32)
+        } else {
+            (
+                self.params.bedrock_floor_y,
+                self.world_height() as u32,
+            )
+        };
         let half = self.view_cols / 2;
         let origin_col = self.focus_col.wrapping_sub(half);
-        let origin_y = self.params.bedrock_floor_y;
         let dn = sky.day_night();
         let phase = sky.phase_u8 as f32 / 255.0;
         let mut rgba = vec![0u8; (cols as usize) * (rows as usize) * 4];
@@ -463,16 +519,9 @@ impl Host {
 mod tests {
     use super::*;
 
-    fn test_host() -> Host {
-        let mut host = Host::default();
-        // No wall throttle in unit tests.
-        host.step_period = Duration::ZERO;
-        host
-    }
-
     #[test]
     fn pause_stops_auto_tick() {
-        let mut host = test_host();
+        let mut host = Host::for_tests();
         let t0 = host.frame().sim_tick;
         let t1 = host.frame().sim_tick;
         assert!(t1 > t0);
@@ -486,7 +535,7 @@ mod tests {
 
     #[test]
     fn camera_rejects_non_positive_view() {
-        let mut host = test_host();
+        let mut host = Host::for_tests();
         let before = host.view_cols;
         let ack = host.apply(ClientCommand::SetCamera {
             focus_col: 10,
@@ -498,12 +547,13 @@ mod tests {
 
     #[test]
     fn view_schema_and_strip() {
-        let mut host = test_host();
+        let mut host = Host::for_tests();
         host.apply(ClientCommand::SetPaused(true));
         let frame = host.frame();
         assert!(frame.schema_ok());
         assert_eq!(frame.contract_version, VIEW_SCHEMA);
         assert!(frame.product_step);
+        assert!(!host.is_compact());
         assert_eq!(frame.terrain.cols, host.view_cols as u32);
         assert_eq!(frame.terrain.rows, host.world_height() as u32);
         assert!(frame.terrain.rgba.iter().any(|&b| b != 0));
@@ -512,7 +562,7 @@ mod tests {
 
     #[test]
     fn sky_tracks_tick() {
-        let mut host = test_host();
+        let mut host = Host::for_tests();
         host.apply(ClientCommand::SetPaused(true));
         let a = host.frame().sky.clone();
         for _ in 0..90 {
@@ -527,12 +577,20 @@ mod tests {
 
     #[test]
     fn product_step_advances_world_tick() {
-        let mut host = test_host();
+        let mut host = Host::for_tests();
         host.apply(ClientCommand::SetPaused(true));
         let t0 = host.frame().sim_tick;
         host.apply(ClientCommand::StepOnce);
         let frame = host.frame();
         assert!(frame.product_step);
         assert!(frame.sim_tick > t0);
+    }
+
+    #[test]
+    fn compact_params_shape() {
+        let p = compact_worldgen_params();
+        assert_eq!(p.width_cols, (CHUNK_CELLS_W as i32) * 64);
+        assert!(p.sky_ceiling_y >= TROPOSPHERE_TOP_Y);
+        assert!(p.wrap_x);
     }
 }

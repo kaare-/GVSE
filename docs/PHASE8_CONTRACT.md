@@ -160,7 +160,10 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
 - [x] Fuller palette (wetness / perm / mycelium) + water glitter on tops.
 - [x] Host uses product [`step_world`] (climate fields); viewer throttled
       present (`VIEW_SCHEMA` 4 + `product_step`).
-- [ ] Later: Compact-sized host world / separate host process.
+- [x] Compact host world: default stamp 4096×tropopause; `StreamWindow` +
+      `sync_residency` under camera; strip band ~384 around sea level;
+      `Host::for_tests()` keeps tiny ring for CI.
+- [ ] Later: separate host process / packaging.
 
 ## Non-goals
 
@@ -185,5 +188,6 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 3. [x] Sky present on A.
 4. [x] Fuller palette / water glitter on A.
 5. [x] Host `step_world` + viewer framing (`VIEW_SCHEMA` 4).
-6. Grow toward Compact / out-of-process host when ready.
-7. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+6. [x] Compact-sized in-process host + stream residency.
+7. Out-of-process host / ship packaging when ready.
+8. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.

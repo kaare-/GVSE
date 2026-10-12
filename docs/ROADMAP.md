@@ -357,9 +357,9 @@ ownership split. **Stack pick:** ship = **A egui+wgpu/winit**; soak/dev
 = **macroquad** ([`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md)).
 **Contract:** [`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md) (`ViewFrame` +
 `ClientCommand`). **Viewer client:** `wk-voxel-client` (egui+wgpu; strip + sky + palette;
-host `step_world`, `VIEW_SCHEMA` 4). **Owner:** client = viewer / camera /
-limited commands; host = sim. **Next:** Compact host, packaging, or
-out-of-process. Soak stays macroquad.
+host `step_world` on Compact + stream/park, `VIEW_SCHEMA` 4). **Owner:**
+client = viewer / camera / limited commands; host = sim. **Next:**
+packaging, out-of-process host, or redirect. Soak stays macroquad.
 
 ---
 
@@ -441,6 +441,7 @@ out-of-process. Soak stays macroquad.
 | 2026-10-12 | Phase 8 palette/glitter | App-aligned cell colours + water glitter on A client |
 | 2026-10-12 | Phase 8 A parked | Present path landed #425–#430; owner pick next wedge |
 | 2026-10-12 | Phase 8 viewer+host | Client = viewer; host `step_world`; VIEW_SCHEMA 4 |
+| 2026-10-12 | Phase 8 Compact host | Default Host stamps Compact + stream/park; strip band ~384; tests `for_tests()` |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
