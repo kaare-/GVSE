@@ -288,8 +288,9 @@ organisms-off).
 
 **Wedge accepted (2026-10-12):** Set E2 — see
 [`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md). E2 stack through
-ghost-root fill (E44) landed. Next: E2 closeout (organisms-on soak /
-stream park check) + daily 09:00 Oslo lists.
+ghost-root fill (E44) landed; organisms-on short soak gate passed
+(TRACKED −0.01/t, park=0). Remaining owner visual for tipped grey logs.
+Daily 09:00 Oslo lists continue.
 
 ---
 
@@ -377,6 +378,8 @@ before coding.
 | 2026-10-12 | E2 epi seating | Habitat spawn on host Stem; unseated death |
 | 2026-10-12 | E2 HostLeave | Same-column epiphyte smother shade via host_leave |
 | 2026-10-12 | E2 attach_prefer | Sticky Holdfast reseat on nearby Stem |
+| 2026-10-12 | E2 ghost-root | Organic residue→Void→Loose + preferential re-root (E44) |
+| 2026-10-12 | E2 org soak gate | 600t / 48 plants: TRACKED −0.01/t, park=0, living=50 |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
@@ -391,6 +394,6 @@ before coding.
 - Phase-1 stretch width / field-shell cuts: **closed with Phase 4** (5 km stream-on).
 - Phase 3 ice option 2 slices A–C + brittle/sheet/lid: closed with Phase 3.
 - Optional Phase-4 leftovers (5 km wind.rebuild / rock bodies): only if owner wants more FPS.
-- Phase-5 E2 closeout: organisms-on soak + stream park check
+- Phase-5 E2 owner visual: tipped grey logs at 1× zoom
   ([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)).
 - Phase-8 shortlist of client stacks when that review starts.

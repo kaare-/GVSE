@@ -4,7 +4,10 @@ Overnight GUI `B` soaks are expensive. Prefer these for mineral / water leftover
 
 ## Headless BudgetSnap (default for mineral)
 
-Uses the same `step_world` order as the play app (evap / cond / karst / phase on, organisms off) and prints overlay stores + probes.
+Uses the same `step_world` order as the play app (evap / cond / karst /
+phase on; organisms off by default) and prints overlay stores + probes.
+Phase 5 soaks set `GVSE_SOAK_ORGANISMS=N` (or run
+`short_organisms_budget_soak`) to seed land plants with `organisms_on`.
 
 Short CI:
 
@@ -22,7 +25,8 @@ GVSE_SOAK_TICKS=250000 GVSE_BUDGET_PERIOD=60 \
   -- --ignored --nocapture
 ```
 
-Env: `GVSE_SOAK_TICKS`, `GVSE_BUDGET_PERIOD`, `GVSE_BUDGET_WARM`.
+Env: `GVSE_SOAK_TICKS`, `GVSE_BUDGET_PERIOD`, `GVSE_BUDGET_WARM`,
+`GVSE_SOAK_ORGANISMS` (seed N plants; 0 = off).
 
 ## Xvfb + screenshot (complex / visual)
 
