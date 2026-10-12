@@ -317,8 +317,11 @@ regressed river growth unit test; reverted.
 rock stale drop; soak park=0 / preferential=0.
 
 **Slice 6 landed (2026-10-12):** Soft litter + root_residue soft-caps
-(4096) + stale Organic prune. **Default next:** longer organisms-on soak
-or park Phase 6 agent slices.
+(4096) + stale Organic prune.
+
+**Agent park (2026-10-12):** Phase 6 measured slices closed for agent
+(baseline, stream+plants, hotspot #1, overlay GC; #2 deferred). Optional
+5k organisms soak evidence; default roadmap next Phase 7 or E2 visual.
 
 ---
 

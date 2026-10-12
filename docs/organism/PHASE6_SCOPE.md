@@ -113,8 +113,8 @@ preferential_root=0, root_residue=0. Log:
 1. ~~**Organisms-on perf baseline**~~ — Compact 0/48/256 + org splits.
 2. ~~**Hotspot cut #1**~~ — plant-only contact / epi / soft-pile skips;
    soak still green.
-3. **Longer organisms-on soak** — 5k then 50k BudgetSnap with plants;
-   only if short gate reopens or buildup shows a store drift.
+3. ~~**Longer organisms-on soak**~~ — 5k organisms-on green (park=0,
+   overlays=0); 50k only if TRACKED hard-gate reopens.
 4. ~~**Stream-on life cost**~~ — Compact stream+evict with plants;
    park/restore cheap; residency gates far work; live-in-view ~0.6 ms
    pre-cut / ~0.3 ms post-cut.
@@ -126,8 +126,7 @@ preferential_root=0, root_residue=0. Log:
    soak park=0.
 7. ~~**Soft litter + root_residue soft-cap**~~ — map max 4096 + stale
    Organic prune; soak park=0.
-8. **Longer organisms-on soak / leftover GC** — 5k BudgetSnap if overlays
-   drift; corpse caps already at 256.
+8. ~~**5k organisms-on soak**~~ — park=0, overlays=0, living=59.
 
 ## Acceptance (proposed)
 
@@ -136,7 +135,8 @@ preferential_root=0, root_residue=0. Log:
       `/opt/cursor/artifacts/`.
 - [x] Compact stream-on + plants A/B logged (focus-band seed).
 - [x] At least one measured life-pass cut with soak gate still green.
-- [ ] Owner: accept Phase 6 wedge or pick a different Phase 5 follow-up.
+- [x] Preferential + litter/residue soft-caps landed; short soak green.
+- [ ] Owner: accept Phase 6 park or pick longer soak / Phase 7.
 
 ## Non-goals
 
@@ -144,9 +144,19 @@ New Set B/C modules, creature locomotion, Phase 7 lighting, client
 split — see [`ROADMAP.md`](../ROADMAP.md) and
 [`CORE_FEATURES.md`](CORE_FEATURES.md).
 
-## Decision list (2026-10-12, post litter GC)
+## 5k organisms-on soak (2026-10-12)
 
-1. **Default next: longer organisms-on soak** — 5k BudgetSnap with plants
-   if owner wants overlay drift proof; else park Phase 6 agent slices.
-2. Optional land/metab revisit — only with a harvest-neutral / tip-safe cut.
-3. Optional corpse-cap retune — only if soak hits `MAX_CORPSES`.
+Harness: `short_organisms_budget_soak` with `GVSE_SOAK_TICKS=5000`
+plants=48. Log: `/opt/cursor/artifacts/phase6-organisms-5k-soak.log`.
+
+living=59, corpses=5, TRACKED −0.33/t, d_min=+260, **park=0**,
+preferential_root=0, root_residue=0. Overlays stay flat under GC soft-caps.
+
+## Decision list (2026-10-12, Phase 6 agent park)
+
+1. **Agent park:** baselines, stream+plants, hotspot #1, preferential +
+   litter/residue GC landed; hotspot #2 deferred (river tip/growth).
+2. **Optional next:** 5k organisms-on BudgetSnap if owner wants longer
+   overlay drift proof (artifact in flight / landed below).
+3. **Default roadmap next:** Phase 7 surface spice, or owner visual on
+   E2 tipped grey logs ([`PHASE5_SCOPE.md`](PHASE5_SCOPE.md)).
