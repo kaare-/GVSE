@@ -3314,8 +3314,17 @@ fn step_land_plant(
     }
     // Phase 5 E2: living stem integrity — recharge from the tank, load from
     // modules above; tip via rigid bake if a Stem pixel fails.
+    // Phase 6: every other tick when all stems stay healthy (≥0.9).
     if !atom.fallen && !stemless && stem_count(atom) > 0 {
-        maintain_live_stem_integrity(atom);
+        let stressed = atom
+            .stem_integrity
+            .iter()
+            .any(|(_, _, v)| *v < 0.9);
+        let due = stressed
+            || (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0;
+        if due {
+            maintain_live_stem_integrity(atom);
+        }
     }
     if atom.energy <= 0.0 {
         pass.land_metab += t_metab.elapsed();
