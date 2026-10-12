@@ -355,8 +355,9 @@ before coding.
 **Scope (2026-10-12):** [`PHASE8_SCOPE.md`](PHASE8_SCOPE.md) —
 ownership split. **Stack pick:** ship = **A egui+wgpu/winit**; soak/dev
 = **macroquad** ([`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md)).
-**Next:** contract sketch (docs), then empty-window spike — no gameplay
-port yet. Optional leftover: E2 tipped-log visual.
+**Contract:** [`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md) (`ViewFrame` +
+`ClientCommand`). **Next:** empty-window A spike — no gameplay port yet.
+Optional leftover: E2 tipped-log visual.
 
 ---
 
@@ -431,6 +432,7 @@ port yet. Optional leftover: E2 tipped-log visual.
 | 2026-10-12 | Phase 8 scope draft | Host/client split + stack shortlist; owner pick before code |
 | 2026-10-12 | Phase 8 stack compare | A–D written ([`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md)); agent lean A; owner pick |
 | 2026-10-12 | Phase 8 stack locked | Ship **A** egui+wgpu; macroquad = soak/dev; next = contract sketch |
+| 2026-10-12 | Phase 8 contract sketch | ViewFrame ≠ SimSnapshot; ClientCommand queue; next = A spike |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

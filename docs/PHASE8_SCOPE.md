@@ -26,26 +26,26 @@ rules.
 ## Open questions (owner)
 
 1. **Ship target first?** Steam desktop, Apple (Mac App Store / notarized
-   .app), or both?
-2. **Multiplayer now or later?** Single-player host + local client first
-   is the safer wedge; netcode is a separate program of work.
-3. **Keep macroquad demo?** Likely yes as a **dev / soak viewer**; ship
-   client is a different binary.
+   .app), or both? (Stack A supports either; packaging differs.)
+2. **Multiplayer now or later?** Default: single-player in-process first;
+   netcode is a separate program of work ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
+
+Resolved: macroquad stays **dev / soak / Xvfb**; ship client is A.
 
 ## Proposed ownership split
 
 ```text
-┌─────────────────────┐     snapshots / commands      ┌──────────────────┐
-│  Sim host (Rust)    │◄────────────────────────────►│  Client (TBD)    │
-│  wk-voxel + step    │   (no mass rules in client)   │  present + input │
-│  audit / park / save│                               │  Apple/Steam UI  │
-└─────────────────────┘                               └──────────────────┘
+┌─────────────────────┐   ViewFrame + commands   ┌──────────────────┐
+│  Sim host (Rust)    │◄────────────────────────►│  Client (A)      │
+│  wk-voxel + step    │  (no mass rules in client)│  egui+wgpu/winit │
+│  audit / park / save│                          │  present + input │
+└─────────────────────┘                          └──────────────────┘
 ```
 
 - **Host owns:** world step, mass audit, organisms, climate clock, save.
-- **Client owns:** camera, draw, HUD, settings UX, storefront packaging.
-- **Contract:** versioned snapshot or delta stream + input commands;
-  client never mutates sat/mass directly.
+- **Client owns:** camera UX, draw, HUD, settings UX, storefront packaging.
+- **Contract:** [`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md) —
+  `ViewFrame` (not full `SimSnapshot`) + `ClientCommand` queue.
 
 ## Client stack *(owner pick 2026-10-12)*
 
@@ -60,15 +60,15 @@ B (Bevy) and C (Godot) parked unless owner reopens. D (ship the
 macroquad binary) is **not** the production path — macroquad stays
 research/dev.
 
-**Next:** contract sketch (snapshot + commands, docs only), then A spike
-(empty window + host tick pump). No gameplay port until contract lands.
+**Next after contract:** A spike (empty window + host tick pump). No
+gameplay / atlas port until spike loop is stable.
 
 ## Wedge plan
 
 1. [x] **Scope freeze** — this file + ROADMAP pointer.
 2. [x] **Stack comparison** — [`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md).
 3. [x] **Owner pick** — ship client **A**; macroquad = soak/dev only.
-4. [ ] **Contract sketch** — snapshot schema / command list (docs only).
+4. [x] **Contract sketch** — [`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md).
 5. [ ] **Spike** — A: empty `winit`+`wgpu`+egui window + host tick pump.
 6. [ ] **Parity gate** — Compact soak park=0 still green with host binary.
 
@@ -77,7 +77,7 @@ research/dev.
 - [x] Named Phase 8 scope draft frozen (this file).
 - [x] Stack A–D comparison landed ([`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md)).
 - [x] Owner accepts stack: **A ship + macroquad soak/dev**.
-- [ ] Contract sketch landed before any client rewrite.
+- [x] Contract sketch landed ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
 - [ ] No sim-mass regressions when a host/client split lands.
 
 ## Non-goals (until owner unlocks)
@@ -90,5 +90,7 @@ the client, abandoning the macroquad soak viewer.
 1. Phase 8 scope draft frozen; stack A–D comparison written.
 2. **Owner pick:** ship client = **A (egui + wgpu / winit)**; keep
    **macroquad** as soak/dev/Xvfb viewer (not the production ship path).
-3. Next wedge: **contract sketch** (docs), then A spike — no gameplay port yet.
-4. Optional leftover: E2 tipped grey-log owner visual (Phase 5).
+3. **Contract sketch:** `ViewFrame` ≠ `SimSnapshot`; `ClientCommand`
+   queue; in-process single-player first ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
+4. Next wedge: **A spike** (empty window + tick) — no gameplay port yet.
+5. Optional leftover: E2 tipped grey-log owner visual (Phase 5).
