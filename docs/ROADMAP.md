@@ -353,8 +353,10 @@ Steam** inspection. Heavy work and testing; own architecture note
 before coding.
 
 **Scope draft (2026-10-12):** [`PHASE8_SCOPE.md`](PHASE8_SCOPE.md) —
-ownership split + stack shortlist (egui/wgpu, Bevy, Godot, macroquad
-wrapper). **No client rewrite until owner picks.** Optional leftover:
+ownership split + stack shortlist. **Comparison:**
+[`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md) (A egui+wgpu, B Bevy,
+C Godot 4, D macroquad wrap; Apple/Steam; agent lean A, soak stays
+macroquad). **No client rewrite until owner picks.** Optional leftover:
 E2 tipped-log visual.
 
 ---
@@ -428,6 +430,7 @@ E2 tipped-log visual.
 | 2026-10-12 | Phase 7 D locked | Water glitter on lit free-water tops |
 | 2026-10-12 | Phase 7 closed | A–D done; 3k soak park=0; next Phase 8 or owner pick |
 | 2026-10-12 | Phase 8 scope draft | Host/client split + stack shortlist; owner pick before code |
+| 2026-10-12 | Phase 8 stack compare | A–D written ([`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md)); agent lean A; owner pick |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
