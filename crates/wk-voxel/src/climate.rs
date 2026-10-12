@@ -180,6 +180,9 @@ fn smooth01(t: f32) -> f32 {
 /// Climate days per lunar cycle (new → full → new).
 pub const MOON_CYCLE_DAYS: u64 = 8;
 
+/// Climate days per year cycle (spring → summer → autumn → winter).
+pub const SEASON_CYCLE_DAYS: u64 = 32;
+
 /// Lunar phase in `[0, 1)`: 0 ≈ new moon, 0.5 ≈ full, wraps over
 /// [`MOON_CYCLE_DAYS`] climate days.
 pub fn moon_phase_cfg(tick: u64, cfg: &ClimateConfig) -> f32 {
@@ -192,6 +195,59 @@ pub fn moon_illumination(phase: f32) -> f32 {
     // Cosine: new at 0/1, full at 0.5.
     let ang = phase.clamp(0.0, 1.0) * std::f32::consts::TAU;
     ((1.0 - ang.cos()) * 0.5).clamp(0.0, 1.0)
+}
+
+/// Season in `[0, 1)`: 0 ≈ spring, 0.25 ≈ summer, 0.5 ≈ autumn, 0.75 ≈ winter.
+pub fn season_fraction_cfg(tick: u64, cfg: &ClimateConfig) -> f32 {
+    let period = cfg.total_ticks().saturating_mul(SEASON_CYCLE_DAYS).max(1);
+    (tick % period) as f32 / period as f32
+}
+
+/// Remap base day/night lengths for a season (same total ticks).
+///
+/// Summer (~0.25) lengthens day; winter (~0.75) lengthens night. Intended for
+/// **sky / celestial draw** — keep the base config for sim/organism clocks.
+pub fn climate_with_season(base: &ClimateConfig, season: f32) -> ClimateConfig {
+    let total = base.total_ticks().max(2);
+    // Peak summer day at season 0.25: cos(0) = 1 → day_frac high.
+    let ang = (season.clamp(0.0, 1.0) - 0.25) * std::f32::consts::TAU;
+    let day_frac = (0.50 + 0.16 * ang.cos()).clamp(0.32, 0.68);
+    let day = ((total as f32) * day_frac).round().clamp(1.0, (total - 1) as f32) as u64;
+    ClimateConfig {
+        day_ticks: day,
+        night_ticks: total.saturating_sub(day).max(1),
+    }
+}
+
+/// Soft seasonal wash on a sky RGB sample (Phase 7 C).
+///
+/// Strength scales with daylight so night stays deep; winter still cools a
+/// little after dusk for a longer blue hour.
+pub fn apply_season_sky_tint(rgb: [u8; 3], season: f32, day_night: f32) -> [u8; 3] {
+    let s = season.clamp(0.0, 1.0);
+    // Blend weights for spring / summer / autumn / winter centers.
+    let spring = smooth01(1.0 - ((s - 0.0).abs().min((s - 1.0).abs()) / 0.28));
+    let summer = smooth01(1.0 - ((s - 0.25).abs() / 0.28));
+    let autumn = smooth01(1.0 - ((s - 0.50).abs() / 0.28));
+    let winter = smooth01(1.0 - ((s - 0.75).abs() / 0.28));
+    let sum = (spring + summer + autumn + winter).max(1e-3);
+    let (spring, summer, autumn, winter) =
+        (spring / sum, summer / sum, autumn / sum, winter / sum);
+
+    let day = ((day_night + 1.0) * 0.5).clamp(0.0, 1.0);
+    // Night keeps most of the palette; winter cools a bit more.
+    let mix = (0.10 + 0.22 * day + 0.08 * winter * (1.0 - day)).clamp(0.0, 0.40);
+
+    let tint = [
+        (spring * 210.0 + summer * 255.0 + autumn * 235.0 + winter * 150.0) as u8,
+        (spring * 225.0 + summer * 235.0 + autumn * 175.0 + winter * 175.0) as u8,
+        (spring * 200.0 + summer * 200.0 + autumn * 130.0 + winter * 220.0) as u8,
+    ];
+    [
+        (rgb[0] as f32 * (1.0 - mix) + tint[0] as f32 * mix) as u8,
+        (rgb[1] as f32 * (1.0 - mix) + tint[1] as f32 * mix) as u8,
+        (rgb[2] as f32 * (1.0 - mix) + tint[2] as f32 * mix) as u8,
+    ]
 }
 
 /// Sky RGB for a day/night factor in `[-1, 1]`.
@@ -386,6 +442,35 @@ mod tests {
         assert!(
             horizon[0] >= zenith[0],
             "zenith={zenith:?} horizon={horizon:?}"
+        );
+    }
+
+    #[test]
+    fn summer_lengthens_day_winter_lengthens_night() {
+        let base = ClimateConfig::default();
+        let summer = climate_with_season(&base, 0.25);
+        let winter = climate_with_season(&base, 0.75);
+        assert_eq!(summer.total_ticks(), base.total_ticks());
+        assert_eq!(winter.total_ticks(), base.total_ticks());
+        assert!(
+            summer.day_ticks > winter.day_ticks,
+            "summer_day={} winter_day={}",
+            summer.day_ticks,
+            winter.day_ticks
+        );
+        assert!(winter.night_ticks > summer.night_ticks);
+    }
+
+    #[test]
+    fn winter_sky_tint_is_cooler_than_summer() {
+        let base = [160u8, 180, 200];
+        let summer = apply_season_sky_tint(base, 0.25, 0.8);
+        let winter = apply_season_sky_tint(base, 0.75, 0.8);
+        let summer_warm = summer[0] as i32 - summer[2] as i32;
+        let winter_warm = winter[0] as i32 - winter[2] as i32;
+        assert!(
+            summer_warm > winter_warm,
+            "summer={summer:?} winter={winter:?}"
         );
     }
 }

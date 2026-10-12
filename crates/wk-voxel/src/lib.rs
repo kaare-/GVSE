@@ -107,9 +107,10 @@ pub use climate::{
     celestial_local, celestial_local_cfg, celestial_moon_local_cfg, celestial_moon_screen_pos_cfg,
     celestial_screen_pos, celestial_screen_pos_cfg, celestial_sun_local_cfg,
     celestial_sun_screen_pos_cfg, day_factor, day_factor_cfg, day_night_factor,
-    day_night_factor_cfg, is_daytime, is_daytime_cfg, moon_illumination, moon_phase_cfg,
-    phase_fraction, phase_fraction_cfg, sky_rgb, sky_rgb_at_height, sky_rgb_at_height_phased,
-    sky_rgb_phased, ClimateConfig, DEMO_DAY_TICKS, MOON_CYCLE_DAYS,
+    apply_season_sky_tint, climate_with_season, day_night_factor_cfg, is_daytime, is_daytime_cfg,
+    moon_illumination, moon_phase_cfg, phase_fraction, phase_fraction_cfg, season_fraction_cfg,
+    sky_rgb, sky_rgb_at_height, sky_rgb_at_height_phased, sky_rgb_phased, ClimateConfig,
+    DEMO_DAY_TICKS, MOON_CYCLE_DAYS, SEASON_CYCLE_DAYS,
 };
 pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,
