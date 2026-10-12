@@ -325,7 +325,7 @@ rock stale drop; soak park=0 / preferential=0.
 
 ---
 
-## Phase 7 — Surface spice (atmosphere & light) *(wedge D in flight)*
+## Phase 7 — Surface spice (atmosphere & light) *(closed for agent)*
 
 **Goal:** Hopefully simple but important presentation:
 
@@ -336,12 +336,12 @@ rock stale drop; soak park=0 / preferential=0.
 - Shadows / shading from sundown
 - Moonlight glitter on water
 
-**Exit criteria (proposed):** visual acceptance on Xvfb/playtest;
+**Exit criteria:** visual acceptance on Xvfb/playtest;
 no sim-mass regressions from lighting-only work.
 
-**Wedges A–C closed (2026-10-12).** **Wedge D (2026-10-12):**
-[`PHASE7_SCOPE.md`](PHASE7_SCOPE.md) — water glitter (sun/moon sheen
-on free-water tops). Owner may redirect (E2).
+**Closed (2026-10-12):** wedges A–D landed ([`PHASE7_SCOPE.md`](PHASE7_SCOPE.md))
+with Xvfb + 3k soak park=0 each. Optional E2 visual remains owner-only.
+Default roadmap next: Phase 8 scoping, or owner pick.
 
 ---
 
@@ -421,6 +421,7 @@ before coding.
 | 2026-10-12 | Phase 7 C locked | Season dial (sky-only day length + tint) |
 | 2026-10-12 | Phase 7 C closed | Summer/winter Xvfb + 3k soak park=0; next D |
 | 2026-10-12 | Phase 7 D locked | Water glitter on lit free-water tops |
+| 2026-10-12 | Phase 7 closed | A–D done; 3k soak park=0; next Phase 8 or owner pick |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

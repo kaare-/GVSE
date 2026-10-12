@@ -33,16 +33,23 @@ over sim rewrites. Kernel stays MS Paint 1×.
 - [x] Wedges A–C closed.
 - [x] Wedge D locked (agent default).
 - [x] Slices 1–3 landed with unit tests where cheap.
-- [ ] At least one Xvfb water glitter still.
-- [ ] No sim-mass regressions (short soak park=0 still green).
+- [x] Xvfb water glitter stills under `/opt/cursor/artifacts/`.
+- [x] Short soak park=0 (3000t: TRACKED −0.02/t, min +0.02/t, park=0).
 
-## Landed (wedge D code)
+## Landed (wedge D)
 
 | Slice | Where |
 |-------|--------|
 | Glitter helper | `apply_water_glitter_rgb` |
 | Atlas wire | `fill_terrain_atlas` on exposed free water |
 | Tab dial | Sky look → Water glitter |
+
+### Xvfb evidence (2026-10-12)
+
+| Still | Notes |
+|-------|-------|
+| `phase7-glitter-00-day.png` | Day view after shore pan |
+| `phase7-glitter-02-night.png` | Night view (stars + moon); glitter unit-tested |
 
 ## Non-goals
 
@@ -51,6 +58,7 @@ volumetric caustics — see [`ROADMAP.md`](ROADMAP.md).
 
 ## Decision list (2026-10-12)
 
-1. **Wedge D in progress** — water glitter.
+1. **Wedge D / Phase 7 closed for agent** — A–D landed; optional E2
+   visual remains owner-only.
 2. Optional: E2 tipped grey-log owner visual (Phase 5 leftover).
-3. Phase 7 park after D closes (or owner redirects).
+3. Default roadmap next: Phase 8 scoping note, or owner pick.
