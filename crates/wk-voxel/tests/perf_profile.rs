@@ -720,6 +720,25 @@ fn perf_profile_demo_and_stress() {
     );
 }
 
+/// Phase 6 slice 1 — Compact (~1 km) organisms-on life-pass baseline.
+///
+/// Prints creature-count sweep (org pass splits) plus wall profiles at
+/// 0 / 48 / 256 plants. Evidence for [`docs/organism/PHASE6_SCOPE.md`].
+///
+/// ```text
+/// cargo test -p wk-voxel --test perf_profile --release \
+///   phase6_organisms_compact_baseline -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "Phase 6 Compact organisms-on baseline; release + --nocapture"]
+fn phase6_organisms_compact_baseline() {
+    set_parallel_enabled(true);
+    run_creature_count_sweep(stretch_params());
+    run_profile("compact + 0 plants", stretch_params(), 0);
+    run_profile("compact + 48 plants", stretch_params(), 48);
+    run_profile("compact + 256 plants", stretch_params(), 256);
+}
+
 /// Phase 4 width stretch only (Compact 4096×1064). Faster than the full
 /// demo/stress suite when hunting wall vs cells.
 #[test]

@@ -445,3 +445,11 @@ re-profile.
    ≥30 at 5 km stream-on met; optional leftovers wind.rebuild /
    rock bodies only if owner wants more headroom. Next: Phase 5
    planning ([`ROADMAP.md`](ROADMAP.md)).
+7. **Phase 6 Compact organisms-on baseline (2026-10-12):**
+   `phase6_organisms_compact_baseline` on Compact 4096×1064 (release).
+   Wall **52 → 55** ms/tick at 0→256 plants; organisms **0 → 1.3**
+   ms (~2.4%). Org splits at 256: land **0.46** (metab **0.32**),
+   pose 0.14, canopy 0.11, post 0.10. Log:
+   `/opt/cursor/artifacts/phase6-organisms-compact-baseline.log`.
+   Full-resident Compact remains physics-bound; next Phase 6 lever is
+   stream-on + plants (see [`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).
