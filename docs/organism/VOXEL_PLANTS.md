@@ -291,7 +291,14 @@ Features:
   nearby Stem when displaced or near-miss spawn
   (`attach_prefer_high_reseats_low_dies`).
 
-**Still later:** ghost-root cavity fill.
+**Landed (slice 7 — ghost-root fill / E44):**
+- Dead Root → Organic + `World.root_residue` (overlay; no `CellFlags` bit —
+  `WATERLOGGED` owns the old Wave AC slot)
+- Fungal compost of residue → Air void + `World.preferential_root`
+- `fill_ghost_root_voids`: Sand/Clay collapses into preferential voids
+- Root elongate: preferential cells use `GHOST_ROOT_PENETRATE` +
+  `ROOT_GHOST_AFFINITY`
+- `SIM_SCHEMA_VERSION` **19**; scenario `e44_ghost_roots`
 
 ## Open: the load-bearing symbiont join
 

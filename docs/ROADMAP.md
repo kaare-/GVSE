@@ -287,9 +287,9 @@ Headless soaks for this phase turn **organisms on** (Phase 0 gate stays
 organisms-off).
 
 **Wedge accepted (2026-10-12):** Set E2 — see
-[`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md). Epiphyte stack
-through attach_prefer reseat landed. Next: ghost-root fill. Daily
-09:00 Oslo lists continue for the next E2 slice.
+[`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md). E2 stack through
+ghost-root fill (E44) landed. Next: E2 closeout (organisms-on soak /
+stream park check) + daily 09:00 Oslo lists.
 
 ---
 
@@ -391,6 +391,6 @@ before coding.
 - Phase-1 stretch width / field-shell cuts: **closed with Phase 4** (5 km stream-on).
 - Phase 3 ice option 2 slices A–C + brittle/sheet/lid: closed with Phase 3.
 - Optional Phase-4 leftovers (5 km wind.rebuild / rock bodies): only if owner wants more FPS.
-- Phase-5 E2 remaining: ghost-root fill
+- Phase-5 E2 closeout: organisms-on soak + stream park check
   ([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)).
 - Phase-8 shortlist of client stacks when that review starts.

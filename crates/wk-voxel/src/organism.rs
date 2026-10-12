@@ -27,9 +27,10 @@ use crate::climate::{
 use crate::clouds::{CloudStore, DOWNPOUR_MASS};
 use crate::fungi::{
     colonize_and_compost_cfg, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
-    max_mycelium_near, FungiConfig, forage_organic_energy, fruiting_body_supported,
-    fungus_should_hibernate, fungus_upkeep, is_fungus, is_fungus_seated, is_surface_stalk,
-    try_emergent_fruiting, try_spore, FRUIT_SUPPORT_MIN_AGE, FUNGUS_HIBERNATE_MAX_TICKS,
+    fill_ghost_root_voids, max_mycelium_near, FungiConfig, forage_organic_energy,
+    fruiting_body_supported, fungus_should_hibernate, fungus_upkeep, is_fungus, is_fungus_seated,
+    is_surface_stalk, try_emergent_fruiting, try_spore, FRUIT_SUPPORT_MIN_AGE,
+    FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::spore_bank::{DispersalResult, SporeBankConfig};
 use crate::temperature::Temperature;
@@ -1999,6 +2000,10 @@ impl OrganismStore {
                 epiphyte_rider_transmit(&self.atoms, a.gx, canopy_top_y(a), i as u32)
             })
             .collect();
+
+        // Phase 5 E2 / E44: Void → Loose fill on PreferentialRootPath cavities
+        // even with no living atoms (empty store still collapses ghost voids).
+        let _ = fill_ghost_root_voids(world);
 
         // Empty store: still allow mycelium field → fruiting body emergence
         // (and corpse settle). Spores need a living body afterward.

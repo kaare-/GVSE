@@ -48,7 +48,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v16: [`World::pore_ice`] frozen pore water seals (geyser P1).
 /// v17: [`World::steam`] sparse conduit steam from boiling free water (P3).
 /// v18: [`World::cave_humidity`] sealed-cave ambient moisture (not sky H, not steam).
-pub const SIM_SCHEMA_VERSION: u32 = 18;
+/// v19: [`World::root_residue`] + [`World::preferential_root`] ghost-root overlays (E44).
+pub const SIM_SCHEMA_VERSION: u32 = 19;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +122,8 @@ impl WorldV5 {
             steam_rev: 0,
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            root_residue: Default::default(),
+            preferential_root: Default::default(),
             confined: Default::default(),
         }
     }
@@ -183,6 +186,8 @@ impl WorldV6 {
             steam_rev: 0,
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            root_residue: Default::default(),
+            preferential_root: Default::default(),
             confined: Default::default(),
         }
     }
@@ -250,6 +255,8 @@ impl WorldV7 {
             steam_rev: 0,
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            root_residue: Default::default(),
+            preferential_root: Default::default(),
             confined: Default::default(),
         };
         // Promote sole ownership → one share matching current `_pad`.
@@ -326,6 +333,8 @@ impl WorldV8 {
             steam_rev: 0,
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            root_residue: Default::default(),
+            preferential_root: Default::default(),
             confined: Default::default(),
         }
     }
@@ -396,6 +405,8 @@ impl WorldV11 {
             steam_rev: 0,
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            root_residue: Default::default(),
+            preferential_root: Default::default(),
             confined: Default::default(),
         }
     }
@@ -512,6 +523,8 @@ impl WorldV10 {
             steam_rev: 0,
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            root_residue: Default::default(),
+            preferential_root: Default::default(),
             confined: Default::default(),
         }
     }
@@ -596,6 +609,8 @@ impl WorldV9 {
             steam_rev: 0,
             buoyant_flags_ready: false,
             water_head: Default::default(),
+            root_residue: Default::default(),
+            preferential_root: Default::default(),
             confined: Default::default(),
         }
     }
