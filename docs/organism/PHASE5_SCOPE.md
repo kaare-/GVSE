@@ -1,10 +1,10 @@
-# Phase 5 — Biological system upgrade *(scope draft)*
-
-*Planning only. No implementation until this doc is accepted and a
-follow-up slice PR names acceptance tests + soak hooks.*
+# Phase 5 — Biological system upgrade *(E2 accepted)*
 
 Phase 4 closed (2026-10-11): streaming + 5 km ≥30 sim-FPS. Headless
 Phase 0 soaks stay **organisms-off**; Phase 5 soaks turn them **on**.
+
+**Wedge (accepted 2026-10-12, daily default):** **Finish Set E2 on voxel**
+— stem integrity / topple first; epiphytes + ghost-root fill follow.
 
 ## Intent
 
@@ -21,50 +21,32 @@ Kernel vocabulary stays MS Paint 1× ([`README.md`](README.md)).
 | Set E1 fungi (litter, mycelium, Symbiont, spores) | Live | [`FUNGI.md`](FUNGI.md) |
 | Organism park under stream (body span) | Live | [`WORLDGEN.md`](../WORLDGEN.md) |
 | Studio / blueprint editor | Live | [`EDITOR.md`](EDITOR.md) |
+| E2 stem integrity + rot topple (corpses) | Live (slice 1) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
 
-## Open scoping picks *(daily 09:00 Oslo)*
+## E2 slice plan
 
-Pick **one** primary wedge before code. Default if no pick: **(1)**.
+1. **Stem integrity + rot topple** *(this slice)* — standing-dead woody
+   corpses decay `stem_integrity`; mycelium / Organic adjacency
+   accelerates; tip via existing rigid bake. Test:
+   `standing_dead_stem_tips_when_fungal_integrity_collapses`.
+2. **Epiphytes** — `Holdfast`, `AttachPrefer`, `HostLeaveFraction`,
+   Mid-lane share with host Stem (E40–E41 / E43).
+3. **Ghost-root fill** — Rock→Organic→Void→Loose + preferential re-root
+   (E44).
 
-1. **Finish Set E2 on voxel** — epiphytes, stem integrity / topple,
-   ghost-root fill ([`CORE_FEATURES.md`](CORE_FEATURES.md) Set E
-   “still later”). Closest to existing plant/fungi code; falsify with
-   E40–E44 skeletons in [`SCENARIOS.md`](SCENARIOS.md).
-2. **Set B chemical talk + nerves** — `ChemoSensor` / `ChemoEmitter` /
-   soma on live atoms ([`CHEM.md`](CHEM.md), [`NERVES.md`](NERVES.md)).
-   Needs chem field + energy cost wiring; scenarios E32 / E35.
-3. **Set C vertical niche** — buoyancy / temp tolerance / chemosystem
-   thin pass ([`CORE_FEATURES.md`](CORE_FEATURES.md)). Niche, not the
-   star of the show.
-4. **Creature locomotion / lanes** — explicitly **out of Core** today
-   ([`CORE_FEATURES.md`](CORE_FEATURES.md) § Explicitly not in Core);
-   only promote if owner overrides the freeze. Otherwise defer to a
-   later phase (lanes note Phase 7 in [`LANES.md`](LANES.md)).
+Out of scope for E2: Set B chem/nerves, Set C niche, creature locomotion
+([`CORE_FEATURES.md`](CORE_FEATURES.md) § Explicitly not in Core).
 
-Secondary (after primary wedge named):
+## Acceptance (wedge)
 
-- Soak harness: organisms-on short `budget_soak` + TRACKED / park
-  invariants with stream-on Compact (and optional 5 km).
-- Studio falsification scenes (E30+) as playable / headless hooks.
-- Mass-audit buckets for any new bio sink/source.
-
-## Proposed acceptance (fill when wedge picked)
-
-- [ ] Named wedge + out-of-scope list frozen in this file.
-- [ ] At least one headless scenario or soak gate (organisms **on**).
-- [ ] Mass audit: new sinks/sources have buckets; short soak `park=0`.
-- [ ] Stream-on: organism park still correct (body span); no full-ring
-  bio scan regressions on Compact stretch stream+evict.
-- [ ] Visual / studio pass called out per Set (1× zoom readable).
+- [x] Named wedge + out-of-scope list frozen in this file.
+- [x] Headless unit: fungal rot tips standing-dead stem.
+- [ ] Organisms-on short soak gate (TRACKED / park) — follow-up.
+- [ ] Stream-on: organism park still correct after bio work.
+- [ ] Visual / studio pass for tipped grey logs (1× zoom).
 
 ## Non-goals (until Core freeze updates)
 
 Learned nets, active predation chase, freeform drawing, full animal
 locomotion, real wood rings / Bezier topple animation — see
 [`CORE_FEATURES.md`](CORE_FEATURES.md) § Explicitly not in Core.
-
-## Next step after accept
-
-Open the first **implementation** slice PR against
-`cursor/wk-voxel-park-bank-fdf9` with code + tests for the chosen
-wedge only. Keep daily decision lists until that PR lands.
