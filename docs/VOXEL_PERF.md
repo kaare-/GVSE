@@ -451,5 +451,13 @@ re-profile.
    ms (~2.4%). Org splits at 256: land **0.46** (metab **0.32**),
    pose 0.14, canopy 0.11, post 0.10. Log:
    `/opt/cursor/artifacts/phase6-organisms-compact-baseline.log`.
-   Full-resident Compact remains physics-bound; next Phase 6 lever is
-   stream-on + plants (see [`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).
+   Full-resident Compact remains physics-bound.
+8. **Phase 6 Compact stream-on + plants (2026-10-12):**
+   `phase6_stream_organisms_compact` — focus `width/4`, 256 plants in
+   ±resident band. Full-resident wall **53.3** ms / org **0.61** ms
+   (living=256). Stream view=320+evict: wall **12.8** ms / org
+   **0.59** ms (living=256, parked=0, chunks 1088→459). Stream org
+   splits: post **0.11**, pose 0.08, land 0.06, canopy 0.05. Log:
+   `/opt/cursor/artifacts/phase6-stream-organisms-compact.log`.
+   Stream cuts wall ~4×; live-in-view org stays ~0.6 ms. Next: hotspot
+   cut #1 (see [`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).

@@ -253,6 +253,12 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
 }
 
 fn seed_plants(scene: &mut Scene, count: usize) {
+    seed_plants_band(scene, count, None);
+}
+
+/// Seed land plants across the ring, or only inside `[center−half, center+half]`
+/// (wrap-aware) when `band` is `Some((center_gx, half_cols))`.
+fn seed_plants_band(scene: &mut Scene, count: usize, band: Option<(i32, i32)>) {
     if count == 0 {
         eprintln!("  seeded 0/0 land plants");
         return;
@@ -263,12 +269,25 @@ fn seed_plants(scene: &mut Scene, count: usize) {
     wk_voxel::sync_alloc_to_body(&mut g, &body);
     let w = scene.params.width_cols.max(1);
     let mut placed = 0usize;
-    // Sweep the full ring with a prime-ish stride so dense caps still seat.
-    let stride = ((w as usize).max(1) / count.max(1)).max(1);
     let mut attempts = 0usize;
-    let max_attempts = count.saturating_mul(8).max(w as usize * 2);
+    let (x0, span, max_attempts) = match band {
+        Some((center, half)) => {
+            let half = half.max(1);
+            let span = (half * 2 + 1).min(w);
+            let x0 = center.rem_euclid(w);
+            (x0, span, count.saturating_mul(16).max(span as usize * 4))
+        }
+        None => {
+            let span = w;
+            (0, span, count.saturating_mul(8).max(w as usize * 2))
+        }
+    };
+    let stride = ((span as usize).max(1) / count.max(1)).max(1);
     while placed < count && attempts < max_attempts {
-        let gx = ((attempts * stride) as i32 + (attempts as i32 / 3)) % w;
+        let gx = match band {
+            Some(_) => (x0 + (attempts as i32 * stride as i32) % span).rem_euclid(w),
+            None => ((attempts * stride) as i32 + (attempts as i32 / 3)).rem_euclid(w),
+        };
         attempts += 1;
         let guess_y = scene.params.sea_level_y + 2;
         let Some(gy) = find_plant_slot(&scene.world, gx, guess_y) else {
@@ -281,10 +300,16 @@ fn seed_plants(scene: &mut Scene, count: usize) {
             placed += 1;
         }
     }
-    eprintln!(
-        "  seeded {placed}/{count} land plants  (cap={}  attempts={attempts})",
-        scene.organisms.atom_cap()
-    );
+    match band {
+        Some((c, h)) => eprintln!(
+            "  seeded {placed}/{count} land plants in band center={c} ±{h}  (cap={}  attempts={attempts})",
+            scene.organisms.atom_cap()
+        ),
+        None => eprintln!(
+            "  seeded {placed}/{count} land plants  (cap={}  attempts={attempts})",
+            scene.organisms.atom_cap()
+        ),
+    }
 }
 
 fn cell_count(params: &WorldgenParams) -> i64 {
@@ -737,6 +762,112 @@ fn phase6_organisms_compact_baseline() {
     run_profile("compact + 0 plants", stretch_params(), 0);
     run_profile("compact + 48 plants", stretch_params(), 48);
     run_profile("compact + 256 plants", stretch_params(), 256);
+}
+
+/// Phase 6 slice 2 — Compact stream-on with plants (org park under residency).
+///
+/// A/B full-resident vs view=320 + halo + evict at 256 plants. Matches play
+/// app: `sync_residency` + `sync_organism_residency` each tick.
+///
+/// ```text
+/// cargo test -p wk-voxel --test perf_profile --release \
+///   phase6_stream_organisms_compact -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "Phase 6 Compact stream+plants; release + --nocapture"]
+fn phase6_stream_organisms_compact() {
+    set_parallel_enabled(true);
+    let params = stretch_params();
+    let plants = 256usize;
+    // Focus on a land-friendly column: ring-mid is often ocean, so a
+    // ring-wide seed + mid focus parks every plant (prior A/B). Seed into
+    // the resident band around focus so stream-on keeps live org cost.
+    let focus = params.width_cols / 4; // continental shelf / land bias on demo stamp
+    let view_cols = 320;
+    // Resident ≈ view/2 + halo(3) + margin(8) chunks → ~13×64 ≈ 832 cols half.
+    let resident_half_cols = 14 * CHUNK_CELLS_W as i32;
+    for (label, stream_on) in [
+        ("compact full-resident + 256 plants (focus band)", false),
+        ("compact stream view=320 + halo + evict + 256 plants (focus band)", true),
+    ] {
+        let mut scene = stamp_scene(params);
+        scene.perf = PerfConfig::default();
+        seed_plants_band(&mut scene, plants, Some((focus, resident_half_cols)));
+        let apply_stream = |s: &mut Scene| {
+            if stream_on {
+                s.world.stream_window = Some(StreamWindow::new(focus, view_cols));
+                let _ = sync_residency(&mut s.world);
+                let _ = s
+                    .organisms
+                    .sync_organism_residency(s.world.wrap_width, s.world.stream_window);
+            } else {
+                s.world.stream_window = None;
+                let _ = s
+                    .organisms
+                    .sync_organism_residency(s.world.wrap_width, None);
+            }
+        };
+        for _ in 0..WARMUP_TICKS {
+            apply_stream(&mut scene);
+            one_stack_tick(&mut scene, None, None);
+        }
+        let mut accum = PassAccum::zero();
+        let mut phys = PhysicsTimings::default();
+        let mut pass = OrganismPassTimings::default();
+        let wall = Instant::now();
+        for _ in 0..MEASURE_TICKS {
+            apply_stream(&mut scene);
+            one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+            let p = scene.organisms.last_pass;
+            pass.pose += p.pose;
+            pass.canopy += p.canopy;
+            pass.reseat += p.reseat;
+            pass.float_cols += p.float_cols;
+            pass.land_plants += p.land_plants;
+            pass.land_seat += p.land_seat;
+            pass.land_metab += p.land_metab;
+            pass.land_grow += p.land_grow;
+            pass.land_disperse += p.land_disperse;
+            pass.other_creatures += p.other_creatures;
+            pass.post += p.post;
+        }
+        let wall = wall.elapsed();
+        profile_label(label, &scene.params, scene.world.chunks.len());
+        let living = scene.organisms.len();
+        let parked = scene.organisms.parked.len();
+        let parked_corpses = scene.organisms.parked_corpses.len();
+        eprintln!(
+            "  residency            chunks={}  store={}  side_entries={}  backlog_sat={}  living={}  parked={}  parked_corpses={}",
+            scene.world.chunks.len(),
+            scene.world.chunk_store.len(),
+            scene.world.side_map_store.entry_count(),
+            wk_voxel::frozen_backlog_total(&scene.world),
+            living,
+            parked,
+            parked_corpses,
+        );
+        print_pass_table(&accum, MEASURE_TICKS, wall);
+        print_physics_table(&phys, MEASURE_TICKS);
+        let n_ticks = MEASURE_TICKS;
+        eprintln!(
+            "  org splits ms/tick: pose {:.3}  canopy {:.3}  reseat {:.3}  float {:.3}  land {:.3}  other {:.3}  post {:.3}",
+            ms_per(pass.pose, n_ticks),
+            ms_per(pass.canopy, n_ticks),
+            ms_per(pass.reseat, n_ticks),
+            ms_per(pass.float_cols, n_ticks),
+            ms_per(pass.land_plants, n_ticks),
+            ms_per(pass.other_creatures, n_ticks),
+            ms_per(pass.post, n_ticks),
+        );
+        eprintln!(
+            "  land splits ms/tick: seat {:.3}  metab {:.3}  grow {:.3}  disperse {:.3}",
+            ms_per(pass.land_seat, n_ticks),
+            ms_per(pass.land_metab, n_ticks),
+            ms_per(pass.land_grow, n_ticks),
+            ms_per(pass.land_disperse, n_ticks),
+        );
+        eprintln!();
+    }
 }
 
 /// Phase 4 width stretch only (Compact 4096×1064). Faster than the full
