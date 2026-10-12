@@ -1,6 +1,7 @@
-//! Empty-window Phase 8 spike: egui + wgpu / winit over an in-process [`Host`].
+//! Phase 8 A client: egui + wgpu / winit over an in-process [`Host`].
 //!
-//! No terrain atlas yet — clear color + egui HUD showing `ViewFrame.sim_tick`.
+//! Terrain strip from the host is shown as an egui `ColorImage` (wgpu-backed).
+//! Sky / glitter / full palette parity are later wedges.
 
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use winit::window::{Window, WindowId};
 use wk_voxel_client::{ClientCommand, Host, ViewFrame, VIEW_SCHEMA};
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -29,6 +30,7 @@ fn main() {
         egui_state: None,
         egui_renderer: None,
         pending: Vec::new(),
+        terrain_tex: None,
     };
 
     event_loop.run_app(&mut app).expect("run");
@@ -50,6 +52,7 @@ struct SpikeApp {
     egui_state: Option<egui_winit::State>,
     egui_renderer: Option<egui_wgpu::Renderer>,
     pending: Vec<ClientCommand>,
+    terrain_tex: Option<egui::TextureHandle>,
 }
 
 impl SpikeApp {
@@ -61,13 +64,12 @@ impl SpikeApp {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("wk-voxel-client spike (Phase 8 A)")
-                        .with_inner_size(LogicalSize::new(960.0, 540.0)),
+                        .with_title("wk-voxel-client (Phase 8 A — terrain strip)")
+                        .with_inner_size(LogicalSize::new(1100.0, 640.0)),
                 )
                 .expect("window"),
         );
 
-        // PRIMARY + GL: desktop Vulkan/Metal/DX when present; Mesa GL under Xvfb.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY | wgpu::Backends::GL,
             ..Default::default()
@@ -99,7 +101,7 @@ impl SpikeApp {
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -150,9 +152,25 @@ impl SpikeApp {
         let cmds = std::mem::take(&mut self.pending);
         self.host.apply_all(cmds);
         self.view = Some(self.host.frame());
-        if self.host.quit_requested {
-            if let Some(w) = &self.window {
-                w.set_visible(false);
+    }
+
+    fn upload_terrain(&mut self, view: &ViewFrame) {
+        let strip = &view.terrain;
+        if strip.cols == 0 || strip.rows == 0 || !strip.byte_len_ok() {
+            return;
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [strip.cols as usize, strip.rows as usize],
+            &strip.rgba,
+        );
+        match self.terrain_tex.as_mut() {
+            Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
+            None => {
+                self.terrain_tex = Some(self.egui_ctx.load_texture(
+                    "terrain_strip",
+                    image,
+                    egui::TextureOptions::NEAREST,
+                ));
             }
         }
     }
@@ -164,6 +182,17 @@ impl SpikeApp {
         let Some(window) = self.window.clone() else {
             return;
         };
+
+        let view = self.view.clone().unwrap_or_else(|| self.host.frame());
+        if !view.schema_ok() {
+            log::error!(
+                "ViewFrame schema mismatch: got {} want {}",
+                view.contract_version,
+                VIEW_SCHEMA
+            );
+        }
+        self.upload_terrain(&view);
+
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -174,45 +203,47 @@ impl SpikeApp {
             return;
         };
 
-        let view = self.view.clone().unwrap_or_else(|| self.host.frame());
-        if !view.schema_ok() {
-            log::error!(
-                "ViewFrame schema mismatch: got {} want {}",
-                view.contract_version,
-                VIEW_SCHEMA
-            );
-        }
-
         let raw_input = egui_state.take_egui_input(&window);
+        let terrain_tex = self.terrain_tex.clone();
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("Phase 8 A spike — egui + wgpu / winit");
-                ui.separator();
-                ui.label(format!("VIEW_SCHEMA {}", view.contract_version));
-                ui.label(format!("sim_tick {}", view.sim_tick));
-                ui.label(format!(
-                    "paused {} · focus_col {} · view_cols {}",
-                    view.paused, view.focus_col, view.view_cols
-                ));
-                ui.label(format!(
-                    "world {}×{} (Compact-shaped stub)",
-                    view.world_width_cols, view.world_height
-                ));
-                ui.separator();
-                ui.label("Space — pause/resume · N — step once · ←/→ — pan focus · Esc — quit");
-                if !view.command_acks.is_empty() {
-                    ui.separator();
-                    ui.label("acks:");
-                    for ack in &view.command_acks {
-                        ui.small(format!(
-                            "#{} {} — {}",
-                            ack.id,
-                            if ack.ok { "ok" } else { "reject" },
-                            ack.detail
-                        ));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(egui::Color32::from_rgb(20, 24, 32)))
+                .show(ctx, |ui| {
+                    let avail = ui.available_size();
+                    if let Some(tex) = &terrain_tex {
+                        let tw = view.terrain.cols as f32;
+                        let th = view.terrain.rows as f32;
+                        let scale = (avail.x / tw).min(avail.y / th).max(1.0);
+                        let size = egui::vec2(tw * scale, th * scale);
+                        ui.centered_and_justified(|ui| {
+                            ui.image((tex.id(), size));
+                        });
                     }
-                }
-            });
+                });
+
+            egui::Window::new("host")
+                .default_pos([12.0, 12.0])
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("VIEW_SCHEMA {}", view.contract_version));
+                    ui.label(format!(
+                        "sim_tick {} · step {} ms",
+                        view.sim_tick, view.last_step_ms
+                    ));
+                    ui.label(format!(
+                        "paused {} · focus {} · view {}",
+                        view.paused, view.focus_col, view.view_cols
+                    ));
+                    ui.label(format!(
+                        "world {}×{} · strip {}×{}",
+                        view.world_width_cols,
+                        view.world_height,
+                        view.terrain.cols,
+                        view.terrain.rows
+                    ));
+                    ui.separator();
+                    ui.small("Space pause · N step · ←/→ pan · Esc quit");
+                });
         });
 
         egui_state.handle_platform_output(&window, egui_output.platform_output);
@@ -269,7 +300,6 @@ impl SpikeApp {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 })
-                // egui-wgpu 0.29 asks for RenderPass<'static>.
                 .forget_lifetime();
             egui_renderer.render(&mut pass, &tris, &screen);
         }

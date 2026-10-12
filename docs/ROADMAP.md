@@ -356,8 +356,8 @@ before coding.
 ownership split. **Stack pick:** ship = **A egui+wgpu/winit**; soak/dev
 = **macroquad** ([`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md)).
 **Contract:** [`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md) (`ViewFrame` +
-`ClientCommand`). **Spike:** `wk-voxel-client` (egui+wgpu empty window +
-tick HUD). **Next:** terrain strip / sky on A — soak stays macroquad.
+`ClientCommand`). **Spike:** `wk-voxel-client` (egui+wgpu + terrain strip `VIEW_SCHEMA` 2).
+**Next:** sky / palette on A — soak stays macroquad.
 Optional leftover: E2 tipped-log visual.
 
 ---
@@ -435,6 +435,7 @@ Optional leftover: E2 tipped-log visual.
 | 2026-10-12 | Phase 8 stack locked | Ship **A** egui+wgpu; macroquad = soak/dev; next = contract sketch |
 | 2026-10-12 | Phase 8 contract sketch | ViewFrame ≠ SimSnapshot; ClientCommand queue; next = A spike |
 | 2026-10-12 | Phase 8 A spike | `wk-voxel-client` egui+wgpu empty window + Host tick; next = strip/sky |
+| 2026-10-12 | Phase 8 terrain strip | ViewFrame v2 RGBA strip + stamped world tick; next = sky/palette |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
