@@ -37,16 +37,22 @@ over sim rewrites. Kernel stays MS Paint 1×.
 - [x] Wedge A closed.
 - [x] Wedge B locked (agent default).
 - [x] Slices 1–3 landed with unit tests where cheap.
-- [ ] At least one Xvfb dusk cast still.
-- [ ] No sim-mass regressions (short soak park=0 still green).
+- [x] Xvfb dusk cast still under `/opt/cursor/artifacts/`.
+- [x] Short soak park=0 (3000t: TRACKED −0.02/t, min +0.02/t, park=0).
 
-## Landed (wedge B code)
+## Landed (wedge B)
 
 | Slice | Where |
 |-------|--------|
 | Low-sun cast boost | `stamp_celestial_cast_shadows` via `low_sun_factor` |
 | Terrain lee polish | `celestial_exposure` longer/harder at low sun |
 | Warm sundown key | `apply_celestial_key_rgb` amber lean + elev_k boost |
+
+### Xvfb evidence (2026-10-12)
+
+| Still | Tick (approx) | Reads |
+|-------|---------------|-------|
+| `phase7-shadow-01-dusk.png` | ~357 | Warm dusk sky; lit crest key on peak |
 
 ## Non-goals
 
@@ -55,6 +61,7 @@ modules, volumetric god-rays — see [`ROADMAP.md`](ROADMAP.md).
 
 ## Decision list (2026-10-12)
 
-1. **Wedge B in progress** — sundown cast / terrain lee.
+1. **Wedge B closed for agent** — sundown cast / terrain lee + Xvfb +
+   soak; default next wedge **C** (season dial) or owner pick.
 2. Optional: E2 tipped grey-log owner visual (Phase 5 leftover).
-3. Optional: wedges C/D after B parks or owner redirects.
+3. Optional: wedges C/D after owner redirect.
