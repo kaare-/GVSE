@@ -259,7 +259,8 @@ Features:
 
 | Gene | Role |
 |------|------|
-| `attach_prefer` / `host_leave_fraction` | On Genome (scaffold); reseat / smother not wired yet |
+| `host_leave_fraction` | Same-column smother shade (wired) |
+| `attach_prefer` | On Genome; reseat not wired yet |
 
 **Landed (slices 1–3):**
 - Standing-dead woody corpses: abiotic / fungal `stem_integrity` decay
@@ -280,8 +281,12 @@ Features:
 - `step_epiphyte`: photo only; unseated riders die after
   `EPIPHYTE_UNSEATED_MAX` ticks (`epiphyte_seats_on_host_stem_and_dies_when_unseated`).
 
-**Still later:** HostLeave shade, attach_prefer reseat, ghost-root
-cavity fill.
+**Landed (slice 5 — HostLeave):**
+- `epiphyte_rider_transmit`: same-column riders steal host light by
+  `(1 − leave) × cast` (`smother_epiphyte_shades_host_more_than_gentle`,
+  `host_leave_gentle_leaves_more_host_energy_than_smotherer`).
+
+**Still later:** attach_prefer reseat, ghost-root cavity fill.
 
 ## Open: the load-bearing symbiont join
 

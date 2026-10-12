@@ -38,6 +38,18 @@ pub const MAX_CELL_ABSORB: f32 = 0.92;
 pub const LATERAL_SHADE_SCALE: f32 = 0.45;
 /// Same-height lateral peer carpet factor (meadows at equal tip height).
 pub const PEER_LATERAL_SCALE: f32 = 0.55;
+/// Per-photosystem contribution to epiphyte rider cast (× `leaf_absorb`).
+pub const EPI_SHADE_PER_LEAF: f32 = 0.28;
+/// Soft cap on how hard one rider can steal from its host column.
+pub const EPI_SHADE_CAST_CAP: f32 = 0.88;
+
+#[inline]
+fn is_epiphyte_body(atom: &Atom) -> bool {
+    // Inline (no `plant` import) — keeps shade ↔ growth acyclic.
+    let has_holdfast = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast);
+    let has_root = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+    has_holdfast && !has_root
+}
 
 /// Sparse per-column foliage absorption (`0..MAX_CELL_ABSORB`).
 #[derive(Debug, Clone, Default)]
@@ -239,6 +251,38 @@ pub fn shade_transmit(index: &CanopyIndex, wx: i32, sample_y: i32) -> f32 {
         if peer > 0.0 {
             transmit *= (1.0 - peer).clamp(0.0, 1.0);
         }
+    }
+    transmit.clamp(SHADE_AMBIENT_FLOOR, 1.0)
+}
+
+/// Same-column epiphyte steal for modules at/below `sample_y` (E2 HostLeave).
+///
+/// `host_leave_fraction` leaves light for the host: steal scales with
+/// `(1 − leave) × cast`. Gentle riders (`leave → 1`) barely shade the
+/// landlord; smotherers (`leave = 0`) take hard.
+pub fn epiphyte_rider_transmit(atoms: &[Atom], wx: i32, sample_y: i32, self_entity: u32) -> f32 {
+    let mut transmit = 1.0f32;
+    for (id, atom) in atoms.iter().enumerate() {
+        if id as u32 == self_entity {
+            continue;
+        }
+        if !is_epiphyte_body(atom) {
+            continue;
+        }
+        if atom.gx != wx {
+            continue;
+        }
+        // Shade host / understory at or below the rider canopy (equal height
+        // still steals — freeloader greens share the crown cell).
+        if canopy_top_y(atom) < sample_y {
+            continue;
+        }
+        let leave = atom.genome.host_leave_fraction.clamp(0.0, 1.0);
+        let n_photo = atom.photosystem_count();
+        let absorb = atom.genome.leaf_absorb.clamp(0.0, 1.0);
+        let cast = (absorb * n_photo as f32 * EPI_SHADE_PER_LEAF).clamp(0.0, EPI_SHADE_CAST_CAP);
+        let steal = (1.0 - leave) * cast * 0.90;
+        transmit *= (1.0 - steal.clamp(0.0, 0.92)).clamp(0.0, 1.0);
     }
     transmit.clamp(SHADE_AMBIENT_FLOOR, 1.0)
 }
@@ -616,6 +660,49 @@ mod tests {
         assert!(
             understory > sun_thug,
             "high shade_efficiency should harvest better in dim light"
+        );
+    }
+
+    #[test]
+    fn smother_epiphyte_shades_host_more_than_gentle() {
+        let host_body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let host = Atom::from_body(8, 2, 80.0, host_body);
+        let epi_body = vec![
+            (0, 0, ModuleId::Holdfast),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Photosystem),
+        ];
+        let mut smother_g = Genome::default();
+        smother_g.leaf_absorb = 0.95;
+        smother_g.host_leave_fraction = 0.0;
+        let mut gentle_g = Genome::default();
+        gentle_g.leaf_absorb = 0.95;
+        gentle_g.host_leave_fraction = 0.85;
+        // Holdfast on upper stem (y=5); epi leaf at y=6 matches host crown.
+        let mut smother = Atom::from_body(8, 5, 40.0, epi_body.clone());
+        smother.genome = smother_g;
+        let mut gentle = Atom::from_body(8, 5, 40.0, epi_body);
+        gentle.genome = gentle_g;
+        let smother_atoms = [host.clone(), smother];
+        let gentle_atoms = [host.clone(), gentle];
+        let sample_y = canopy_top_y(&host);
+        let rt_s = epiphyte_rider_transmit(&smother_atoms, 8, sample_y, 0);
+        let rt_g = epiphyte_rider_transmit(&gentle_atoms, 8, sample_y, 0);
+        assert!(
+            rt_s < rt_g,
+            "smotherer should leave less light for host (smother={rt_s} gentle={rt_g})"
+        );
+        assert!(rt_g > 0.85, "gentle rider should leave most light ({rt_g})");
+        assert!(
+            rt_s < rt_g - 0.05,
+            "smother gap should be meaningful (smother={rt_s} gentle={rt_g})"
         );
     }
 }

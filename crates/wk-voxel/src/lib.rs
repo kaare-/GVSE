@@ -243,9 +243,10 @@ pub use rules::{
 };
 pub use save::{SimSnapshot, SIM_SAVE_DIR, SIM_SAVE_EXT, SIM_SCHEMA_VERSION};
 pub use shade::{
-    build_canopy_index, build_canopy_index_posed, effective_photo_light, group_posed_by_atom,
-    posed_canopy_sample, posed_canopy_sample_of, shade_transmit, shade_transmit_column,
-    sum_posed_photo_light, sum_posed_photo_light_of, CanopyIndex, PosedModule,
+    build_canopy_index, build_canopy_index_posed, effective_photo_light, epiphyte_rider_transmit,
+    group_posed_by_atom, posed_canopy_sample, posed_canopy_sample_of, shade_transmit,
+    shade_transmit_column, sum_posed_photo_light, sum_posed_photo_light_of, CanopyIndex,
+    PosedModule,
 };
 pub use sim_clock::{SimClock, DEFAULT_SIM_BUDGET};
 pub use sim_preset::{
