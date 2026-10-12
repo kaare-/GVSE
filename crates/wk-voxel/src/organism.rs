@@ -45,9 +45,10 @@ use crate::plant::{
     is_anchored, is_epiphyte, is_holdfast_anchored, is_land_plant, paint_leaf_litter,
     plant_resists_rock_shove, plant_rooted_in_loose, stem_count, leave_dead_roots_in_place,
     pin_plant_pose, prune_detached_woody_leaves, shed_unproductive_woody_leaves,
-    sync_root_storage, try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand,
-    PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
-    PLANT_GROW_MIN_DAY, PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
+    sync_root_storage, try_epiphyte_reseat, try_grow_plant, try_plant_wind_spore,
+    try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
+    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_GROW_MIN_DAY,
+    PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
     build_canopy_index_posed, canopy_top_y, effective_photo_light_cached, epiphyte_rider_transmit,
@@ -1738,7 +1739,9 @@ impl OrganismStore {
         } else if epi {
             pin_plant_pose(&mut atom);
             let stems = collect_live_stem_world_cells(&self.atoms, |x| world.wrap_x(x));
-            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x)) {
+            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x))
+                && !try_epiphyte_reseat(world, &mut atom, &stems)
+            {
                 return false;
             }
         } else if fungus {
@@ -1794,6 +1797,11 @@ impl OrganismStore {
         apply_genome(&mut atom, genome);
         if is_land_plant(&atom) || is_fungus(&atom) || is_epiphyte(&atom) {
             pin_plant_pose(&mut atom);
+            // Sticky Holdfasts snag a nearby Stem from a near-miss click.
+            if is_epiphyte(&atom) {
+                let stems = collect_live_stem_world_cells(&self.atoms, |x| world.wrap_x(x));
+                let _ = try_epiphyte_reseat(world, &mut atom, &stems);
+            }
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
         }
@@ -2898,7 +2906,12 @@ fn step_epiphyte(
 ) -> PlantStep {
     let _ = entity_id;
     pin_plant_pose(atom);
-    if !is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x)) {
+    // High attach_prefer re-seeks a nearby host Stem when unseated.
+    let mut seated = is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x));
+    if !seated {
+        seated = try_epiphyte_reseat(world, atom, host_stems);
+    }
+    if !seated {
         atom.drought_ticks = atom.drought_ticks.saturating_add(1);
         if atom.drought_ticks >= EPIPHYTE_UNSEATED_MAX {
             return PlantStep::Dead;
@@ -7356,6 +7369,56 @@ mod tests {
         assert!(
             !same || (store.atoms[0].vel_y - store.atoms[1].vel_y).abs() > 0.01,
             "contact should shove apart in x or bounce in y"
+        );
+    }
+
+    #[test]
+    fn attach_prefer_high_reseats_low_dies() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let host = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Photosystem),
+        ];
+        assert!(store.spawn_blueprint(&w, 4, 2, host.clone(), 80.0, Genome::default()));
+        let stem_y = 2 + 2;
+        let epi = vec![
+            (0, 0, ModuleId::Holdfast),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Photosystem),
+        ];
+        let mut sticky = Genome::default();
+        sticky.attach_prefer = 0.9;
+        assert!(store.spawn_blueprint(&w, 4, stem_y, epi.clone(), 40.0, sticky));
+        assert!(store.spawn_blueprint(&w, 8, 2, host, 80.0, Genome::default()));
+        let mut cling_free = Genome::default();
+        cling_free.attach_prefer = 0.0;
+        assert!(store.spawn_blueprint(&w, 8, stem_y, epi, 40.0, cling_free));
+        assert_eq!(store.atoms.iter().filter(|a| is_epiphyte(a)).count(), 2);
+
+        // Displace both two cells left — within sticky radius (4), outside cling-free (0).
+        for atom in store.atoms.iter_mut().filter(|a| is_epiphyte(a)) {
+            atom.gx = w.wrap_x(atom.gx - 2);
+            atom.fy = atom.gy as f32;
+            atom.drought_ticks = 0;
+        }
+
+        for t in 0..16 {
+            store.step(&mut w, t);
+        }
+        let epis: Vec<_> = store.atoms.iter().filter(|a| is_epiphyte(a)).collect();
+        assert_eq!(epis.len(), 1, "cling-free should die; sticky should reseat");
+        let stems = collect_live_stem_world_cells(&store.atoms, |x| w.wrap_x(x));
+        assert!(
+            is_holdfast_anchored(epis[0], &stems, |x| w.wrap_x(x)),
+            "sticky Holdfast should be back on a Stem"
+        );
+        assert!(
+            (epis[0].genome.attach_prefer - 0.9).abs() < 1e-5,
+            "survivor should be the sticky rider"
         );
     }
 

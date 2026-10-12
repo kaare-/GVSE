@@ -197,12 +197,12 @@ pub use phase::{
     PhaseConfig, ICE_CARRY_THICKNESS_DEFAULT, PRECIP_IN_AIR_MIN,
 };
 pub use plant::{
-    collect_live_photo_world_cells, collect_live_root_world_cells, collect_live_stem_world_cells,
-    collect_plant_sail_tops, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    is_epiphyte, is_holdfast_anchored, is_land_plant, plant_resists_rock_shove,
-    plant_rooted_in_loose, sail_plants_on_wind_rafts, sail_plants_on_wind_rafts_cfg,
-    sail_plants_on_wind_rafts_columns, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES,
-    MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    attach_seek_radius, collect_live_photo_world_cells, collect_live_root_world_cells,
+    collect_live_stem_world_cells, collect_plant_sail_tops, find_fungus_slot, find_plant_slot,
+    find_surface_air_slot, is_epiphyte, is_holdfast_anchored, is_land_plant,
+    plant_resists_rock_shove, plant_rooted_in_loose, sail_plants_on_wind_rafts,
+    sail_plants_on_wind_rafts_cfg, sail_plants_on_wind_rafts_columns, sync_alloc_to_body,
+    try_epiphyte_reseat, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use rules::{
     active_has_unsupported_grain, apply_airborne_snow_fall, apply_airborne_snow_fall_cfg,
