@@ -3236,18 +3236,18 @@ fn step_land_plant(
         is_day,
     );
     // Single-leaf / near-dark / staggered multi-leaf: tip×count (skip
-    // per-leaf shade walks). Full leaf sum every 3rd tick per plant
-    // (Phase 6 hotspot #2 — was every other tick).
+    // per-leaf shade walks). Phase 6 hotspot #2: grounded upright always
+    // uses tip×count (dense groves share lit/shade caches; full leaf walks
+    // were the metab hotspot). Fallen / unrooted keep a 3-tick full sum.
     const FULL_LEAF_SHADE_PERIOD: u64 = 3;
     let full_leaves = n_photo > 1
         && tip_sky > 0.02
+        && (atom.fallen || !grounded)
         && (atom.age_ticks.wrapping_add(entity_id as u64)) % FULL_LEAF_SHADE_PERIOD == 0;
     let mut light_sum = if !full_leaves {
         let tip =
             effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
         // Tip overestimates shaded lower leaves slightly on skip ticks.
-        // Slightly lower scale with the longer stagger so dense groves do
-        // not inflate harvest vs the old every-other-tick path.
         let scale = if n_photo > 1 && tip_sky > 0.02 {
             0.80
         } else {
