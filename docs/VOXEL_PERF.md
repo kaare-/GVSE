@@ -467,5 +467,9 @@ re-profile.
    Logs: `phase6-stream-organisms-hotspot.log`,
    `phase6-organisms-compact-hotspot.log`,
    `phase6-hotspot-short-soak.log`. Hotspot #2 (land/metab) deferred —
-   tip×count/stem cadence regress river growth; next buildup/GC
-   ([`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).
+   tip×count/stem cadence regress river growth.
+10. **Phase 6 PreferentialRootPath soft-cap (2026-10-12):** map max
+    **4096** + competent-rock stale drop in `fill_ghost_root_voids`.
+    Soak 600t/48: living=50, park=0, preferential_root=0. Log:
+    `phase6-pref-gc-short-soak.log`. Next: soft litter / root_residue GC
+    ([`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).

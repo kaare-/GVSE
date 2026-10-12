@@ -89,6 +89,16 @@ Compact 256) and stem-integrity every-other-tick. Both regress
 `plant_size_is_limited_by_cost_not_by_the_ceiling` (river tip sample /
 load-tip timing). Code reverted; no life-pass cut #2 landed.
 
+## PreferentialRootPath soft-cap (2026-10-12)
+
+Phase 6 buildup/GC slice 1. Soft-cap [`PREFERENTIAL_ROOT_MAP_MAX`]
+(4096) with insert eviction; `clear_preferential_root`; drop competent-rock
+stale marks in `fill_ghost_root_voids`.
+
+Short soak 600t/48: living=50, TRACKED −0.01/t, **park=0**,
+`preferential_root=0`, `root_residue=0`. Log:
+`/opt/cursor/artifacts/phase6-pref-gc-short-soak.log`.
+
 ## Proposed slice plan
 
 1. ~~**Organisms-on perf baseline**~~ — Compact 0/48/256 + org splits.
@@ -103,8 +113,10 @@ load-tip timing). Code reverted; no life-pass cut #2 landed.
    starves river tips (submerged tip sample); stem-integrity cadence
    delays load-tip that river plants need to outgrow cost caps. Revisit
    only with a harvest-neutral cut.
-6. **Buildup / GC** — mycelium strain keys, soft litter, preferential
-   overlays, corpse caps under long soak (park or cut).
+6. ~~**PreferentialRootPath soft-cap**~~ — map max 4096 + rock stale drop;
+   soak park=0.
+7. **Buildup / GC continued** — soft litter map cap, root_residue stale GC,
+   longer organisms-on soak if stores drift.
 
 ## Acceptance (proposed)
 
@@ -121,11 +133,9 @@ New Set B/C modules, creature locomotion, Phase 7 lighting, client
 split — see [`ROADMAP.md`](../ROADMAP.md) and
 [`CORE_FEATURES.md`](CORE_FEATURES.md).
 
-## Decision list (2026-10-12, post hotspot #2 deferral)
+## Decision list (2026-10-12, post preferential GC)
 
-1. **Default next: buildup / GC** — mycelium strain keys, soft litter,
-   preferential overlays, corpse caps under organisms-on soak.
+1. **Default next: buildup / GC continued** — soft litter map cap and/or
+   root_residue stale GC; prove with organisms-on soak overlays.
 2. Optional longer organisms-on BudgetSnap — only if TRACKED reopens.
-3. Optional land/metab revisit — only with a harvest-neutral /
-   tip-timing-neutral cut (`plant_size_is_limited_by_cost_not_by_the_ceiling`
-   must stay green).
+3. Optional land/metab revisit — only with a harvest-neutral / tip-safe cut.

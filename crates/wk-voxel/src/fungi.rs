@@ -1801,13 +1801,23 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
 ///
 /// One cell per preferential void per call — Void → Loose fill. The
 /// PreferentialRootPath overlay stays on the filled coordinate.
+///
+/// Phase 6: drop stale marks on competent rock (never a void host) so the
+/// set does not accumulate unusable keys between soft-cap evictions.
 pub fn fill_ghost_root_voids(world: &mut World) -> u32 {
     let targets: Vec<(i32, i32)> = world.preferential_root.iter().copied().collect();
     let mut filled = 0u32;
     for (gx, gy) in targets {
         let Some(cur) = world.get_cell(gx, gy) else {
+            world.clear_preferential_root(gx, gy);
             continue;
         };
+        // Preferential memory only matters on Air voids or recently filled
+        // Loose. Competent rock can never host a ghost cavity.
+        if crate::cell::is_competent_rock(cur.material) {
+            world.clear_preferential_root(gx, gy);
+            continue;
+        }
         if cur.material != MaterialId::Air {
             continue;
         }
