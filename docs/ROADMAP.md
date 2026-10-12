@@ -311,8 +311,11 @@ contacts (+ epi/soft-pile gates). Stream org **0.59 → 0.29** ms
 (post ≈0); Compact 256 **1.30 → 0.83** ms; soak park=0.
 
 **Slice 4 deferred (2026-10-12):** land/metab tip×count / stem cadence
-regressed river growth unit test; reverted. **Default next:**
-buildup/GC under organisms-on soak.
+regressed river growth unit test; reverted.
+
+**Slice 5 landed (2026-10-12):** PreferentialRootPath soft-cap (4096) +
+rock stale drop; soak park=0 / preferential=0. **Default next:** soft
+litter / root_residue GC or longer organisms-on soak.
 
 ---
 
