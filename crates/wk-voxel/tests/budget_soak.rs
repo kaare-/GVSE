@@ -16,6 +16,8 @@
 //! - `GVSE_SOAK_TICKS` — soak length for short (default 120) and long (default 50_000)
 //! - `GVSE_BUDGET_PERIOD` — sample every N ticks (default 60)
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
+//! - `GVSE_SOAK_ORGANISMS` — seed N land plants and step with `organisms_on`
+//!   (default 0 = Phase 0 organisms-off). Phase 5 E2 closeout uses >0.
 //! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `leftover`, `cadence`,
 //!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`, `surplus`,
 //!   `diffuse` (α=0), `orphan` (evap crest-film 8× off),
@@ -36,11 +38,12 @@
 //! reloc / other (`SnowSwapScope`).
 
 use wk_voxel::{
-    set_peel_seated_snow, set_skip_grain_settle, set_skip_gravity, set_skip_park_orphan,
-    set_skip_seepage, set_skip_surface_flow, snow_mint_probe_reset, snow_mint_probe_snapshot,
-    stamp_world, step_world, BudgetLedger, BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig,
-    CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
-    FungiConfig, GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrographicConfig,
+    find_plant_slot, set_peel_seated_snow, set_skip_grain_settle, set_skip_gravity,
+    set_skip_park_orphan, set_skip_seepage, set_skip_surface_flow, snow_mint_probe_reset,
+    snow_mint_probe_snapshot, stamp_world, step_world, sync_alloc_to_body, Blueprint, BudgetLedger,
+    BudgetProbe, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
+    CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, Genome,
+    GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore, OrographicConfig,
     PerfConfig, PhaseConfig, SnowOtherStage, SteamConfig, Temperature, Wind, World, WorldStep,
     WorldStepConfig, WorldgenParams,
 };
@@ -61,6 +64,42 @@ struct SoakScene {
     clouds: CloudStore,
     carbon: CarbonBudget,
     landscape: LandscapeBodyStore,
+    organisms: OrganismStore,
+}
+
+/// Seed land plants across the demo ring (Phase 5 organisms-on soaks).
+fn seed_plants(scene: &mut SoakScene, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    scene.organisms.max_atoms = count.max(scene.organisms.atom_cap()).max(1);
+    let body = Blueprint::minimal_plant().modules_relative_to_nucleus();
+    let mut g = Genome::default();
+    sync_alloc_to_body(&mut g, &body);
+    let w = scene.params.width_cols.max(1);
+    let mut placed = 0usize;
+    let stride = ((w as usize).max(1) / count.max(1)).max(1);
+    let mut attempts = 0usize;
+    let max_attempts = count.saturating_mul(8).max(w as usize * 2);
+    while placed < count && attempts < max_attempts {
+        let gx = ((attempts * stride) as i32 + (attempts as i32 / 3)) % w;
+        attempts += 1;
+        let guess_y = scene.params.sea_level_y + 2;
+        let Some(gy) = find_plant_slot(&scene.world, gx, guess_y) else {
+            continue;
+        };
+        if scene
+            .organisms
+            .spawn_blueprint(&scene.world, gx, gy, body.clone(), 70.0, g)
+        {
+            placed += 1;
+        }
+    }
+    eprintln!(
+        "  seeded {placed}/{count} land plants  (cap={}  attempts={attempts})",
+        scene.organisms.atom_cap()
+    );
+    placed
 }
 
 fn stamped_demo() -> SoakScene {
@@ -105,6 +144,7 @@ fn stamped_demo() -> SoakScene {
         clouds: CloudStore::new(),
         carbon: CarbonBudget::default(),
         landscape: LandscapeBodyStore::new(),
+        organisms: OrganismStore::new(),
     }
 }
 
@@ -239,8 +279,23 @@ impl Drop for HuntGateGuard {
     }
 }
 
-fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, BudgetProbe) {
+fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, BudgetProbe, usize) {
+    let plant_n = env_u64("GVSE_SOAK_ORGANISMS", 0) as usize;
+    run_soak_with_plants(ticks, warm, period, label, plant_n)
+}
+
+fn run_soak_with_plants(
+    ticks: u64,
+    warm: u64,
+    period: u64,
+    label: &str,
+    plant_n: usize,
+) -> (i64, i64, BudgetProbe, usize) {
     let mut s = stamped_demo();
+    let organisms_on = plant_n > 0;
+    if organisms_on {
+        let _ = seed_plants(&mut s, plant_n);
+    }
     let perf = PerfConfig::default();
     let mut failure = FailureConfig::default();
     if soak_off("failure") {
@@ -342,7 +397,7 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         evap_on: !soak_off("evap"),
         cond_rain_on: !soak_off("cond"),
         karst_on: !soak_off("karst"),
-        organisms_on: false,
+        organisms_on,
     };
 
     for _ in 0..warm {
@@ -354,7 +409,7 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
                 temperature: &mut s.temperature,
                 clouds: &mut s.clouds,
                 carbon: &mut s.carbon,
-                organisms: None,
+                organisms: organisms_on.then_some(&mut s.organisms),
                 landscape: Some(&mut s.landscape),
                 geotech: None,
                 support: None,
@@ -391,7 +446,7 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
                 temperature: &mut s.temperature,
                 clouds: &mut s.clouds,
                 carbon: &mut s.carbon,
-                organisms: None,
+                organisms: organisms_on.then_some(&mut s.organisms),
                 landscape: Some(&mut s.landscape),
                 geotech: None,
                 support: None,
@@ -466,7 +521,19 @@ fn run_soak(ticks: u64, warm: u64, period: u64, label: &str) -> (i64, i64, Budge
         d.d_tracked,
         snow.paid - phase_store as f64,
     );
-    (d.d_min_total, d.d_tracked as i64, BudgetProbe::snapshot())
+    let living = s.organisms.living_count();
+    let corpses = s.organisms.corpses.len() + s.organisms.parked_corpses.len();
+    let preferential = s.world.preferential_root.len();
+    let residue = s.world.root_residue.len();
+    eprintln!(
+        "organisms-on={organisms_on} living={living} corpses={corpses} preferential_root={preferential} root_residue={residue}"
+    );
+    (
+        d.d_min_total,
+        d.d_tracked as i64,
+        BudgetProbe::snapshot(),
+        living,
+    )
 }
 
 #[test]
@@ -480,7 +547,7 @@ fn short_budget_soak() {
     } else {
         format!("short/{ticks}/OFF={off}")
     };
-    let (d_min, d_tracked, probe) = run_soak(ticks, warm, period, &label);
+    let (d_min, d_tracked, probe, _living) = run_soak(ticks, warm, period, &label);
     // OFF=park deliberately discards orphan water — park leftover is the signal.
     if !soak_off("park") {
         assert_eq!(probe.water_park, 0, "park leftover must stay closed");
@@ -584,10 +651,35 @@ fn long_budget_soak() {
     let warm = env_u64("GVSE_BUDGET_WARM", 40);
     let period = env_u64("GVSE_BUDGET_PERIOD", 60);
     let ticks = env_u64("GVSE_SOAK_TICKS", 50_000);
-    let (d_min, d_tracked, probe) = run_soak(ticks, warm, period, "long");
+    let (d_min, d_tracked, probe, _living) = run_soak(ticks, warm, period, "long");
     assert_eq!(probe.water_park, 0, "park leftover must stay closed");
     eprintln!(
         "long soak summary: ticks={ticks} d_tracked={d_tracked} d_min={d_min} park={}",
+        probe.water_park
+    );
+}
+
+/// Phase 5 E2 closeout gate: short organisms-on soak must keep park closed
+/// and leave a living population (TRACKED rate logged, not hard-gated).
+#[test]
+fn short_organisms_budget_soak() {
+    let warm = env_u64("GVSE_BUDGET_WARM", 20);
+    let period = env_u64("GVSE_BUDGET_PERIOD", 30);
+    let ticks = env_u64("GVSE_SOAK_TICKS", 600);
+    let plants = env_u64("GVSE_SOAK_ORGANISMS", 48) as usize;
+    let label = format!("short-org/{ticks}/plants={plants}");
+    let (d_min, d_tracked, probe, living) =
+        run_soak_with_plants(ticks, warm, period, &label, plants);
+    assert_eq!(probe.water_park, 0, "park leftover must stay closed with organisms on");
+    assert_eq!(probe.water_clamp, 0, "humidity clamp must stay closed");
+    assert_eq!(probe.mineral_clip, 0, "dissolved clip must stay closed");
+    assert!(
+        living > 0,
+        "organisms-on soak must keep at least one living atom (got {living})"
+    );
+    let rate = d_tracked as f64 / ticks.max(1) as f64;
+    eprintln!(
+        "short organisms soak summary: ticks={ticks} plants={plants} living={living} d_tracked={d_tracked} ({rate:+.2}/t) d_min={d_min} park={}",
         probe.water_park
     );
 }
