@@ -175,6 +175,10 @@ pub enum ModuleId {
     ReproSpore = 0x10,
     /// Mint — opt-in plant↔fungus symbiosis organ (treaty on Genome).
     Symbiont = 0x16,
+    /// Pink — grips a host Stem (Set E2 epiphyte; Mid-lane share).
+    /// Appended after Symbiont so existing postcard variant indices stay
+    /// stable; hex `0x0F` still matches `docs/organism/PALETTE.md`.
+    Holdfast = 0x0F,
 }
 
 /// Bright Photosystem green (full light) — `docs/organism/PALETTE.md`.
@@ -195,6 +199,7 @@ impl ModuleId {
             ModuleId::Stem => (0x55, 0x6B, 0x2F),
             ModuleId::ReproSpore => (0xD0, 0xB0, 0xFF),
             ModuleId::Symbiont => (0x3D, 0xBE, 0x9A),
+            ModuleId::Holdfast => (0xFF, 0x3D, 0x9A),
         }
     }
 
@@ -225,8 +230,18 @@ impl ModuleId {
             ModuleId::Stem => "Stem",
             ModuleId::ReproSpore => "ReproSpore",
             ModuleId::Symbiont => "Symbiont",
+            ModuleId::Holdfast => "Holdfast",
         }
     }
+}
+
+/// Mid-lane attach exception: pink Holdfast may share a cell with olive Stem.
+#[inline]
+pub fn holdfast_may_share_stem(a: ModuleId, b: ModuleId) -> bool {
+    matches!(
+        (a, b),
+        (ModuleId::Holdfast, ModuleId::Stem) | (ModuleId::Stem, ModuleId::Holdfast)
+    )
 }
 
 /// Body module as offset from the nucleus anchor.
@@ -4964,10 +4979,41 @@ fn resolve_contacts(world: &World, atoms: &mut [Atom]) {
 }
 
 fn bodies_overlap(a: &Atom, b: &Atom) -> bool {
-    for &(dx, dy, _) in &a.body {
-        let ax = a.gx + dx as i32;
-        let ay = a.gy + dy as i32;
-        if b.occupies(ax, ay) {
+    // Collect posed modules per world cell so Holdfast↔Stem Mid-lane share
+    // can ignore a co-located rider Nucleus on the same holdfast cell.
+    let cell_mods = |atom: &Atom| -> Vec<((i32, i32), ModuleId)> {
+        atom.body
+            .iter()
+            .map(|&(dx, dy, m)| {
+                let (odx, ody) = atom.fallen_draw_offset(dx, dy);
+                ((atom.gx + odx as i32, atom.gy + ody as i32), m)
+            })
+            .collect()
+    };
+    let a_at = cell_mods(a);
+    let b_at = cell_mods(b);
+    let mut seen = Vec::new();
+    for &(ac, _) in &a_at {
+        if seen.contains(&ac) {
+            continue;
+        }
+        seen.push(ac);
+        let a_hit: Vec<ModuleId> = a_at
+            .iter()
+            .filter(|(c, _)| *c == ac)
+            .map(|(_, m)| *m)
+            .collect();
+        let b_hit: Vec<ModuleId> = b_at
+            .iter()
+            .filter(|(c, _)| *c == ac)
+            .map(|(_, m)| *m)
+            .collect();
+        if b_hit.is_empty() {
+            continue;
+        }
+        let share = (a_hit.contains(&ModuleId::Holdfast) && b_hit.contains(&ModuleId::Stem))
+            || (b_hit.contains(&ModuleId::Holdfast) && a_hit.contains(&ModuleId::Stem));
+        if !share {
             return true;
         }
     }
@@ -7175,6 +7221,63 @@ mod tests {
         assert!(
             !same || (store.atoms[0].vel_y - store.atoms[1].vel_y).abs() > 0.01,
             "contact should shove apart in x or bounce in y"
+        );
+    }
+
+    #[test]
+    fn epiphyte_holdfast_may_share_host_stem_cell() {
+        assert!(holdfast_may_share_stem(
+            ModuleId::Holdfast,
+            ModuleId::Stem
+        ));
+        assert!(holdfast_may_share_stem(
+            ModuleId::Stem,
+            ModuleId::Holdfast
+        ));
+        assert!(!holdfast_may_share_stem(
+            ModuleId::Holdfast,
+            ModuleId::Photosystem
+        ));
+
+        // Host olive Stem at world (5, 3); epiphyte Holdfast on the same cell.
+        let host = Atom::from_body(
+            5,
+            2,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+            ],
+        );
+        let epi = Atom::from_body(
+            5,
+            3,
+            40.0,
+            crate::blueprint::Blueprint::minimal_epiphyte().modules_relative_to_nucleus(),
+        );
+        assert!(
+            host.occupies(5, 3) && epi.occupies(5, 3),
+            "both bodies must claim the shared Mid-lane cell"
+        );
+        assert!(
+            !bodies_overlap(&host, &epi),
+            "Holdfast↔Stem Mid-lane share must not count as contact overlap"
+        );
+
+        // Same-cell Photosystem vs Stem still collides.
+        let leaf_rider = Atom::from_body(
+            5,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, 0, ModuleId::Photosystem),
+            ],
+        );
+        assert!(
+            bodies_overlap(&host, &leaf_rider),
+            "non-Holdfast Mid-lane share must still collide"
         );
     }
 
