@@ -38,16 +38,24 @@ over sim rewrites. Kernel stays MS Paint 1×.
 - [x] Named Phase 7 scope frozen (this file).
 - [x] Wedge A locked (agent default).
 - [x] Slices 1–3 landed with unit tests where cheap.
-- [ ] At least one Xvfb acceptance for dusk/night/dawn.
-- [ ] No sim-mass regressions (short soak park=0 still green).
+- [x] Xvfb dusk / midnight / dawn stills under `/opt/cursor/artifacts/`.
+- [ ] No sim-mass regressions (short soak park=0 — in flight).
 
-## Landed (wedge A code)
+## Landed (wedge A)
 
 | Slice | Where |
 |-------|--------|
 | Sunrise/sunset palette | `climate::sky_rgb_phased` / `sky_rgb_at_height_phased` + weather_phased |
 | Moon phase crescent | `moon_phase_cfg` → app `draw_celestials` bite |
 | Night stars | `atmosphere::draw_night_stars` from `draw_sky` |
+
+### Xvfb evidence (2026-10-12)
+
+| Still | Tick (approx) | Reads |
+|-------|---------------|-------|
+| `phase7-celestial-11-dusk.png` | ~315 | Amber/orange sky + sun |
+| `phase7-celestial-13-midnight.png` | ~626 | Dark sky + stars + crescent moon |
+| `phase7-celestial-16-morning.png` | ~887 | Rose/salmon dawn + sun/moon handoff |
 
 ## Non-goals
 
@@ -57,6 +65,6 @@ season dial (C), water glitter (D) until A parks — see
 
 ## Decision list (2026-10-12)
 
-1. **Wedge A code in flight** — Xvfb gate + park soak next.
+1. **Wedge A nearly closed** — short soak park=0, then park A / pick B–D.
 2. Optional: E2 tipped grey-log owner visual (Phase 5 leftover).
-3. Optional: wedges B/C/D only after A lands or owner redirects.
+3. Optional: wedges B/C/D after A parks or owner redirects.

@@ -340,9 +340,9 @@ rock stale drop; soak park=0 / preferential=0.
 no sim-mass regressions from lighting-only work.
 
 **Wedge A (2026-10-12):** [`PHASE7_SCOPE.md`](PHASE7_SCOPE.md) —
-celestial polish code landing (sunrise/sunset + moon cycle + stars);
-Xvfb stills + short soak before park. Owner may redirect to E2 visual
-or wedges B–D.
+celestial polish landed (sunrise/sunset + moon cycle + stars) with
+Xvfb dusk/midnight/dawn stills; short soak then park. Owner may
+redirect to E2 visual or wedges B–D.
 
 ---
 
