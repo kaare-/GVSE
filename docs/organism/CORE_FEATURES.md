@@ -125,9 +125,9 @@ network sugar, multi-strain shares, fruiting / spores, and moisture-
 directed Symbiont trade (plant↔cream and strain↔strain). See
 [`FUNGI.md`](FUNGI.md) and [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md).
 
-**E2 in progress:** stem integrity + rot topple (slices 1–2) and
-Holdfast Mid-lane share + attach genes scaffold (slice 3). **Still
-later:** epiphyte seating / HostLeave shade / reseat, ghost-root fill.
+**E2 in progress:** stem integrity + rot topple (slices 1–2), Holdfast
+scaffold (slice 3), epiphyte host-Stem seating (slice 4). **Still
+later:** HostLeave shade / attach_prefer reseat, ghost-root fill.
 
 Scenarios: E39 litter bloom, E40 epiphyte free-ride, E41 allocation
 trap, E42 smother → rot → topple, E43 gentle wins long game, E44

@@ -313,10 +313,66 @@ pub fn sync_root_storage(atom: &mut Atom) {
 
 /// True when the body includes a Root (land habit).
 pub fn is_land_plant(atom: &Atom) -> bool {
-    // Holdfast riders are land plants without a ground Root (E2 epiphytes).
+    atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root)
+}
+
+/// True when the body is an epiphyte (Holdfast, no Root).
+///
+/// Seats on a host Stem via [`is_holdfast_anchored`]. Photo only this
+/// slice — no own drink / growth.
+pub fn is_epiphyte(atom: &Atom) -> bool {
+    let has_holdfast = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast);
+    let has_root = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+    has_holdfast && !has_root
+}
+
+pub fn holdfast_count(atom: &Atom) -> usize {
     atom.body
         .iter()
-        .any(|(_, _, m)| matches!(m, ModuleId::Root | ModuleId::Holdfast))
+        .filter(|(_, _, m)| *m == ModuleId::Holdfast)
+        .count()
+}
+
+/// World cells occupied by living Stem modules (host attach sites).
+///
+/// Skips epiphytes so a rider cannot self-anchor on its own Stem (if any).
+/// `wrap_x` is typically [`crate::grid::World::wrap_x`].
+pub fn collect_live_stem_world_cells(
+    atoms: &[Atom],
+    wrap_x: impl Fn(i32) -> i32,
+) -> std::collections::HashSet<(i32, i32)> {
+    use std::collections::HashSet;
+    let mut out = HashSet::new();
+    for atom in atoms {
+        if is_epiphyte(atom) {
+            continue;
+        }
+        for &(dx, dy, mid) in &atom.body {
+            if mid != ModuleId::Stem {
+                continue;
+            }
+            let (odx, ody) = atom.fallen_draw_offset(dx, dy);
+            out.insert((wrap_x(atom.gx + odx as i32), atom.gy + ody as i32));
+        }
+    }
+    out
+}
+
+/// True when at least one Holdfast shares a world cell with a host Stem.
+pub fn is_holdfast_anchored(
+    atom: &Atom,
+    host_stems: &std::collections::HashSet<(i32, i32)>,
+    wrap_x: impl Fn(i32) -> i32,
+) -> bool {
+    atom.body.iter().any(|&(dx, dy, mid)| {
+        if mid != ModuleId::Holdfast {
+            return false;
+        }
+        let (odx, ody) = atom.fallen_draw_offset(dx, dy);
+        let wx = wrap_x(atom.gx + odx as i32);
+        let wy = atom.gy + ody as i32;
+        host_stems.contains(&(wx, wy))
+    })
 }
 
 pub fn root_count(atom: &Atom) -> usize {

@@ -23,6 +23,7 @@ Kernel vocabulary stays MS Paint 1× ([`README.md`](README.md)).
 | Studio / blueprint editor | Live | [`EDITOR.md`](EDITOR.md) |
 | E2 stem integrity (live + corpse topple) | Live (slices 1–2) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
 | E2 Holdfast Mid-lane share + attach genes | Live (slice 3 scaffold) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
+| E2 epiphyte host-Stem seating | Live (slice 4) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
 
 ## E2 slice plan
 
@@ -31,9 +32,11 @@ Kernel vocabulary stays MS Paint 1× ([`README.md`](README.md)).
    modules above; tip when threshold hit.
 3. ~~**Epiphytes scaffold**~~ — `Holdfast`, `attach_prefer` /
    `host_leave_fraction` on Genome, Mid-lane share with host Stem,
-   `Blueprint::minimal_epiphyte`. Seating / HostLeave shade / reseat
-   follow.
-4. **Ghost-root fill** — Rock→Organic→Void→Loose + preferential re-root
+   `Blueprint::minimal_epiphyte`.
+4. ~~**Epiphyte seating**~~ — habitat spawn requires Holdfast on a
+   living host Stem; unseated riders die within a few ticks (photo
+   only). HostLeave shade + attach_prefer reseat follow.
+5. **Ghost-root fill** — Rock→Organic→Void→Loose + preferential re-root
    (E44).
 
 Out of scope for E2: Set B chem/nerves, Set C niche, creature locomotion

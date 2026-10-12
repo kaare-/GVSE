@@ -274,8 +274,14 @@ Features:
   `Blueprint::minimal_epiphyte`; editor `0` brush / `Y` template;
   Genome `attach_prefer` + `host_leave_fraction` mutate with fidelity.
 
-**Still later:** host-Stem seating + unseated death, HostLeave shade,
-attach_prefer reseat, ghost-root cavity fill.
+**Landed (slice 4 — seating):**
+- Habitat `spawn_blueprint` requires Holdfast on a living host Stem;
+  editor free spawn still places anywhere.
+- `step_epiphyte`: photo only; unseated riders die after
+  `EPIPHYTE_UNSEATED_MAX` ticks (`epiphyte_seats_on_host_stem_and_dies_when_unseated`).
+
+**Still later:** HostLeave shade, attach_prefer reseat, ghost-root
+cavity fill.
 
 ## Open: the load-bearing symbiont join
 
