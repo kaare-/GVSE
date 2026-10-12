@@ -110,6 +110,8 @@ pub struct AtmosphereLookConfig {
     /// Manual season dial in `[0, 1)` when `season_auto` is false
     /// (0 spring, 0.25 summer, 0.5 autumn, 0.75 winter).
     pub season_dial: f32,
+    /// Sun/moon glitter on free-water tops (0..1).
+    pub water_glitter_strength: f32,
 }
 
 impl Default for AtmosphereLookConfig {
@@ -134,6 +136,7 @@ impl Default for AtmosphereLookConfig {
             haze_min_mass: 0.0,
             season_auto: true,
             season_dial: 0.25,
+            water_glitter_strength: 0.75,
         }
     }
 }
@@ -2184,6 +2187,64 @@ pub fn celestial_exposure(world: &World, x: i32, y: i32, celestial_local: f32) -
     1.0
 }
 
+/// Soft sheen + sparse sparkle on lit free-water tops (Phase 7 D).
+///
+/// `key` is [`terrain_celestial_key_strength`] (0..1). Most lit water gets a
+/// mild specular lift; a narrow hash band gets a bright fleck that crawls
+/// with `tick` so the lake is not a static salt-and-pepper field.
+pub fn apply_water_glitter_rgb(
+    rgb: [u8; 3],
+    x: i32,
+    y: i32,
+    tick: u64,
+    celestial_local: f32,
+    is_day: bool,
+    key: f32,
+    strength: f32,
+) -> [u8; 3] {
+    let s = strength.clamp(0.0, 1.0);
+    let key = key.clamp(0.0, 1.0);
+    if s < 0.02 || key < 0.12 {
+        return rgb;
+    }
+    let low = low_sun_factor(celestial_local);
+    // Horizon sun/moon: slightly stronger glitter (long specular).
+    let s = (s * (1.0 + 0.25 * low)).clamp(0.0, 1.0);
+    let h = (x as u32)
+        .wrapping_mul(374761393)
+        .wrapping_add((y as u32).wrapping_mul(668265263))
+        .wrapping_add(((tick / 4) as u32).wrapping_mul(2654435761));
+    let spark = ((h >> 16) & 0xFF) as f32 / 255.0;
+    // Soft sheen on all lit water.
+    let sheen = (key * s * (0.14 + 0.10 * low)).clamp(0.0, 0.35);
+    let gloss = if is_day {
+        [255.0f32, 240.0, 190.0]
+    } else {
+        [185.0f32, 205.0, 255.0]
+    };
+    let mut out = [
+        (rgb[0] as f32 * (1.0 - sheen) + gloss[0] * sheen) as u8,
+        (rgb[1] as f32 * (1.0 - sheen) + gloss[1] * sheen) as u8,
+        (rgb[2] as f32 * (1.0 - sheen) + gloss[2] * sheen) as u8,
+    ];
+    // Sparse flecks — ~10–18% of lit tops.
+    let threshold = 0.90 - 0.08 * s;
+    if spark >= threshold {
+        let fleck = (key * s * (0.55 + 0.35 * spark)).clamp(0.0, 0.95);
+        let tip = if is_day {
+            [255.0f32, 252.0, 230.0]
+        } else {
+            [230.0f32, 240.0, 255.0]
+        };
+        out = [
+            (out[0] as f32 * (1.0 - fleck) + tip[0] * fleck).clamp(0.0, 255.0) as u8,
+            (out[1] as f32 * (1.0 - fleck) + tip[1] * fleck).clamp(0.0, 255.0) as u8,
+            (out[2] as f32 * (1.0 - fleck) + tip[2] * fleck).clamp(0.0, 255.0) as u8,
+        ];
+    }
+    out
+}
+
 /// Warm sun highlight or cool moon glow mixed into an RGB sample.
 pub fn apply_celestial_key_rgb(
     rgb: [u8; 3],
@@ -2792,6 +2853,16 @@ mod tests {
             dusk_warm > noon_warm,
             "noon={noon:?} dusk={dusk:?} warm_n={noon_warm} warm_d={dusk_warm}"
         );
+    }
+
+    #[test]
+    fn water_glitter_brightens_lit_water() {
+        use super::apply_water_glitter_rgb;
+        let base = [40u8, 90, 140];
+        let out = apply_water_glitter_rgb(base, 3, 7, 12, 0.5, true, 0.9, 1.0);
+        let base_luma = base[0] as u32 + base[1] as u32 + base[2] as u32;
+        let out_luma = out[0] as u32 + out[1] as u32 + out[2] as u32;
+        assert!(out_luma > base_luma, "base={base:?} out={out:?}");
     }
 
     #[test]

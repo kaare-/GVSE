@@ -804,6 +804,13 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
+                        "Water glitter",
+                        0.0..1.0,
+                        &mut self.atmosphere.water_glitter_strength,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
                         "Ridge sky mix (near)",
                         0.0..1.0,
                         &mut self.atmosphere.ridge_sky_mix_near,

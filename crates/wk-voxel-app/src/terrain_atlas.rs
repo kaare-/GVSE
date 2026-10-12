@@ -10,7 +10,10 @@ use wk_voxel::{
     GRAIN_REPOSE_HAZE_MAX,
 };
 
-use crate::atmosphere::{apply_celestial_key_rgb, terrain_celestial_key_strength};
+use crate::atmosphere::{
+    apply_celestial_key_rgb, apply_water_glitter_rgb, is_exposed_surface_top,
+    terrain_celestial_key_strength,
+};
 use crate::palette::cell_color_with;
 
 /// Disjoint per-column writes into a row-major atlas (safe under rayon).
@@ -56,6 +59,8 @@ pub fn fill_terrain_atlas(
     sky_weather: &SkyWeatherParams,
     sun_local: f32,
     sun_day: bool,
+    tick: u64,
+    water_glitter: f32,
 ) {
     assert_eq!(pixels.len(), w.saturating_mul(h));
     if w == 0 || h == 0 || y_max <= y_min {
@@ -94,6 +99,8 @@ pub fn fill_terrain_atlas(
             &weather,
             sun_local,
             sun_day,
+            tick,
+            water_glitter,
         );
     });
 }
@@ -112,6 +119,8 @@ fn fill_column(
     sky_weather: &SkyWeatherParams,
     sun_local: f32,
     sun_day: bool,
+    tick: u64,
+    water_glitter: f32,
 ) {
     let _ = sea_level_y;
     // Paint the full viewport band — do not clip to worldgen surface
@@ -152,6 +161,29 @@ fn fill_column(
             let key = terrain_celestial_key_strength(world, x, y, sun_local, sun_day);
             if key > 0.03 {
                 let lit = apply_celestial_key_rgb([r, g, b], key, sun_local, sun_day);
+                r = lit[0];
+                g = lit[1];
+                b = lit[2];
+            }
+            // Free water tops: soft sheen + sparse sun/moon flecks (Phase 7 D).
+            let is_free_water = (cell.material == MaterialId::Air
+                && cell.sat.0 > GRAIN_REPOSE_HAZE_MAX)
+                || cell.material == MaterialId::Water;
+            if is_free_water
+                && water_glitter > 0.02
+                && key > 0.12
+                && is_exposed_surface_top(world, x, y)
+            {
+                let lit = apply_water_glitter_rgb(
+                    [r, g, b],
+                    x,
+                    y,
+                    tick,
+                    sun_local,
+                    sun_day,
+                    key,
+                    water_glitter,
+                );
                 r = lit[0];
                 g = lit[1];
                 b = lit[2];
