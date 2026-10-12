@@ -2975,6 +2975,8 @@ dependencies = [
  "wayland-sys",
  "wgpu",
  "winit",
+ "wk-material",
+ "wk-voxel",
 ]
 
 [[package]]

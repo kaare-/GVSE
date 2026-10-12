@@ -153,7 +153,9 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
 - [x] Command table covers camera, pause, save/load, settings, editors.
 - [x] Spike implements empty window + tick counter via this loop
       (`crates/wk-voxel-client`).
-- [ ] Later: terrain strip parity with macroquad atlas for one Compact view.
+- [x] Terrain strip in `ViewFrame` (schema v2) + egui blit; small stamped
+      world + `tick` on host.
+- [ ] Later: sky / full palette parity with macroquad atlas; Compact size.
 
 ## Non-goals
 
@@ -174,5 +176,6 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 ## Next
 
 1. [x] Land this sketch + A spike empty window.
-2. Port terrain strip + sky when spike loop is boringly stable.
-3. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+2. [x] Terrain strip (`VIEW_SCHEMA` 2) on A.
+3. Sky / climate present fields + fuller palette; grow world toward Compact.
+4. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
