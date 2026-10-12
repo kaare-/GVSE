@@ -99,6 +99,15 @@ Short soak 600t/48: living=50, TRACKED −0.01/t, **park=0**,
 `preferential_root=0`, `root_residue=0`. Log:
 `/opt/cursor/artifacts/phase6-pref-gc-short-soak.log`.
 
+## Soft litter + root_residue soft-cap (2026-10-12)
+
+Phase 6 buildup/GC slice 2. `SOFT_LITTER_MAP_MAX` / `ROOT_RESIDUE_MAP_MAX`
+(4096) with insert eviction; `prune_stale_root_residue` each org step.
+
+Short soak 600t/48: living=50, TRACKED −0.01/t, **park=0**,
+preferential_root=0, root_residue=0. Log:
+`/opt/cursor/artifacts/phase6-litter-gc-short-soak.log`.
+
 ## Proposed slice plan
 
 1. ~~**Organisms-on perf baseline**~~ — Compact 0/48/256 + org splits.
@@ -115,8 +124,10 @@ Short soak 600t/48: living=50, TRACKED −0.01/t, **park=0**,
    only with a harvest-neutral cut.
 6. ~~**PreferentialRootPath soft-cap**~~ — map max 4096 + rock stale drop;
    soak park=0.
-7. **Buildup / GC continued** — soft litter map cap, root_residue stale GC,
-   longer organisms-on soak if stores drift.
+7. ~~**Soft litter + root_residue soft-cap**~~ — map max 4096 + stale
+   Organic prune; soak park=0.
+8. **Longer organisms-on soak / leftover GC** — 5k BudgetSnap if overlays
+   drift; corpse caps already at 256.
 
 ## Acceptance (proposed)
 
@@ -133,9 +144,9 @@ New Set B/C modules, creature locomotion, Phase 7 lighting, client
 split — see [`ROADMAP.md`](../ROADMAP.md) and
 [`CORE_FEATURES.md`](CORE_FEATURES.md).
 
-## Decision list (2026-10-12, post preferential GC)
+## Decision list (2026-10-12, post litter GC)
 
-1. **Default next: buildup / GC continued** — soft litter map cap and/or
-   root_residue stale GC; prove with organisms-on soak overlays.
-2. Optional longer organisms-on BudgetSnap — only if TRACKED reopens.
-3. Optional land/metab revisit — only with a harvest-neutral / tip-safe cut.
+1. **Default next: longer organisms-on soak** — 5k BudgetSnap with plants
+   if owner wants overlay drift proof; else park Phase 6 agent slices.
+2. Optional land/metab revisit — only with a harvest-neutral / tip-safe cut.
+3. Optional corpse-cap retune — only if soak hits `MAX_CORPSES`.
