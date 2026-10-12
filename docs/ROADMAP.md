@@ -373,6 +373,7 @@ before coding.
 | 2026-10-11 | Phase 4 closed | Width+streaming goals met; park Phase 4 / open Phase 5 planning |
 | 2026-10-11 | Phase 5 scope draft | [`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md) decision picks (no code) |
 | 2026-10-12 | Phase 5 E2 wedge | Accept Set E2; stem integrity + rot topple on woody corpses |
+| 2026-10-12 | E2 live integrity | Living stems recharge + load tip; completes PLANTS.md integrity table |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

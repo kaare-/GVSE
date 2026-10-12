@@ -133,6 +133,12 @@ pub const STEM_DEAD_DECAY_PER_TICK: f32 = 0.002;
 pub const STEM_FUNGAL_DECAY_PER_TICK: f32 = 0.05;
 /// Tip when any Stem pixel integrity falls to this (Phase 5 E2).
 pub const STEM_INTEGRITY_TOPPLE_THRESHOLD: f32 = 0.05;
+/// Living woody stems recharge toward 1.0 when the tank has spare energy.
+pub const STEM_LIVE_RECHARGE_PER_TICK: f32 = 0.02;
+/// Energy spent per Stem pixel that actually recharges this tick.
+pub const STEM_RECHARGE_ENERGY_COST: f32 = 0.015;
+/// Integrity drop per Stem/Photosystem module stacked above a Stem pixel.
+pub const STEM_LOAD_PER_MODULE_ABOVE: f32 = 0.008;
 /// Base chance for a floating corpse to drift one cell when `|push| ≈ 1`.
 /// Tuned so wind ~0.2 or modest sat-shear current visibly slides dead stems.
 const CORPSE_DRIFT_BASE: f32 = 0.75;
@@ -3123,6 +3129,15 @@ fn step_land_plant(
         pass.land_metab += t_metab.elapsed();
         return PlantStep::Dead;
     }
+    // Phase 5 E2: living stem integrity — recharge from the tank, load from
+    // modules above; tip via rigid bake if a Stem pixel fails.
+    if !atom.fallen && !stemless && stem_count(atom) > 0 {
+        maintain_live_stem_integrity(atom);
+    }
+    if atom.energy <= 0.0 {
+        pass.land_metab += t_metab.elapsed();
+        return PlantStep::Dead;
+    }
     pass.land_metab += t_metab.elapsed();
 
     let t_grow = Instant::now();
@@ -3543,6 +3558,59 @@ pub fn rigid_tip_offset(dx: i16, dy: i16) -> (i16, i16) {
 ///
 /// Re-tipping an already-fallen mast folds new upright shoots onto the
 /// existing waterline trunk without re-rotating roots.
+/// Recharge living Stem integrity from energy; apply load from modules above.
+///
+/// Tips the plant in place when any Stem pixel reaches
+/// [`STEM_INTEGRITY_TOPPLE_THRESHOLD`].
+fn maintain_live_stem_integrity(atom: &mut Atom) {
+    // Sync entries to current Stem modules.
+    for &(dx, dy, m) in &atom.body {
+        if m != ModuleId::Stem {
+            continue;
+        }
+        if !atom
+            .stem_integrity
+            .iter()
+            .any(|(x, y, _)| *x == dx && *y == dy)
+        {
+            atom.stem_integrity.push((dx, dy, 1.0));
+        }
+    }
+    atom.stem_integrity.retain(|(dx, dy, _)| {
+        atom.body
+            .iter()
+            .any(|&(bx, by, m)| bx == *dx && by == *dy && m == ModuleId::Stem)
+    });
+    let mut tip = false;
+    for (dx, dy, v) in atom.stem_integrity.iter_mut() {
+        let above = atom
+            .body
+            .iter()
+            .filter(|&&(bx, by, m)| {
+                bx == *dx
+                    && by > *dy
+                    && matches!(m, ModuleId::Stem | ModuleId::Photosystem)
+            })
+            .count();
+        let load = STEM_LOAD_PER_MODULE_ABOVE * above as f32;
+        *v = (*v - load).max(0.0);
+        if *v < 1.0 - 1e-4 && atom.energy > STEM_RECHARGE_ENERGY_COST {
+            let before = *v;
+            *v = (*v + STEM_LIVE_RECHARGE_PER_TICK).min(1.0);
+            if *v > before {
+                atom.energy = (atom.energy - STEM_RECHARGE_ENERGY_COST).max(0.0);
+            }
+        }
+        if *v <= STEM_INTEGRITY_TOPPLE_THRESHOLD {
+            tip = true;
+        }
+    }
+    if tip && !atom.fallen {
+        bake_tip_into_body(atom);
+        atom.stem_integrity.clear();
+    }
+}
+
 /// Decay standing-dead Stem integrity on a land corpse.
 ///
 /// Returns `true` when any Stem pixel reaches
@@ -6328,6 +6396,74 @@ mod tests {
         assert!(
             !store.corpses.is_empty(),
             "tipped corpse should still be settling"
+        );
+    }
+
+    #[test]
+    fn living_stem_recharges_integrity_from_energy() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let (sdx, sdy, _) = store.atoms[0]
+            .body
+            .iter()
+            .copied()
+            .find(|(_, _, m)| *m == ModuleId::Stem)
+            .expect("stem");
+        store.atoms[0].stem_integrity = vec![(sdx, sdy, 0.40)];
+        store.atoms[0].energy = 30.0;
+        let before = 0.40f32;
+        store.step(&mut w, 0);
+        let after = store.atoms[0]
+            .stem_integrity
+            .iter()
+            .find(|(x, y, _)| *x == sdx && *y == sdy)
+            .map(|(_, _, v)| *v)
+            .unwrap_or(0.0);
+        assert!(
+            after > before,
+            "living stem should recharge toward 1.0 (before={before} after={after})"
+        );
+        assert!(!store.atoms[0].fallen, "healthy recharge must not tip");
+    }
+
+    #[test]
+    fn living_stem_tips_under_excess_load() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let (sdx, sdy, _) = store.atoms[0]
+            .body
+            .iter()
+            .copied()
+            .find(|(_, _, m)| *m == ModuleId::Stem)
+            .expect("stem");
+        // Stack a tall olive mast so load exceeds recharge in one tick.
+        for i in 1..=40 {
+            store.atoms[0]
+                .body
+                .push((sdx, sdy + i, ModuleId::Stem));
+        }
+        store.atoms[0].stem_integrity = vec![(sdx, sdy, 0.12)];
+        store.atoms[0].energy = 5.0;
+        store.step(&mut w, 0);
+        assert!(
+            store.atoms[0].fallen,
+            "excess stem load should tip the living plant"
         );
     }
 

@@ -21,17 +21,16 @@ Kernel vocabulary stays MS Paint 1× ([`README.md`](README.md)).
 | Set E1 fungi (litter, mycelium, Symbiont, spores) | Live | [`FUNGI.md`](FUNGI.md) |
 | Organism park under stream (body span) | Live | [`WORLDGEN.md`](../WORLDGEN.md) |
 | Studio / blueprint editor | Live | [`EDITOR.md`](EDITOR.md) |
-| E2 stem integrity + rot topple (corpses) | Live (slice 1) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
+| E2 stem integrity (live + corpse topple) | Live (slices 1–2) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
 
 ## E2 slice plan
 
-1. **Stem integrity + rot topple** *(this slice)* — standing-dead woody
-   corpses decay `stem_integrity`; mycelium / Organic adjacency
-   accelerates; tip via existing rigid bake. Test:
-   `standing_dead_stem_tips_when_fungal_integrity_collapses`.
-2. **Epiphytes** — `Holdfast`, `AttachPrefer`, `HostLeaveFraction`,
+1. ~~**Stem integrity + rot topple**~~ — standing-dead woody corpses.
+2. ~~**Living stem integrity**~~ — recharge from energy; load from
+   modules above; tip when threshold hit.
+3. **Epiphytes** — `Holdfast`, `AttachPrefer`, `HostLeaveFraction`,
    Mid-lane share with host Stem (E40–E41 / E43).
-3. **Ghost-root fill** — Rock→Organic→Void→Loose + preferential re-root
+4. **Ghost-root fill** — Rock→Organic→Void→Loose + preferential re-root
    (E44).
 
 Out of scope for E2: Set B chem/nerves, Set C niche, creature locomotion
