@@ -308,8 +308,11 @@ modes (living=256, parked=0). Stream org splits: post/pose lead.
 
 **Slice 3 landed (2026-10-12):** Hotspot cut #1 — skip plant-only
 contacts (+ epi/soft-pile gates). Stream org **0.59 → 0.29** ms
-(post ≈0); Compact 256 **1.30 → 0.83** ms; soak park=0. **Default
-next:** land/metab cut #2 or buildup/GC.
+(post ≈0); Compact 256 **1.30 → 0.83** ms; soak park=0.
+
+**Slice 4 deferred (2026-10-12):** land/metab tip×count / stem cadence
+regressed river growth unit test; reverted. **Default next:**
+buildup/GC under organisms-on soak.
 
 ---
 
@@ -395,6 +398,7 @@ before coding.
 | 2026-10-12 | E2 agent-parked | Slices 1–7 + soak/park gates done; Phase 6 default next |
 | 2026-10-12 | Phase 6 stream+plants | Compact A/B: wall 53→12.8 ms; org ~0.6 ms live-in-view; next = hotspot cut |
 | 2026-10-12 | Phase 6 hotspot #1 | Plant-only contact skip; stream org 0.59→0.29; Compact 1.30→0.83; soak park=0 |
+| 2026-10-12 | Phase 6 hotspot #2 | Deferred: tip×count/stem cadence regress river growth; next = buildup/GC |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

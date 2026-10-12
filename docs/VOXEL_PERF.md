@@ -466,5 +466,6 @@ re-profile.
    ms (post **0.10 → 0.010**). Soak 600t/48: living=50, park=0.
    Logs: `phase6-stream-organisms-hotspot.log`,
    `phase6-organisms-compact-hotspot.log`,
-   `phase6-hotspot-short-soak.log`. Next: land/metab or buildup
+   `phase6-hotspot-short-soak.log`. Hotspot #2 (land/metab) deferred —
+   tip×count/stem cadence regress river growth; next buildup/GC
    ([`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).

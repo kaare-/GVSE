@@ -1,4 +1,4 @@
-# Phase 6 — Optimise the biological loop *(hotspot #1 landed)*
+# Phase 6 — Optimise the biological loop *(hotspot #2 deferred)*
 
 Phase 5 E2 agent slices closed (2026-10-12). Phase 6 focuses on
 **cost and buildup** of the life pass — not new genes.
@@ -82,6 +82,13 @@ TRACKED −0.01/t, **park=0**. Logs:
 ring-wide seed, **land/metab** (~0.34 ms at 256) remains the largest
 named org bucket.
 
+## Hotspot cut #2 — deferred (2026-10-12)
+
+Tried tip×count-always for grounded upright (metab **0.34 → 0.20** on
+Compact 256) and stem-integrity every-other-tick. Both regress
+`plant_size_is_limited_by_cost_not_by_the_ceiling` (river tip sample /
+load-tip timing). Code reverted; no life-pass cut #2 landed.
+
 ## Proposed slice plan
 
 1. ~~**Organisms-on perf baseline**~~ — Compact 0/48/256 + org splits.
@@ -92,8 +99,12 @@ named org bucket.
 4. ~~**Stream-on life cost**~~ — Compact stream+evict with plants;
    park/restore cheap; residency gates far work; live-in-view ~0.6 ms
    pre-cut / ~0.3 ms post-cut.
-5. **Hotspot cut #2 / buildup** — thin land/metab on dense seed, or
-   mycelium strain / litter / preferential GC under long soak.
+5. ~~**Hotspot cut #2 (land/metab)**~~ — **deferred**: tip×count-always
+   starves river tips (submerged tip sample); stem-integrity cadence
+   delays load-tip that river plants need to outgrow cost caps. Revisit
+   only with a harvest-neutral cut.
+6. **Buildup / GC** — mycelium strain keys, soft litter, preferential
+   overlays, corpse caps under long soak (park or cut).
 
 ## Acceptance (proposed)
 
@@ -110,10 +121,11 @@ New Set B/C modules, creature locomotion, Phase 7 lighting, client
 split — see [`ROADMAP.md`](../ROADMAP.md) and
 [`CORE_FEATURES.md`](CORE_FEATURES.md).
 
-## Decision list (2026-10-12, post hotspot #1)
+## Decision list (2026-10-12, post hotspot #2 deferral)
 
-1. **Default next: hotspot cut #2** — thin `land`/`metab` on dense
-   ring-wide seed (largest remaining named org bucket), or skip if
-   owner prefers buildup/GC first.
+1. **Default next: buildup / GC** — mycelium strain keys, soft litter,
+   preferential overlays, corpse caps under organisms-on soak.
 2. Optional longer organisms-on BudgetSnap — only if TRACKED reopens.
-3. Optional buildup/GC if soak stores drift.
+3. Optional land/metab revisit — only with a harvest-neutral /
+   tip-timing-neutral cut (`plant_size_is_limited_by_cost_not_by_the_ceiling`
+   must stay green).
