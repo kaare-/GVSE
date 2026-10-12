@@ -788,6 +788,19 @@ impl SimSettings {
                         8.0..64.0,
                         &mut self.atmosphere.moon_bite_radius,
                     );
+                    ui.separator();
+                    ui.label(None, "Season (sky draw only — sim clock stays on Day/night lengths).");
+                    let mut auto = if self.atmosphere.season_auto { 1.0 } else { 0.0 };
+                    labeled_slider(ui, hash!(), "Season auto (0 off / 1 on)", 0.0..1.0, &mut auto);
+                    self.atmosphere.season_auto = auto >= 0.5;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Season dial (0 spr / .25 sum / .5 aut / .75 win)",
+                        0.0..1.0,
+                        &mut self.atmosphere.season_dial,
+                    );
+                    self.atmosphere.season_dial = self.atmosphere.season_dial.clamp(0.0, 0.999);
                     labeled_slider(
                         ui,
                         hash!(),

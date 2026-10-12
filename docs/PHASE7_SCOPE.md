@@ -1,9 +1,9 @@
-# Phase 7 — Surface spice (atmosphere & light) *(wedge B)*
+# Phase 7 — Surface spice (atmosphere & light) *(wedge C)*
 
-Wedge A closed (2026-10-12): celestial polish + Xvfb + 3k soak park=0.
-**Wedge B accepted by default (2026-10-12):** cast shadows / sundown
-shading — longer plant lee + stronger terrain occlusion + warmer key
-at low sun. App/render only; no sim-mass changes.
+Wedges A–B closed (2026-10-12). **Wedge C accepted by default
+(2026-10-12):** season dial — year-cycle day/night length for sky draw,
+seasonal sky tint, Tab dial + auto. Presentation / climate helpers;
+sim step keeps base `ClimateConfig` (no sim-mass reopen).
 
 ## Intent
 
@@ -15,53 +15,46 @@ over sim rewrites. Kernel stays MS Paint 1×.
 
 | Area | Status | Docs |
 |------|--------|------|
-| Day/night sky + moon phase + stars | Live (A) | [`SKY.md`](SKY.md) |
-| Plant/creature cast + under-canopy dim | Live | `atmosphere::draw_canopy_air_dim` |
-| Terrain celestial key / exposure | Live | `terrain_celestial_key_strength` |
-| Night moon cast after organisms | Live | [`SKY.md`](SKY.md) |
+| Celestial polish (A) | Live | [`SKY.md`](SKY.md) |
+| Sundown cast / terrain lee (B) | Live | [`SKY.md`](SKY.md) |
+| Day/night climate clock | Live | `ClimateConfig` |
 | Phase 6 org cost / overlay GC | Live | [`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md) |
 
-## Wedge B slice plan
+## Wedge C slice plan
 
-1. **Low-sun cast boost** — plant lee longer/stronger near horizon
-   (dusk / dawn elevation).
-2. **Terrain lee polish** — `celestial_exposure` reaches farther and
-   occludes harder at low sun so ridge faces read as shaded.
-3. **Warm sundown key** — day rim highlight leans amber when the sun
-   is low (pairs with A palette).
-4. **Xvfb gate** — stills near dusk with readable long lee under
-   `/opt/cursor/artifacts/`.
+1. **Season clock** — `season_fraction_cfg` over `SEASON_CYCLE_DAYS`
+   climate days (spring→summer→autumn→winter).
+2. **Sky-only day length** — `climate_with_season` remaps day/night
+   for sun/moon/sky draw; organism/temp keep base config.
+3. **Seasonal sky tint** — cool winter / warm summer / amber autumn /
+   soft spring wash on the sky gradient.
+4. **Tab dial** — auto season from tick, or manual 0..1 dial.
+5. **Xvfb gate** — winter vs summer stills under `/opt/cursor/artifacts/`.
 
 ## Acceptance (proposed)
 
-- [x] Wedge A closed.
-- [x] Wedge B locked (agent default).
-- [x] Slices 1–3 landed with unit tests where cheap.
-- [x] Xvfb dusk cast still under `/opt/cursor/artifacts/`.
-- [x] Short soak park=0 (3000t: TRACKED −0.02/t, min +0.02/t, park=0).
+- [x] Wedges A–B closed.
+- [x] Wedge C locked (agent default).
+- [x] Slices 1–4 landed with unit tests where cheap.
+- [ ] At least one Xvfb winter/summer pair.
+- [ ] No sim-mass regressions (short soak park=0 still green).
 
-## Landed (wedge B)
+## Landed (wedge C code)
 
 | Slice | Where |
 |-------|--------|
-| Low-sun cast boost | `stamp_celestial_cast_shadows` via `low_sun_factor` |
-| Terrain lee polish | `celestial_exposure` longer/harder at low sun |
-| Warm sundown key | `apply_celestial_key_rgb` amber lean + elev_k boost |
-
-### Xvfb evidence (2026-10-12)
-
-| Still | Tick (approx) | Reads |
-|-------|---------------|-------|
-| `phase7-shadow-01-dusk.png` | ~357 | Warm dusk sky; lit crest key on peak |
+| Season clock | `season_fraction_cfg` / `SEASON_CYCLE_DAYS` |
+| Sky-only day length | `climate_with_season` → draw path |
+| Seasonal sky tint | `apply_season_sky_tint` + winter star density |
+| Tab dial | auto + manual; `GVSE_FORCE_SEASON` for stills |
 
 ## Non-goals
 
-Season dial (C), water glitter (D), Phase 8 client, new Set B/C
-modules, volumetric god-rays — see [`ROADMAP.md`](ROADMAP.md).
+Water glitter (D), Phase 8 client, seasonal leaf drop / wood rings,
+sim temperature season amp — see [`ROADMAP.md`](ROADMAP.md).
 
 ## Decision list (2026-10-12)
 
-1. **Wedge B closed for agent** — sundown cast / terrain lee + Xvfb +
-   soak; default next wedge **C** (season dial) or owner pick.
+1. **Wedge C in progress** — season dial (sky-only).
 2. Optional: E2 tipped grey-log owner visual (Phase 5 leftover).
-3. Optional: wedges C/D after owner redirect.
+3. Optional: wedge D after C parks or owner redirects.

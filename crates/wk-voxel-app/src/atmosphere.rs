@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use macroquad::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
-    airborne_loose_at, carbon_ratio, celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg,
-    cloud_floor_y, cloud_sky_transmit, continental_surface_y, day_night_factor_cfg,
-    falls_through_empty_air, is_standing_water, moon_illumination, moon_phase_cfg,
-    occupied_sky_sample, phase_fraction_cfg, shade_transmit_column,
+    airborne_loose_at, apply_season_sky_tint, carbon_ratio, celestial_moon_screen_pos_cfg,
+    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
+    day_night_factor_cfg, falls_through_empty_air, is_standing_water, moon_illumination,
+    moon_phase_cfg, occupied_sky_sample, phase_fraction_cfg, shade_transmit_column,
     sky_rgb_at_height_weather_phased, CanopyIndex, CarbonBudget, ClimateConfig, Humidity, ModuleId,
     PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H, CHUNK_CELLS_W,
     GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH,
@@ -105,6 +105,11 @@ pub struct AtmosphereLookConfig {
     pub haze_resample: bool,
     /// `H` overlay: seats / samples below this mass do not paint.
     pub haze_min_mass: f32,
+    /// When true, season follows tick (`season_fraction_cfg`).
+    pub season_auto: bool,
+    /// Manual season dial in `[0, 1)` when `season_auto` is false
+    /// (0 spring, 0.25 summer, 0.5 autumn, 0.75 winter).
+    pub season_dial: f32,
 }
 
 impl Default for AtmosphereLookConfig {
@@ -127,6 +132,8 @@ impl Default for AtmosphereLookConfig {
             cloud_shade_strength: 0.35,
             haze_resample: true,
             haze_min_mass: 0.0,
+            season_auto: true,
+            season_dial: 0.25,
         }
     }
 }
@@ -910,16 +917,22 @@ fn sample_sky_weather(
 }
 
 /// Day/night sky gradient + weather tint (celestials drawn separately).
+///
+/// `climate` should already be the sky-season remap ([`wk_voxel::climate_with_season`])
+/// when a season dial is active. `season` drives the soft seasonal wash only.
 pub fn draw_sky(
     tick: u64,
     sw: f32,
     sh: f32,
     climate: &ClimateConfig,
     weather: &SkyWeatherParams,
-    _look: &AtmosphereLookConfig,
+    look: &AtmosphereLookConfig,
+    season: f32,
 ) {
     let dn = day_night_factor_cfg(tick, climate);
     let phase = phase_fraction_cfg(tick, climate);
+    let season = season.clamp(0.0, 1.0);
+    let _ = look;
     const BANDS: u16 = 36;
     // 1×N gradient stretched once — avoids O(bands) fullscreen rects.
     SKY_ATLAS.with(|slot| {
@@ -932,7 +945,8 @@ pub fn draw_sky(
         let pixels = atlas.img.get_image_data_mut();
         for i in 0..BANDS {
             let height_01 = (i as f32 + 0.5) / BANDS as f32;
-            let [r, g, b] = sky_rgb_at_height_weather_phased(dn, height_01, weather, phase);
+            let rgb = sky_rgb_at_height_weather_phased(dn, height_01, weather, phase);
+            let [r, g, b] = apply_season_sky_tint(rgb, season, dn);
             pixels[i as usize] = [r, g, b, 255];
         }
         atlas.draw_scaled(0.0, 0.0, sw, sh);
@@ -945,11 +959,13 @@ pub fn draw_sky(
         draw_rectangle(0.0, 0.0, sw, sh * 0.50, Color::from_rgba(90, 96, 108, a));
     }
 
-    draw_night_stars(tick, sw, sh, dn);
+    // Winter nights: a few more stars; summer keeps the sparse field.
+    let winter = ((1.0 - ((season - 0.75).abs() / 0.28)).clamp(0.0, 1.0)).powi(2);
+    draw_night_stars(tick, sw, sh, dn, 1.0 + 0.55 * winter);
 }
 
 /// Sparse fine-px stars with slow drift while the sky is dark.
-fn draw_night_stars(tick: u64, sw: f32, sh: f32, day_night: f32) {
+fn draw_night_stars(tick: u64, sw: f32, sh: f32, day_night: f32, density: f32) {
     if day_night >= -0.02 || sw < 8.0 || sh < 8.0 {
         return;
     }
@@ -961,8 +977,8 @@ fn draw_night_stars(tick: u64, sw: f32, sh: f32, day_night: f32) {
     // Slow eastward drift (~1 screen width per ~8k ticks at default).
     let drift_x = (tick as f32 * 0.014) % sw.max(1.0);
     let drift_y = ((tick as f32 * 0.0025) % (sh * 0.12)).max(0.0);
-    const STAR_COUNT: u32 = 56;
-    for i in 0..STAR_COUNT {
+    let star_count = (56.0 * density.clamp(0.5, 1.8)).round() as u32;
+    for i in 0..star_count {
         let h = i.wrapping_mul(2654435761).wrapping_add(0x9E37_79B9);
         let ux = (h & 0xFFFF) as f32 / 65535.0;
         let uy = ((h >> 16) & 0xFFFF) as f32 / 65535.0;

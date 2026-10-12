@@ -62,8 +62,8 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_competent_fall_regions, apply_landscape_fall, apply_weather_rgb, build_canopy_index_posed,
     celestial_local_cfg, celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg,
-    day_night_factor_cfg, is_daytime_cfg, phase_fraction_cfg, plan_active, pore_wetness_with,
-    resolve_organism_draw_cells,
+    climate_with_season, day_night_factor_cfg, is_daytime_cfg, phase_fraction_cfg, plan_active,
+    pore_wetness_with, resolve_organism_draw_cells, season_fraction_cfg,
     step_world, wake_competent_bodies_all, wake_unsupported_grains, wake_unstable_slopes,
     restore_all_from_store, sync_residency, CanopyIndex, GeotechOverlayMode, SimClock,
     SimSnapshot, StreamWindow, WorldStep, WorldStepConfig, WorldgenParams, SIM_SAVE_DIR,
@@ -948,13 +948,22 @@ async fn main() {
             scene.params.width_cols,
             phase.freeze_point_c,
         );
+        // Season remap is sky/celestial draw only — sim keeps base climate.
+        let season = if settings.atmosphere.season_auto {
+            season_fraction_cfg(scene.world.tick, &settings.climate)
+        } else {
+            settings.atmosphere.season_dial.clamp(0.0, 0.999)
+        };
+        let sky_climate = climate_with_season(&settings.climate, season);
+
         draw_sky(
             scene.world.tick,
             sw,
             sh,
-            &settings.climate,
+            &sky_climate,
             &sky_weather,
             &settings.atmosphere,
+            season,
         );
 
         ridges.ensure(
@@ -966,22 +975,22 @@ async fn main() {
             scene.world.tick,
             scene.params.seed,
         );
-        let dn_fg = day_night_factor_cfg(scene.world.tick, &settings.climate);
-        let sun_local = celestial_local_cfg(scene.world.tick, &settings.climate);
-        let sun_day = is_daytime_cfg(scene.world.tick, &settings.climate);
+        let dn_fg = day_night_factor_cfg(scene.world.tick, &sky_climate);
+        let sun_local = celestial_local_cfg(scene.world.tick, &sky_climate);
+        let sun_day = is_daytime_cfg(scene.world.tick, &sky_climate);
         let (celestial_sx, celestial_sy) = if sun_day {
             celestial_sun_screen_pos_cfg(
                 scene.world.tick,
                 sw,
                 sh,
-                &settings.climate,
+                &sky_climate,
             )
         } else {
             celestial_moon_screen_pos_cfg(
                 scene.world.tick,
                 sw,
                 sh,
-                &settings.climate,
+                &sky_climate,
             )
         };
 
@@ -990,7 +999,7 @@ async fn main() {
             scene.world.tick,
             sw,
             sh,
-            &settings.climate,
+            &sky_climate,
             &sky_weather,
             &settings.atmosphere,
             &ridges,
@@ -1018,7 +1027,7 @@ async fn main() {
                 dn_fg,
                 &sky_weather,
                 &settings.atmosphere,
-                phase_fraction_cfg(scene.world.tick, &settings.climate),
+                phase_fraction_cfg(scene.world.tick, &sky_climate),
                 cam_x,
                 cam_y,
                 origin_x,
@@ -1914,11 +1923,7 @@ async fn main() {
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
         if show_hud && !quit_dialog.open {
-            let tod = if is_daytime_cfg(scene.world.tick, &settings.climate) {
-                "day"
-            } else {
-                "night"
-            };
+            let tod = if sun_day { "day" } else { "night" };
             let info = format!(
                 "fps={:.0} sim={:.1}ms atlas={:.1}ms  tick={} {} T̄={:.1}C drizzle={} evap={} phase={} steam={} cave_h={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
