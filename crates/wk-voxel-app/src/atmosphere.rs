@@ -2136,12 +2136,22 @@ fn is_shadow_receiver(world: &World, x: i32, y: i32) -> bool {
 /// How open a cell is toward the active celestial (1 = lit, 0 = occluded).
 ///
 /// Short diagonal probe toward sun/moon — used for terrain-top and plant key.
+/// 0 at zenith sun, 1 at horizon — drives Phase 7 B sundown cast / key.
+pub fn low_sun_factor(celestial_local: f32) -> f32 {
+    let elev = (celestial_local.clamp(0.0, 1.0) * std::f32::consts::PI)
+        .sin()
+        .clamp(0.0, 1.0);
+    ((0.55 - elev) / 0.55).clamp(0.0, 1.0)
+}
+
 pub fn celestial_exposure(world: &World, x: i32, y: i32, celestial_local: f32) -> f32 {
     let local = celestial_local.clamp(0.0, 1.0);
     let elev = (local * std::f32::consts::PI).sin().clamp(0.05, 1.0);
+    let low = low_sun_factor(local);
     let toward = if local < 0.5 { -1.0 } else { 1.0 };
-    let horiz = ((1.0 - elev) / elev).clamp(0.0, 1.45);
-    let max_steps = 7i32;
+    let horiz = ((1.0 - elev) / elev).clamp(0.0, 1.45 + 0.55 * low);
+    // Horizon sun: longer occlusion walk so ridge faces go dark.
+    let max_steps = (7.0 + 8.0 * low).round() as i32;
     let mut fx = x as f32;
     let mut yy = y;
     for step in 1..=max_steps {
@@ -2150,7 +2160,9 @@ pub fn celestial_exposure(world: &World, x: i32, y: i32, celestial_local: f32) -
         let ix = world.wrap_x(fx.round() as i32);
         if is_shadow_receiver(world, ix, yy) {
             // Soft occlusion — near blockers still leak a little ambient.
-            return ((step as f32 - 1.0) / max_steps as f32 * 0.20).clamp(0.0, 0.20);
+            // Low sun: harder lee (less leak) so sundown faces read shaded.
+            let leak = (0.20 - 0.10 * low).clamp(0.08, 0.20);
+            return ((step as f32 - 1.0) / max_steps as f32 * leak).clamp(0.0, leak);
         }
     }
     1.0
@@ -2166,21 +2178,32 @@ pub fn apply_celestial_key_rgb(
     let elev = (celestial_local.clamp(0.0, 1.0) * std::f32::consts::PI)
         .sin()
         .clamp(0.0, 1.0);
-    // Horizon bodies contribute less key; apex more.
-    let elev_k = (0.35 + 0.65 * elev).clamp(0.35, 1.0);
+    let low = low_sun_factor(celestial_local);
+    // Horizon bodies contribute less key; apex more. Day sundown keeps a
+    // stronger rim so amber still reads (Phase 7 B).
+    let elev_k = if is_day {
+        (0.35 + 0.65 * elev + 0.30 * low).clamp(0.35, 1.0)
+    } else {
+        (0.35 + 0.65 * elev).clamp(0.35, 1.0)
+    };
     let e = (exposure.clamp(0.0, 1.0) * elev_k).clamp(0.0, 1.0);
     if e < 0.03 {
         return rgb;
     }
     if is_day {
-        // Warm sun highlight — readable on dark stems.
-        let k = 0.38 * e;
-        let warm = [255.0f32, 228.0, 150.0];
-        let lift = 14.0 * e;
+        // Warm sun highlight — lean amber at low sun (Phase 7 B).
+        let k = (0.38 + 0.14 * low) * e;
+        let warm = [
+            255.0f32,
+            228.0 - 36.0 * low,
+            150.0 - 70.0 * low,
+        ];
+        let lift = (14.0 + 8.0 * low) * e;
         [
             (rgb[0] as f32 * (1.0 - k) + warm[0] * k + lift).clamp(0.0, 255.0) as u8,
             (rgb[1] as f32 * (1.0 - k) + warm[1] * k + lift * 0.85).clamp(0.0, 255.0) as u8,
-            (rgb[2] as f32 * (1.0 - k) + warm[2] * k + lift * 0.45).clamp(0.0, 255.0) as u8,
+            (rgb[2] as f32 * (1.0 - k) + warm[2] * k + lift * (0.45 - 0.20 * low))
+                .clamp(0.0, 255.0) as u8,
         ]
     } else {
         // Soft cool moon glow on rims / light-facing edges.
@@ -2595,20 +2618,24 @@ fn stamp_celestial_cast_shadows(
 ) {
     let local = celestial_local.clamp(0.0, 1.0);
     let elev = (local * std::f32::consts::PI).sin().clamp(0.05, 1.0);
+    let low = low_sun_factor(local);
     let slant = (1.0 - elev).clamp(0.0, 1.0);
     // −1 morning (light left) … +1 evening (light right).
     let azimuth = (local - 0.5) * 2.0;
     let shadow_dir = if azimuth >= 0.0 { -1.0 } else { 1.0 };
     let mut horiz = if elev < 0.08 {
-        1.45
+        1.45 + 0.55 * low
     } else {
-        ((1.0 - elev) / elev).clamp(0.0, 1.55)
+        ((1.0 - elev) / elev).clamp(0.0, 1.55 + 0.65 * low)
     };
     // Keep a readable lean when the body is clearly off-zenith (high afternoon).
-    horiz = horiz.max(azimuth.abs() * 0.65).min(1.70);
-    // Soft, light air corridor — ground lee stays stronger.
-    let air_k = if is_day { 0.22 } else { 0.30 };
-    let air_cap = if is_day { 0.24 } else { 0.32 };
+    // Sundown (Phase 7 B): allow a longer ground lee.
+    let horiz_cap = 1.70 + 0.85 * low;
+    horiz = horiz.max(azimuth.abs() * (0.65 + 0.35 * low)).min(horiz_cap);
+    // Soft, light air corridor — ground lee stays stronger; dusk deepens both.
+    let air_k = if is_day { 0.22 + 0.10 * low } else { 0.30 };
+    let air_cap = if is_day { 0.24 + 0.10 * low } else { 0.32 };
+    let strength = (strength * (1.0 + 0.35 * low)).clamp(0.0, 1.15);
 
     let crowns = crown_casters_near_view(
         world,
@@ -2637,7 +2664,8 @@ fn stamp_celestial_cast_shadows(
             }
             continue;
         }
-        let max_steps = (height + 2 + (slant * 14.0).round() as i32).clamp(4, 40);
+        let max_steps = (height + 2 + ((slant + 0.45 * low) * 14.0).round() as i32)
+            .clamp(4, 40 + (12.0 * low).round() as i32);
         let noon_floor = if elev > 0.85 {
             strength * caster * 0.28
         } else {
@@ -2720,13 +2748,35 @@ pub fn estimate_snow_bias(humidity: &Humidity, temperature: &Temperature, freeze
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_not_below_view, collect_drop_tops, gx_in_ranges, haze_cell_is_drop, haze_column_y0,
-        haze_paint_seats, haze_paint_seats_in_box, haze_paint_seats_where, haze_resampled_cells,
-        humidity_haze_alpha, humidity_haze_alpha_gated, humidity_tile_touches_view,
-        view_cell_x_ranges, view_tile_box,
+        apply_celestial_key_rgb, chunk_not_below_view, collect_drop_tops, gx_in_ranges,
+        haze_cell_is_drop, haze_column_y0, haze_paint_seats, haze_paint_seats_in_box,
+        haze_paint_seats_where, haze_resampled_cells, humidity_haze_alpha,
+        humidity_haze_alpha_gated, humidity_tile_touches_view, low_sun_factor, view_cell_x_ranges,
+        view_tile_box,
     };
     use std::collections::HashMap;
     use wk_voxel::Humidity;
+
+    #[test]
+    fn low_sun_factor_is_high_near_horizon() {
+        // celestial_local 0.5 ≈ zenith; 0.0 / 1.0 ≈ horizon rise/set.
+        assert!(low_sun_factor(0.5) < 0.15, "noon={}", low_sun_factor(0.5));
+        assert!(low_sun_factor(0.05) > 0.7, "rise={}", low_sun_factor(0.05));
+        assert!(low_sun_factor(0.95) > 0.7, "set={}", low_sun_factor(0.95));
+    }
+
+    #[test]
+    fn sundown_key_is_warmer_than_noon_key() {
+        let base = [80u8, 90, 100];
+        let noon = apply_celestial_key_rgb(base, 1.0, 0.5, true);
+        let dusk = apply_celestial_key_rgb(base, 1.0, 0.08, true);
+        let noon_warm = noon[0] as i32 - noon[2] as i32;
+        let dusk_warm = dusk[0] as i32 - dusk[2] as i32;
+        assert!(
+            dusk_warm > noon_warm,
+            "noon={noon:?} dusk={dusk:?} warm_n={noon_warm} warm_d={dusk_warm}"
+        );
+    }
 
     #[test]
     fn shadow_surface_cache_matches_the_column_walk() {
