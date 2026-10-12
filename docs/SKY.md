@@ -55,6 +55,7 @@ runs at full rate off-screen (ring + pan). Not a quadtree.
 | Night stars | Sparse fine-px field with slow drift while `day_night < 0` |
 | Low-sun cast (B) | Longer plant lee + stronger terrain occlusion + amber key |
 | Season dial (C) | Sky-only day/night remap + seasonal tint; Tab auto/manual |
+| Water glitter (D) | Soft sheen + sparse flecks on lit free-water tops |
 | Wind / currents | `V` — cyan wind above water; teal lake currents (warm↑ / cold↓ + skin wind drift; free-water only; wrapped seam) |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
 | Cast / celestial key | See prior plant/terrain lighting notes |

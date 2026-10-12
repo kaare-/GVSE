@@ -1126,6 +1126,8 @@ async fn main() {
                 &sky_weather,
                 sun_local,
                 sun_day,
+                scene.world.tick,
+                settings.atmosphere.water_glitter_strength,
             );
             let tex = terrain_tex.as_ref().unwrap();
             tex.update(img);
