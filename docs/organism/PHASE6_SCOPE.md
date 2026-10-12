@@ -1,4 +1,4 @@
-# Phase 6 — Optimise the biological loop *(baseline landed)*
+# Phase 6 — Optimise the biological loop *(stream profile landed)*
 
 Phase 5 E2 agent slices closed (2026-10-12). Phase 6 focuses on
 **cost and buildup** of the life pass — not new genes.
@@ -18,6 +18,7 @@ feature work.
 | Stream organism park (body span) | Live | [`WORLDGEN.md`](../WORLDGEN.md) |
 | Phase 1/4 physics perf baselines | Live | [`VOXEL_PERF.md`](../VOXEL_PERF.md) |
 | Compact organisms-on perf baseline | Live (slice 1) | this file + `perf_profile` |
+| Compact stream-on + plants A/B | Live (slice 2) | this file + `perf_profile` |
 
 ## Compact baseline (2026-10-12)
 
@@ -39,16 +40,36 @@ seat 0.04, disperse 0.01.
 wall). Organisms at MAX-ish plant load are ~1.3 ms — the only ≥1 ms
 life bucket. Inside that, `land` / `metab` dominates.
 
+## Compact stream-on + plants (2026-10-12)
+
+Harness: `phase6_stream_organisms_compact` (release). Focus at
+`width/4`; plants seeded into ±resident (~14 chunks) so stream-on
+keeps live org cost (ring-mid focus parks land seeds). Log:
+`/opt/cursor/artifacts/phase6-stream-organisms-compact.log`.
+
+| mode | wall ms/tick | org ms/tick | living | parked | chunks |
+|------|-------------:|------------:|-------:|-------:|-------:|
+| full-resident + 256 (focus band) | 53.3 | 0.61 | 256 | 0 | 1088 |
+| stream view=320 + evict + 256 | **12.8** | 0.59 | 256 | 0 | 459 |
+
+Stream org splits (ms/tick): **post 0.11**, pose 0.08, land 0.06,
+canopy 0.05. Land: metab 0.02, seat 0.02.
+
+**Read:** Stream cuts wall ~4× (physics/climate residency). With plants
+inside the resident band, **org stays ~0.6 ms** (parked=0) — park only
+helps far bodies. Under play-like stream+live load, post/pose lead;
+ring-wide baseline still shows land/metab as the dense-seed hotspot.
+
 ## Proposed slice plan
 
 1. ~~**Organisms-on perf baseline**~~ — Compact 0/48/256 + org splits.
-2. **Hotspot cut #1** — thin `land` / `metab` (or skip if owner wants
-   stream-on / buildup first); keep TRACKED flat + park=0 on
-   `short_organisms_budget_soak`.
+2. **Hotspot cut #1** — thin hottest org buckets under stream+live
+   (post / pose; land/metab on dense ring-wide seed); keep TRACKED
+   flat + park=0 on `short_organisms_budget_soak`.
 3. **Longer organisms-on soak** — 5k then 50k BudgetSnap with plants;
    only if short gate reopens or buildup shows a store drift.
-4. **Stream-on life cost** — Compact stream+evict with plants; ensure
-   park/restore stays cheap and residency still gates far work.
+4. ~~**Stream-on life cost**~~ — Compact stream+evict with plants;
+   park/restore cheap; residency gates far work; live-in-view ~0.6 ms.
 5. **Buildup / GC** — mycelium strain keys, soft litter, preferential
    overlays, corpse caps under long soak (park or cut).
 
@@ -57,6 +78,7 @@ life bucket. Inside that, `land` / `metab` dominates.
 - [x] Named Phase 6 scope frozen (this file).
 - [x] Organisms-on Compact perf baseline logged under
       `/opt/cursor/artifacts/`.
+- [x] Compact stream-on + plants A/B logged (focus-band seed).
 - [ ] At least one measured life-pass cut with soak gate still green.
 - [ ] Owner: accept Phase 6 wedge or pick a different Phase 5 follow-up.
 
@@ -66,11 +88,9 @@ New Set B/C modules, creature locomotion, Phase 7 lighting, client
 split — see [`ROADMAP.md`](../ROADMAP.md) and
 [`CORE_FEATURES.md`](CORE_FEATURES.md).
 
-## Decision list (2026-10-12, post-baseline)
+## Decision list (2026-10-12, post stream profile)
 
-1. **Default next: stream-on Compact + plants** — wall is physics-bound;
-   life cost matters more under stream residency / larger rings than a
-   sub-ms metab micro-cut on full-resident Compact.
-2. Optional: surgical `land`/`metab` trim if owner wants a measured
-   life-pass cut before stream work.
-3. Optional longer organisms-on BudgetSnap — only if TRACKED reopens.
+1. **Default next: hotspot cut #1** — thin post/pose (stream+live) and/or
+   land/metab (dense seed); prove with `perf_profile` + short soak.
+2. Optional longer organisms-on BudgetSnap — only if TRACKED reopens.
+3. Optional buildup/GC if soak stores drift before a life-pass cut pays.

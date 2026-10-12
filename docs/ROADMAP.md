@@ -300,8 +300,13 @@ under long soak / larger maps. See
 
 **Slice 1 landed (2026-10-12):** Compact organisms-on baseline —
 256 plants ≈ **1.3 ms** org / **55 ms** wall (~2.4%); physics-bound.
-Inside org: land/metab hottest. **Default next:** Compact stream+evict
-with plants (life cost under residency), not a sub-ms metab micro-cut.
+Inside org: land/metab hottest (ring-wide seed).
+
+**Slice 2 landed (2026-10-12):** Compact stream+evict + 256 plants in
+focus resident band — wall **53 → 12.8** ms; org **~0.6** ms both
+modes (living=256, parked=0). Stream org splits: post/pose lead.
+**Default next:** hotspot cut #1 (post/pose and/or land/metab) with
+short soak still green.
 
 ---
 
@@ -385,6 +390,7 @@ before coding.
 | 2026-10-12 | E2 ghost-root | Organic residue→Void→Loose + preferential re-root (E44) |
 | 2026-10-12 | E2 org soak gate | 600t / 48 plants: TRACKED −0.01/t, park=0, living=50 |
 | 2026-10-12 | E2 agent-parked | Slices 1–7 + soak/park gates done; Phase 6 default next |
+| 2026-10-12 | Phase 6 stream+plants | Compact A/B: wall 53→12.8 ms; org ~0.6 ms live-in-view; next = hotspot cut |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
