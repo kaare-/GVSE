@@ -1,8 +1,8 @@
 # Phase 8 — Client stack comparison
 
-**Status:** comparison only (2026-10-12). No production client coding
-until the owner picks a stack (or parks Phase 8). See
-[`PHASE8_SCOPE.md`](PHASE8_SCOPE.md) for ownership split and wedge plan.
+**Status:** comparison closed (2026-10-12). **Owner pick:** ship client
+**= A (egui + wgpu / winit)**; **macroquad** remains soak/dev/Xvfb only.
+See [`PHASE8_SCOPE.md`](PHASE8_SCOPE.md) for ownership split and wedge plan.
 
 ## Baseline (what we have today)
 
@@ -192,21 +192,14 @@ until a later Phase 8b.
 | Framework churn | Low | High | Medium | Low |
 | Fits 2D atlas client | Excellent | Overkill-prone | OK | Already there |
 
-## Recommendation framing (not a decision)
+## Decision (owner, 2026-10-12)
 
-Agent default for **architecture next**, still owner-gated:
-
-1. **Treat D as the soak/dev viewer forever** (or until replaced), not as
-   the assumed ship client — unless the owner explicitly chooses D.
-2. **Prefer A as the production-compatible default** if the ship target
-   is Steam desktop and/or notarized Apple with a 2D atlas + settings
-   HUD: hygiene + Metal + lowest lock-in among A/B/C.
-3. **Choose B only** if the owner wants Bevy’s presentation runway and
-   accepts a hard “sim not in Bevy World” rule in the contract.
-4. **Choose C only** if store/editor tooling outweighs dual-runtime cost.
-
-Correct prior shortlist wording: demo settings are **`macroquad::ui`**,
-not egui. Stack A is a UI **port**, not a free lunch.
+1. **Ship client = A** (egui + wgpu / winit) — new explicit binary.
+2. **macroquad `wk-voxel-app` = soak/dev/Xvfb** — not the production
+   ship path (D declined as ship strategy).
+3. **B / C parked** unless reopened.
+4. Demo settings are **`macroquad::ui`**; A implies a deliberate egui
+   settings port when gameplay presentation moves — not “already egui.”
 
 ## Suggested spike (after owner pick)
 
@@ -228,8 +221,8 @@ binary.
 Full multiplayer, console, web WASM ship client, rewriting CA/mass into
 the client, abandoning the macroquad soak viewer without an owner call.
 
-## Decision needed (owner)
+## Open (owner, non-blocking for contract sketch)
 
-1. Ship target: Steam / Apple / both / park Phase 8.
-2. Stack: **A / B / C / D**.
-3. Keep macroquad as: soak-only / soak+ship (D) / retire later.
+1. Ship storefront first: Steam, Apple (notarized / MAS), or both —
+   stack A supports either; packaging scripts differ.
+2. When (if ever) to retire the macroquad viewer after A parity.
