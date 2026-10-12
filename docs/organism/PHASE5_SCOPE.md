@@ -1,10 +1,12 @@
-# Phase 5 — Biological system upgrade *(E2 accepted)*
+# Phase 5 — Biological system upgrade *(E2 agent-parked)*
 
 Phase 4 closed (2026-10-11): streaming + 5 km ≥30 sim-FPS. Headless
 Phase 0 soaks stay **organisms-off**; Phase 5 soaks turn them **on**.
 
-**Wedge (accepted 2026-10-12, daily default):** **Finish Set E2 on voxel**
-— stem integrity / topple first; epiphytes + ghost-root fill follow.
+**Wedge (accepted 2026-10-12):** **Finish Set E2 on voxel** — stem
+integrity / topple, epiphytes, ghost-root fill. **Agent slices 1–7 +
+soak/park gates landed** (2026-10-12). Owner visual for tipped grey
+logs remains open; not a code blocker.
 
 ## Intent
 
@@ -67,3 +69,18 @@ Out of scope for E2: Set B chem/nerves, Set C niche, creature locomotion
 Learned nets, active predation chase, freeform drawing, full animal
 locomotion, real wood rings / Bezier topple animation — see
 [`CORE_FEATURES.md`](CORE_FEATURES.md) § Explicitly not in Core.
+
+## Decision list (2026-10-12, post-E2)
+
+E2 agent work is parked. Open forks (defaults in **bold**):
+
+1. **Owner visual** for tipped grey logs at 1× — play/Xvfb when Kaare
+   has eyes; agent does not block on this.
+2. **Next phase default: Phase 6 scope** — optimise the biological loop
+   (organisms-on cost / buildup under longer soak + larger maps). Draft
+   [`PHASE6_SCOPE.md`](PHASE6_SCOPE.md) + organisms-on perf baseline
+   before deep cuts.
+3. Optional: longer organisms-on BudgetSnap (5k / 50k) — only if TRACKED
+   reopens after short gate; short gate already flat (−0.01/t).
+4. Optional Phase-4 FPS leftovers (5 km wind.rebuild / rock bodies) —
+   only if owner wants more stream FPS; not a Phase-5 blocker.

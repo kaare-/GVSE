@@ -277,27 +277,27 @@ trims are optional follow-ups, not Phase-4 blockers.
 
 ---
 
-## Phase 5 — Biological system upgrade *(next — planning)*
+## Phase 5 — Biological system upgrade *(E2 agent-parked 2026-10-12)*
 
 **Goal:** Big organism/ecology pass. Lots of **fundamental changes** to
-the system we have — not a thin skin. **Requires its own major planning
-session** and scoping doc before implementation.
+the system we have — not a thin skin.
 
 Headless soaks for this phase turn **organisms on** (Phase 0 gate stays
 organisms-off).
 
-**Wedge accepted (2026-10-12):** Set E2 — see
-[`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md). E2 stack through
-ghost-root fill (E44) landed; organisms-on short soak gate passed
-(TRACKED −0.01/t, park=0). Remaining owner visual for tipped grey logs.
-Daily 09:00 Oslo lists continue.
+**Wedge Set E2** — see [`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md).
+Slices 1–7 + organisms-on soak/park gates landed (TRACKED −0.01/t,
+park=0). Owner visual for tipped grey logs remains open (not a code
+blocker). Daily 09:00 Oslo lists continue.
 
 ---
 
-## Phase 6 — Optimise the biological loop
+## Phase 6 — Optimise the biological loop *(next — default)*
 
-**Goal:** After the upgrade lands, cost and buildup of the life pass
-under long soak / larger maps.
+**Goal:** After the E2 upgrade lands, cost and buildup of the life pass
+under long soak / larger maps. **Default next** without owner pick:
+draft Phase 6 scope + organisms-on perf baseline, then cut the hottest
+life-pass levers.
 
 ---
 
@@ -380,6 +380,7 @@ before coding.
 | 2026-10-12 | E2 attach_prefer | Sticky Holdfast reseat on nearby Stem |
 | 2026-10-12 | E2 ghost-root | Organic residue→Void→Loose + preferential re-root (E44) |
 | 2026-10-12 | E2 org soak gate | 600t / 48 plants: TRACKED −0.01/t, park=0, living=50 |
+| 2026-10-12 | E2 agent-parked | Slices 1–7 + soak/park gates done; Phase 6 default next |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
