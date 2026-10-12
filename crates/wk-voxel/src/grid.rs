@@ -22,6 +22,9 @@ pub type ChunkMap = FxHashMap<ChunkCoord, Chunk>;
 /// past this limit (E44 only needs local recent memory).
 pub const PREFERENTIAL_ROOT_MAP_MAX: usize = 4_096;
 
+/// Soft cap on [`World::root_residue`] overlay entries (Phase 6 buildup GC).
+pub const ROOT_RESIDUE_MAP_MAX: usize = 4_096;
+
 static NEXT_CHUNK_CACHE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn default_world_pipe_expand() -> u16 {
@@ -431,8 +434,17 @@ impl World {
     }
 
     /// Mark `(gx, gy)` as dead-root Organic residue (Phase 5 E2 / E44).
+    ///
+    /// Soft-caps at [`ROOT_RESIDUE_MAP_MAX`].
     pub fn mark_root_residue(&mut self, gx: i32, gy: i32) {
         let gx = self.wrap_x(gx);
+        if self.root_residue.len() >= ROOT_RESIDUE_MAP_MAX
+            && !self.root_residue.contains(&(gx, gy))
+        {
+            if let Some(&key) = self.root_residue.iter().next() {
+                self.root_residue.remove(&key);
+            }
+        }
         self.root_residue.insert((gx, gy));
     }
 
@@ -857,5 +869,17 @@ mod tests {
         );
         w.clear_preferential_root(PREFERENTIAL_ROOT_MAP_MAX as i32, 0);
         assert!(!w.is_preferential_root(PREFERENTIAL_ROOT_MAP_MAX as i32, 0));
+    }
+
+    #[test]
+    fn root_residue_soft_caps() {
+        let mut w = World::new(3);
+        for i in 0..ROOT_RESIDUE_MAP_MAX {
+            w.mark_root_residue(i as i32, 1);
+        }
+        assert_eq!(w.root_residue.len(), ROOT_RESIDUE_MAP_MAX);
+        w.mark_root_residue(ROOT_RESIDUE_MAP_MAX as i32, 1);
+        assert_eq!(w.root_residue.len(), ROOT_RESIDUE_MAP_MAX);
+        assert!(w.is_root_residue(ROOT_RESIDUE_MAP_MAX as i32, 1));
     }
 }

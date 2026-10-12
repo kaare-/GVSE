@@ -314,8 +314,11 @@ contacts (+ epi/soft-pile gates). Stream org **0.59 → 0.29** ms
 regressed river growth unit test; reverted.
 
 **Slice 5 landed (2026-10-12):** PreferentialRootPath soft-cap (4096) +
-rock stale drop; soak park=0 / preferential=0. **Default next:** soft
-litter / root_residue GC or longer organisms-on soak.
+rock stale drop; soak park=0 / preferential=0.
+
+**Slice 6 landed (2026-10-12):** Soft litter + root_residue soft-caps
+(4096) + stale Organic prune. **Default next:** longer organisms-on soak
+or park Phase 6 agent slices.
 
 ---
 

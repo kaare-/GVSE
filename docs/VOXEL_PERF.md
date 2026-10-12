@@ -471,5 +471,8 @@ re-profile.
 10. **Phase 6 PreferentialRootPath soft-cap (2026-10-12):** map max
     **4096** + competent-rock stale drop in `fill_ghost_root_voids`.
     Soak 600t/48: living=50, park=0, preferential_root=0. Log:
-    `phase6-pref-gc-short-soak.log`. Next: soft litter / root_residue GC
-    ([`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).
+    `phase6-pref-gc-short-soak.log`.
+11. **Phase 6 soft litter + root_residue GC (2026-10-12):** map max
+    **4096** each + stale Organic residue prune. Soak log:
+    `phase6-litter-gc-short-soak.log`. Next: longer organisms-on soak or
+    park ([`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).

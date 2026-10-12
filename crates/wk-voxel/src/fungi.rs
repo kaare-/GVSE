@@ -144,6 +144,10 @@ pub const FUNGUS_SPORE_LOCAL_MAX: usize = 2;
 /// Age before network support prevents energy-starve (babies must earn).
 pub const FRUIT_SUPPORT_MIN_AGE: u64 = 480;
 /// Soft litter deposited per body module on death.
+/// Soft cap on [`World::soft_litter`] column keys (Phase 6 buildup GC).
+/// Digest already removes zero entries; this bounds columns that never
+/// see a fungus sip under organisms-on soak.
+pub const SOFT_LITTER_MAP_MAX: usize = 4_096;
 pub const DEATH_LITTER_PER_MODULE: u16 = 6;
 /// Cap soft litter added from one corpse.
 pub const DEATH_LITTER_MAX: u16 = 48;
@@ -276,6 +280,11 @@ pub fn add_soft_litter(world: &mut World, gx: i32, units: u16) {
         return;
     }
     let gx = world.wrap_x(gx);
+    if world.soft_litter.len() >= SOFT_LITTER_MAP_MAX && !world.soft_litter.contains_key(&gx) {
+        if let Some(&key) = world.soft_litter.keys().next() {
+            world.soft_litter.remove(&key);
+        }
+    }
     let e = world.soft_litter.entry(gx).or_insert(0);
     *e = e.saturating_add(units);
 }
@@ -1797,6 +1806,26 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     true
 }
 
+/// Drop [`World::root_residue`] marks whose cell is no longer Organic.
+///
+/// Residue only opens a preferential void on Organic compost; marks left
+/// after overwrite / erosion are dead weight under organisms-on soak.
+pub fn prune_stale_root_residue(world: &mut World) -> u32 {
+    let keys: Vec<(i32, i32)> = world.root_residue.iter().copied().collect();
+    let mut dropped = 0u32;
+    for (gx, gy) in keys {
+        let keep = matches!(
+            world.get_cell(gx, gy).map(|c| c.material),
+            Some(MaterialId::Organic)
+        );
+        if !keep {
+            world.clear_root_residue(gx, gy);
+            dropped += 1;
+        }
+    }
+    dropped
+}
+
 /// Collapse loose Sand/Clay into preferential Air voids (Phase 5 E2 / E44).
 ///
 /// One cell per preferential void per call — Void → Loose fill. The
@@ -3167,6 +3196,29 @@ mod tests {
             w.preferential_root.is_empty(),
             "litter Organic must not open a ghost cavity"
         );
+    }
+
+    #[test]
+    fn soft_litter_map_soft_caps() {
+        let mut w = litter_plot();
+        for i in 0..SOFT_LITTER_MAP_MAX {
+            add_soft_litter(&mut w, i as i32, 1);
+        }
+        assert_eq!(w.soft_litter.len(), SOFT_LITTER_MAP_MAX);
+        add_soft_litter(&mut w, SOFT_LITTER_MAP_MAX as i32, 3);
+        assert_eq!(w.soft_litter.len(), SOFT_LITTER_MAP_MAX);
+        assert_eq!(soft_litter_at(&w, SOFT_LITTER_MAP_MAX as i32), 3);
+    }
+
+    #[test]
+    fn prune_stale_root_residue_drops_non_organic() {
+        let mut w = litter_plot();
+        w.set_cell(4, 2, Cell::solid(MaterialId::Organic));
+        w.mark_root_residue(4, 2);
+        w.mark_root_residue(5, 2); // no Organic here
+        assert_eq!(prune_stale_root_residue(&mut w), 1);
+        assert!(w.is_root_residue(4, 2));
+        assert!(!w.is_root_residue(5, 2));
     }
 
     #[test]
