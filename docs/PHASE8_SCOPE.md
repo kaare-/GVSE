@@ -60,11 +60,18 @@ B (Bevy) and C (Godot) parked unless owner reopens. D (ship the
 macroquad binary) is **not** the production path — macroquad stays
 research/dev.
 
-## Landed (2026-10-12) — agent parked
+## Architecture (owner confirm 2026-10-12)
 
-`wk-voxel-client` presents a stamped small ring via `ViewFrame` v3
-(strip + sky + palette/glitter). Host still uses CA `tick` (not full
-`step_world`). Macroquad remains soak/dev/Xvfb.
+**Server / client:** host owns the sim; client is a **viewer** — camera,
+HUD, and limited interaction via `ClientCommand` (pause, pan/focus,
+save/load, editors later). Client never mutates sat/mass. In-process
+first; same messages can move to a separate host process later.
+
+## Landed (2026-10-12)
+
+`wk-voxel-client` is the **viewer**; in-process host runs product
+`step_world` on a small ring and emits `ViewFrame` v4 (strip + sky +
+palette/glitter). Macroquad remains soak/dev/Xvfb.
 
 ## Wedge plan
 
@@ -76,17 +83,18 @@ research/dev.
 6. [x] **Terrain strip** — `ViewFrame` v2 RGBA window + stamped world `tick`.
 7. [x] **Sky** — `ViewFrame` v3 sky fields + air fill + sun/moon marker.
 8. [x] **Palette / glitter** — app-aligned cell colours + water glitter.
-9. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+9. [x] **Grow host** — `step_world` + climate fields; present throttled.
+10. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host is a small ring for now).
 
-## Owner next (pick one)
+## Owner next (after grow-host)
 
 | Pick | Notes |
 |------|--------|
-| **Grow host** | Wire `step_world` + climate fields; enlarge toward Compact |
-| **Ship packaging** | Steam / notarize spike for stack A (no sim change) |
-| **E2 visual** | Phase 5 tipped grey-log leftover |
-| **Park / redirect** | Leave Phase 8 presentation as-is |
+| **Compact host** | Enlarge viewer world toward Compact / soak parity |
+| **Ship packaging** | Steam / notarize A binary |
+| **Out-of-process host** | Split host binary; same ViewFrame / commands |
+| **E2 / redirect** | Phase 5 leftover or other program |
 
 ## Acceptance (proposed)
 
@@ -109,5 +117,6 @@ the client, abandoning the macroquad soak viewer.
 3. **Contract sketch:** `ViewFrame` ≠ `SimSnapshot`; `ClientCommand`
    queue; in-process single-player first ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
 4. Contract + A spike + strip + sky + palette/glitter landed (#425–#430).
-5. **Agent parked** — owner pick: grow host / packaging / E2 / redirect.
-6. Soak stays macroquad. Optional: E2 tipped grey-log (Phase 5).
+5. Owner: client = **viewer** (camera + limited commands); host = sim.
+6. Grow-host (`step_world`) in flight. Soak stays macroquad.
+7. Optional leftover: E2 tipped grey-log (Phase 5).

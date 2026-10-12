@@ -1,22 +1,32 @@
-//! Phase 8 ship-client contract types + in-process host.
+//! Phase 8 ship-client contract types + in-process **sim host**.
 //!
-//! See [`docs/PHASE8_CONTRACT.md`]. The host owns the tick and terrain
-//! extract; the client only queues [`ClientCommand`]s and paints
-//! [`ViewFrame`]s. No sat/mass mutation lives in the present path.
+//! The binary is a **viewer**: camera, HUD, limited [`ClientCommand`]s.
+//! Host owns [`step_world`] + terrain extract. See
+//! [`docs/PHASE8_CONTRACT.md`](../../docs/PHASE8_CONTRACT.md).
 
 mod present;
+
+use std::time::{Duration, Instant};
 
 use wk_voxel::{
     apply_season_sky_tint, celestial_local_cfg, climate_with_season, day_night_factor_cfg,
     is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, season_fraction_cfg,
-    sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, tick, ClimateConfig, StreamWindow,
-    World, WorldgenParams, CHUNK_CELLS_W,
+    sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, step_world, CarbonBudget, CarbonConfig,
+    ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig,
+    FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity, KarstConfig, LandscapeBodyStore,
+    OrganismStore, PerfConfig, PhaseConfig, SteamConfig, StreamWindow, SupportMap, Temperature,
+    Wind, World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
-pub const VIEW_SCHEMA: u32 = 3;
+pub const VIEW_SCHEMA: u32 = 4;
 /// Bump when [`ClientCommand`] enum breaks.
 pub const COMMAND_SCHEMA: u32 = 1;
+
+const HUMIDITY_TILE_COLS: i32 = 4;
+const CLIMATE_WIND_VX: f32 = 0.05;
+/// Default max sim rate while the viewer presents (~20 Hz).
+pub const DEFAULT_STEP_PERIOD_MS: u64 = 50;
 
 /// Camera-window RGBA strip (row-major, y=0 at top / high world-y).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,17 +48,11 @@ impl TerrainStrip {
 /// Host-authored sky / climate presentation (packed for `Eq`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkyPresent {
-    /// Horizon-ish sky colour from [`sky_rgb_phased`].
     pub sky_rgb: [u8; 3],
-    /// `day_night_factor` mapped −1..+1 → 0..255 (128 ≈ dusk/dawn).
     pub day_night_u8: u8,
-    /// Climate phase 0..1 → 0..255 (0 ≈ noon).
     pub phase_u8: u8,
-    /// Sun/moon arc local 0..1 → 0..255.
     pub celestial_local_u8: u8,
-    /// Moon phase 0..1 → 0..255.
     pub moon_phase_u8: u8,
-    /// Season fraction 0..1 → 0..255.
     pub season_u8: u8,
     pub is_day: bool,
 }
@@ -59,7 +63,7 @@ impl SkyPresent {
     }
 }
 
-/// Camera-window extract for presentation (not a durable `SimSnapshot`).
+/// Camera-window extract for the viewer (not a durable `SimSnapshot`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewFrame {
     pub contract_version: u32,
@@ -70,6 +74,8 @@ pub struct ViewFrame {
     pub focus_col: i32,
     pub view_cols: i32,
     pub last_step_ms: u32,
+    /// True when the last host advance used full [`step_world`].
+    pub product_step: bool,
     pub sky: SkyPresent,
     pub terrain: TerrainStrip,
     pub command_acks: Vec<CommandAck>,
@@ -88,27 +94,54 @@ pub struct CommandAck {
     pub detail: String,
 }
 
-/// Client → host. Host drains between steps; never mid-step.
+/// Viewer → host. Host drains between steps; never mid-step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientCommand {
+    /// Pan / zoom the camera window (viewer owns UX; host owns residency).
     SetCamera { focus_col: i32, view_cols: i32 },
     SetPaused(bool),
     StepOnce,
     Quit,
 }
 
-/// In-process host: stamped `wk-voxel` world + CA tick + terrain extract.
+/// In-process sim host for the viewer binary.
 pub struct Host {
     world: World,
     params: WorldgenParams,
+    humidity: Humidity,
+    wind: Wind,
+    temperature: Temperature,
+    clouds: CloudStore,
+    carbon: CarbonBudget,
+    organisms: OrganismStore,
+    landscape: LandscapeBodyStore,
+    geotech: GeotechMap,
+    support: SupportMap,
     climate: ClimateConfig,
+    // Product-step knobs (defaults; viewer has no settings panel yet).
+    perf: PerfConfig,
+    failure: FailureConfig,
+    evap: EvapConfig,
+    cond: CondensationConfig,
+    karst: KarstConfig,
+    cloud: CloudConfig,
+    phase: PhaseConfig,
+    steam: SteamConfig,
+    carbon_cfg: CarbonConfig,
+    grain: GrainConfig,
+    fungi: FungiConfig,
+    competent: CompetentFallConfig,
     pub paused: bool,
     pub focus_col: i32,
     pub view_cols: i32,
     pub quit_requested: bool,
+    /// Min wall time between auto product steps (present may be faster).
+    pub step_period: Duration,
     next_ack_id: u64,
     pending_acks: Vec<CommandAck>,
     last_step_ms: u32,
+    last_step_wall: Instant,
+    product_step: bool,
 }
 
 /// Small ring world for the client host (fast stamp; not Compact soak size).
@@ -137,8 +170,40 @@ impl Host {
     pub fn new(params: WorldgenParams) -> Self {
         let mut world = World::new(params.seed);
         stamp_world(&mut world, &params);
+        let mut humidity = Humidity::with_world_bounds(
+            HUMIDITY_TILE_COLS,
+            0,
+            params.bedrock_floor_y,
+            params.width_cols,
+            params.sky_ceiling_y,
+        );
+        humidity.wrap_x = params.wrap_x;
+        let wind = Wind::climate(
+            HUMIDITY_TILE_COLS,
+            CLIMATE_WIND_VX,
+            params.seed,
+            params.width_cols,
+            params.sea_level_y,
+            params.bedrock_floor_y,
+            params.sky_ceiling_y,
+            params.wrap_x,
+        );
+        let temperature = Temperature::with_world_bounds(
+            HUMIDITY_TILE_COLS,
+            0,
+            params.bedrock_floor_y,
+            params.width_cols,
+            params.sky_ceiling_y,
+            params.seed,
+            params.width_cols,
+            params.sea_level_y,
+            params.wrap_x,
+        );
+        let mut geotech = GeotechMap::new();
+        geotech.rebuild(&world);
+        let mut support = SupportMap::new();
+        support.rebuild(&world);
         let focus_col = params.width_cols / 2;
-        // Short cycle so dusk/dawn is visible while driving the spike.
         let climate = climate_with_season(
             &ClimateConfig {
                 day_ticks: 180,
@@ -149,14 +214,40 @@ impl Host {
         Self {
             world,
             params,
+            humidity,
+            wind,
+            temperature,
+            clouds: CloudStore::new(),
+            carbon: CarbonBudget::default(),
+            organisms: OrganismStore::new(),
+            landscape: LandscapeBodyStore::new(),
+            geotech,
+            support,
             climate,
+            perf: PerfConfig::default(),
+            failure: FailureConfig::default(),
+            evap: EvapConfig::default(),
+            cond: CondensationConfig::default(),
+            karst: KarstConfig::default(),
+            cloud: CloudConfig::default(),
+            phase: PhaseConfig::default(),
+            steam: SteamConfig::default(),
+            carbon_cfg: CarbonConfig::default(),
+            grain: GrainConfig::default(),
+            fungi: FungiConfig::default(),
+            competent: CompetentFallConfig::default(),
             paused: false,
             focus_col,
             view_cols: 96,
             quit_requested: false,
+            step_period: Duration::from_millis(DEFAULT_STEP_PERIOD_MS),
             next_ack_id: 1,
             pending_acks: Vec::new(),
             last_step_ms: 0,
+            last_step_wall: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
+            product_step: true,
         }
     }
 
@@ -224,14 +315,53 @@ impl Host {
     }
 
     fn step_once(&mut self) {
-        let t0 = std::time::Instant::now();
+        let t0 = Instant::now();
         let half = self.view_cols / 2;
         self.world.stream_window = Some(StreamWindow::new(
             self.focus_col.wrapping_sub(half),
             self.view_cols.max(1),
         ));
-        tick(&mut self.world);
+        let _ = step_world(
+            WorldStep {
+                world: &mut self.world,
+                humidity: &mut self.humidity,
+                wind: &mut self.wind,
+                temperature: &mut self.temperature,
+                clouds: &mut self.clouds,
+                carbon: &mut self.carbon,
+                organisms: Some(&mut self.organisms),
+                landscape: Some(&mut self.landscape),
+                geotech: Some(&mut self.geotech),
+                support: Some(&mut self.support),
+            },
+            &WorldStepConfig {
+                perf: &self.perf,
+                failure: &self.failure,
+                evap: &self.evap,
+                cond: &self.cond,
+                oro: None,
+                karst: &self.karst,
+                cloud: &self.cloud,
+                phase: &self.phase,
+                steam: &self.steam,
+                climate: &self.climate,
+                carbon: &self.carbon_cfg,
+                grain: &self.grain,
+                fungi: &self.fungi,
+                competent: &self.competent,
+                humidity_diffusion_alpha: 0.15,
+                sea_level_y: self.params.sea_level_y,
+                sky_ceiling_y: self.params.sky_ceiling_y,
+                evap_on: true,
+                cond_rain_on: true,
+                karst_on: true,
+                organisms_on: false,
+            },
+            None,
+        );
         self.last_step_ms = t0.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        self.last_step_wall = Instant::now();
+        self.product_step = true;
     }
 
     fn sky_present(&self) -> SkyPresent {
@@ -263,7 +393,6 @@ impl Host {
         let phase = sky.phase_u8 as f32 / 255.0;
         let mut rgba = vec![0u8; (cols as usize) * (rows as usize) * 4];
         for row in 0..rows {
-            // y=0 at top of texture = high world-y (sky / zenith).
             let gy = origin_y + (rows as i32 - 1 - row as i32);
             let height_01 = if rows <= 1 {
                 0.0
@@ -301,10 +430,14 @@ impl Host {
         }
     }
 
-    /// One product frame: step if running; emit view with terrain strip.
+    /// Present a view frame. Auto-steps at [`Self::step_period`] when running.
     pub fn frame(&mut self) -> ViewFrame {
         if !self.paused {
-            self.step_once();
+            let due = self.step_period.is_zero()
+                || self.last_step_wall.elapsed() >= self.step_period;
+            if due {
+                self.step_once();
+            }
         }
         let acks = std::mem::take(&mut self.pending_acks);
         let sky = self.sky_present();
@@ -318,6 +451,7 @@ impl Host {
             focus_col: self.focus_col,
             view_cols: self.view_cols,
             last_step_ms: self.last_step_ms,
+            product_step: self.product_step,
             sky,
             terrain,
             command_acks: acks,
@@ -329,9 +463,16 @@ impl Host {
 mod tests {
     use super::*;
 
+    fn test_host() -> Host {
+        let mut host = Host::default();
+        // No wall throttle in unit tests.
+        host.step_period = Duration::ZERO;
+        host
+    }
+
     #[test]
     fn pause_stops_auto_tick() {
-        let mut host = Host::default();
+        let mut host = test_host();
         let t0 = host.frame().sim_tick;
         let t1 = host.frame().sim_tick;
         assert!(t1 > t0);
@@ -345,7 +486,7 @@ mod tests {
 
     #[test]
     fn camera_rejects_non_positive_view() {
-        let mut host = Host::default();
+        let mut host = test_host();
         let before = host.view_cols;
         let ack = host.apply(ClientCommand::SetCamera {
             focus_col: 10,
@@ -357,21 +498,21 @@ mod tests {
 
     #[test]
     fn view_schema_and_strip() {
-        let mut host = Host::default();
+        let mut host = test_host();
         host.apply(ClientCommand::SetPaused(true));
         let frame = host.frame();
         assert!(frame.schema_ok());
         assert_eq!(frame.contract_version, VIEW_SCHEMA);
+        assert!(frame.product_step);
         assert_eq!(frame.terrain.cols, host.view_cols as u32);
         assert_eq!(frame.terrain.rows, host.world_height() as u32);
         assert!(frame.terrain.rgba.iter().any(|&b| b != 0));
-        // Air cells are sky-filled (opaque), not left clear.
         assert!(frame.terrain.rgba.chunks(4).any(|c| c[3] == 255));
     }
 
     #[test]
     fn sky_tracks_tick() {
-        let mut host = Host::default();
+        let mut host = test_host();
         host.apply(ClientCommand::SetPaused(true));
         let a = host.frame().sky.clone();
         for _ in 0..90 {
@@ -382,5 +523,16 @@ mod tests {
             a.day_night_u8 != b.day_night_u8 || a.phase_u8 != b.phase_u8,
             "short climate cycle should move sky within 90 steps"
         );
+    }
+
+    #[test]
+    fn product_step_advances_world_tick() {
+        let mut host = test_host();
+        host.apply(ClientCommand::SetPaused(true));
+        let t0 = host.frame().sim_tick;
+        host.apply(ClientCommand::StepOnce);
+        let frame = host.frame();
+        assert!(frame.product_step);
+        assert!(frame.sim_tick > t0);
     }
 }
