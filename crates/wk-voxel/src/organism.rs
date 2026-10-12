@@ -1990,16 +1990,25 @@ impl OrganismStore {
         let mut lit_cache: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         let mut shade_cache: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         // Host Stem cells for epiphyte Holdfast attach (E2 seating).
-        let host_stems = collect_live_stem_world_cells(&self.atoms, |x| world.wrap_x(x));
+        let any_epiphyte = self.atoms.iter().any(is_epiphyte);
+        let host_stems = if any_epiphyte {
+            collect_live_stem_world_cells(&self.atoms, |x| world.wrap_x(x))
+        } else {
+            std::collections::HashSet::new()
+        };
         // Same-column HostLeave steal per living entity (E2 smother shade).
-        let rider_transmit: Vec<f32> = self
-            .atoms
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                epiphyte_rider_transmit(&self.atoms, a.gx, canopy_top_y(a), i as u32)
-            })
-            .collect();
+        // Empty → callers use unwrap_or(1.0) (no smother) when plant-only.
+        let rider_transmit: Vec<f32> = if any_epiphyte {
+            self.atoms
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    epiphyte_rider_transmit(&self.atoms, a.gx, canopy_top_y(a), i as u32)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Phase 5 E2 / E44: Void → Loose fill on PreferentialRootPath cavities
         // even with no living atoms (empty store still collapses ghost voids).
@@ -3601,7 +3610,14 @@ pub fn resolve_organism_draw_cells(
     wind_vx: f32,
 ) -> Vec<PosedModule> {
     use std::collections::HashSet;
-    let mut occupied: HashSet<(i32, i32)> = HashSet::new();
+    // Soft-mat pile HashSet only when a stemless Photosystem exists — woody
+    // groves otherwise paid insert-per-cell for unused collision state.
+    let needs_soft_pile = atoms.iter().any(|a| {
+        crate::plant::stem_count(a) == 0
+            && a.body.iter().any(|&(_, _, m)| m == ModuleId::Photosystem)
+    });
+    let mut occupied: Option<HashSet<(i32, i32)>> =
+        needs_soft_pile.then(HashSet::new);
     let mut out = Vec::with_capacity(atoms.iter().map(|a| a.body.len()).sum());
     for (atom_idx, atom) in atoms.iter().enumerate() {
         // Per-atom upright woody fast-path. A single tipped/stemless neighbour
@@ -3648,6 +3664,9 @@ pub fn resolve_organism_draw_cells(
             // old "blocked → wy+=1" loop pumped ribbon tips out the top of
             // litter mats and made them oscillate as sway/soak moved.
             if mid == ModuleId::Photosystem && crate::plant::stem_count(atom) == 0 {
+                let Some(occupied) = occupied.as_mut() else {
+                    continue;
+                };
                 let solid = |world: &World, x: i32, y: i32| {
                     matches!(
                         world.get_cell(x, y),
@@ -3679,8 +3698,10 @@ pub fn resolve_organism_draw_cells(
                         break;
                     }
                 }
+                occupied.insert((wx, wy));
+            } else if let Some(occupied) = occupied.as_mut() {
+                occupied.insert((wx, wy));
             }
-            occupied.insert((wx, wy));
             out.push(PosedModule {
                 atom_idx,
                 wx,
@@ -5082,6 +5103,16 @@ fn step_buoyancy(world: &World, atom: &mut Atom, bias: f32) {
 fn resolve_contacts(world: &World, atoms: &mut [Atom]) {
     let n = atoms.len();
     if n < 2 {
+        return;
+    }
+    // Land/fungus pairs always early-continue. Plant-only soaks still paid
+    // 4×O(n²) for nothing — skip unless ≥2 mobile (plankton) atoms exist.
+    let mobile = atoms
+        .iter()
+        .filter(|a| !is_land_plant(a) && !is_fungus(a))
+        .take(2)
+        .count();
+    if mobile < 2 {
         return;
     }
     for _ in 0..4 {
@@ -7586,6 +7617,22 @@ mod tests {
             bodies_overlap(&host, &leaf_rider),
             "non-Holdfast Mid-lane share must still collide"
         );
+    }
+
+    #[test]
+    fn resolve_contacts_skips_plant_only_loads() {
+        // Plant-only: mobile gate returns without touching gx (would still be
+        // a no-op via early-continue, but must not regress the O(n²) skip).
+        let w = World::new(8);
+        let mut plants = vec![
+            Atom::from_body(2, 4, 40.0, minimal_plant_body()),
+            Atom::from_body(3, 4, 40.0, minimal_plant_body()),
+            Atom::from_body(4, 4, 40.0, minimal_plant_body()),
+        ];
+        let before: Vec<(i32, i32)> = plants.iter().map(|a| (a.gx, a.gy)).collect();
+        resolve_contacts(&w, &mut plants);
+        let after: Vec<(i32, i32)> = plants.iter().map(|a| (a.gx, a.gy)).collect();
+        assert_eq!(before, after, "plant-only contact resolve must be a no-op");
     }
 
     fn moist_sand_plot() -> World {
