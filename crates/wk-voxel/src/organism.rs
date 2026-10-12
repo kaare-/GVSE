@@ -3162,17 +3162,15 @@ fn step_land_plant(
     sync_root_storage(atom);
     // Pore moisture under roots, or free standing water on leaves.
     // Grounded upright plants skip leaf-bathing scans (shore leaves don't
-    // drink). Root moisture is resampled every 3rd tick and cached
-    // (Phase 6 hotspot #2 — was every other tick).
-    const MOIST_RESAMPLE_PERIOD: u64 = 3;
+    // drink). Root moisture is resampled every other tick and cached.
     let (moist, bathing) = if atom.fallen || !grounded {
         let root_moist = crate::plant::root_moisture_frac(world, atom);
         let leaf_bath = crate::plant::leaf_bathing_frac(world, atom);
         let moist = root_moist.max(leaf_bath);
         atom.moist_frac_cache = moist;
         (moist, leaf_bath >= 0.12)
-    } else if atom.age_ticks < MOIST_RESAMPLE_PERIOD
-        || (atom.age_ticks.wrapping_add(entity_id as u64)) % MOIST_RESAMPLE_PERIOD == 0
+    } else if atom.age_ticks < 2
+        || (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0
     {
         let root_moist = crate::plant::root_moisture_frac(world, atom);
         atom.moist_frac_cache = root_moist;
@@ -3236,20 +3234,16 @@ fn step_land_plant(
         is_day,
     );
     // Single-leaf / near-dark / staggered multi-leaf: tip×count (skip
-    // per-leaf shade walks). Phase 6 hotspot #2: grounded upright always
-    // uses tip×count (dense groves share lit/shade caches; full leaf walks
-    // were the metab hotspot). Fallen / unrooted keep a 3-tick full sum.
-    const FULL_LEAF_SHADE_PERIOD: u64 = 3;
+    // per-leaf shade walks). Full leaf sum every other tick per plant.
     let full_leaves = n_photo > 1
         && tip_sky > 0.02
-        && (atom.fallen || !grounded)
-        && (atom.age_ticks.wrapping_add(entity_id as u64)) % FULL_LEAF_SHADE_PERIOD == 0;
+        && (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0;
     let mut light_sum = if !full_leaves {
         let tip =
             effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
         // Tip overestimates shaded lower leaves slightly on skip ticks.
         let scale = if n_photo > 1 && tip_sky > 0.02 {
-            0.80
+            0.82
         } else {
             1.0
         };
@@ -3314,17 +3308,8 @@ fn step_land_plant(
     }
     // Phase 5 E2: living stem integrity — recharge from the tank, load from
     // modules above; tip via rigid bake if a Stem pixel fails.
-    // Phase 6: every other tick when all stems stay healthy (≥0.9).
     if !atom.fallen && !stemless && stem_count(atom) > 0 {
-        let stressed = atom
-            .stem_integrity
-            .iter()
-            .any(|(_, _, v)| *v < 0.9);
-        let due = stressed
-            || (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0;
-        if due {
-            maintain_live_stem_integrity(atom);
-        }
+        maintain_live_stem_integrity(atom);
     }
     if atom.energy <= 0.0 {
         pass.land_metab += t_metab.elapsed();
