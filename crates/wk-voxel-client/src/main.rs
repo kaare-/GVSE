@@ -64,7 +64,7 @@ impl SpikeApp {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("wk-voxel-client (Phase 8 A — terrain strip)")
+                        .with_title("wk-voxel-client (Phase 8 A — sky + strip)")
                         .with_inner_size(LogicalSize::new(1100.0, 640.0)),
                 )
                 .expect("window"),
@@ -205,9 +205,12 @@ impl SpikeApp {
 
         let raw_input = egui_state.take_egui_input(&window);
         let terrain_tex = self.terrain_tex.clone();
+        let sky = view.sky.sky_rgb;
         let egui_output = self.egui_ctx.run(raw_input, |ctx| {
             egui::CentralPanel::default()
-                .frame(egui::Frame::none().fill(egui::Color32::from_rgb(20, 24, 32)))
+                .frame(egui::Frame::none().fill(egui::Color32::from_rgb(
+                    sky[0], sky[1], sky[2],
+                )))
                 .show(ctx, |ui| {
                     let avail = ui.available_size();
                     if let Some(tex) = &terrain_tex {
@@ -219,6 +222,23 @@ impl SpikeApp {
                             ui.image((tex.id(), size));
                         });
                     }
+
+                    // Simple sun/moon marker along the top of the strip.
+                    let local = view.sky.celestial_local_u8 as f32 / 255.0;
+                    let body_x = avail.x * (0.12 + 0.76 * local);
+                    let body_y = avail.y * 0.12;
+                    let (r, g, b, rad) = if view.sky.is_day {
+                        (255, 214, 90, 10.0)
+                    } else {
+                        let illum = view.sky.moon_phase_u8 as f32 / 255.0;
+                        let a = (140.0 + 100.0 * (1.0 - (illum - 0.5).abs() * 2.0)) as u8;
+                        (a, a, (a as f32 * 1.05).min(255.0) as u8, 7.0)
+                    };
+                    ui.painter().circle_filled(
+                        egui::pos2(body_x, body_y),
+                        rad,
+                        egui::Color32::from_rgb(r, g, b),
+                    );
                 });
 
             egui::Window::new("host")
@@ -240,6 +260,15 @@ impl SpikeApp {
                         view.world_height,
                         view.terrain.cols,
                         view.terrain.rows
+                    ));
+                    ui.label(format!(
+                        "sky rgb({},{},{}) · {} · dn {} · season {}",
+                        view.sky.sky_rgb[0],
+                        view.sky.sky_rgb[1],
+                        view.sky.sky_rgb[2],
+                        if view.sky.is_day { "day" } else { "night" },
+                        view.sky.day_night_u8,
+                        view.sky.season_u8
                     ));
                     ui.separator();
                     ui.small("Space pause · N step · ←/→ pan · Esc quit");
@@ -288,9 +317,9 @@ impl SpikeApp {
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.08,
-                                g: 0.10,
-                                b: 0.14,
+                                r: sky[0] as f64 / 255.0,
+                                g: sky[1] as f64 / 255.0,
+                                b: sky[2] as f64 / 255.0,
                                 a: 1.0,
                             }),
                             store: wgpu::StoreOp::Store,
