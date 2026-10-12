@@ -261,12 +261,13 @@ Features:
 |------|------|
 | `attach_prefer` / `host_leave_fraction` | Epiphytes (not yet) |
 
-**Landed (slice 1):** standing-dead woody corpses carry per-Stem
-`stem_integrity` (0..1). Abiotic decay each corpse tick; faster when
-mycelium / Organic is adjacent. At
-`STEM_INTEGRITY_TOPPLE_THRESHOLD` the corpse tips via the existing
-rigid bake (`bake_tip_corpse`). Test:
-`standing_dead_stem_tips_when_fungal_integrity_collapses`.
+**Landed (slices 1–2):**
+- Standing-dead woody corpses: abiotic / fungal `stem_integrity` decay
+  → `bake_tip_corpse` (`standing_dead_stem_tips_when_fungal_integrity_collapses`).
+- Living woody plants: recharge from energy; load from Stem/Photosystem
+  modules above; tip via `bake_tip_into_body`
+  (`living_stem_recharges_integrity_from_energy`,
+  `living_stem_tips_under_excess_load`).
 
 **Still later:** Holdfast Mid-lane share, attach / HostLeave genes,
 ghost-root cavity fill.
