@@ -313,7 +313,10 @@ pub fn sync_root_storage(atom: &mut Atom) {
 
 /// True when the body includes a Root (land habit).
 pub fn is_land_plant(atom: &Atom) -> bool {
-    atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root)
+    // Holdfast riders are land plants without a ground Root (E2 epiphytes).
+    atom.body
+        .iter()
+        .any(|(_, _, m)| matches!(m, ModuleId::Root | ModuleId::Holdfast))
 }
 
 pub fn root_count(atom: &Atom) -> usize {
@@ -412,6 +415,7 @@ pub fn plant_metabolic_load(atom: &Atom) -> f32 {
             ModuleId::Photosystem => 1.0,
             ModuleId::Stem => 0.28,
             ModuleId::Root => 0.18,
+            ModuleId::Holdfast => 0.12,
             ModuleId::Nucleus => 0.40,
             ModuleId::ReproSpore => 0.45,
             ModuleId::Symbiont => 0.22,
@@ -2295,7 +2299,7 @@ fn append_juvenile_symbiont(out: &mut Vec<BodyModule>, body: &[BodyModule]) {
 fn module_dedupe_priority(m: ModuleId) -> u8 {
     match m {
         ModuleId::Nucleus => 0,
-        ModuleId::Symbiont | ModuleId::ReproSpore => 1,
+        ModuleId::Symbiont | ModuleId::ReproSpore | ModuleId::Holdfast => 1,
         ModuleId::Stem | ModuleId::Root | ModuleId::Digest | ModuleId::Hypha => 2,
         ModuleId::Photosystem => 3,
     }

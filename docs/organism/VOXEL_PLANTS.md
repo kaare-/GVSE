@@ -259,18 +259,23 @@ Features:
 
 | Gene | Role |
 |------|------|
-| `attach_prefer` / `host_leave_fraction` | Epiphytes (not yet) |
+| `attach_prefer` / `host_leave_fraction` | On Genome (scaffold); reseat / smother not wired yet |
 
-**Landed (slices 1–2):**
+**Landed (slices 1–3):**
 - Standing-dead woody corpses: abiotic / fungal `stem_integrity` decay
   → `bake_tip_corpse` (`standing_dead_stem_tips_when_fungal_integrity_collapses`).
 - Living woody plants: recharge from energy; load from Stem/Photosystem
   modules above; tip via `bake_tip_into_body`
   (`living_stem_recharges_integrity_from_energy`,
   `living_stem_tips_under_excess_load`).
+- `ModuleId::Holdfast` (`0x0F`, `#FF3D9A`) appended after Symbiont
+  (postcard-safe); Mid-lane share with host Stem
+  (`epiphyte_holdfast_may_share_host_stem_cell`);
+  `Blueprint::minimal_epiphyte`; editor `0` brush / `Y` template;
+  Genome `attach_prefer` + `host_leave_fraction` mutate with fidelity.
 
-**Still later:** Holdfast Mid-lane share, attach / HostLeave genes,
-ghost-root cavity fill.
+**Still later:** host-Stem seating + unseated death, HostLeave shade,
+attach_prefer reseat, ghost-root cavity fill.
 
 ## Open: the load-bearing symbiont join
 

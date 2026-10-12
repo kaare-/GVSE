@@ -92,6 +92,10 @@ impl CreatureEditor {
             self.brush = ModuleId::Symbiont;
             self.tool = EditorTool::Paint;
         }
+        if is_key_pressed(KeyCode::Key0) {
+            self.brush = ModuleId::Holdfast;
+            self.tool = EditorTool::Paint;
+        }
         // Mutable Symbiont treaty (W, E) on the blueprint genome.
         if is_key_pressed(KeyCode::Comma) {
             self.blueprint.genome.sym_water = self.blueprint.genome.sym_water.saturating_sub(8);
@@ -151,6 +155,12 @@ impl CreatureEditor {
             self.status =
                 "Fungus — Enter inoculates cream (Organic + mineral corridors); stalk emerges later matching this design"
                     .into();
+        }
+        if is_key_pressed(KeyCode::Y) {
+            self.blueprint = Blueprint::minimal_epiphyte();
+            self.name_buf = "epiphyte".into();
+            self.status =
+                "Epiphyte template — seat Holdfast on a host Stem (0 = Holdfast brush)".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -213,6 +223,7 @@ impl CreatureEditor {
             ModuleId::Hypha,
             ModuleId::ReproSpore,
             ModuleId::Symbiont,
+            ModuleId::Holdfast,
         ];
         for (i, mid) in brushes.iter().enumerate() {
             let sx = px + i as f32 * 36.0;
@@ -385,6 +396,7 @@ impl CreatureEditor {
             ModuleId::Hypha,
             ModuleId::ReproSpore,
             ModuleId::Symbiont,
+            ModuleId::Holdfast,
         ]
         .iter()
         .enumerate()

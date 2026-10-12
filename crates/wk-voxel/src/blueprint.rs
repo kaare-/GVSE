@@ -74,6 +74,13 @@ pub struct Genome {
     /// the founder stays alive.
     #[serde(default = "default_temp_width")]
     pub temp_width: f32,
+    /// Epiphyte reseat drive toward nearby host Stems (0..=1). Set E2.
+    #[serde(default = "default_attach_prefer")]
+    pub attach_prefer: f32,
+    /// How much canopy light an epiphyte lets through to its host (0..=1).
+    /// High leave = gentle rider; low leave = smother. Set E2.
+    #[serde(default = "default_host_leave_fraction")]
+    pub host_leave_fraction: f32,
 }
 
 fn default_root_depth_bias() -> f32 {
@@ -109,6 +116,12 @@ fn default_temp_optimum() -> f32 {
 fn default_temp_width() -> f32 {
     18.0
 }
+fn default_attach_prefer() -> f32 {
+    0.55
+}
+fn default_host_leave_fraction() -> f32 {
+    0.65
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -128,6 +141,8 @@ impl Default for Genome {
             sym_energy: default_sym_energy(),
             temp_optimum: default_temp_optimum(),
             temp_width: default_temp_width(),
+            attach_prefer: default_attach_prefer(),
+            host_leave_fraction: default_host_leave_fraction(),
         }
     }
 }
@@ -173,6 +188,8 @@ impl Genome {
         g.digest_rate = jitter(g.digest_rate, 0.05, 2.0);
         g.temp_optimum = jitter(g.temp_optimum, 0.0, 40.0);
         g.temp_width = jitter(g.temp_width, 2.0, 40.0);
+        g.attach_prefer = jitter(g.attach_prefer, 0.0, 1.0);
+        g.host_leave_fraction = jitter(g.host_leave_fraction, 0.0, 1.0);
         // Drop the f32 closure before the u8 one — both touch `trait_i`.
         drop(jitter);
         let mut jitter_u8 = |value: u8| -> u8 {
@@ -202,8 +219,9 @@ enum BodyHabit {
 
 fn classify_body_habit(body: &[(i16, i16, ModuleId)]) -> BodyHabit {
     let has_root = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+    let has_holdfast = body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast);
     let has_digest = body.iter().any(|(_, _, m)| *m == ModuleId::Digest);
-    if has_root {
+    if has_root || has_holdfast {
         BodyHabit::Plant
     } else if has_digest {
         BodyHabit::Fungus
@@ -219,6 +237,7 @@ fn habit_palette(habit: BodyHabit) -> &'static [ModuleId] {
             ModuleId::Photosystem,
             ModuleId::Root,
             ModuleId::Stem,
+            ModuleId::Holdfast,
             ModuleId::ReproSpore,
             ModuleId::Symbiont,
         ],
@@ -916,6 +935,49 @@ impl Blueprint {
         }
     }
 
+    /// Minimal epiphyte (E2): pink Holdfast + nucleus + leaf (no Root).
+    ///
+    /// Seat the Holdfast on a host Stem cell at spawn; relative offsets
+    /// place Holdfast at the nucleus cell, leaf above.
+    pub fn minimal_epiphyte() -> Self {
+        Self {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                PlacedModule {
+                    x: 8,
+                    y: 5,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Holdfast,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 5,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 6,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+            ],
+            genome: Genome {
+                // Prefer nearby stems; leave most host light through.
+                attach_prefer: 0.70,
+                host_leave_fraction: 0.75,
+                alloc_stem: 0.0,
+                alloc_leaf: 0.85,
+                alloc_root: 0.15,
+                ..Genome::default()
+            },
+            name: "epiphyte".into(),
+            notes: "Set E2 epiphyte — Holdfast on host Stem; Mid-lane share".into(),
+        }
+    }
+
     /// Minimal fruiting body (E): nucleus + digest + hyphae + spore packet.
     /// Underground mycelium is a ground field on Organic, not painted here.
     pub fn minimal_fungus() -> Self {
@@ -992,11 +1054,19 @@ impl Blueprint {
             .count()
     }
 
+    pub fn holdfast_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Holdfast)
+            .count()
+    }
+
     pub fn is_valid_atom(&self) -> bool {
         self.nucleus_count() >= 1
             && self.photosystem_count() >= 1
             && self.root_count() == 0
             && self.digest_count() == 0
+            && self.holdfast_count() == 0
     }
 
     pub fn is_valid_plant(&self) -> bool {
@@ -1005,18 +1075,31 @@ impl Blueprint {
             && self.root_count() >= 1
     }
 
-    /// Nucleus + Digest, no root/stem (detritus habit).
+    /// Nucleus + Digest, no root/stem/holdfast (detritus habit).
     pub fn is_valid_fungus(&self) -> bool {
         self.nucleus_count() >= 1
             && self.digest_count() >= 1
-            && !self
-                .modules
-                .iter()
-                .any(|m| matches!(m.module, ModuleId::Root | ModuleId::Stem))
+            && !self.modules.iter().any(|m| {
+                matches!(
+                    m.module,
+                    ModuleId::Root | ModuleId::Stem | ModuleId::Holdfast
+                )
+            })
+    }
+
+    /// Nucleus + Holdfast + Photosystem, no Root (canopy freeloader).
+    pub fn is_valid_epiphyte(&self) -> bool {
+        self.nucleus_count() >= 1
+            && self.holdfast_count() >= 1
+            && self.photosystem_count() >= 1
+            && self.root_count() == 0
     }
 
     pub fn is_valid_creature(&self) -> bool {
-        self.is_valid_atom() || self.is_valid_plant() || self.is_valid_fungus()
+        self.is_valid_atom()
+            || self.is_valid_plant()
+            || self.is_valid_fungus()
+            || self.is_valid_epiphyte()
     }
 
     /// Editor spawn gate: any painted body with a Nucleus (habit rules are
@@ -1158,6 +1241,52 @@ mod tests {
         assert!(photos.iter().all(|&y| y > 0), "leaves above nucleus");
         assert!(bp.genome.alloc_stem <= 0.05);
         assert!(bp.genome.alloc_leaf >= 0.5);
+    }
+
+    #[test]
+    fn minimal_epiphyte_is_valid_holdfast_habit() {
+        let bp = Blueprint::minimal_epiphyte();
+        assert!(bp.is_valid_epiphyte());
+        assert!(!bp.is_valid_atom());
+        assert!(!bp.is_valid_plant());
+        assert!(!bp.is_valid_fungus());
+        assert!(bp.is_valid_creature());
+        let rel = bp.modules_relative_to_nucleus();
+        assert!(rel.contains(&(0, 0, ModuleId::Nucleus)));
+        assert!(rel.contains(&(0, 0, ModuleId::Holdfast)));
+        assert!(rel
+            .iter()
+            .any(|&(_, dy, m)| m == ModuleId::Photosystem && dy > 0));
+        assert_eq!(ModuleId::Holdfast.rgb(), (0xFF, 0x3D, 0x9A));
+        assert!(bp.genome.attach_prefer > 0.5);
+        assert!(bp.genome.host_leave_fraction > 0.5);
+    }
+
+    #[test]
+    fn holdfast_postcard_appends_without_shifting_prior_variants() {
+        // Variant index order (not hex): … Stem, ReproSpore, Symbiont, Holdfast.
+        #[derive(Serialize, Deserialize)]
+        #[repr(u8)]
+        enum Probe {
+            Nucleus = 0x00,
+            Photosystem = 0x01,
+            Digest = 0x0A,
+            Hypha = 0x0B,
+            Root = 0x0D,
+            Stem = 0x0E,
+            ReproSpore = 0x10,
+            Symbiont = 0x16,
+            Holdfast = 0x0F,
+        }
+        let hold = postcard::to_allocvec(&Probe::Holdfast).unwrap();
+        let live_hold = postcard::to_allocvec(&ModuleId::Holdfast).unwrap();
+        assert_eq!(hold, live_hold);
+        let spore = postcard::to_allocvec(&Probe::ReproSpore).unwrap();
+        let live_spore = postcard::to_allocvec(&ModuleId::ReproSpore).unwrap();
+        assert_eq!(spore, live_spore);
+        let sym = postcard::to_allocvec(&Probe::Symbiont).unwrap();
+        let live_sym = postcard::to_allocvec(&ModuleId::Symbiont).unwrap();
+        assert_eq!(sym, live_sym);
     }
 
     #[test]

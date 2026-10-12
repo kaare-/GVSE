@@ -22,14 +22,17 @@ Kernel vocabulary stays MS Paint 1× ([`README.md`](README.md)).
 | Organism park under stream (body span) | Live | [`WORLDGEN.md`](../WORLDGEN.md) |
 | Studio / blueprint editor | Live | [`EDITOR.md`](EDITOR.md) |
 | E2 stem integrity (live + corpse topple) | Live (slices 1–2) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
+| E2 Holdfast Mid-lane share + attach genes | Live (slice 3 scaffold) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
 
 ## E2 slice plan
 
 1. ~~**Stem integrity + rot topple**~~ — standing-dead woody corpses.
 2. ~~**Living stem integrity**~~ — recharge from energy; load from
    modules above; tip when threshold hit.
-3. **Epiphytes** — `Holdfast`, `AttachPrefer`, `HostLeaveFraction`,
-   Mid-lane share with host Stem (E40–E41 / E43).
+3. ~~**Epiphytes scaffold**~~ — `Holdfast`, `attach_prefer` /
+   `host_leave_fraction` on Genome, Mid-lane share with host Stem,
+   `Blueprint::minimal_epiphyte`. Seating / HostLeave shade / reseat
+   follow.
 4. **Ghost-root fill** — Rock→Organic→Void→Loose + preferential re-root
    (E44).
 
