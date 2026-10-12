@@ -53,9 +53,14 @@ Out of scope for E2: Set B chem/nerves, Set C niche, creature locomotion
 
 - [x] Named wedge + out-of-scope list frozen in this file.
 - [x] Headless unit: fungal rot tips standing-dead stem.
-- [ ] Organisms-on short soak gate (TRACKED / park) — follow-up.
-- [ ] Stream-on: organism park still correct after bio work.
-- [ ] Visual / studio pass for tipped grey logs (1× zoom).
+- [x] Organisms-on short soak gate (TRACKED / park) —
+  `short_organisms_budget_soak` 600t / 48 plants: TRACKED **−0.01/t**,
+  park=0, living=50 (log
+  `/opt/cursor/artifacts/phase5-e2-organisms-soak.log`).
+- [x] Stream-on: organism park still correct after bio work —
+  `sync_organism_residency_*` unit tests green on tip after E44.
+- [ ] Visual / studio pass for tipped grey logs (1× zoom) — owner /
+  play session (not headless).
 
 ## Non-goals (until Core freeze updates)
 
