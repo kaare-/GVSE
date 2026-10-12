@@ -27,10 +27,9 @@ use crate::climate::{
 use crate::clouds::{CloudStore, DOWNPOUR_MASS};
 use crate::fungi::{
     colonize_and_compost_cfg, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
-    FungiConfig,
-    forage_organic_energy, fruiting_body_supported, fungus_should_hibernate, fungus_upkeep,
-    is_fungus, is_fungus_seated, is_surface_stalk, try_emergent_fruiting, try_spore,
-    FRUIT_SUPPORT_MIN_AGE, FUNGUS_HIBERNATE_MAX_TICKS,
+    max_mycelium_near, FungiConfig, forage_organic_energy, fruiting_body_supported,
+    fungus_should_hibernate, fungus_upkeep, is_fungus, is_fungus_seated, is_surface_stalk,
+    try_emergent_fruiting, try_spore, FRUIT_SUPPORT_MIN_AGE, FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::spore_bank::{DispersalResult, SporeBankConfig};
 use crate::temperature::Temperature;
@@ -128,6 +127,12 @@ fn life_ticks(climate: &ClimateConfig, plant_or_fungus: bool) -> u64 {
 pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
 /// Plankton corpses linger longer so bloom deaths leave a visible carpet.
 pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
+/// Standing-dead stem abiotic rot per corpse tick ([`docs/organism/PLANTS.md`]).
+pub const STEM_DEAD_DECAY_PER_TICK: f32 = 0.002;
+/// Mycelium / Organic-adjacent stem rot per corpse tick.
+pub const STEM_FUNGAL_DECAY_PER_TICK: f32 = 0.05;
+/// Tip when any Stem pixel integrity falls to this (Phase 5 E2).
+pub const STEM_INTEGRITY_TOPPLE_THRESHOLD: f32 = 0.05;
 /// Base chance for a floating corpse to drift one cell when `|push| ≈ 1`.
 /// Tuned so wind ~0.2 or modest sat-shear current visibly slides dead stems.
 const CORPSE_DRIFT_BASE: f32 = 0.75;
@@ -273,6 +278,10 @@ pub struct Atom {
     /// Stemless seaweed ignores this. Cleared when a leaf is productive again.
     #[serde(default)]
     pub leaf_starve: Vec<(i16, i16, u16)>,
+    /// Per-Stem structural integrity `(local_x, local_y, 0..1)`. Missing ⇒ 1.0.
+    /// Scratch only — not in the mass audit ([`docs/organism/PLANTS.md`]).
+    #[serde(default)]
+    pub stem_integrity: Vec<(i16, i16, f32)>,
     /// Lost purchase / tippy raft — original body drawn tipped.
     #[serde(default)]
     pub fallen: bool,
@@ -342,6 +351,7 @@ impl Atom {
             growth_target: Vec::new(),
             genome,
             leaf_starve: Vec::new(),
+            stem_integrity: Vec::new(),
             fallen: false,
             tip_cooldown: 0,
             upright_growth: Vec::new(),
@@ -459,6 +469,9 @@ pub struct Corpse {
     /// Pre-death upright shoots — still drawn upright on a tipped corpse.
     #[serde(default)]
     pub upright_growth: Vec<(i16, i16)>,
+    /// Standing-dead Stem integrity `(local_x, local_y, 0..1)`. Missing ⇒ 1.0.
+    #[serde(default)]
+    pub stem_integrity: Vec<(i16, i16, f32)>,
 }
 
 impl Corpse {
@@ -484,6 +497,20 @@ impl Corpse {
             .copied()
             .filter(|&(x, y)| body.iter().any(|&(bx, by, _)| bx == x && by == y))
             .collect();
+        let stem_integrity: Vec<(i16, i16, f32)> = body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .map(|&(dx, dy, _)| {
+                let v = atom
+                    .stem_integrity
+                    .iter()
+                    .find(|(x, y, _)| *x == dx && *y == dy)
+                    .map(|(_, _, v)| *v)
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 1.0);
+                (dx, dy, v)
+            })
+            .collect();
         let fallen = atom.fallen;
         let mut upright_growth = upright_growth;
         let mut body = body;
@@ -500,6 +527,7 @@ impl Corpse {
             last_water_top: atom.last_water_top,
             fallen,
             upright_growth,
+            stem_integrity,
         }
     }
 
@@ -2389,6 +2417,23 @@ impl OrganismStore {
                     );
                     prune_fallen_corpse_canopy_in_solid(world, corpse);
                 }
+                // Phase 5 E2: standing-dead woody stems rot (faster near
+                // mycelium / Organic) and tip via the existing bake path.
+                if !corpse.fallen
+                    && corpse
+                        .body
+                        .iter()
+                        .any(|(_, _, m)| *m == ModuleId::Stem)
+                    && decay_corpse_stem_integrity(world, corpse)
+                {
+                    bake_tip_corpse(corpse);
+                    clamp_fallen_body_extent(
+                        corpse.fallen,
+                        &mut corpse.body,
+                        &mut corpse.upright_growth,
+                    );
+                    prune_fallen_corpse_canopy_in_solid(world, corpse);
+                }
                 let in_stream = wet_band(world, corpse.gx, corpse.gy).is_some()
                     || corpse_adjacent_stream(world, corpse);
                 let settle_step = if in_stream { 5 } else { 1 };
@@ -3498,6 +3543,82 @@ pub fn rigid_tip_offset(dx: i16, dy: i16) -> (i16, i16) {
 ///
 /// Re-tipping an already-fallen mast folds new upright shoots onto the
 /// existing waterline trunk without re-rotating roots.
+/// Decay standing-dead Stem integrity on a land corpse.
+///
+/// Returns `true` when any Stem pixel reaches
+/// [`STEM_INTEGRITY_TOPPLE_THRESHOLD`] (caller should tip).
+fn decay_corpse_stem_integrity(world: &World, corpse: &mut Corpse) -> bool {
+    // Ensure every Stem module has an entry (missing ⇒ freshly seeded 1.0).
+    for &(dx, dy, m) in &corpse.body {
+        if m != ModuleId::Stem {
+            continue;
+        }
+        if !corpse
+            .stem_integrity
+            .iter()
+            .any(|(x, y, _)| *x == dx && *y == dy)
+        {
+            corpse.stem_integrity.push((dx, dy, 1.0));
+        }
+    }
+    // Drop stale ranks that no longer map to a Stem module.
+    corpse
+        .stem_integrity
+        .retain(|(dx, dy, _)| {
+            corpse
+                .body
+                .iter()
+                .any(|&(bx, by, m)| bx == *dx && by == *dy && m == ModuleId::Stem)
+        });
+    let mut tip = false;
+    for (dx, dy, v) in corpse.stem_integrity.iter_mut() {
+        let (odx, ody) =
+            fallen_draw_offset(corpse.fallen, &corpse.upright_growth, &corpse.body, *dx, *dy);
+        let wx = corpse.gx + odx as i32;
+        let wy = corpse.gy + ody as i32;
+        let fungal = max_mycelium_near(world, wx, wy) > 0 || organic_adjacent(world, wx, wy);
+        let decay = if fungal {
+            STEM_FUNGAL_DECAY_PER_TICK
+        } else {
+            STEM_DEAD_DECAY_PER_TICK
+        };
+        *v = (*v - decay).max(0.0);
+        if *v <= STEM_INTEGRITY_TOPPLE_THRESHOLD {
+            tip = true;
+        }
+    }
+    tip
+}
+
+fn organic_adjacent(world: &World, gx: i32, gy: i32) -> bool {
+    for (dx, dy) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let nx = world.wrap_x(gx + dx);
+        if matches!(
+            world.get_cell(nx, gy + dy).map(|c| c.material),
+            Some(MaterialId::Organic)
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Tip a woody land corpse with the same rigid bake as live plants.
+fn bake_tip_corpse(corpse: &mut Corpse) {
+    if corpse.fallen {
+        return;
+    }
+    let mut atom = Atom::new(corpse.gx, corpse.gy, 1.0);
+    atom.body = corpse.body.clone();
+    atom.fallen = corpse.fallen;
+    atom.upright_growth = corpse.upright_growth.clone();
+    bake_tip_into_body(&mut atom);
+    corpse.body = atom.body;
+    corpse.fallen = atom.fallen;
+    corpse.upright_growth = atom.upright_growth;
+    corpse.stem_integrity.clear();
+}
+
 pub fn bake_tip_into_body(atom: &mut Atom) {
     use std::collections::HashSet;
 
@@ -6158,6 +6279,56 @@ mod tests {
                 "leaf cell ({lx},{ly}) should be falling Organic litter"
             );
         }
+    }
+
+    #[test]
+    fn standing_dead_stem_tips_when_fungal_integrity_collapses() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        store.atoms[0].age_ticks = super::PLANT_LIFE_TICKS;
+        store.atoms[0].energy = 40.0;
+        store.step(&mut w, 0);
+        assert_eq!(store.corpse_count(), 1);
+        assert!(
+            !store.corpses[0].fallen,
+            "dry-land corpse starts upright"
+        );
+        let (sdx, sdy, _) = store.corpses[0]
+            .body
+            .iter()
+            .copied()
+            .find(|(_, _, m)| *m == ModuleId::Stem)
+            .expect("stem on corpse");
+        let sx = store.corpses[0].gx + sdx as i32;
+        let sy = store.corpses[0].gy + sdy as i32;
+        // Organic + mycelium under the stem — fungal decay path.
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.set_mycelium(48);
+        w.set_cell(sx, sy - 1, org);
+        let mut tipped = false;
+        for t in 1..50 {
+            store.step(&mut w, t);
+            if store.corpses.is_empty() {
+                break;
+            }
+            if store.corpses[0].fallen {
+                tipped = true;
+                break;
+            }
+        }
+        assert!(tipped, "mycelium-adjacent standing dead should tip");
+        assert!(
+            !store.corpses.is_empty(),
+            "tipped corpse should still be settling"
+        );
     }
 
     #[test]

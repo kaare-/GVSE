@@ -255,13 +255,21 @@ Features:
 - Inspector: Symbiont treaty / link / last+total ledgers; `sym frontier`
   for strain↔strain edges; F4 creature list; **`M`** strain overlay
 
-### E2 — Epiphytes + topple *(later)*
+### E2 — Epiphytes + topple *(in progress)*
 
 | Gene | Role |
 |------|------|
-| `attach_prefer` / `host_leave_fraction` | Epiphytes |
+| `attach_prefer` / `host_leave_fraction` | Epiphytes (not yet) |
 
-Features: stem `integrity`, topple, Holdfast. Needs dead stems.
+**Landed (slice 1):** standing-dead woody corpses carry per-Stem
+`stem_integrity` (0..1). Abiotic decay each corpse tick; faster when
+mycelium / Organic is adjacent. At
+`STEM_INTEGRITY_TOPPLE_THRESHOLD` the corpse tips via the existing
+rigid bake (`bake_tip_corpse`). Test:
+`standing_dead_stem_tips_when_fungal_integrity_collapses`.
+
+**Still later:** Holdfast Mid-lane share, attach / HostLeave genes,
+ghost-root cavity fill.
 
 ## Open: the load-bearing symbiont join
 

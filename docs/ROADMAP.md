@@ -286,11 +286,11 @@ session** and scoping doc before implementation.
 Headless soaks for this phase turn **organisms on** (Phase 0 gate stays
 organisms-off).
 
-**Scope draft:** [`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)
-(decision picks: E2 plants/fungi finish vs Set B chem/nerves vs Set C
-niche). Do not start coding until the scope is accepted and a slice PR
-names acceptance tests + soak hooks. Daily 09:00 Oslo lists continue
-for Phase-5 scoping picks.
+**Wedge accepted (2026-10-12):** Set E2 — see
+[`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md). First slice:
+stem integrity + rot topple on standing-dead woody corpses. Epiphytes
+and ghost-root fill follow. Daily 09:00 Oslo lists continue for the
+next E2 slice.
 
 ---
 
@@ -372,6 +372,7 @@ before coding.
 | 2026-10-11 | Temp+rain stream | 5 km ~16→**~74** sim-FPS (pass ≥30); Compact stream ~91→**~115** |
 | 2026-10-11 | Phase 4 closed | Width+streaming goals met; park Phase 4 / open Phase 5 planning |
 | 2026-10-11 | Phase 5 scope draft | [`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md) decision picks (no code) |
+| 2026-10-12 | Phase 5 E2 wedge | Accept Set E2; stem integrity + rot topple on woody corpses |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
@@ -386,5 +387,6 @@ before coding.
 - Phase-1 stretch width / field-shell cuts: **closed with Phase 4** (5 km stream-on).
 - Phase 3 ice option 2 slices A–C + brittle/sheet/lid: closed with Phase 3.
 - Optional Phase-4 leftovers (5 km wind.rebuild / rock bodies): only if owner wants more FPS.
-- Phase-5 scoping agenda — draft in [`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md); owner pick before code.
+- Phase-5 E2 remaining: epiphytes + ghost-root fill
+  ([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)).
 - Phase-8 shortlist of client stacks when that review starts.
