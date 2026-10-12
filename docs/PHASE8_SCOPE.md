@@ -108,6 +108,6 @@ the client, abandoning the macroquad soak viewer.
    **macroquad** as soak/dev/Xvfb viewer (not the production ship path).
 3. **Contract sketch:** `ViewFrame` ≠ `SimSnapshot`; `ClientCommand`
    queue; in-process single-player first ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
-4. Contract + A spike + strip + sky + **palette/glitter** landed.
-5. Next: grow client host / `step_world` when owner wants; soak stays macroquad.
-6. Optional leftover: E2 tipped grey-log owner visual (Phase 5).
+4. Contract + A spike + strip + sky + palette/glitter landed (#425–#430).
+5. **Agent parked** — owner pick: grow host / packaging / E2 / redirect.
+6. Soak stays macroquad. Optional: E2 tipped grey-log (Phase 5).
