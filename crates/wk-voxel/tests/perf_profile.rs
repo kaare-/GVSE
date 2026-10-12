@@ -253,6 +253,12 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
 }
 
 fn seed_plants(scene: &mut Scene, count: usize) {
+    seed_plants_band(scene, count, None);
+}
+
+/// Seed land plants across the ring, or only inside `[center−half, center+half]`
+/// (wrap-aware) when `band` is `Some((center_gx, half_cols))`.
+fn seed_plants_band(scene: &mut Scene, count: usize, band: Option<(i32, i32)>) {
     if count == 0 {
         eprintln!("  seeded 0/0 land plants");
         return;
@@ -263,12 +269,25 @@ fn seed_plants(scene: &mut Scene, count: usize) {
     wk_voxel::sync_alloc_to_body(&mut g, &body);
     let w = scene.params.width_cols.max(1);
     let mut placed = 0usize;
-    // Sweep the full ring with a prime-ish stride so dense caps still seat.
-    let stride = ((w as usize).max(1) / count.max(1)).max(1);
     let mut attempts = 0usize;
-    let max_attempts = count.saturating_mul(8).max(w as usize * 2);
+    let (x0, span, max_attempts) = match band {
+        Some((center, half)) => {
+            let half = half.max(1);
+            let span = (half * 2 + 1).min(w);
+            let x0 = center.rem_euclid(w);
+            (x0, span, count.saturating_mul(16).max(span as usize * 4))
+        }
+        None => {
+            let span = w;
+            (0, span, count.saturating_mul(8).max(w as usize * 2))
+        }
+    };
+    let stride = ((span as usize).max(1) / count.max(1)).max(1);
     while placed < count && attempts < max_attempts {
-        let gx = ((attempts * stride) as i32 + (attempts as i32 / 3)) % w;
+        let gx = match band {
+            Some(_) => (x0 + (attempts as i32 * stride as i32) % span).rem_euclid(w),
+            None => ((attempts * stride) as i32 + (attempts as i32 / 3)).rem_euclid(w),
+        };
         attempts += 1;
         let guess_y = scene.params.sea_level_y + 2;
         let Some(gy) = find_plant_slot(&scene.world, gx, guess_y) else {
@@ -281,10 +300,16 @@ fn seed_plants(scene: &mut Scene, count: usize) {
             placed += 1;
         }
     }
-    eprintln!(
-        "  seeded {placed}/{count} land plants  (cap={}  attempts={attempts})",
-        scene.organisms.atom_cap()
-    );
+    match band {
+        Some((c, h)) => eprintln!(
+            "  seeded {placed}/{count} land plants in band center={c} ±{h}  (cap={}  attempts={attempts})",
+            scene.organisms.atom_cap()
+        ),
+        None => eprintln!(
+            "  seeded {placed}/{count} land plants  (cap={}  attempts={attempts})",
+            scene.organisms.atom_cap()
+        ),
+    }
 }
 
 fn cell_count(params: &WorldgenParams) -> i64 {
@@ -754,16 +779,23 @@ fn phase6_stream_organisms_compact() {
     set_parallel_enabled(true);
     let params = stretch_params();
     let plants = 256usize;
+    // Focus on a land-friendly column: ring-mid is often ocean, so a
+    // ring-wide seed + mid focus parks every plant (prior A/B). Seed into
+    // the resident band around focus so stream-on keeps live org cost.
+    let focus = params.width_cols / 4; // continental shelf / land bias on demo stamp
+    let view_cols = 320;
+    // Resident ≈ view/2 + halo(3) + margin(8) chunks → ~13×64 ≈ 832 cols half.
+    let resident_half_cols = 14 * CHUNK_CELLS_W as i32;
     for (label, stream_on) in [
-        ("compact full-resident + 256 plants", false),
-        ("compact stream view=320 + halo + evict + 256 plants", true),
+        ("compact full-resident + 256 plants (focus band)", false),
+        ("compact stream view=320 + halo + evict + 256 plants (focus band)", true),
     ] {
         let mut scene = stamp_scene(params);
         scene.perf = PerfConfig::default();
-        seed_plants(&mut scene, plants);
+        seed_plants_band(&mut scene, plants, Some((focus, resident_half_cols)));
         let apply_stream = |s: &mut Scene| {
             if stream_on {
-                s.world.stream_window = Some(StreamWindow::new(s.params.width_cols / 2, 320));
+                s.world.stream_window = Some(StreamWindow::new(focus, view_cols));
                 let _ = sync_residency(&mut s.world);
                 let _ = s
                     .organisms
