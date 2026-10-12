@@ -47,31 +47,36 @@ rules.
 - **Contract:** versioned snapshot or delta stream + input commands;
   client never mutates sat/mass directly.
 
-## Client stack shortlist *(draft — not decided)*
+## Client stack *(owner pick 2026-10-12)*
 
-| Stack | Pros | Cons / risks |
-|-------|------|----------------|
-| **A. egui + wgpu / winit** | Rust-native; good desktop packaging; egui already in demo settings | Rewrite draw from macroquad; Apple Metal via wgpu OK |
-| **B. Bevy** | ECS + rendering ecosystem; Steam-friendly desktop | Heavy; learning curve; risk of pulling sim into Bevy world |
-| **C. Godot 4 (GDExtension / Rust)** | Store pipelines mature; editor tooling | Two runtimes; FFI surface; Apple review quirks |
-| **D. Keep macroquad + ship wrapper** | Least rewrite | Weakest store/inspection story; limited UI polish |
+Full comparison: [`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md).
 
-**Agent default for next architecture wedge:** shortlist review only —
-expand stack A vs B with a one-page spike plan; **no** client rewrite
-until owner picks.
+| Role | Stack |
+|------|--------|
+| **Ship / explicit client** | **A — egui + wgpu / winit** (new binary; present + input only) |
+| **Dev / soak / Xvfb viewer** | Keep **`wk-voxel-app` (macroquad 0.4.14 + `macroquad::ui`)** |
 
-## Wedge plan (proposed)
+B (Bevy) and C (Godot) parked unless owner reopens. D (ship the
+macroquad binary) is **not** the production path — macroquad stays
+research/dev.
 
-1. **Scope freeze** — this file + ROADMAP pointer (this PR).
-2. **Owner pick** — ship target + stack A/B/C/D (or defer Phase 8).
-3. **Contract sketch** — snapshot schema / command list (docs only).
-4. **Spike** — empty client window + host tick pump (no gameplay).
-5. **Parity gate** — Compact soak park=0 still green with host binary.
+**Next:** contract sketch (snapshot + commands, docs only), then A spike
+(empty window + host tick pump). No gameplay port until contract lands.
+
+## Wedge plan
+
+1. [x] **Scope freeze** — this file + ROADMAP pointer.
+2. [x] **Stack comparison** — [`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md).
+3. [x] **Owner pick** — ship client **A**; macroquad = soak/dev only.
+4. [ ] **Contract sketch** — snapshot schema / command list (docs only).
+5. [ ] **Spike** — A: empty `winit`+`wgpu`+egui window + host tick pump.
+6. [ ] **Parity gate** — Compact soak park=0 still green with host binary.
 
 ## Acceptance (proposed)
 
 - [x] Named Phase 8 scope draft frozen (this file).
-- [ ] Owner accepts ship target + stack shortlist (or parks Phase 8).
+- [x] Stack A–D comparison landed ([`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md)).
+- [x] Owner accepts stack: **A ship + macroquad soak/dev**.
 - [ ] Contract sketch landed before any client rewrite.
 - [ ] No sim-mass regressions when a host/client split lands.
 
@@ -82,6 +87,8 @@ the client, abandoning the macroquad soak viewer.
 
 ## Decision list (2026-10-12)
 
-1. **Phase 8 scope draft in flight** — architecture note only.
-2. Optional: E2 tipped grey-log owner visual (Phase 5 leftover).
-3. Owner: pick stack / park Phase 8 / redirect.
+1. Phase 8 scope draft frozen; stack A–D comparison written.
+2. **Owner pick:** ship client = **A (egui + wgpu / winit)**; keep
+   **macroquad** as soak/dev/Xvfb viewer (not the production ship path).
+3. Next wedge: **contract sketch** (docs), then A spike — no gameplay port yet.
+4. Optional leftover: E2 tipped grey-log owner visual (Phase 5).
