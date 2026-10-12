@@ -64,7 +64,7 @@ impl SpikeApp {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("wk-voxel-client (Phase 8 A — palette + sky)")
+                        .with_title("wk-voxel-client (viewer · Phase 8 A)")
                         .with_inner_size(LogicalSize::new(1100.0, 640.0)),
                 )
                 .expect("window"),
@@ -241,14 +241,16 @@ impl SpikeApp {
                     );
                 });
 
-            egui::Window::new("host")
+            egui::Window::new("viewer")
                 .default_pos([12.0, 12.0])
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label(format!("VIEW_SCHEMA {}", view.contract_version));
                     ui.label(format!(
-                        "sim_tick {} · step {} ms",
-                        view.sim_tick, view.last_step_ms
+                        "sim_tick {} · step_world {} ms{}",
+                        view.sim_tick,
+                        view.last_step_ms,
+                        if view.product_step { "" } else { " (held)" }
                     ));
                     ui.label(format!(
                         "paused {} · focus {} · view {}",
@@ -272,6 +274,7 @@ impl SpikeApp {
                     ));
                     ui.separator();
                     ui.small("Space pause · N step · ←/→ pan · Esc quit");
+                    ui.small("client = viewer; host owns step_world");
                 });
         });
 

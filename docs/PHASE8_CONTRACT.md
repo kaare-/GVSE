@@ -1,9 +1,9 @@
 # Phase 8 — Host / client contract *(sketch)*
 
-**Status:** docs sketch (2026-10-12). No wire format code until the A
-spike. Stack pick: ship = **egui + wgpu / winit**; soak/dev =
-**macroquad** ([`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md)).
-Scope: [`PHASE8_SCOPE.md`](PHASE8_SCOPE.md).
+**Status:** live sketch + spike code (2026-10-12). Stack: ship =
+**egui + wgpu / winit**; soak/dev = **macroquad**. Owner confirm: client
+is a **viewer** (camera + limited commands); host owns sim.
+[`PHASE8_SCOPE.md`](PHASE8_SCOPE.md), [`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md).
 
 ## Hard rules
 
@@ -158,7 +158,9 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
 - [x] Sky present fields (schema v3) — day/night/phase/moon/season; air
       cells filled with height-phased sky; sun/moon marker in client.
 - [x] Fuller palette (wetness / perm / mycelium) + water glitter on tops.
-- [ ] Later: Compact-sized host world / `step_world` parity with soak.
+- [x] Host uses product [`step_world`] (climate fields); viewer throttled
+      present (`VIEW_SCHEMA` 4 + `product_step`).
+- [ ] Later: Compact-sized host world / separate host process.
 
 ## Non-goals
 
@@ -180,7 +182,8 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 
 1. [x] Land this sketch + A spike empty window.
 2. [x] Terrain strip (`VIEW_SCHEMA` 2) on A.
-3. [x] Sky present (`VIEW_SCHEMA` 3) on A.
+3. [x] Sky present on A.
 4. [x] Fuller palette / water glitter on A.
-5. Grow client host toward Compact / `step_world` when ready.
-6. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+5. [x] Host `step_world` + viewer framing (`VIEW_SCHEMA` 4).
+6. Grow toward Compact / out-of-process host when ready.
+7. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
