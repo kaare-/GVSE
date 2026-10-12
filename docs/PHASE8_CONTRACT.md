@@ -151,7 +151,8 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       `SimSnapshot`.
 - [x] Hard rules: no client mass mutation; single-player in-process first.
 - [x] Command table covers camera, pause, save/load, settings, editors.
-- [ ] Spike implements empty window + tick counter via this loop (code).
+- [x] Spike implements empty window + tick counter via this loop
+      (`crates/wk-voxel-client`).
 - [ ] Later: terrain strip parity with macroquad atlas for one Compact view.
 
 ## Non-goals
@@ -159,9 +160,19 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
 Netcode, delta compression, prediction, WASM, Godot/Bevy bridges,
 replacing soak harness, sending full `SimSnapshot` every frame.
 
+## Spike crate
+
+`crates/wk-voxel-client` — `winit` 0.30.5 + `wgpu` 22 + `egui` 0.29
+(pinned under rustc 1.83; transitive edition2024 crates forced down).
+In-process host (`crates/wk-voxel-client/src/lib.rs`) emits `ViewFrame`
+header only; egui HUD shows `sim_tick`. Keys: Space pause, N step,
+←/→ pan focus, Esc quit.
+
+Linux run deps (not needed for `cargo test`): `libxkbcommon-x11-0`,
+Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
+
 ## Next
 
-1. Land this sketch (docs PR).
-2. A spike crate/binary: `winit` + `wgpu` + egui; in-process host that
-   advances tick and emits `ViewFrame` header only.
-3. Port terrain strip + sky when spike loop is boringly stable.
+1. [x] Land this sketch + A spike empty window.
+2. Port terrain strip + sky when spike loop is boringly stable.
+3. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.

@@ -1,0 +1,42 @@
+[package]
+name = "wk-voxel-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 8 ship-client spike: egui + wgpu / winit over an in-process host"
+
+[dependencies]
+# Presentation stack (pinned for rustc 1.83 — see PHASE8_CONTRACT.md).
+winit = { workspace = true }
+wgpu = { workspace = true }
+egui = { workspace = true }
+egui-winit = { workspace = true }
+egui-wgpu = { workspace = true }
+pollster = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+
+# Force pre-edition2024 transitive pins so Cargo 1.83 can parse manifests.
+url = { workspace = true }
+idna = { workspace = true }
+wayland-protocols = { workspace = true }
+wayland-backend = { workspace = true }
+wayland-client = { workspace = true }
+wayland-cursor = { workspace = true }
+wayland-sys = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
+wayland-protocols-plasma = { workspace = true }
+hashbrown = { workspace = true }
+indexmap = { workspace = true }
+getrandom = { workspace = true }
+jobserver = { workspace = true }
+unicode-segmentation = { workspace = true }
+cc = { workspace = true }
+
+[[bin]]
+name = "wk-voxel-client"
+path = "src/main.rs"
+
+[lib]
+name = "wk_voxel_client"
+path = "src/lib.rs"
