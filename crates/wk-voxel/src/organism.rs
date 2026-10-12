@@ -40,14 +40,14 @@ use crate::streaming::StreamWindow;
 use crate::cell::is_competent_rock;
 use crate::plant::{
     apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
-    collect_trunk_world_cells, drink_plant_with_moist, drought_band, drop_dead_leaves,
-    find_fungus_slot, find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
-    paint_leaf_litter, plant_resists_rock_shove, plant_rooted_in_loose, stem_count,
-    leave_dead_roots_in_place, pin_plant_pose, prune_detached_woody_leaves,
-    shed_unproductive_woody_leaves, sync_root_storage, try_grow_plant, try_plant_wind_spore,
-    try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
-    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_GROW_MIN_DAY,
-    PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
+    collect_live_stem_world_cells, collect_trunk_world_cells, drink_plant_with_moist,
+    drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
+    is_anchored, is_epiphyte, is_holdfast_anchored, is_land_plant, paint_leaf_litter,
+    plant_resists_rock_shove, plant_rooted_in_loose, stem_count, leave_dead_roots_in_place,
+    pin_plant_pose, prune_detached_woody_leaves, shed_unproductive_woody_leaves,
+    sync_root_storage, try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand,
+    PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
+    PLANT_GROW_MIN_DAY, PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
     build_canopy_index_posed, canopy_top_y, effective_photo_light_cached, group_posed_by_atom,
@@ -593,7 +593,7 @@ pub struct OrganismStepStats {
 
 impl OrganismStepStats {
     fn bump_birth(&mut self, atom: &Atom) {
-        if is_land_plant(atom) {
+        if is_land_plant(atom) || is_epiphyte(atom) {
             self.births_plant += 1;
         } else if is_fungus(atom) {
             self.births_fungus += 1;
@@ -603,7 +603,7 @@ impl OrganismStepStats {
     }
 
     fn bump_death(&mut self, atom: &Atom) {
-        if is_land_plant(atom) {
+        if is_land_plant(atom) || is_epiphyte(atom) {
             self.deaths_plant += 1;
         } else if is_fungus(atom) {
             self.deaths_fungus += 1;
@@ -1698,12 +1698,24 @@ impl OrganismStore {
         }
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
-        let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+        let epi = body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast) && !plant;
+        let fungus =
+            body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant && !epi;
         let gy = if plant {
             let Some(slot) = find_plant_slot(world, gx, gy) else {
                 return false;
             };
             slot
+        } else if epi {
+            if is_wet_air(world, gx, gy)
+                || world.get_cell(gx, gy).map(|c| c.material) == Some(MaterialId::Air)
+            {
+                gy
+            } else if let Some(slot) = find_air_near(world, gx, gy) {
+                slot
+            } else {
+                return false;
+            }
         } else if fungus {
             let Some(slot) = find_fungus_slot(world, gx, gy) else {
                 return false;
@@ -1721,6 +1733,12 @@ impl OrganismStore {
         if plant {
             pin_plant_pose(&mut atom);
             if !is_anchored(world, &atom) {
+                return false;
+            }
+        } else if epi {
+            pin_plant_pose(&mut atom);
+            let stems = collect_live_stem_world_cells(&self.atoms, |x| world.wrap_x(x));
+            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x)) {
                 return false;
             }
         } else if fungus {
@@ -1774,7 +1792,7 @@ impl OrganismStore {
         };
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
         apply_genome(&mut atom, genome);
-        if is_land_plant(&atom) || is_fungus(&atom) {
+        if is_land_plant(&atom) || is_fungus(&atom) || is_epiphyte(&atom) {
             pin_plant_pose(&mut atom);
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
@@ -1962,6 +1980,8 @@ impl OrganismStore {
         // Per-tick caches. Many leaves / plants share columns.
         let mut lit_cache: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         let mut shade_cache: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        // Host Stem cells for epiphyte Holdfast attach (E2 seating).
+        let host_stems = collect_live_stem_world_cells(&self.atoms, |x| world.wrap_x(x));
 
         // Empty store: still allow mycelium field → fruiting body emergence
         // (and corpse settle). Spores need a living body afterward.
@@ -2004,9 +2024,39 @@ impl OrganismStore {
             atom.cooldown = atom.cooldown.saturating_sub(1);
             atom.tip_cooldown = atom.tip_cooldown.saturating_sub(1);
 
-            let life_cap = life_ticks(climate, is_land_plant(atom) || is_fungus(atom));
+            let life_cap =
+                life_ticks(climate, is_land_plant(atom) || is_fungus(atom) || is_epiphyte(atom));
             if atom.age_ticks >= life_cap {
                 deaths.push(i);
+                continue;
+            }
+
+            if is_epiphyte(atom) {
+                let t_land = Instant::now();
+                match step_epiphyte(
+                    world,
+                    atom,
+                    day,
+                    &canopy,
+                    &host_stems,
+                    &mut lit_cache,
+                    &mut shade_cache,
+                    clouds,
+                    humidity.as_deref(),
+                    wrap_w,
+                    downpour_mass,
+                    sun_local,
+                    is_day,
+                    i as u32,
+                ) {
+                    PlantStep::Dead => deaths.push(i),
+                    PlantStep::Alive { .. } => {}
+                    PlantStep::Sprout(_)
+                    | PlantStep::Spore(_)
+                    | PlantStep::SporeBanked { .. }
+                    | PlantStep::SporeInoculated { .. } => {}
+                }
+                land_ns += t_land.elapsed();
                 continue;
             }
 
@@ -2811,6 +2861,74 @@ fn reseat_stacked_fungi(world: &World, atoms: &mut [Atom]) {
 /// Long enough that a raft cannot spin, short enough that a genuinely
 /// unstable plant still goes over while you watch it.
 pub const TIP_RECOVER_TICKS: u16 = 180;
+
+/// Max ticks an epiphyte may float unseated before dying (E2 seating).
+const EPIPHYTE_UNSEATED_MAX: u32 = 8;
+
+/// Epiphyte tick: require Holdfast on a host Stem; photo only (no drink/growth).
+fn step_epiphyte(
+    world: &World,
+    atom: &mut Atom,
+    day: f32,
+    canopy: &CanopyIndex,
+    host_stems: &std::collections::HashSet<(i32, i32)>,
+    lit_cache: &mut FxHashMap<(i32, i32), f32>,
+    shade_cache: &mut FxHashMap<(i32, i32), f32>,
+    clouds: Option<&CloudStore>,
+    humidity: Option<&Humidity>,
+    wrap_w: Option<i32>,
+    downpour_mass: f32,
+    sun_local: f32,
+    is_day: bool,
+    entity_id: u32,
+) -> PlantStep {
+    let _ = entity_id;
+    pin_plant_pose(atom);
+    if !is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x)) {
+        atom.drought_ticks = atom.drought_ticks.saturating_add(1);
+        if atom.drought_ticks >= EPIPHYTE_UNSEATED_MAX {
+            return PlantStep::Dead;
+        }
+    } else {
+        atom.drought_ticks = 0;
+    }
+
+    let n_photo = atom.photosystem_count().max(1) as f32;
+    let metabolic = atom.genome.metabolic_rate.max(0.05);
+    let upkeep =
+        UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * metabolic * (0.45 + 0.55 * day);
+    let sample_y = canopy_top_y(atom);
+    let sky = cached_lit_sky(
+        lit_cache,
+        world,
+        atom.gx,
+        sample_y,
+        day,
+        clouds,
+        humidity,
+        wrap_w,
+        downpour_mass,
+        sun_local,
+        is_day,
+    );
+    let light = effective_photo_light_cached(
+        canopy,
+        shade_cache,
+        atom.gx,
+        sample_y,
+        sky,
+        &atom.genome,
+    );
+    let harvest = PHOTON_RATE * light * n_photo;
+    atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
+    if atom.energy <= 0.0 {
+        return PlantStep::Dead;
+    }
+    PlantStep::Alive {
+        sat: 0,
+        at: (atom.gx, atom.gy),
+    }
+}
 
 fn step_land_plant(
     world: &mut World,
@@ -7222,6 +7340,68 @@ mod tests {
             !same || (store.atoms[0].vel_y - store.atoms[1].vel_y).abs() > 0.01,
             "contact should shove apart in x or bounce in y"
         );
+    }
+
+    #[test]
+    fn epiphyte_seats_on_host_stem_and_dies_when_unseated() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let host = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Photosystem),
+        ];
+        assert!(store.spawn_blueprint(&w, 4, 2, host, 80.0, Genome::default()));
+        let stem_y = 2 + 2; // upper Stem world y
+        let epi = crate::blueprint::Blueprint::minimal_epiphyte().modules_relative_to_nucleus();
+        assert!(
+            store.spawn_blueprint(&w, 4, stem_y, epi, 40.0, Genome::default()),
+            "epiphyte must seat on host Stem"
+        );
+        assert_eq!(store.atoms.iter().filter(|a| is_epiphyte(a)).count(), 1);
+        let stems = collect_live_stem_world_cells(&store.atoms, |x| w.wrap_x(x));
+        let epi_ref = store.atoms.iter().find(|a| is_epiphyte(a)).unwrap();
+        assert!(is_holdfast_anchored(epi_ref, &stems, |x| w.wrap_x(x)));
+
+        for t in 0..20 {
+            store.step(&mut w, t);
+        }
+        assert_eq!(
+            store.atoms.iter().filter(|a| is_epiphyte(a)).count(),
+            1,
+            "seated epiphyte should stay alive"
+        );
+
+        // Strip host stems → rider loses purchase.
+        let host = store
+            .atoms
+            .iter_mut()
+            .find(|a| !is_epiphyte(a))
+            .expect("host");
+        host.body.retain(|(_, _, m)| *m != ModuleId::Stem);
+
+        for t in 20..40 {
+            store.step(&mut w, t);
+        }
+        assert_eq!(
+            store.atoms.iter().filter(|a| is_epiphyte(a)).count(),
+            0,
+            "unseated epiphyte should die within a few ticks"
+        );
+    }
+
+    #[test]
+    fn epiphyte_habitat_spawn_refuses_air_without_host() {
+        let w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let epi = crate::blueprint::Blueprint::minimal_epiphyte().modules_relative_to_nucleus();
+        assert!(
+            !store.spawn_blueprint(&w, 4, 4, epi, 40.0, Genome::default()),
+            "habitat spawn must refuse an unseated epiphyte"
+        );
+        assert!(store.atoms.is_empty());
     }
 
     #[test]
