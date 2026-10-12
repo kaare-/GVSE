@@ -110,9 +110,10 @@ New Set B/C modules, creature locomotion, Phase 7 lighting, client
 split — see [`ROADMAP.md`](../ROADMAP.md) and
 [`CORE_FEATURES.md`](CORE_FEATURES.md).
 
-## Decision list (2026-10-12, post stream profile)
+## Decision list (2026-10-12, post hotspot #1)
 
-1. **Default next: hotspot cut #1** — thin post/pose (stream+live) and/or
-   land/metab (dense seed); prove with `perf_profile` + short soak.
+1. **Default next: hotspot cut #2** — thin `land`/`metab` on dense
+   ring-wide seed (largest remaining named org bucket), or skip if
+   owner prefers buildup/GC first.
 2. Optional longer organisms-on BudgetSnap — only if TRACKED reopens.
-3. Optional buildup/GC if soak stores drift before a life-pass cut pays.
+3. Optional buildup/GC if soak stores drift.
