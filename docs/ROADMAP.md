@@ -345,12 +345,17 @@ Default roadmap next: Phase 8 scoping, or owner pick.
 
 ---
 
-## Phase 8 — Server / client *(huge)*
+## Phase 8 — Server / client *(scope draft)*
 
 **Goal:** Split sim presentation from ownership. Review alternatives;
 prefer a **production-compatible client** that can pass **Apple and/or
 Steam** inspection. Heavy work and testing; own architecture note
 before coding.
+
+**Scope draft (2026-10-12):** [`PHASE8_SCOPE.md`](PHASE8_SCOPE.md) —
+ownership split + stack shortlist (egui/wgpu, Bevy, Godot, macroquad
+wrapper). **No client rewrite until owner picks.** Optional leftover:
+E2 tipped-log visual.
 
 ---
 
@@ -422,6 +427,7 @@ before coding.
 | 2026-10-12 | Phase 7 C closed | Summer/winter Xvfb + 3k soak park=0; next D |
 | 2026-10-12 | Phase 7 D locked | Water glitter on lit free-water tops |
 | 2026-10-12 | Phase 7 closed | A–D done; 3k soak park=0; next Phase 8 or owner pick |
+| 2026-10-12 | Phase 8 scope draft | Host/client split + stack shortlist; owner pick before code |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
@@ -438,4 +444,4 @@ before coding.
 - Optional Phase-4 leftovers (5 km wind.rebuild / rock bodies): only if owner wants more FPS.
 - Phase-5 E2 owner visual: tipped grey logs at 1× zoom
   ([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)).
-- Phase-8 shortlist of client stacks when that review starts.
+- Phase-8 shortlist: see [`PHASE8_SCOPE.md`](PHASE8_SCOPE.md); owner pick.
