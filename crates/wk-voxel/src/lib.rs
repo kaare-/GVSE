@@ -140,7 +140,7 @@ pub use geotech_map::{
     wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,
     GEOTECH_MAP_PHASE,
 };
-pub use grid::{ChunkMap, World};
+pub use grid::{ChunkMap, World, PREFERENTIAL_ROOT_MAP_MAX};
 pub use water_temp::{
     clear_water_temp, clear_water_temp_if_dry, cool_water_temp_toward_ambient,
     mix_mouth_water_temp_on_transfer, mix_water_temp_on_transfer, set_water_temp, water_temp_at,

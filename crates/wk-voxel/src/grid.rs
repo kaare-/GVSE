@@ -16,6 +16,12 @@ use crate::fasthash::{FxHashMap, FxHashSet};
 /// untrusted keys, so SipHash would only add cost.
 pub type ChunkMap = FxHashMap<ChunkCoord, Chunk>;
 
+/// Soft cap on [`World::preferential_root`] overlay entries (Phase 6
+/// buildup GC). Ghost-root compost + fill used to stamp forever; the org
+/// step clones the whole set each tick. Evict an arbitrary key on insert
+/// past this limit (E44 only needs local recent memory).
+pub const PREFERENTIAL_ROOT_MAP_MAX: usize = 4_096;
+
 static NEXT_CHUNK_CACHE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn default_world_pipe_expand() -> u16 {
@@ -443,8 +449,18 @@ impl World {
     }
 
     /// Mark `(gx, gy)` as a PreferentialRootPath cell (Phase 5 E2 / E44).
+    ///
+    /// Soft-caps at [`PREFERENTIAL_ROOT_MAP_MAX`]: when full, drops one
+    /// existing key so organisms-on soaks cannot unbounded-grow the overlay.
     pub fn mark_preferential_root(&mut self, gx: i32, gy: i32) {
         let gx = self.wrap_x(gx);
+        if self.preferential_root.len() >= PREFERENTIAL_ROOT_MAP_MAX
+            && !self.preferential_root.contains(&(gx, gy))
+        {
+            if let Some(&key) = self.preferential_root.iter().next() {
+                self.preferential_root.remove(&key);
+            }
+        }
         self.preferential_root.insert((gx, gy));
     }
 
@@ -452,6 +468,12 @@ impl World {
     pub fn is_preferential_root(&self, gx: i32, gy: i32) -> bool {
         let gx = self.wrap_x(gx);
         self.preferential_root.contains(&(gx, gy))
+    }
+
+    /// Clear PreferentialRootPath memory at `(gx, gy)`.
+    pub fn clear_preferential_root(&mut self, gx: i32, gy: i32) {
+        let gx = self.wrap_x(gx);
+        self.preferential_root.remove(&(gx, gy));
     }
 
     /// Map a world-x into the stored range when wrap is enabled.
@@ -813,5 +835,27 @@ mod tests {
             w.get_cell(10, 2).map(|c| c.material),
             Some(MaterialId::Stone)
         );
+    }
+
+    #[test]
+    fn preferential_root_soft_caps_and_clears() {
+        let mut w = World::new(3);
+        for i in 0..PREFERENTIAL_ROOT_MAP_MAX {
+            w.mark_preferential_root(i as i32, 0);
+        }
+        assert_eq!(w.preferential_root.len(), PREFERENTIAL_ROOT_MAP_MAX);
+        // Insert past the cap: size stays at the soft max.
+        w.mark_preferential_root(PREFERENTIAL_ROOT_MAP_MAX as i32, 0);
+        assert_eq!(
+            w.preferential_root.len(),
+            PREFERENTIAL_ROOT_MAP_MAX,
+            "soft-cap must not grow past PREFERENTIAL_ROOT_MAP_MAX"
+        );
+        assert!(
+            w.is_preferential_root(PREFERENTIAL_ROOT_MAP_MAX as i32, 0),
+            "newest mark must land"
+        );
+        w.clear_preferential_root(PREFERENTIAL_ROOT_MAP_MAX as i32, 0);
+        assert!(!w.is_preferential_root(PREFERENTIAL_ROOT_MAP_MAX as i32, 0));
     }
 }
