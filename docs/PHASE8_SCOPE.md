@@ -69,8 +69,9 @@ gameplay / atlas port until spike loop is stable.
 2. [x] **Stack comparison** — [`PHASE8_CLIENT_STACKS.md`](PHASE8_CLIENT_STACKS.md).
 3. [x] **Owner pick** — ship client **A**; macroquad = soak/dev only.
 4. [x] **Contract sketch** — [`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md).
-5. [ ] **Spike** — A: empty `winit`+`wgpu`+egui window + host tick pump.
-6. [ ] **Parity gate** — Compact soak park=0 still green with host binary.
+5. [x] **Spike** — `crates/wk-voxel-client` empty window + host tick HUD.
+6. [ ] **Parity gate** — Compact soak park=0 still green with host binary
+      (unchanged; spike host is tick-only stub).
 
 ## Acceptance (proposed)
 
@@ -92,5 +93,6 @@ the client, abandoning the macroquad soak viewer.
    **macroquad** as soak/dev/Xvfb viewer (not the production ship path).
 3. **Contract sketch:** `ViewFrame` ≠ `SimSnapshot`; `ClientCommand`
    queue; in-process single-player first ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
-4. Next wedge: **A spike** (empty window + tick) — no gameplay port yet.
-5. Optional leftover: E2 tipped grey-log owner visual (Phase 5).
+4. Contract sketch + **A spike** landed (`wk-voxel-client`).
+5. Next: terrain strip / sky port onto A when ready; soak stays macroquad.
+6. Optional leftover: E2 tipped grey-log owner visual (Phase 5).
