@@ -69,9 +69,11 @@ first; same messages can move to a separate host process later.
 
 ## Landed (2026-10-12)
 
-`wk-voxel-client` is the **viewer**; in-process host runs product
-`step_world` on a small ring and emits `ViewFrame` v4 (strip + sky +
-palette/glitter). Macroquad remains soak/dev/Xvfb.
+`wk-voxel-client` is the **viewer**; in-process host defaults to
+**Compact** (4096×tropopause) with `StreamWindow` + `sync_residency`,
+runs product `step_world`, and emits `ViewFrame` v4 (strip band ~384
+around sea level + sky + palette/glitter). Unit tests use
+`Host::for_tests()` (tiny ring). Macroquad remains soak/dev/Xvfb.
 
 ## Wedge plan
 
@@ -84,14 +86,16 @@ palette/glitter). Macroquad remains soak/dev/Xvfb.
 7. [x] **Sky** — `ViewFrame` v3 sky fields + air fill + sun/moon marker.
 8. [x] **Palette / glitter** — app-aligned cell colours + water glitter.
 9. [x] **Grow host** — `step_world` + climate fields; present throttled.
-10. [ ] **Parity gate** — Compact soak park=0 still green on soak host
-      (macroquad / headless; client host is a small ring for now).
+10. [x] **Compact host** — default `Host` stamps Compact; stream
+    `COMPACT_VIEW_COLS` (320) + park far chunks; extract ~view×384 band.
+11. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+      (macroquad / headless; client host streams Compact, soak gate
+      unchanged).
 
-## Owner next (after grow-host)
+## Owner next (after Compact host)
 
 | Pick | Notes |
 |------|--------|
-| **Compact host** | Enlarge viewer world toward Compact / soak parity |
 | **Ship packaging** | Steam / notarize A binary |
 | **Out-of-process host** | Split host binary; same ViewFrame / commands |
 | **E2 / redirect** | Phase 5 leftover or other program |
@@ -118,5 +122,7 @@ the client, abandoning the macroquad soak viewer.
    queue; in-process single-player first ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
 4. Contract + A spike + strip + sky + palette/glitter landed (#425–#430).
 5. Owner: client = **viewer** (camera + limited commands); host = sim.
-6. Grow-host (`step_world`) in flight. Soak stays macroquad.
-7. Optional leftover: E2 tipped grey-log (Phase 5).
+6. Grow-host (`step_world`) landed (#432). Soak stays macroquad.
+7. Compact host: default stamp 4096×tropopause + stream/park; tests use
+   `for_tests()`.
+8. Optional leftover: E2 tipped grey-log (Phase 5).

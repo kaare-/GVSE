@@ -257,11 +257,16 @@ impl SpikeApp {
                         view.paused, view.focus_col, view.view_cols
                     ));
                     ui.label(format!(
-                        "world {}×{} · strip {}×{}",
+                        "world {}×{} · strip {}×{}{}",
                         view.world_width_cols,
                         view.world_height,
                         view.terrain.cols,
-                        view.terrain.rows
+                        view.terrain.rows,
+                        if view.world_width_cols >= 4096 {
+                            " · Compact stream"
+                        } else {
+                            ""
+                        }
                     ));
                     ui.label(format!(
                         "sky rgb({},{},{}) · {} · dn {} · season {}",
