@@ -459,5 +459,12 @@ re-profile.
    **0.59** ms (living=256, parked=0, chunks 1088→459). Stream org
    splits: post **0.11**, pose 0.08, land 0.06, canopy 0.05. Log:
    `/opt/cursor/artifacts/phase6-stream-organisms-compact.log`.
-   Stream cuts wall ~4×; live-in-view org stays ~0.6 ms. Next: hotspot
-   cut #1 (see [`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).
+   Stream cuts wall ~4×; live-in-view org stays ~0.6 ms.
+9. **Phase 6 hotspot cut #1 (2026-10-12):** plant-only `resolve_contacts`
+   skip + epi/soft-pile gates. Stream+256 org **0.59 → 0.29** ms
+   (post **0.11 → 0.007**); Compact ring-wide 256 org **1.30 → 0.83**
+   ms (post **0.10 → 0.010**). Soak 600t/48: living=50, park=0.
+   Logs: `phase6-stream-organisms-hotspot.log`,
+   `phase6-organisms-compact-hotspot.log`,
+   `phase6-hotspot-short-soak.log`. Next: land/metab or buildup
+   ([`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).

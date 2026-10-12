@@ -1,4 +1,4 @@
-# Phase 6 — Optimise the biological loop *(stream profile landed)*
+# Phase 6 — Optimise the biological loop *(hotspot #1 landed)*
 
 Phase 5 E2 agent slices closed (2026-10-12). Phase 6 focuses on
 **cost and buildup** of the life pass — not new genes.
@@ -19,6 +19,7 @@ feature work.
 | Phase 1/4 physics perf baselines | Live | [`VOXEL_PERF.md`](../VOXEL_PERF.md) |
 | Compact organisms-on perf baseline | Live (slice 1) | this file + `perf_profile` |
 | Compact stream-on + plants A/B | Live (slice 2) | this file + `perf_profile` |
+| Hotspot cut #1 (plant-only contacts) | Live (slice 3) | this file + `organism.rs` |
 
 ## Compact baseline (2026-10-12)
 
@@ -60,18 +61,39 @@ inside the resident band, **org stays ~0.6 ms** (parked=0) — park only
 helps far bodies. Under play-like stream+live load, post/pose lead;
 ring-wide baseline still shows land/metab as the dense-seed hotspot.
 
+## Hotspot cut #1 (2026-10-12)
+
+Skip wasted plant-only work: `resolve_contacts` unless ≥2 mobile atoms;
+epiphyte host/rider maps only when epiphytes exist; soft-mat pose
+`HashSet` only when a stemless Photosystem exists.
+
+| harness | before org | after org | post before→after |
+|---------|-----------:|----------:|-------------------:|
+| stream view=320 + 256 live | 0.59 | **0.29** | 0.11 → **0.007** |
+| Compact ring-wide 256 | 1.30 | **0.83** | 0.10 → **0.010** |
+
+Short soak (`short_organisms_budget_soak`, 600t / 48 plants): living=50,
+TRACKED −0.01/t, **park=0**. Logs:
+`phase6-stream-organisms-hotspot.log`,
+`phase6-organisms-compact-hotspot.log`,
+`phase6-hotspot-short-soak.log`.
+
+**Read:** Post is no longer a hotspot on plant-only loads. Under
+ring-wide seed, **land/metab** (~0.34 ms at 256) remains the largest
+named org bucket.
+
 ## Proposed slice plan
 
 1. ~~**Organisms-on perf baseline**~~ — Compact 0/48/256 + org splits.
-2. **Hotspot cut #1** — thin hottest org buckets under stream+live
-   (post / pose; land/metab on dense ring-wide seed); keep TRACKED
-   flat + park=0 on `short_organisms_budget_soak`.
+2. ~~**Hotspot cut #1**~~ — plant-only contact / epi / soft-pile skips;
+   soak still green.
 3. **Longer organisms-on soak** — 5k then 50k BudgetSnap with plants;
    only if short gate reopens or buildup shows a store drift.
 4. ~~**Stream-on life cost**~~ — Compact stream+evict with plants;
-   park/restore cheap; residency gates far work; live-in-view ~0.6 ms.
-5. **Buildup / GC** — mycelium strain keys, soft litter, preferential
-   overlays, corpse caps under long soak (park or cut).
+   park/restore cheap; residency gates far work; live-in-view ~0.6 ms
+   pre-cut / ~0.3 ms post-cut.
+5. **Hotspot cut #2 / buildup** — thin land/metab on dense seed, or
+   mycelium strain / litter / preferential GC under long soak.
 
 ## Acceptance (proposed)
 
@@ -79,7 +101,7 @@ ring-wide baseline still shows land/metab as the dense-seed hotspot.
 - [x] Organisms-on Compact perf baseline logged under
       `/opt/cursor/artifacts/`.
 - [x] Compact stream-on + plants A/B logged (focus-band seed).
-- [ ] At least one measured life-pass cut with soak gate still green.
+- [x] At least one measured life-pass cut with soak gate still green.
 - [ ] Owner: accept Phase 6 wedge or pick a different Phase 5 follow-up.
 
 ## Non-goals
@@ -88,9 +110,10 @@ New Set B/C modules, creature locomotion, Phase 7 lighting, client
 split — see [`ROADMAP.md`](../ROADMAP.md) and
 [`CORE_FEATURES.md`](CORE_FEATURES.md).
 
-## Decision list (2026-10-12, post stream profile)
+## Decision list (2026-10-12, post hotspot #1)
 
-1. **Default next: hotspot cut #1** — thin post/pose (stream+live) and/or
-   land/metab (dense seed); prove with `perf_profile` + short soak.
+1. **Default next: hotspot cut #2** — thin `land`/`metab` on dense
+   ring-wide seed (largest remaining named org bucket), or skip if
+   owner prefers buildup/GC first.
 2. Optional longer organisms-on BudgetSnap — only if TRACKED reopens.
-3. Optional buildup/GC if soak stores drift before a life-pass cut pays.
+3. Optional buildup/GC if soak stores drift.
