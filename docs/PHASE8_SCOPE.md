@@ -60,8 +60,11 @@ B (Bevy) and C (Godot) parked unless owner reopens. D (ship the
 macroquad binary) is **not** the production path — macroquad stays
 research/dev.
 
-**Next after contract:** A spike (empty window + host tick pump). No
-gameplay / atlas port until spike loop is stable.
+## Landed (2026-10-12) — agent parked
+
+`wk-voxel-client` presents a stamped small ring via `ViewFrame` v3
+(strip + sky + palette/glitter). Host still uses CA `tick` (not full
+`step_world`). Macroquad remains soak/dev/Xvfb.
 
 ## Wedge plan
 
@@ -75,6 +78,15 @@ gameplay / atlas port until spike loop is stable.
 8. [x] **Palette / glitter** — app-aligned cell colours + water glitter.
 9. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host is a small ring for now).
+
+## Owner next (pick one)
+
+| Pick | Notes |
+|------|--------|
+| **Grow host** | Wire `step_world` + climate fields; enlarge toward Compact |
+| **Ship packaging** | Steam / notarize spike for stack A (no sim change) |
+| **E2 visual** | Phase 5 tipped grey-log leftover |
+| **Park / redirect** | Leave Phase 8 presentation as-is |
 
 ## Acceptance (proposed)
 
@@ -96,6 +108,6 @@ the client, abandoning the macroquad soak viewer.
    **macroquad** as soak/dev/Xvfb viewer (not the production ship path).
 3. **Contract sketch:** `ViewFrame` ≠ `SimSnapshot`; `ClientCommand`
    queue; in-process single-player first ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
-4. Contract + A spike + strip + sky + **palette/glitter** landed.
-5. Next: grow client host / `step_world` when owner wants; soak stays macroquad.
-6. Optional leftover: E2 tipped grey-log owner visual (Phase 5).
+4. Contract + A spike + strip + sky + palette/glitter landed (#425–#430).
+5. **Agent parked** — owner pick: grow host / packaging / E2 / redirect.
+6. Soak stays macroquad. Optional: E2 tipped grey-log (Phase 5).
