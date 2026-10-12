@@ -39,7 +39,7 @@ over sim rewrites. Kernel stays MS Paint 1×.
 - [x] Wedge A locked (agent default).
 - [x] Slices 1–3 landed with unit tests where cheap.
 - [x] Xvfb dusk / midnight / dawn stills under `/opt/cursor/artifacts/`.
-- [ ] No sim-mass regressions (short soak park=0 — in flight).
+- [x] Short soak park=0 (3000t: TRACKED −0.02/t, min +0.02/t, park=0).
 
 ## Landed (wedge A)
 
