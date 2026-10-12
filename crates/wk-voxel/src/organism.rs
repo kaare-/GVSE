@@ -27,7 +27,8 @@ use crate::climate::{
 use crate::clouds::{CloudStore, DOWNPOUR_MASS};
 use crate::fungi::{
     colonize_and_compost_cfg, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
-    fill_ghost_root_voids, max_mycelium_near, FungiConfig, forage_organic_energy,
+    fill_ghost_root_voids, max_mycelium_near, prune_stale_root_residue, FungiConfig,
+    forage_organic_energy,
     fruiting_body_supported, fungus_should_hibernate, fungus_upkeep, is_fungus, is_fungus_seated,
     is_surface_stalk, try_emergent_fruiting, try_spore, FRUIT_SUPPORT_MIN_AGE,
     FUNGUS_HIBERNATE_MAX_TICKS,
@@ -2012,6 +2013,8 @@ impl OrganismStore {
 
         // Phase 5 E2 / E44: Void → Loose fill on PreferentialRootPath cavities
         // even with no living atoms (empty store still collapses ghost voids).
+        // Phase 6: drop residue marks whose Organic host is gone first.
+        let _ = prune_stale_root_residue(world);
         let _ = fill_ghost_root_voids(world);
 
         // Empty store: still allow mycelium field → fruiting body emergence

@@ -129,18 +129,18 @@ pub use fungi::{
     infect_mycelium_at, infect_mycelium_with_lineage, is_fungus, is_surface_stalk,
     lineage_for_strain_at, max_mycelium_near, move_mycelium_meta, mycelium_energy_at,
     mycelium_shares_at, mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb,
-    nearest_mycelium_lineage, pull_mycelium_cargo_to, seed_mycelium_near, sip_mycelium_energy_near,
-    soft_litter_at, stamp_mycelium_lineage, step_mycelium_field, step_mycelium_field_cfg,
-    strain_lineage, swap_cells_preserving_mycelium, swap_mycelium_meta, FungiConfig,
-    MyceliumLineage, MyceliumLineageMap, FUNGUS_STALK_SPORE_MAX_DIST, FUNGUS_STALK_SPORE_MIN_DIST,
-    MYCELIUM_ENERGY_CAP,
+    nearest_mycelium_lineage, prune_stale_root_residue, pull_mycelium_cargo_to, seed_mycelium_near,
+    sip_mycelium_energy_near, soft_litter_at, stamp_mycelium_lineage, step_mycelium_field,
+    step_mycelium_field_cfg, strain_lineage, swap_cells_preserving_mycelium, swap_mycelium_meta,
+    FungiConfig, MyceliumLineage, MyceliumLineageMap, FUNGUS_STALK_SPORE_MAX_DIST,
+    FUNGUS_STALK_SPORE_MIN_DIST, MYCELIUM_ENERGY_CAP, SOFT_LITTER_MAP_MAX,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
     wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,
     GEOTECH_MAP_PHASE,
 };
-pub use grid::{ChunkMap, World, PREFERENTIAL_ROOT_MAP_MAX};
+pub use grid::{ChunkMap, World, PREFERENTIAL_ROOT_MAP_MAX, ROOT_RESIDUE_MAP_MAX};
 pub use water_temp::{
     clear_water_temp, clear_water_temp_if_dry, cool_water_temp_toward_ambient,
     mix_mouth_water_temp_on_transfer, mix_water_temp_on_transfer, set_water_temp, water_temp_at,
