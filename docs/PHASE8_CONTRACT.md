@@ -155,7 +155,9 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       (`crates/wk-voxel-client`).
 - [x] Terrain strip in `ViewFrame` (schema v2) + egui blit; small stamped
       world + `tick` on host.
-- [ ] Later: sky / full palette parity with macroquad atlas; Compact size.
+- [x] Sky present fields (schema v3) — day/night/phase/moon/season; air
+      cells filled with height-phased sky; sun/moon marker in client.
+- [ ] Later: fuller palette / glitter / Compact-sized host world.
 
 ## Non-goals
 
@@ -177,5 +179,6 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 
 1. [x] Land this sketch + A spike empty window.
 2. [x] Terrain strip (`VIEW_SCHEMA` 2) on A.
-3. Sky / climate present fields + fuller palette; grow world toward Compact.
-4. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+3. [x] Sky present (`VIEW_SCHEMA` 3) on A.
+4. Fuller palette / glitter; grow world toward Compact.
+5. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.

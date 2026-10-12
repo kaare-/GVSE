@@ -6,10 +6,15 @@
 
 mod present;
 
-use wk_voxel::{stamp_world, tick, StreamWindow, World, WorldgenParams, CHUNK_CELLS_W};
+use wk_voxel::{
+    apply_season_sky_tint, celestial_local_cfg, climate_with_season, day_night_factor_cfg,
+    is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, season_fraction_cfg,
+    sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, tick, ClimateConfig, StreamWindow,
+    World, WorldgenParams, CHUNK_CELLS_W,
+};
 
 /// Bump when [`ViewFrame`] field layout breaks.
-pub const VIEW_SCHEMA: u32 = 2;
+pub const VIEW_SCHEMA: u32 = 3;
 /// Bump when [`ClientCommand`] enum breaks.
 pub const COMMAND_SCHEMA: u32 = 1;
 
@@ -30,6 +35,30 @@ impl TerrainStrip {
     }
 }
 
+/// Host-authored sky / climate presentation (packed for `Eq`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkyPresent {
+    /// Horizon-ish sky colour from [`sky_rgb_phased`].
+    pub sky_rgb: [u8; 3],
+    /// `day_night_factor` mapped −1..+1 → 0..255 (128 ≈ dusk/dawn).
+    pub day_night_u8: u8,
+    /// Climate phase 0..1 → 0..255 (0 ≈ noon).
+    pub phase_u8: u8,
+    /// Sun/moon arc local 0..1 → 0..255.
+    pub celestial_local_u8: u8,
+    /// Moon phase 0..1 → 0..255.
+    pub moon_phase_u8: u8,
+    /// Season fraction 0..1 → 0..255.
+    pub season_u8: u8,
+    pub is_day: bool,
+}
+
+impl SkyPresent {
+    pub fn day_night(&self) -> f32 {
+        (self.day_night_u8 as f32 / 255.0) * 2.0 - 1.0
+    }
+}
+
 /// Camera-window extract for presentation (not a durable `SimSnapshot`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewFrame {
@@ -41,6 +70,7 @@ pub struct ViewFrame {
     pub focus_col: i32,
     pub view_cols: i32,
     pub last_step_ms: u32,
+    pub sky: SkyPresent,
     pub terrain: TerrainStrip,
     pub command_acks: Vec<CommandAck>,
 }
@@ -71,6 +101,7 @@ pub enum ClientCommand {
 pub struct Host {
     world: World,
     params: WorldgenParams,
+    climate: ClimateConfig,
     pub paused: bool,
     pub focus_col: i32,
     pub view_cols: i32,
@@ -107,9 +138,18 @@ impl Host {
         let mut world = World::new(params.seed);
         stamp_world(&mut world, &params);
         let focus_col = params.width_cols / 2;
+        // Short cycle so dusk/dawn is visible while driving the spike.
+        let climate = climate_with_season(
+            &ClimateConfig {
+                day_ticks: 180,
+                night_ticks: 180,
+            },
+            0.35,
+        );
         Self {
             world,
             params,
+            climate,
             paused: false,
             focus_col,
             view_cols: 96,
@@ -194,19 +234,51 @@ impl Host {
         self.last_step_ms = t0.elapsed().as_millis().min(u32::MAX as u128) as u32;
     }
 
-    fn extract_terrain(&self) -> TerrainStrip {
+    fn sky_present(&self) -> SkyPresent {
+        let tick = self.world.tick;
+        let dn = day_night_factor_cfg(tick, &self.climate);
+        let phase = phase_fraction_cfg(tick, &self.climate);
+        let season = season_fraction_cfg(tick, &self.climate);
+        let sky = apply_season_sky_tint(sky_rgb_phased(dn, phase), season, dn);
+        SkyPresent {
+            sky_rgb: sky,
+            day_night_u8: ((dn.clamp(-1.0, 1.0) + 1.0) * 0.5 * 255.0).round() as u8,
+            phase_u8: (phase.clamp(0.0, 1.0) * 255.0).round() as u8,
+            celestial_local_u8: (celestial_local_cfg(tick, &self.climate).clamp(0.0, 1.0) * 255.0)
+                .round() as u8,
+            moon_phase_u8: (moon_phase_cfg(tick, &self.climate).clamp(0.0, 1.0) * 255.0).round()
+                as u8,
+            season_u8: (season.clamp(0.0, 1.0) * 255.0).round() as u8,
+            is_day: is_daytime_cfg(tick, &self.climate),
+        }
+    }
+
+    fn extract_terrain(&self, sky: &SkyPresent) -> TerrainStrip {
         let cols = self.view_cols.max(1) as u32;
         let rows = self.world_height() as u32;
         let half = self.view_cols / 2;
         let origin_col = self.focus_col.wrapping_sub(half);
         let origin_y = self.params.bedrock_floor_y;
+        let dn = sky.day_night();
+        let phase = sky.phase_u8 as f32 / 255.0;
         let mut rgba = vec![0u8; (cols as usize) * (rows as usize) * 4];
         for row in 0..rows {
-            // y=0 at top of texture = high world-y (sky).
+            // y=0 at top of texture = high world-y (sky / zenith).
             let gy = origin_y + (rows as i32 - 1 - row as i32);
+            let height_01 = if rows <= 1 {
+                0.0
+            } else {
+                row as f32 / (rows - 1) as f32
+            };
+            let season = sky.season_u8 as f32 / 255.0;
+            let sky_row =
+                apply_season_sky_tint(sky_rgb_at_height_phased(dn, height_01, phase), season, dn);
             for col in 0..cols {
                 let gx = self.world.wrap_x(origin_col + col as i32);
-                let px = present::cell_rgba(self.world.get_cell(gx, gy));
+                let mut px = present::cell_rgba(self.world.get_cell(gx, gy));
+                if px[3] == 0 {
+                    px = [sky_row[0], sky_row[1], sky_row[2], 255];
+                }
                 let i = ((row as usize) * cols as usize + col as usize) * 4;
                 rgba[i..i + 4].copy_from_slice(&px);
             }
@@ -226,6 +298,8 @@ impl Host {
             self.step_once();
         }
         let acks = std::mem::take(&mut self.pending_acks);
+        let sky = self.sky_present();
+        let terrain = self.extract_terrain(&sky);
         ViewFrame {
             contract_version: VIEW_SCHEMA,
             sim_tick: self.world.tick,
@@ -235,7 +309,8 @@ impl Host {
             focus_col: self.focus_col,
             view_cols: self.view_cols,
             last_step_ms: self.last_step_ms,
-            terrain: self.extract_terrain(),
+            sky,
+            terrain,
             command_acks: acks,
         }
     }
@@ -281,5 +356,22 @@ mod tests {
         assert_eq!(frame.terrain.cols, host.view_cols as u32);
         assert_eq!(frame.terrain.rows, host.world_height() as u32);
         assert!(frame.terrain.rgba.iter().any(|&b| b != 0));
+        // Air cells are sky-filled (opaque), not left clear.
+        assert!(frame.terrain.rgba.chunks(4).any(|c| c[3] == 255));
+    }
+
+    #[test]
+    fn sky_tracks_tick() {
+        let mut host = Host::default();
+        host.apply(ClientCommand::SetPaused(true));
+        let a = host.frame().sky.clone();
+        for _ in 0..90 {
+            host.apply(ClientCommand::StepOnce);
+        }
+        let b = host.frame().sky;
+        assert!(
+            a.day_night_u8 != b.day_night_u8 || a.phase_u8 != b.phase_u8,
+            "short climate cycle should move sky within 90 steps"
+        );
     }
 }

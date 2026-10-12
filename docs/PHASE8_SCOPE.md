@@ -71,8 +71,9 @@ gameplay / atlas port until spike loop is stable.
 4. [x] **Contract sketch** — [`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md).
 5. [x] **Spike** — `crates/wk-voxel-client` empty window + host tick HUD.
 6. [x] **Terrain strip** — `ViewFrame` v2 RGBA window + stamped world `tick`.
-7. [ ] **Sky / palette** — celestial + fuller cell colours on A.
-8. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+7. [x] **Sky** — `ViewFrame` v3 sky fields + air fill + sun/moon marker.
+8. [ ] **Palette / glitter** — fuller cell colours + Phase 7 glitter on A.
+9. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host is a small ring for now).
 
 ## Acceptance (proposed)
@@ -95,6 +96,6 @@ the client, abandoning the macroquad soak viewer.
    **macroquad** as soak/dev/Xvfb viewer (not the production ship path).
 3. **Contract sketch:** `ViewFrame` ≠ `SimSnapshot`; `ClientCommand`
    queue; in-process single-player first ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
-4. Contract sketch + **A spike** + **terrain strip** landed (`wk-voxel-client`).
-5. Next: sky / fuller palette on A; soak stays macroquad.
+4. Contract + A spike + strip + **sky** landed (`wk-voxel-client`).
+5. Next: fuller palette / glitter on A; soak stays macroquad.
 6. Optional leftover: E2 tipped grey-log owner visual (Phase 5).
