@@ -292,12 +292,16 @@ blocker). Daily 09:00 Oslo lists continue.
 
 ---
 
-## Phase 6 — Optimise the biological loop *(next — default)*
+## Phase 6 — Optimise the biological loop *(in progress)*
 
 **Goal:** After the E2 upgrade lands, cost and buildup of the life pass
-under long soak / larger maps. **Default next** without owner pick:
-draft Phase 6 scope + organisms-on perf baseline, then cut the hottest
-life-pass levers.
+under long soak / larger maps. See
+[`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md).
+
+**Slice 1 landed (2026-10-12):** Compact organisms-on baseline —
+256 plants ≈ **1.3 ms** org / **55 ms** wall (~2.4%); physics-bound.
+Inside org: land/metab hottest. **Default next:** Compact stream+evict
+with plants (life cost under residency), not a sub-ms metab micro-cut.
 
 ---
 
