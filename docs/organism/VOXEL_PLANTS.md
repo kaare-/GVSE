@@ -260,7 +260,7 @@ Features:
 | Gene | Role |
 |------|------|
 | `host_leave_fraction` | Same-column smother shade (wired) |
-| `attach_prefer` | On Genome; reseat not wired yet |
+| `attach_prefer` | Nearby Stem re-seek when unseated (wired) |
 
 **Landed (slices 1–3):**
 - Standing-dead woody corpses: abiotic / fungal `stem_integrity` decay
@@ -286,7 +286,12 @@ Features:
   `(1 − leave) × cast` (`smother_epiphyte_shades_host_more_than_gentle`,
   `host_leave_gentle_leaves_more_host_energy_than_smotherer`).
 
-**Still later:** attach_prefer reseat, ghost-root cavity fill.
+**Landed (slice 6 — attach_prefer):**
+- `try_epiphyte_reseat` / `attach_seek_radius`: sticky Holdfasts snag a
+  nearby Stem when displaced or near-miss spawn
+  (`attach_prefer_high_reseats_low_dies`).
+
+**Still later:** ghost-root cavity fill.
 
 ## Open: the load-bearing symbiont join
 
