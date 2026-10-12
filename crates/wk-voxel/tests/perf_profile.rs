@@ -739,6 +739,105 @@ fn phase6_organisms_compact_baseline() {
     run_profile("compact + 256 plants", stretch_params(), 256);
 }
 
+/// Phase 6 slice 2 — Compact stream-on with plants (org park under residency).
+///
+/// A/B full-resident vs view=320 + halo + evict at 256 plants. Matches play
+/// app: `sync_residency` + `sync_organism_residency` each tick.
+///
+/// ```text
+/// cargo test -p wk-voxel --test perf_profile --release \
+///   phase6_stream_organisms_compact -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "Phase 6 Compact stream+plants; release + --nocapture"]
+fn phase6_stream_organisms_compact() {
+    set_parallel_enabled(true);
+    let params = stretch_params();
+    let plants = 256usize;
+    for (label, stream_on) in [
+        ("compact full-resident + 256 plants", false),
+        ("compact stream view=320 + halo + evict + 256 plants", true),
+    ] {
+        let mut scene = stamp_scene(params);
+        scene.perf = PerfConfig::default();
+        seed_plants(&mut scene, plants);
+        let apply_stream = |s: &mut Scene| {
+            if stream_on {
+                s.world.stream_window = Some(StreamWindow::new(s.params.width_cols / 2, 320));
+                let _ = sync_residency(&mut s.world);
+                let _ = s
+                    .organisms
+                    .sync_organism_residency(s.world.wrap_width, s.world.stream_window);
+            } else {
+                s.world.stream_window = None;
+                let _ = s
+                    .organisms
+                    .sync_organism_residency(s.world.wrap_width, None);
+            }
+        };
+        for _ in 0..WARMUP_TICKS {
+            apply_stream(&mut scene);
+            one_stack_tick(&mut scene, None, None);
+        }
+        let mut accum = PassAccum::zero();
+        let mut phys = PhysicsTimings::default();
+        let mut pass = OrganismPassTimings::default();
+        let wall = Instant::now();
+        for _ in 0..MEASURE_TICKS {
+            apply_stream(&mut scene);
+            one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+            let p = scene.organisms.last_pass;
+            pass.pose += p.pose;
+            pass.canopy += p.canopy;
+            pass.reseat += p.reseat;
+            pass.float_cols += p.float_cols;
+            pass.land_plants += p.land_plants;
+            pass.land_seat += p.land_seat;
+            pass.land_metab += p.land_metab;
+            pass.land_grow += p.land_grow;
+            pass.land_disperse += p.land_disperse;
+            pass.other_creatures += p.other_creatures;
+            pass.post += p.post;
+        }
+        let wall = wall.elapsed();
+        profile_label(label, &scene.params, scene.world.chunks.len());
+        let living = scene.organisms.len();
+        let parked = scene.organisms.parked.len();
+        let parked_corpses = scene.organisms.parked_corpses.len();
+        eprintln!(
+            "  residency            chunks={}  store={}  side_entries={}  backlog_sat={}  living={}  parked={}  parked_corpses={}",
+            scene.world.chunks.len(),
+            scene.world.chunk_store.len(),
+            scene.world.side_map_store.entry_count(),
+            wk_voxel::frozen_backlog_total(&scene.world),
+            living,
+            parked,
+            parked_corpses,
+        );
+        print_pass_table(&accum, MEASURE_TICKS, wall);
+        print_physics_table(&phys, MEASURE_TICKS);
+        let n_ticks = MEASURE_TICKS;
+        eprintln!(
+            "  org splits ms/tick: pose {:.3}  canopy {:.3}  reseat {:.3}  float {:.3}  land {:.3}  other {:.3}  post {:.3}",
+            ms_per(pass.pose, n_ticks),
+            ms_per(pass.canopy, n_ticks),
+            ms_per(pass.reseat, n_ticks),
+            ms_per(pass.float_cols, n_ticks),
+            ms_per(pass.land_plants, n_ticks),
+            ms_per(pass.other_creatures, n_ticks),
+            ms_per(pass.post, n_ticks),
+        );
+        eprintln!(
+            "  land splits ms/tick: seat {:.3}  metab {:.3}  grow {:.3}  disperse {:.3}",
+            ms_per(pass.land_seat, n_ticks),
+            ms_per(pass.land_metab, n_ticks),
+            ms_per(pass.land_grow, n_ticks),
+            ms_per(pass.land_disperse, n_ticks),
+        );
+        eprintln!();
+    }
+}
+
 /// Phase 4 width stretch only (Compact 4096×1064). Faster than the full
 /// demo/stress suite when hunting wall vs cells.
 #[test]
