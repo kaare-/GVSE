@@ -68,7 +68,8 @@ pub use streaming::{
 pub use atmosphere_metrics::{
     apply_weather_rgb, carbon_ratio, cloud_sky_transmit, column_surface_lee, humidity_mean_norm,
     humidity_norm_at, lit_sky_at, occupied_sky_sample, precip_cover_fraction,
-    sky_rgb_at_height_weather, sky_transmit, sky_transmit_at, sun_sky_transmit, OccupiedSkySample,
+    sky_rgb_at_height_weather, sky_rgb_at_height_weather_phased, sky_transmit, sky_transmit_at,
+    sun_sky_transmit, OccupiedSkySample,
     SkyWeatherParams, CLOUD_COVER_MAX, CLOUD_TRANSMIT_FLOOR, HUMIDITY_SKY_ATTEN,
     SUN_TRANSMIT_FLOOR,
 };
@@ -106,8 +107,9 @@ pub use climate::{
     celestial_local, celestial_local_cfg, celestial_moon_local_cfg, celestial_moon_screen_pos_cfg,
     celestial_screen_pos, celestial_screen_pos_cfg, celestial_sun_local_cfg,
     celestial_sun_screen_pos_cfg, day_factor, day_factor_cfg, day_night_factor,
-    day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction, phase_fraction_cfg, sky_rgb,
-    sky_rgb_at_height, ClimateConfig, DEMO_DAY_TICKS,
+    day_night_factor_cfg, is_daytime, is_daytime_cfg, moon_illumination, moon_phase_cfg,
+    phase_fraction, phase_fraction_cfg, sky_rgb, sky_rgb_at_height, sky_rgb_at_height_phased,
+    sky_rgb_phased, ClimateConfig, DEMO_DAY_TICKS, MOON_CYCLE_DAYS,
 };
 pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,

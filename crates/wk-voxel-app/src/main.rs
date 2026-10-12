@@ -62,7 +62,8 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_competent_fall_regions, apply_landscape_fall, apply_weather_rgb, build_canopy_index_posed,
     celestial_local_cfg, celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg,
-    day_night_factor_cfg, is_daytime_cfg, plan_active, pore_wetness_with, resolve_organism_draw_cells,
+    day_night_factor_cfg, is_daytime_cfg, phase_fraction_cfg, plan_active, pore_wetness_with,
+    resolve_organism_draw_cells,
     step_world, wake_competent_bodies_all, wake_unsupported_grains, wake_unstable_slopes,
     restore_all_from_store, sync_residency, CanopyIndex, GeotechOverlayMode, SimClock,
     SimSnapshot, StreamWindow, WorldStep, WorldStepConfig, WorldgenParams, SIM_SAVE_DIR,
@@ -1017,6 +1018,7 @@ async fn main() {
                 dn_fg,
                 &sky_weather,
                 &settings.atmosphere,
+                phase_fraction_cfg(scene.world.tick, &settings.climate),
                 cam_x,
                 cam_y,
                 origin_x,
