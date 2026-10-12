@@ -476,3 +476,6 @@ re-profile.
     **4096** each + stale Organic residue prune. Soak log:
     `phase6-litter-gc-short-soak.log`. Next: longer organisms-on soak or
     park ([`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)).
+12. **Phase 6 5k organisms-on soak (2026-10-12):** 5000t / 48 plants —
+    living=59, park=0, preferential_root=0, root_residue=0, TRACKED
+    −0.33/t. Log: `phase6-organisms-5k-soak.log`. Phase 6 agent-parked.
