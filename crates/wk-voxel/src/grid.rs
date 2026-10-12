@@ -10,7 +10,7 @@ use wk_material::HydroOverrides;
 
 use crate::cell::Cell;
 use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
-use crate::fasthash::FxHashMap;
+use crate::fasthash::{FxHashMap, FxHashSet};
 
 /// Live chunk table. FxHash — the hot `get_cell` / `set_cell` path never sees
 /// untrusted keys, so SipHash would only add cost.
@@ -112,6 +112,19 @@ pub struct World {
     /// Serde still writes a plain map (same postcard shape).
     #[serde(default)]
     pub soft_litter: FxHashMap<i32, u16>,
+    /// Dead-root Organic stencil (Phase 5 E2 / E44). Compost of these
+    /// cells opens a preferential Air void instead of Soil. Litter
+    /// Organic stays unmarked. Overlay — no `CellFlags` bit (WATERLOGGED
+    /// owns the Wave AC `ROOT_RESIDUE` slot).
+    ///
+    /// Sparse and saved (`#[serde(default)]` so older snaps load empty).
+    #[serde(default)]
+    pub root_residue: FxHashSet<(i32, i32)>,
+    /// Ghost-root preferential path overlay (Phase 5 E2 / E44).
+    /// Survives material swaps — "there was a root here" memory.
+    /// Sparse and saved (`#[serde(default)]` so older snaps load empty).
+    #[serde(default)]
+    pub preferential_root: FxHashSet<(i32, i32)>,
     /// Hibernating plant/fungus spores keyed by landing cell (Set E bank).
     #[serde(default)]
     pub spore_bank: crate::spore_bank::SporeBank,
@@ -321,6 +334,8 @@ impl World {
             side_map_store: crate::chunk_store::SideMapStore::default(),
             frozen_backlog: FxHashMap::default(),
             soft_litter: FxHashMap::default(),
+            root_residue: FxHashSet::default(),
+            preferential_root: FxHashSet::default(),
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),
             mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
@@ -407,6 +422,36 @@ impl World {
     #[inline]
     pub fn water_capacity(&self, material: wk_material::MaterialId) -> u8 {
         crate::cell::water_capacity_with(material, &self.hydro)
+    }
+
+    /// Mark `(gx, gy)` as dead-root Organic residue (Phase 5 E2 / E44).
+    pub fn mark_root_residue(&mut self, gx: i32, gy: i32) {
+        let gx = self.wrap_x(gx);
+        self.root_residue.insert((gx, gy));
+    }
+
+    /// True when fungal compost should open a preferential void here.
+    pub fn is_root_residue(&self, gx: i32, gy: i32) -> bool {
+        let gx = self.wrap_x(gx);
+        self.root_residue.contains(&(gx, gy))
+    }
+
+    /// Clear the dead-root residue mark (after compost / void open).
+    pub fn clear_root_residue(&mut self, gx: i32, gy: i32) {
+        let gx = self.wrap_x(gx);
+        self.root_residue.remove(&(gx, gy));
+    }
+
+    /// Mark `(gx, gy)` as a PreferentialRootPath cell (Phase 5 E2 / E44).
+    pub fn mark_preferential_root(&mut self, gx: i32, gy: i32) {
+        let gx = self.wrap_x(gx);
+        self.preferential_root.insert((gx, gy));
+    }
+
+    /// True when roots get the ghost-path subsidy at this cell.
+    pub fn is_preferential_root(&self, gx: i32, gy: i32) -> bool {
+        let gx = self.wrap_x(gx);
+        self.preferential_root.contains(&(gx, gy))
     }
 
     /// Map a world-x into the stored range when wrap is enabled.

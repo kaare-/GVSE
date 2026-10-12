@@ -26,6 +26,7 @@ Kernel vocabulary stays MS Paint 1× ([`README.md`](README.md)).
 | E2 epiphyte host-Stem seating | Live (slice 4) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
 | E2 HostLeave smother shade | Live (slice 5) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
 | E2 attach_prefer reseat | Live (slice 6) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
+| E2 ghost-root fill (E44) | Live (slice 7) | this file + [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) |
 
 ## E2 slice plan
 
@@ -42,8 +43,8 @@ Kernel vocabulary stays MS Paint 1× ([`README.md`](README.md)).
    `(1 − leave) × cast` (`epiphyte_rider_transmit`).
 6. ~~**attach_prefer reseat**~~ — unseated / near-miss Holdfast seeks
    nearby Stem (`try_epiphyte_reseat`).
-7. **Ghost-root fill** — Rock→Organic→Void→Loose + preferential re-root
-   (E44).
+7. ~~**Ghost-root fill**~~ — Organic residue→Void→Loose + preferential
+   re-root (E44); competent Stone stays rock on death.
 
 Out of scope for E2: Set B chem/nerves, Set C niche, creature locomotion
 ([`CORE_FEATURES.md`](CORE_FEATURES.md) § Explicitly not in Core).

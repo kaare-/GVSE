@@ -1745,6 +1745,9 @@ fn push_excess_sat(world: &mut World, gx: i32, gy: i32, mut excess: u8) {
 /// reconnect through the humified patch instead of hard-severing.
 /// Virgin Organic (no cream) composts clean — carbon surface oxidation
 /// uses this path and must not invent orphan `mycelium=1` soil.
+///
+/// Phase 5 E2 / E44: dead-root residue ([`World::root_residue`]) opens an
+/// Air void + PreferentialRootPath instead of Soil.
 pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     let gx = world.wrap_x(gx);
     let Some(c) = world.get_cell(gx, gy) else {
@@ -1755,6 +1758,17 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     }
     let old_sat = c.sat.0;
     let prior_myc = c.mycelium();
+    // Ghost-root cavity: Void + preferential memory (FUNGI.md / E44).
+    if world.is_root_residue(gx, gy) {
+        let mut void = Cell::air();
+        // Keep a film of pore moisture as free Air sat when present.
+        void.sat.0 = old_sat;
+        world.set_cell(gx, gy, void);
+        world.clear_root_residue(gx, gy);
+        world.mark_preferential_root(gx, gy);
+        clear_mycelium_shares(world, gx, gy);
+        return true;
+    }
     let mut soil = Cell::solid(MaterialId::Soil);
     soil.pore = c.pore;
     let cap = water_capacity_cell(soil, &world.hydro);
@@ -1768,6 +1782,8 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     let residual = MYCELIUM_COMPOST_RESIDUAL.min(prior_myc);
     soil.set_mycelium(residual);
     world.set_cell(gx, gy, soil);
+    // Stale residue marks must not linger on Soil.
+    world.clear_root_residue(gx, gy);
     if residual > 0 {
         // Keep / mint strain ownership so residual corridors stay on `M`.
         if mycelium_shares_at(world, gx, gy).is_empty() {
@@ -1779,6 +1795,43 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     }
     push_excess_sat(world, gx, gy, excess);
     true
+}
+
+/// Collapse loose Sand/Clay into preferential Air voids (Phase 5 E2 / E44).
+///
+/// One cell per preferential void per call — Void → Loose fill. The
+/// PreferentialRootPath overlay stays on the filled coordinate.
+pub fn fill_ghost_root_voids(world: &mut World) -> u32 {
+    let targets: Vec<(i32, i32)> = world.preferential_root.iter().copied().collect();
+    let mut filled = 0u32;
+    for (gx, gy) in targets {
+        let Some(cur) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if cur.material != MaterialId::Air {
+            continue;
+        }
+        let Some(above) = world.get_cell(gx, gy + 1) else {
+            continue;
+        };
+        if !matches!(above.material, MaterialId::Sand | MaterialId::Clay) {
+            continue;
+        }
+        // Pull loose fill down; vacate the upper cell as empty Air.
+        let mut loose = above;
+        // Pore sat from the void film rides into the fill when capacity allows.
+        let cap = water_capacity_cell(loose, &world.hydro);
+        if cap > 0 && cur.sat.0 > 0 {
+            loose.sat.0 = loose.sat.0.saturating_add(cur.sat.0).min(cap);
+        }
+        world.set_cell(gx, gy, loose);
+        world.set_cell(gx, gy + 1, Cell::air());
+        // Memory stays on (gx, gy); also stamp the vacated column cell so
+        // a pipe of fill keeps the preferential trail.
+        world.mark_preferential_root(gx, gy);
+        filled += 1;
+    }
+    filled
 }
 
 /// Sip soft litter for energy. Organic cells are colonized separately via
@@ -3099,6 +3152,48 @@ mod tests {
         assert!(
             total >= 200,
             "water must not vanish on compost (total={total})"
+        );
+        assert!(
+            w.preferential_root.is_empty(),
+            "litter Organic must not open a ghost cavity"
+        );
+    }
+
+    #[test]
+    fn compost_root_residue_opens_preferential_void() {
+        let mut w = litter_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(80);
+            w.set_cell(4, y, org);
+            w.mark_root_residue(4, y);
+        }
+        // Cap of loose Sand so fill can collapse into the void.
+        w.set_cell(4, 4, Cell::solid(MaterialId::Sand));
+        assert!(compost_organic_to_soil(&mut w, 4, 3));
+        assert_eq!(
+            w.get_cell(4, 3).map(|c| c.material),
+            Some(MaterialId::Air),
+            "root residue should become an Air void"
+        );
+        assert!(
+            w.is_preferential_root(4, 3),
+            "void must be PreferentialRootPath"
+        );
+        assert!(
+            !w.is_root_residue(4, 3),
+            "residue mark clears when the void opens"
+        );
+        let filled = fill_ghost_root_voids(&mut w);
+        assert!(filled >= 1, "Sand cap should collapse into the void");
+        assert_eq!(
+            w.get_cell(4, 3).map(|c| c.material),
+            Some(MaterialId::Sand),
+            "filled cavity is Loose (Sand)"
+        );
+        assert!(
+            w.is_preferential_root(4, 3),
+            "preferential memory survives fill"
         );
     }
 

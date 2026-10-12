@@ -151,8 +151,13 @@ Incentives this creates:
 
 ## Voxel path (wk-voxel) — inoculum → mycelium → rare fruiting
 
-The live voxel stack diverges from the ghost-root cavity cascade above
-on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
+The live voxel stack now lands the ghost-root cavity cascade (Phase 5
+E2 / E44) via `World.root_residue` + `World.preferential_root` overlays
+— compost of dead-root Organic opens Air voids; Sand/Clay fill
+collapses in; PreferentialRootPath cheapens re-root. Competent Stone
+stays rock on death (living roots crack it to Loose first). See
+[`VOXEL_PLANTS.md`](VOXEL_PLANTS.md). The mycelium field path below is
+unchanged:
 
 - **Editor plant (`F`)** — paints a fruiting-body chassis; terrain click
   calls `infect_mycelium_with_lineage`: cream on a porous host (+ short

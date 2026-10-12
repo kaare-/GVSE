@@ -125,10 +125,10 @@ pub use failure::{
 };
 pub use fasthash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 pub use fungi::{
-    add_soft_litter, bind_strain_lineage, compost_organic_to_soil, infect_mycelium_at,
-    infect_mycelium_with_lineage, is_fungus, is_surface_stalk, lineage_for_strain_at,
-    max_mycelium_near, move_mycelium_meta, mycelium_energy_at, mycelium_shares_at,
-    mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb,
+    add_soft_litter, bind_strain_lineage, compost_organic_to_soil, fill_ghost_root_voids,
+    infect_mycelium_at, infect_mycelium_with_lineage, is_fungus, is_surface_stalk,
+    lineage_for_strain_at, max_mycelium_near, move_mycelium_meta, mycelium_energy_at,
+    mycelium_shares_at, mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb,
     nearest_mycelium_lineage, pull_mycelium_cargo_to, seed_mycelium_near, sip_mycelium_energy_near,
     soft_litter_at, stamp_mycelium_lineage, step_mycelium_field, step_mycelium_field_cfg,
     strain_lineage, swap_cells_preserving_mycelium, swap_mycelium_meta, FungiConfig,
@@ -197,12 +197,13 @@ pub use phase::{
     PhaseConfig, ICE_CARRY_THICKNESS_DEFAULT, PRECIP_IN_AIR_MIN,
 };
 pub use plant::{
-    attach_seek_radius, collect_live_photo_world_cells, collect_live_root_world_cells,
+    apply_genome, attach_seek_radius, collect_live_photo_world_cells, collect_live_root_world_cells,
     collect_live_stem_world_cells, collect_plant_sail_tops, find_fungus_slot, find_plant_slot,
     find_surface_air_slot, is_epiphyte, is_holdfast_anchored, is_land_plant,
-    plant_resists_rock_shove, plant_rooted_in_loose, sail_plants_on_wind_rafts,
-    sail_plants_on_wind_rafts_cfg, sail_plants_on_wind_rafts_columns, sync_alloc_to_body,
-    try_epiphyte_reseat, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    leave_dead_roots_in_place, plant_resists_rock_shove, plant_rooted_in_loose,
+    sail_plants_on_wind_rafts, sail_plants_on_wind_rafts_cfg, sail_plants_on_wind_rafts_columns,
+    sync_alloc_to_body, try_elongate_root, try_epiphyte_reseat, PlantGrowthCaps, MAX_PHOTO_MODULES,
+    MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use rules::{
     active_has_unsupported_grain, apply_airborne_snow_fall, apply_airborne_snow_fall_cfg,
