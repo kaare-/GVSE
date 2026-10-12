@@ -273,9 +273,18 @@ impl Host {
             let season = sky.season_u8 as f32 / 255.0;
             let sky_row =
                 apply_season_sky_tint(sky_rgb_at_height_phased(dn, height_01, phase), season, dn);
+            let celestial = sky.celestial_local_u8 as f32 / 255.0;
             for col in 0..cols {
                 let gx = self.world.wrap_x(origin_col + col as i32);
-                let mut px = present::cell_rgba(self.world.get_cell(gx, gy));
+                let mut px = present::cell_rgba_lit(
+                    &self.world,
+                    gx,
+                    gy,
+                    self.world.tick,
+                    celestial,
+                    sky.is_day,
+                    present::WATER_GLITTER_STRENGTH,
+                );
                 if px[3] == 0 {
                     px = [sky_row[0], sky_row[1], sky_row[2], 255];
                 }
