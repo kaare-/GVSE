@@ -64,7 +64,7 @@ impl SpikeApp {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("wk-voxel-client (Phase 8 A — sky + strip)")
+                        .with_title("wk-voxel-client (Phase 8 A — palette + sky)")
                         .with_inner_size(LogicalSize::new(1100.0, 640.0)),
                 )
                 .expect("window"),
