@@ -50,9 +50,9 @@ use crate::plant::{
     PLANT_GROW_MIN_DAY, PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
-    build_canopy_index_posed, canopy_top_y, effective_photo_light_cached, group_posed_by_atom,
-    posed_canopy_sample_of, shade_transmit, sum_posed_photo_light_of_cached, CanopyIndex,
-    PosedModule,
+    build_canopy_index_posed, canopy_top_y, effective_photo_light_cached, epiphyte_rider_transmit,
+    group_posed_by_atom, posed_canopy_sample_of, shade_transmit, sum_posed_photo_light_of_cached,
+    CanopyIndex, PosedModule,
 };
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
@@ -1982,6 +1982,15 @@ impl OrganismStore {
         let mut shade_cache: FxHashMap<(i32, i32), f32> = FxHashMap::default();
         // Host Stem cells for epiphyte Holdfast attach (E2 seating).
         let host_stems = collect_live_stem_world_cells(&self.atoms, |x| world.wrap_x(x));
+        // Same-column HostLeave steal per living entity (E2 smother shade).
+        let rider_transmit: Vec<f32> = self
+            .atoms
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                epiphyte_rider_transmit(&self.atoms, a.gx, canopy_top_y(a), i as u32)
+            })
+            .collect();
 
         // Empty store: still allow mycelium field → fruiting body emergence
         // (and corpse settle). Spores need a living body afterward.
@@ -2033,6 +2042,7 @@ impl OrganismStore {
 
             if is_epiphyte(atom) {
                 let t_land = Instant::now();
+                let rider_t = rider_transmit.get(i).copied().unwrap_or(1.0);
                 match step_epiphyte(
                     world,
                     atom,
@@ -2048,6 +2058,7 @@ impl OrganismStore {
                     sun_local,
                     is_day,
                     i as u32,
+                    rider_t,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
@@ -2067,6 +2078,7 @@ impl OrganismStore {
                 let parent_gy = atom.gy;
                 let empty: [usize; 0] = [];
                 let posed_indices = posed_by_atom.get(i).map(|v| v.as_slice()).unwrap_or(&empty);
+                let rider_t = rider_transmit.get(i).copied().unwrap_or(1.0);
                 match step_land_plant(
                     world,
                     atom,
@@ -2097,6 +2109,7 @@ impl OrganismStore {
                     is_day,
                     temperature,
                     &mut pass,
+                    rider_t,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -2881,6 +2894,7 @@ fn step_epiphyte(
     sun_local: f32,
     is_day: bool,
     entity_id: u32,
+    rider_transmit: f32,
 ) -> PlantStep {
     let _ = entity_id;
     pin_plant_pose(atom);
@@ -2918,7 +2932,7 @@ fn step_epiphyte(
         sample_y,
         sky,
         &atom.genome,
-    );
+    ) * rider_transmit.clamp(crate::shade::SHADE_AMBIENT_FLOOR, 1.0);
     let harvest = PHOTON_RATE * light * n_photo;
     atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
@@ -2960,6 +2974,7 @@ fn step_land_plant(
     is_day: bool,
     temperature: Option<&Temperature>,
     pass: &mut OrganismPassTimings,
+    rider_transmit: f32,
 ) -> PlantStep {
     // Pose / seat:
     // - Sand/rock purchase wins: once grounded, organics and water never
@@ -3236,6 +3251,8 @@ fn step_land_plant(
             effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
         light_sum = tip * n_photo as f32;
     }
+    // Same-column epiphyte HostLeave steal (gentle riders leave more light).
+    light_sum *= rider_transmit.clamp(crate::shade::SHADE_AMBIENT_FLOOR, 1.0);
     // Mean leaf light for submerged stem-urge threshold.
     let light = if n_photo > 0 {
         light_sum / n_photo as f32
@@ -7339,6 +7356,48 @@ mod tests {
         assert!(
             !same || (store.atoms[0].vel_y - store.atoms[1].vel_y).abs() > 0.01,
             "contact should shove apart in x or bounce in y"
+        );
+    }
+
+    #[test]
+    fn host_leave_gentle_leaves_more_host_energy_than_smotherer() {
+        fn run_with_leave(leave: f32) -> f32 {
+            let mut w = moist_sand_plot();
+            let mut store = OrganismStore::new();
+            let host = vec![
+                (0, -1, ModuleId::Root),
+                (0, 0, ModuleId::Nucleus),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Photosystem),
+            ];
+            assert!(store.spawn_blueprint(&w, 4, 2, host, 100.0, Genome::default()));
+            store.atoms[0].energy = 40.0;
+            let epi = vec![
+                (0, 0, ModuleId::Holdfast),
+                (0, 0, ModuleId::Nucleus),
+                (0, 1, ModuleId::Photosystem),
+            ];
+            let mut epi_g = Genome::default();
+            epi_g.leaf_absorb = 0.95;
+            epi_g.host_leave_fraction = leave;
+            assert!(store.spawn_blueprint(&w, 4, 2 + 3, epi, 40.0, epi_g));
+            for t in 0..80 {
+                store.step(&mut w, t);
+            }
+            store
+                .atoms
+                .iter()
+                .find(|a| !is_epiphyte(a))
+                .map(|a| a.energy)
+                .unwrap_or(0.0)
+        }
+        let smother_e = run_with_leave(0.0);
+        let gentle_e = run_with_leave(0.85);
+        assert!(
+            gentle_e > smother_e + 1.0,
+            "gentle rider should leave host healthier (gentle={gentle_e} smother={smother_e})"
         );
     }
 

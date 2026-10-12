@@ -288,9 +288,9 @@ organisms-off).
 
 **Wedge accepted (2026-10-12):** Set E2 — see
 [`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md). Stem integrity,
-Holdfast Mid-lane share, and host-Stem seating landed. Next: HostLeave
-shade / attach_prefer reseat, then ghost-root fill. Daily 09:00 Oslo
-lists continue for the next E2 slice.
+Holdfast, seating, and HostLeave shade landed. Next: attach_prefer
+reseat, then ghost-root fill. Daily 09:00 Oslo lists continue for the
+next E2 slice.
 
 ---
 
@@ -376,6 +376,7 @@ before coding.
 | 2026-10-12 | E2 live integrity | Living stems recharge + load tip; completes PLANTS.md integrity table |
 | 2026-10-12 | E2 Holdfast scaffold | Holdfast Mid-lane share + attach genes + minimal_epiphyte |
 | 2026-10-12 | E2 epi seating | Habitat spawn on host Stem; unseated death |
+| 2026-10-12 | E2 HostLeave | Same-column epiphyte smother shade via host_leave |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
@@ -390,6 +391,6 @@ before coding.
 - Phase-1 stretch width / field-shell cuts: **closed with Phase 4** (5 km stream-on).
 - Phase 3 ice option 2 slices A–C + brittle/sheet/lid: closed with Phase 3.
 - Optional Phase-4 leftovers (5 km wind.rebuild / rock bodies): only if owner wants more FPS.
-- Phase-5 E2 remaining: HostLeave shade / attach_prefer reseat +
-  ghost-root fill ([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)).
+- Phase-5 E2 remaining: attach_prefer reseat + ghost-root fill
+  ([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)).
 - Phase-8 shortlist of client stacks when that review starts.
