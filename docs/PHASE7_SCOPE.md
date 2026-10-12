@@ -1,12 +1,9 @@
-# Phase 7 — Surface spice (atmosphere & light) *(scope draft)*
+# Phase 7 — Surface spice (atmosphere & light) *(wedge A)*
 
-Phase 6 agent slices parked (2026-10-12): organisms-on baselines,
-stream+plants, hotspot #1, overlay GC, 5k soak green. Hotspot #2
-(land/metab) stays deferred. See
-[`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md).
-
-This file is a **decision draft** — no presentation code until the
-wedge is accepted.
+Phase 6 agent slices parked (2026-10-12). **Wedge A accepted by
+default (2026-10-12):** celestial polish — richer sunrise/sunset, moon
+phase/cycle, night stars that drift. App/render + climate helpers;
+no sim-mass changes.
 
 ## Intent
 
@@ -25,42 +22,41 @@ over sim rewrites. Kernel stays MS Paint 1×.
 | Canopy shade (organisms) | Live | [`organism/LIGHT.md`](organism/LIGHT.md) |
 | Phase 6 org cost / overlay GC | Live | [`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md) |
 
-## ROADMAP wishlist (from [`ROADMAP.md`](ROADMAP.md))
+## Wedge A slice plan
 
-- Colors; sunrise / sunset polish
-- Moon + moon cycle
-- Seasons
-- Stars that move over time and seasons
-- Shadows / shading from sundown
-- Moonlight glitter on water
-
-## Proposed wedges (pick one)
-
-1. **Default: celestial polish (A)** — richer sunrise/sunset palette,
-   moon phase / cycle, night stars that drift. Mostly `wk-voxel-app`
-   draw + existing celestial helpers; Xvfb screenshots as gate.
-2. **Terrain cast shadows (B)** — sundown column / ridge cast into the
-   pixel landscape (heavier; couple carefully with FPS budget).
-3. **Season dial (C)** — calendar length / leaf tint / snow bias without
-   new organism genes (docs + climate knobs first).
-4. **Water glitter (D)** — moonlight / low-sun sparkle on standing water
-   (app-only; after A if night read is weak).
+1. **Sunrise/sunset palette** — stronger dusk/dawn stops; dawn vs dusk
+   split via climate phase; warm horizon lift.
+2. **Moon phase** — multi-night lunar cycle drives crescent bite
+   (new → full → new).
+3. **Night stars** — sparse fine-px stars with slow drift while
+   `day_night < 0`.
+4. **Xvfb gate** — stills at dusk / midnight / dawn under
+   `/opt/cursor/artifacts/`.
 
 ## Acceptance (proposed)
 
 - [x] Named Phase 7 scope frozen (this file).
-- [ ] Owner: accept a wedge (default A) or park Phase 7 / reopen E2 visual.
-- [ ] At least one Xvfb / playtest acceptance for the chosen wedge.
+- [x] Wedge A locked (agent default).
+- [x] Slices 1–3 landed with unit tests where cheap.
+- [ ] At least one Xvfb acceptance for dusk/night/dawn.
 - [ ] No sim-mass regressions (short soak park=0 still green).
+
+## Landed (wedge A code)
+
+| Slice | Where |
+|-------|--------|
+| Sunrise/sunset palette | `climate::sky_rgb_phased` / `sky_rgb_at_height_phased` + weather_phased |
+| Moon phase crescent | `moon_phase_cfg` → app `draw_celestials` bite |
+| Night stars | `atmosphere::draw_night_stars` from `draw_sky` |
 
 ## Non-goals
 
-New Set B/C modules, Phase 8 client split, reopening Phase 6 land/metab
-micro-cuts that fail river growth — see [`ROADMAP.md`](ROADMAP.md).
+New Set B/C modules, Phase 8 client split, cast shadows (wedge B),
+season dial (C), water glitter (D) until A parks — see
+[`ROADMAP.md`](ROADMAP.md).
 
 ## Decision list (2026-10-12)
 
-1. **Default next: wedge A (celestial polish)** — sunrise/sunset + moon
-   cycle + stars; prove on Xvfb.
+1. **Wedge A code in flight** — Xvfb gate + park soak next.
 2. Optional: E2 tipped grey-log owner visual (Phase 5 leftover).
 3. Optional: wedges B/C/D only after A lands or owner redirects.

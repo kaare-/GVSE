@@ -325,7 +325,7 @@ rock stale drop; soak park=0 / preferential=0.
 
 ---
 
-## Phase 7 — Surface spice (atmosphere & light) *(scope draft)*
+## Phase 7 — Surface spice (atmosphere & light) *(wedge A in flight)*
 
 **Goal:** Hopefully simple but important presentation:
 
@@ -339,9 +339,10 @@ rock stale drop; soak park=0 / preferential=0.
 **Exit criteria (proposed):** visual acceptance on Xvfb/playtest;
 no sim-mass regressions from lighting-only work.
 
-**Scope draft (2026-10-12):** [`PHASE7_SCOPE.md`](PHASE7_SCOPE.md) —
-default wedge **A** (celestial polish: sunrise/sunset + moon cycle +
-stars). Owner accepts or redirects (E2 visual / B–D).
+**Wedge A (2026-10-12):** [`PHASE7_SCOPE.md`](PHASE7_SCOPE.md) —
+celestial polish code landing (sunrise/sunset + moon cycle + stars);
+Xvfb stills + short soak before park. Owner may redirect to E2 visual
+or wedges B–D.
 
 ---
 
@@ -413,6 +414,7 @@ before coding.
 | 2026-10-12 | Phase 6 hotspot #1 | Plant-only contact skip; stream org 0.59→0.29; Compact 1.30→0.83; soak park=0 |
 | 2026-10-12 | Phase 6 hotspot #2 | Deferred: tip×count/stem cadence regress river growth; next = buildup/GC |
 | 2026-10-12 | Phase 7 scope draft | Celestial polish (A) default; owner pick |
+| 2026-10-12 | Phase 7 A code | Dawn/dusk palette + moon cycle crescent + drifting stars |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

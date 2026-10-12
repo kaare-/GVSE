@@ -4,7 +4,7 @@
 use wk_material::MaterialId;
 
 use crate::carbon::AMBIENT_ATM_C;
-use crate::climate::sky_rgb_at_height;
+use crate::climate::{sky_rgb_at_height, sky_rgb_at_height_phased};
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::temperature::Temperature;
@@ -291,7 +291,26 @@ pub fn sky_rgb_at_height_weather(
     height_01: f32,
     weather: &SkyWeatherParams,
 ) -> [u8; 3] {
-    let mut rgb = sky_rgb_at_height(day_night, height_01);
+    sky_rgb_at_height_weather_phased(day_night, height_01, weather, 0.0)
+}
+
+/// Like [`sky_rgb_at_height_weather`], with climate `phase` for dawn/dusk split.
+pub fn sky_rgb_at_height_weather_phased(
+    day_night: f32,
+    height_01: f32,
+    weather: &SkyWeatherParams,
+    phase: f32,
+) -> [u8; 3] {
+    let mut rgb = if phase.abs() < 1e-6 {
+        sky_rgb_at_height(day_night, height_01)
+    } else {
+        sky_rgb_at_height_phased(day_night, height_01, phase)
+    };
+    apply_sky_weather_mod(&mut rgb, day_night, weather);
+    rgb
+}
+
+fn apply_sky_weather_mod(rgb: &mut [u8; 3], day_night: f32, weather: &SkyWeatherParams) {
     let cover = weather.precip_cover.clamp(0.0, 1.0);
     let hum = weather.humidity_mean.clamp(0.0, 1.0);
     let snow = weather.snow_bias.clamp(0.0, 1.0);
@@ -303,7 +322,7 @@ pub fn sky_rgb_at_height_weather(
     if overcast > 0.01 {
         let grey = ((rgb[0] as f32 + rgb[1] as f32 + rgb[2] as f32) / 3.0) as u8;
         let dark = 1.0 - 0.28 * overcast;
-        for c in &mut rgb {
+        for c in rgb.iter_mut() {
             let g = grey as f32;
             let v = *c as f32;
             let mixed = v * (1.0 - 0.45 * overcast) + g * (0.45 * overcast);
@@ -332,7 +351,7 @@ pub fn sky_rgb_at_height_weather(
         rgb[1] = (rgb[1] as f32 * (1.0 - 0.02 * t)) as u8;
         rgb[2] = rgb[2].saturating_add((8.0 * t) as u8);
         let dark = 1.0 - 0.06 * t;
-        for c in &mut rgb {
+        for c in rgb.iter_mut() {
             *c = (*c as f32 * dark) as u8;
         }
     }
@@ -345,13 +364,11 @@ pub fn sky_rgb_at_height_weather(
             ((1.0 - carbon) / 1.0).clamp(0.0, 1.0) * 0.04
         };
         let grey = ((rgb[0] as f32 + rgb[1] as f32 + rgb[2] as f32) / 3.0) as f32;
-        for c in &mut rgb {
+        for c in rgb.iter_mut() {
             let v = *c as f32;
             *c = (v * (1.0 - thick) + grey * thick) as u8;
         }
     }
-
-    rgb
 }
 
 /// Mild weather / colour-temp shift for foreground cells (terrain, water).

@@ -50,6 +50,9 @@ runs at full rate off-screen (ring + pan). Not a quadtree.
 | Humidity tiles | Vapour wash (`H`) — bilinear on 4×4 seats; a drop opens that column from itself downward |
 | Wet columns | Canopy / column shade via `cloud_sky_transmit` (humidity, not parcels) |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
+| Climate phase | Dawn rose vs dusk amber; warm horizon band (Phase 7 A) |
+| Lunar cycle | `moon_phase_cfg` / `moon_illumination` drive crescent bite |
+| Night stars | Sparse fine-px field with slow drift while `day_night < 0` |
 | Wind / currents | `V` — cyan wind above water; teal lake currents (warm↑ / cold↓ + skin wind drift; free-water only; wrapped seam) |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
 | Cast / celestial key | See prior plant/terrain lighting notes |

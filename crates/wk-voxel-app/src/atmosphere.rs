@@ -10,10 +10,11 @@ use wk_material::MaterialId;
 use wk_voxel::{
     airborne_loose_at, carbon_ratio, celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg,
     cloud_floor_y, cloud_sky_transmit, continental_surface_y, day_night_factor_cfg,
-    falls_through_empty_air, is_standing_water, occupied_sky_sample,
-    shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig,
-    Humidity, ModuleId, PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H,
-    CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH,
+    falls_through_empty_air, is_standing_water, moon_illumination, moon_phase_cfg,
+    occupied_sky_sample, phase_fraction_cfg, shade_transmit_column,
+    sky_rgb_at_height_weather_phased, CanopyIndex, CarbonBudget, ClimateConfig, Humidity, ModuleId,
+    PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H, CHUNK_CELLS_W,
+    GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX, LIVE_SURFACE_SEARCH,
 };
 
 /// Reusable 1 px/cell atlas — fill on CPU, one Nearest upload + draw.
@@ -845,11 +846,12 @@ fn ridge_palette(
     weather: &SkyWeatherParams,
     look: &AtmosphereLookConfig,
     near: bool,
+    phase: f32,
 ) -> (Color, [u8; 3]) {
     // day_night: +1 noon … −1 midnight
     let day = ((day_night + 1.0) * 0.5).clamp(0.0, 1.0);
     let h = if near { 0.58 } else { 0.78 };
-    let sky = sky_rgb_at_height_weather(day_night, h, weather);
+    let sky = sky_rgb_at_height_weather_phased(day_night, h, weather, phase);
     // Soft land undertone — mostly buried under sky wash.
     let land = if near {
         [
@@ -917,6 +919,7 @@ pub fn draw_sky(
     _look: &AtmosphereLookConfig,
 ) {
     let dn = day_night_factor_cfg(tick, climate);
+    let phase = phase_fraction_cfg(tick, climate);
     const BANDS: u16 = 36;
     // 1×N gradient stretched once — avoids O(bands) fullscreen rects.
     SKY_ATLAS.with(|slot| {
@@ -929,7 +932,7 @@ pub fn draw_sky(
         let pixels = atlas.img.get_image_data_mut();
         for i in 0..BANDS {
             let height_01 = (i as f32 + 0.5) / BANDS as f32;
-            let [r, g, b] = sky_rgb_at_height_weather(dn, height_01, weather);
+            let [r, g, b] = sky_rgb_at_height_weather_phased(dn, height_01, weather, phase);
             pixels[i as usize] = [r, g, b, 255];
         }
         atlas.draw_scaled(0.0, 0.0, sw, sh);
@@ -940,6 +943,49 @@ pub fn draw_sky(
     if veil > 0.02 {
         let a = (veil * 32.0) as u8;
         draw_rectangle(0.0, 0.0, sw, sh * 0.50, Color::from_rgba(90, 96, 108, a));
+    }
+
+    draw_night_stars(tick, sw, sh, dn);
+}
+
+/// Sparse fine-px stars with slow drift while the sky is dark.
+fn draw_night_stars(tick: u64, sw: f32, sh: f32, day_night: f32) {
+    if day_night >= -0.02 || sw < 8.0 || sh < 8.0 {
+        return;
+    }
+    let night = (-day_night).clamp(0.0, 1.0);
+    let fade = (night * night).clamp(0.0, 1.0);
+    if fade < 0.04 {
+        return;
+    }
+    // Slow eastward drift (~1 screen width per ~8k ticks at default).
+    let drift_x = (tick as f32 * 0.014) % sw.max(1.0);
+    let drift_y = ((tick as f32 * 0.0025) % (sh * 0.12)).max(0.0);
+    const STAR_COUNT: u32 = 56;
+    for i in 0..STAR_COUNT {
+        let h = i.wrapping_mul(2654435761).wrapping_add(0x9E37_79B9);
+        let ux = (h & 0xFFFF) as f32 / 65535.0;
+        let uy = ((h >> 16) & 0xFFFF) as f32 / 65535.0;
+        let mut x = ux * sw + drift_x;
+        if x >= sw {
+            x -= sw;
+        }
+        let y = uy * sh * 0.52 + drift_y;
+        // Cheap twinkle from tick + index (stable, not noisy).
+        let tw = (((tick.wrapping_add(i as u64 * 17)) / 11) % 5) as f32;
+        let bright = 0.55 + 0.09 * tw;
+        let a = (185.0 * fade * bright * (0.65 + 0.35 * uy)) as u8;
+        if a < 10 {
+            continue;
+        }
+        let size = if (h & 7) == 0 { 2.0 } else { 1.0 };
+        draw_rectangle(
+            x.floor(),
+            y.floor(),
+            size,
+            size,
+            Color::from_rgba(220, 228, 255, a),
+        );
     }
 }
 
@@ -1019,38 +1065,53 @@ pub fn draw_celestials(
     if moon_w > 0.02 {
         let (cx, cy) = celestial_moon_screen_pos_cfg(tick, sw, sh, climate);
         let moon_r = look.moon_radius.clamp(10.0, 72.0);
-        let reveal = celestial_far_reveal(
-            cx,
-            cy,
-            moon_r,
-            ridges,
-            cam_x,
-            cam_y,
-            origin_x,
-            origin_y,
-            cell_px,
-            bedrock_floor_y,
-            wrap_x,
-            width_cols,
-            sh,
-        );
-        // Snap reveal so ridge-cache jitter can't pulse the moon.
-        let reveal_q = ((reveal * 10.0).round() / 10.0).clamp(0.0, 1.0);
-        let w = moon_w * reveal_q;
-        if w > 0.02 {
-            // Flat alpha — no overcast/glow disk (that was the dark “bubble”).
-            let a = (255.0 * w).round() as u8;
-            let bite_dx = look.moon_bite_offset.clamp(4.0, 40.0);
-            let bite_r = look.moon_bite_radius.clamp(8.0, 64.0);
-            draw_solid_crescent(
+        let lunar = moon_phase_cfg(tick, climate);
+        let illum = moon_illumination(lunar);
+        // New moon stays off-sky; weak crescent still reads near first/last.
+        if illum >= 0.04 {
+            let reveal = celestial_far_reveal(
                 cx,
                 cy,
                 moon_r,
-                bite_dx,
-                0.0,
-                bite_r,
-                Color::from_rgba(232, 236, 245, a),
+                ridges,
+                cam_x,
+                cam_y,
+                origin_x,
+                origin_y,
+                cell_px,
+                bedrock_floor_y,
+                wrap_x,
+                width_cols,
+                sh,
             );
+            // Snap reveal so ridge-cache jitter can't pulse the moon.
+            let reveal_q = ((reveal * 10.0).round() / 10.0).clamp(0.0, 1.0);
+            let w = moon_w * reveal_q * (0.35 + 0.65 * illum);
+            if w > 0.02 {
+                // Flat alpha — no overcast/glow disk (that was the dark “bubble”).
+                let a = (255.0 * w).round() as u8;
+                let color = Color::from_rgba(232, 236, 245, a);
+                if illum > 0.92 {
+                    draw_circle(cx, cy, moon_r, color);
+                } else {
+                    // Occluder same radius; offset 0 = new, ~2r = nearly full.
+                    // Waxing (phase < 0.5): light on the right; waning: left.
+                    // Tab bite radius scales the occluder slightly.
+                    let offset = (moon_r * (2.0 * illum)).clamp(0.0, moon_r * 2.05);
+                    let sign = if lunar < 0.5 { 1.0 } else { -1.0 };
+                    let bite_scale =
+                        (look.moon_bite_radius.clamp(8.0, 64.0) / 18.0).clamp(0.85, 1.25);
+                    draw_solid_crescent(
+                        cx,
+                        cy,
+                        moon_r,
+                        sign * offset,
+                        0.0,
+                        moon_r * 1.02 * bite_scale,
+                        color,
+                    );
+                }
+            }
         }
     }
 }
@@ -1174,6 +1235,7 @@ pub fn draw_ridge_silhouettes(
     day_night: f32,
     weather: &SkyWeatherParams,
     look: &AtmosphereLookConfig,
+    phase: f32,
     cam_x: f32,
     cam_y: f32,
     origin_x: f32,
@@ -1189,8 +1251,8 @@ pub fn draw_ridge_silhouettes(
     if ridges.far.is_empty() {
         return;
     }
-    let (far_fill, far_sky) = ridge_palette(day_night, weather, look, false);
-    let (near_fill, near_sky) = ridge_palette(day_night, weather, look, true);
+    let (far_fill, far_sky) = ridge_palette(day_night, weather, look, false, phase);
+    let (near_fill, near_sky) = ridge_palette(day_night, weather, look, true, phase);
     let far_feather = look.ridge_feather_far.round().clamp(2.0, 10.0) as i32;
     let near_feather = look.ridge_feather_near.round().clamp(2.0, 10.0) as i32;
     let far_squash = ridges.far_squash;
