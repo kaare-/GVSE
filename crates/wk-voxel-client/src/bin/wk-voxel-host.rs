@@ -1,9 +1,9 @@
 //! Phase 8 out-of-process sim host (localhost TCP).
 //!
 //! ```text
-//! wk-voxel-host                # Compact stamp, bind 127.0.0.1:17420
-//! wk-voxel-host --dev          # tiny ring (fast smoke)
-//! wk-voxel-host --bind 127.0.0.1:0
+//! cargo run -p wk-voxel-client --release --bin wk-voxel-host
+//! cargo run -p wk-voxel-client --release --bin wk-voxel-host -- --dev
+//! cargo run -p wk-voxel-client --release --bin wk-voxel-host -- --bind 127.0.0.1:0
 //! ```
 //!
 //! One client at a time. Same [`ViewFrame`] / [`ClientCommand`] contract as
