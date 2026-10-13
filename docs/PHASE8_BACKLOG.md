@@ -27,6 +27,7 @@ applies.
 | 17 | Host ship | reconnect loop; `--lan` / `--once` / `--seed`; runbook |
 | 18 | Multiplayer + auth | token Hello; N peers; Viewer/Operator roles |
 | 19 | Operator client w1 | role-aware UI; sim + save/load/reset gated |
+| 20 | Operator paint | `PaintTerrain` + F3 brush click (`COMMAND_SCHEMA` 6) |
 
 ## Soak / park gate (parity)
 

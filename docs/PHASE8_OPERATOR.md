@@ -1,13 +1,13 @@
 # Phase 8 — Operator client *(wedge 1)*
 
-**Status:** landed (2026-10-13). Owner path:
+**Status:** wedge 1 + paint landed (2026-10-13). Owner path:
 **host ship → remote multiplayer/auth → operator client**.
 
 ## Intent
 
 Same egui viewer binary (`wk-voxel-client`) with role-aware UI. Operator
-gets full sim dials + save/load/reset against a live host; Viewer keeps
-camera / present / clock only.
+gets full sim dials + save/load/reset + terrain paint against a live
+host; Viewer keeps camera / present / clock only.
 
 ## Defaults
 
