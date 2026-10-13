@@ -1,6 +1,6 @@
 # Phase 8 — Host ship *(single-player)*
 
-**Status:** in progress (2026-10-13). Owner path:
+**Status:** landed (2026-10-13). Owner path:
 **host ship → remote multiplayer/auth → operator client**.
 
 ## Intent

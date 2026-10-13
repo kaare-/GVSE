@@ -34,11 +34,9 @@ applies.
 
 ## Owner path (2026-10-13) — locked order
 
-1. **Host ship** — harden `wk-voxel-host` for single-player ship
-   (session reconnect, `--lan`, CLI/seed, schema UX, runbook).
-   See [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md).
-2. **Remote multiplayer + auth** — unlock after host ship; own design
-   note before coding (tokens / allowlist / TLS-or-equivalent).
+1. **Host ship** — ✅ landed. See [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md).
+2. **Remote multiplayer + auth** — next; own design note before coding
+   (tokens / allowlist / TLS-or-equivalent).
 3. **Operator client** — full tools + settings control against a live
    host (circle back after multiplayer/auth).
 
@@ -46,9 +44,8 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Continue **host ship** until the runbook acceptance is met, then stop
-and scope multiplayer/auth (do not start multiplayer without a short
-design note).
+Host ship landed. Next: short **multiplayer/auth design note**, then
+implement (do not code multiplayer without that note).
 
 ## Pinned / later
 
