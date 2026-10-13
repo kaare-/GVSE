@@ -48,8 +48,10 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Apple notarize track (pinned **2026-11-15**), or broader operator
-sim dials / blueprint editor if owner asks.
+Apple notarize track (pinned **2026-11-15**), or owner-picked pillar
+from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Hosting realism:
+[`HOSTING_COST.md`](HOSTING_COST.md) (compress ViewFrame before public
+AWS).
 
 ## Pinned / later
 
