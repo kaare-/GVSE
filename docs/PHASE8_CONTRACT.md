@@ -13,28 +13,28 @@ is a **viewer** (camera + limited commands); host owns sim.
    pause — all go through **commands**; host applies or rejects.
 3. **Presentation may lag.** Client paints the latest **view frame**; it
    must not call into `tick` / `step_world` itself.
-4. **Single-player first.** In-process host+client is the spike target.
-   Message shapes should still be serializable later (IPC / netcode is a
-   different program).
+4. **Single-player first.** In-process host+client remains the default.
+   Out-of-process localhost IPC is landed; multiplayer / auth is later.
 
 ## Topology (spike → ship)
 
 ```text
+Default (in-process):
 ┌──────────────────────────────────────────────────────────┐
-│  Process (single-player default)                         │
-│                                                          │
-│   ┌─────────────────┐  ViewFrame + HostInfo   ┌────────┐ │
-│   │ Host (wk-voxel) │ ──────────────────────► │ Client │ │
+│  Process                                                 │
+│   ┌─────────────────┐  ViewFrame              ┌────────┐ │
+│   │ Host (lib)      │ ──────────────────────► │ Client │ │
 │   │ step / save     │ ◄────────────────────── │ A: egui│ │
 │   └─────────────────┘  ClientCommand queue    │ wgpu   │ │
-│                                                          │
-│  Dev path unchanged: wk-voxel-app (macroquad) may keep   │
-│  calling step_world in-process until retired.            │
 └──────────────────────────────────────────────────────────┘
+
+Optional (OOP spike):
+  wk-voxel-host  ←── TCP postcard (Hello/Cmd/Pull ↔ HelloAck/Frame) ──→  wk-voxel-client --connect
+  Default bind 127.0.0.1:17420. One client. No auth.
 ```
 
-Later (not Phase 8 spike): host as separate binary; same messages over
-IPC. Multiplayer not in scope.
+Dev path unchanged: `wk-voxel-app` (macroquad) may keep calling
+`step_world` in-process until retired. Multiplayer not in scope.
 
 ## Two snapshot kinds (do not conflate)
 
@@ -163,7 +163,9 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
 - [x] Compact host world: default stamp 4096×tropopause; `StreamWindow` +
       `sync_residency` under camera; strip band ~384 around sea level;
       `Host::for_tests()` keeps tiny ring for CI.
-- [ ] Later: separate host process / packaging.
+- [x] Out-of-process host: `wk-voxel-host` + postcard IPC; viewer
+      `--connect HOST:PORT` (in-process still default).
+- [ ] Later: ship packaging / IPC harden.
 
 ## Non-goals
 
@@ -189,5 +191,6 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 4. [x] Fuller palette / water glitter on A.
 5. [x] Host `step_world` + viewer framing (`VIEW_SCHEMA` 4).
 6. [x] Compact-sized in-process host + stream residency.
-7. Out-of-process host / ship packaging when ready.
-8. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+7. [x] Out-of-process host binary + localhost IPC.
+8. Ship packaging / IPC harden when ready.
+9. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
