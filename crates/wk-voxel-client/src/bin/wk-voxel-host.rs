@@ -8,8 +8,12 @@
 //!
 //! One client at a time. Same [`ViewFrame`] / [`ClientCommand`] contract as
 //! the in-process path.
+//!
+//! Bind + announce listen address **before** stamping so `--spawn-host`
+//! can discover an ephemeral port while Compact worldgen runs.
 
 use std::env;
+use std::io::Write;
 use std::net::TcpListener;
 
 use wk_voxel_client::ipc::{serve_client, DEFAULT_HOST_ADDR};
@@ -43,6 +47,14 @@ fn main() {
         }
     }
 
+    let listener = TcpListener::bind(&bind).unwrap_or_else(|e| {
+        eprintln!("bind {bind}: {e}");
+        std::process::exit(1);
+    });
+    let local = listener.local_addr().expect("local_addr");
+    println!("wk-voxel-host listening on {local}");
+    let _ = std::io::stdout().flush();
+
     let mut host = if dev {
         log::info!("stamping dev (tiny) host");
         Host::for_tests()
@@ -51,18 +63,11 @@ fn main() {
         Host::default()
     };
     log::info!(
-        "host ready compact={} world_w focus={} view={}",
+        "host ready compact={} focus={} view={}",
         host.is_compact(),
         host.focus_col,
         host.view_cols
     );
-
-    let listener = TcpListener::bind(&bind).unwrap_or_else(|e| {
-        eprintln!("bind {bind}: {e}");
-        std::process::exit(1);
-    });
-    let local = listener.local_addr().expect("local_addr");
-    println!("wk-voxel-host listening on {local}");
     log::info!("waiting for viewer…");
 
     let (stream, peer) = listener.accept().unwrap_or_else(|e| {
@@ -73,7 +78,6 @@ fn main() {
     match serve_client(stream, &mut host) {
         Ok(()) => log::info!("session ended (quit)"),
         Err(e) => {
-            // Clean disconnect after Quit is fine; other errors log.
             log::warn!("session error: {e}");
         }
     }

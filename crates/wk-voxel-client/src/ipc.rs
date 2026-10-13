@@ -3,9 +3,11 @@
 //! Framing: `u32` LE payload length + postcard([`ClientMsg`] / [`HostMsg`]).
 //! Localhost TCP only for this spike (no auth, no multiplayer).
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -164,6 +166,152 @@ impl RemoteHost {
     pub fn quit_requested(&self) -> bool {
         self.quit
     }
+}
+
+/// Child `wk-voxel-host` + connected [`RemoteHost`].
+///
+/// Drop sends best-effort Quit then kills the child.
+pub struct SpawnedHost {
+    pub remote: RemoteHost,
+    child: Child,
+}
+
+impl SpawnedHost {
+    /// Launch `wk-voxel-host` on an ephemeral port and connect.
+    ///
+    /// `dev`: pass `--dev` (tiny ring). Otherwise Compact stamp.
+    pub fn spawn(dev: bool) -> Result<Self, IpcError> {
+        Self::spawn_with_bin(resolve_host_bin()?, dev)
+    }
+
+    pub fn spawn_with_bin(host_bin: impl AsRef<Path>, dev: bool) -> Result<Self, IpcError> {
+        let host_bin = host_bin.as_ref();
+        if !host_bin.is_file() {
+            return Err(IpcError::Protocol(format!(
+                "host binary not found: {}",
+                host_bin.display()
+            )));
+        }
+        let mut cmd = Command::new(host_bin);
+        cmd.arg("--bind").arg("127.0.0.1:0");
+        if dev {
+            cmd.arg("--dev");
+        }
+        // Inherit stderr so the pipe buffer cannot stall the host on logs.
+        cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
+        let mut child = cmd.spawn().map_err(IpcError::Io)?;
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                return Err(IpcError::Protocol("host stdout missing".into()));
+            }
+        };
+        let addr = match wait_listening_addr(stdout, Duration::from_secs(120)) {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        // Stamp may still be running; connect waits in accept backlog / HelloAck.
+        let remote = match connect_with_retry(&addr, Duration::from_secs(120)) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        Ok(Self { remote, child })
+    }
+
+    pub fn child_id(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+impl Drop for SpawnedHost {
+    fn drop(&mut self) {
+        let _ = self.remote.apply_all([ClientCommand::Quit]);
+        let _ = self.remote.pull();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Resolve `wk-voxel-host` next to the running binary, else `PATH`.
+pub fn resolve_host_bin() -> Result<PathBuf, IpcError> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("wk-voxel-host");
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
+            #[cfg(windows)]
+            {
+                let sibling = dir.join("wk-voxel-host.exe");
+                if sibling.is_file() {
+                    return Ok(sibling);
+                }
+            }
+        }
+    }
+    Ok(PathBuf::from("wk-voxel-host"))
+}
+
+fn wait_listening_addr(
+    stdout: impl Read,
+    timeout: Duration,
+) -> Result<String, IpcError> {
+    let mut reader = BufReader::new(stdout);
+    let deadline = Instant::now() + timeout;
+    let mut line = String::new();
+    loop {
+        if Instant::now() > deadline {
+            return Err(IpcError::Protocol(
+                "timed out waiting for 'wk-voxel-host listening on …'".into(),
+            ));
+        }
+        line.clear();
+        // Blocking read; host prints promptly after bind (before Compact stamp… actually
+        // host stamps BEFORE bind. So for Compact, listen line comes after stamp.
+        // Stdout is line-buffered when piped? Rust println! flushes on newline usually
+        // when connected to terminal; for pipes may block until buffer fills.
+        // Host uses println! which should flush on newline in practice for small lines.
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                return Err(IpcError::Protocol(
+                    "host exited before publishing listen address".into(),
+                ));
+            }
+            Ok(_) => {
+                if let Some(rest) = line.strip_prefix("wk-voxel-host listening on ") {
+                    return Ok(rest.trim().to_string());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(IpcError::Io(e)),
+        }
+    }
+}
+
+fn connect_with_retry(addr: &str, timeout: Duration) -> Result<RemoteHost, IpcError> {
+    let deadline = Instant::now() + timeout;
+    let mut last = None;
+    while Instant::now() < deadline {
+        match RemoteHost::connect(addr) {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        IpcError::Protocol(format!("connect {addr}: retries exhausted"))
+    }))
 }
 
 /// Serve one client connection: drain cmds, answer Pull with [`crate::Host::frame`].

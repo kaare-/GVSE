@@ -4,6 +4,8 @@
 //! wk-voxel-client                         # in-process Compact
 //! wk-voxel-client --dev                   # in-process tiny ring
 //! wk-voxel-client --connect 127.0.0.1:17420
+//! wk-voxel-client --spawn-host            # child wk-voxel-host (Compact)
+//! wk-voxel-client --spawn-host --dev      # child tiny host
 //! ```
 
 use std::env;
@@ -17,7 +19,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
-use wk_voxel_client::ipc::{RemoteHost, DEFAULT_HOST_ADDR};
+use wk_voxel_client::ipc::{RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
     ClientCommand, Host, ViewFrame, DEFAULT_SAVE_SLOT, VIEW_SCHEMA,
 };
@@ -25,6 +27,49 @@ use wk_voxel_client::{
 enum SimBridge {
     Local(Host),
     Remote(RemoteHost),
+    /// Child host process; Drop kills it.
+    Spawned(SpawnedHost),
+}
+
+fn empty_frame() -> ViewFrame {
+    ViewFrame {
+        contract_version: VIEW_SCHEMA,
+        sim_tick: 0,
+        paused: true,
+        world_width_cols: 0,
+        world_height: 0,
+        focus_col: 0,
+        view_cols: 0,
+        last_step_ms: 0,
+        product_step: false,
+        sky: wk_voxel_client::SkyPresent {
+            sky_rgb: [40, 40, 48],
+            day_night_u8: 0,
+            phase_u8: 0,
+            celestial_local_u8: 0,
+            moon_phase_u8: 0,
+            season_u8: 0,
+            is_day: false,
+        },
+        terrain: wk_voxel_client::TerrainStrip {
+            origin_col: 0,
+            origin_y: 0,
+            cols: 0,
+            rows: 0,
+            rgba: Vec::new(),
+        },
+        command_acks: Vec::new(),
+    }
+}
+
+fn pull_remote(r: &mut RemoteHost) -> ViewFrame {
+    match r.pull() {
+        Ok(f) => f,
+        Err(e) => {
+            log::error!("remote pull: {e}");
+            r.last().cloned().unwrap_or_else(empty_frame)
+        }
+    }
 }
 
 impl SimBridge {
@@ -36,46 +81,19 @@ impl SimBridge {
                     log::error!("remote apply: {e}");
                 }
             }
+            Self::Spawned(s) => {
+                if let Err(e) = s.remote.apply_all(cmds) {
+                    log::error!("spawned apply: {e}");
+                }
+            }
         }
     }
 
     fn frame(&mut self) -> ViewFrame {
         match self {
             Self::Local(h) => h.frame(),
-            Self::Remote(r) => match r.pull() {
-                Ok(f) => f,
-                Err(e) => {
-                    log::error!("remote pull: {e}");
-                    r.last().cloned().unwrap_or_else(|| ViewFrame {
-                        contract_version: VIEW_SCHEMA,
-                        sim_tick: 0,
-                        paused: true,
-                        world_width_cols: 0,
-                        world_height: 0,
-                        focus_col: 0,
-                        view_cols: 0,
-                        last_step_ms: 0,
-                        product_step: false,
-                        sky: wk_voxel_client::SkyPresent {
-                            sky_rgb: [40, 40, 48],
-                            day_night_u8: 0,
-                            phase_u8: 0,
-                            celestial_local_u8: 0,
-                            moon_phase_u8: 0,
-                            season_u8: 0,
-                            is_day: false,
-                        },
-                        terrain: wk_voxel_client::TerrainStrip {
-                            origin_col: 0,
-                            origin_y: 0,
-                            cols: 0,
-                            rows: 0,
-                            rgba: Vec::new(),
-                        },
-                        command_acks: Vec::new(),
-                    })
-                }
-            },
+            Self::Remote(r) => pull_remote(r),
+            Self::Spawned(s) => pull_remote(&mut s.remote),
         }
     }
 
@@ -83,6 +101,7 @@ impl SimBridge {
         match self {
             Self::Local(h) => h.quit_requested,
             Self::Remote(r) => r.quit_requested(),
+            Self::Spawned(s) => s.remote.quit_requested(),
         }
     }
 
@@ -90,6 +109,7 @@ impl SimBridge {
         match self {
             Self::Local(h) => h.paused,
             Self::Remote(r) => r.last().map(|f| f.paused).unwrap_or(false),
+            Self::Spawned(s) => s.remote.last().map(|f| f.paused).unwrap_or(false),
         }
     }
 
@@ -97,6 +117,7 @@ impl SimBridge {
         match self {
             Self::Local(h) => h.focus_col,
             Self::Remote(r) => r.last().map(|f| f.focus_col).unwrap_or(0),
+            Self::Spawned(s) => s.remote.last().map(|f| f.focus_col).unwrap_or(0),
         }
     }
 
@@ -104,6 +125,7 @@ impl SimBridge {
         match self {
             Self::Local(h) => h.view_cols,
             Self::Remote(r) => r.last().map(|f| f.view_cols).unwrap_or(96),
+            Self::Spawned(s) => s.remote.last().map(|f| f.view_cols).unwrap_or(96),
         }
     }
 
@@ -111,17 +133,20 @@ impl SimBridge {
         match self {
             Self::Local(_) => "in-process",
             Self::Remote(_) => "IPC",
+            Self::Spawned(_) => "spawn-host",
         }
     }
 }
 
 fn parse_args() -> SimBridge {
     let mut connect: Option<String> = None;
+    let mut spawn_host = false;
     let mut dev = false;
     let mut args = env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dev" => dev = true,
+            "--spawn-host" => spawn_host = true,
             "--connect" => {
                 connect = Some(
                     args.next()
@@ -130,10 +155,11 @@ fn parse_args() -> SimBridge {
             }
             "-h" | "--help" => {
                 eprintln!(
-                    "wk-voxel-client [--dev] [--connect HOST:PORT]\n\
+                    "wk-voxel-client [--dev] [--connect HOST:PORT] [--spawn-host]\n\
                      default: in-process Compact host\n\
-                     --dev: tiny in-process ring\n\
-                     --connect: TCP to wk-voxel-host (default {DEFAULT_HOST_ADDR})"
+                     --dev: tiny ring (in-process or with --spawn-host)\n\
+                     --connect: TCP to existing wk-voxel-host (default {DEFAULT_HOST_ADDR})\n\
+                     --spawn-host: launch wk-voxel-host child + connect"
                 );
                 std::process::exit(0);
             }
@@ -143,7 +169,23 @@ fn parse_args() -> SimBridge {
             }
         }
     }
-    if let Some(addr) = connect {
+    if spawn_host && connect.is_some() {
+        eprintln!("--spawn-host and --connect are mutually exclusive");
+        std::process::exit(2);
+    }
+    if spawn_host {
+        log::info!("spawning wk-voxel-host (dev={dev})");
+        match SpawnedHost::spawn(dev) {
+            Ok(s) => {
+                log::info!("spawned host pid={}", s.child_id());
+                SimBridge::Spawned(s)
+            }
+            Err(e) => {
+                eprintln!("spawn-host: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else if let Some(addr) = connect {
         log::info!("connecting to host at {addr}");
         match RemoteHost::connect(&*addr) {
             Ok(r) => SimBridge::Remote(r),

@@ -95,7 +95,9 @@ around sea level + sky + palette/glitter). Unit tests use
     codesign/notarize.
 13. [x] **Host durable cmds** — `Save` / `Load` / `ResetWorld`
     (`COMMAND_SCHEMA` 2); F5 / F9 / R on viewer.
-14. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+14. [x] **`--spawn-host`** — viewer launches `wk-voxel-host` child
+    (ephemeral port); HUD `spawn-host`.
+15. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host streams Compact, soak gate
       unchanged).
 
@@ -103,7 +105,6 @@ around sea level + sky + palette/glitter). Unit tests use
 
 | Pick | Notes |
 |------|--------|
-| **`--spawn-host`** | Viewer launches `wk-voxel-host` child + connects |
 | **SetSimSettings** | Climate / organisms dials through commands |
 | **Apple notarize** | **Pinned → 2026-11-15** (Dev membership expired) |
 | **E2 visual** | Tipped grey logs at 1× — owner eyes only |
@@ -141,4 +142,5 @@ the client, abandoning the macroquad soak viewer.
 10. **2026-10-13:** Apple notarize **pinned until 2026-11-15** (membership
     expired / cost). Resume then; do not block other wedges.
 11. Host Save/Load/ResetWorld + viewer keys (`COMMAND_SCHEMA` 2).
-12. Optional leftover: E2 tipped grey-log (Phase 5).
+12. Viewer `--spawn-host` (child host + IPC).
+13. Optional leftover: E2 tipped grey-log (Phase 5).
