@@ -7,6 +7,7 @@
 mod present;
 pub mod ipc;
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -14,17 +15,17 @@ use serde::{Deserialize, Serialize};
 use wk_voxel::{
     apply_season_sky_tint, celestial_local_cfg, climate_with_season, day_night_factor_cfg,
     is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, season_fraction_cfg,
-    restore_all_from_store, sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, step_world,
-    sync_residency, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
-    CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap,
-    GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig,
-    SimSnapshot, SteamConfig, StreamWindow, SupportMap, SyncResidencyStats, Temperature, Wind,
-    World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, STRATOSPHERE_CELLS,
-    TROPOSPHERE_TOP_Y,
+    cave_humidity_haze_wash, restore_all_from_store, sky_rgb_at_height_phased, sky_rgb_phased,
+    stamp_world, steam_haze_wash, step_world, sync_residency, CarbonBudget, CarbonConfig,
+    ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig,
+    FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity, KarstConfig,
+    LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SimSnapshot, SteamConfig,
+    StreamWindow, SupportMap, SyncResidencyStats, Temperature, Wind, World, WorldStep,
+    WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
-pub const VIEW_SCHEMA: u32 = 7;
+pub const VIEW_SCHEMA: u32 = 8;
 /// Bump when [`ClientCommand`] enum breaks.
 pub const COMMAND_SCHEMA: u32 = 4;
 /// Default disk slot for F5 / F9.
@@ -112,6 +113,10 @@ pub struct HostInfo {
 pub struct PresentHints {
     /// Soft humidity wash on air / sky-fill cells in the terrain strip.
     pub humidity_overlay: bool,
+    /// Soft steam haze (conduit vapour) on strip cells.
+    pub steam_overlay: bool,
+    /// Soft sealed-cave humidity wash on strip cells.
+    pub cave_humidity_overlay: bool,
 }
 
 /// Camera-window extract for the viewer (not a durable `SimSnapshot`).
@@ -469,7 +474,12 @@ impl Host {
                 CommandAck {
                     id,
                     ok: true,
-                    detail: format!("present humidity={}", self.present.humidity_overlay),
+                    detail: format!(
+                        "present H={} steam={} caveH={}",
+                        self.present.humidity_overlay,
+                        self.present.steam_overlay,
+                        self.present.cave_humidity_overlay
+                    ),
                 }
             }
             ClientCommand::Quit => {
@@ -675,6 +685,22 @@ impl Host {
         let origin_col = self.focus_col.wrapping_sub(half);
         let dn = sky.day_night();
         let phase = sky.phase_u8 as f32 / 255.0;
+        let steam_map: HashMap<(i32, i32), (u8, u8)> = if self.present.steam_overlay {
+            steam_haze_wash(&self.world, Some(&self.temperature))
+                .into_iter()
+                .map(|s| ((s.gx, s.gy), (s.density, s.warmth)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let cave_map: HashMap<(i32, i32), u8> = if self.present.cave_humidity_overlay {
+            cave_humidity_haze_wash(&self.world)
+                .into_iter()
+                .map(|s| ((s.gx, s.gy), s.density))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let mut rgba = vec![0u8; (cols as usize) * (rows as usize) * 4];
         for row in 0..rows {
             let gy = origin_y + (rows as i32 - 1 - row as i32);
@@ -710,6 +736,25 @@ impl Host {
                         px[0] = px[0].saturating_sub(wash / 3);
                         px[1] = px[1].saturating_sub(wash / 5);
                         px[2] = px[2].saturating_add(wash).min(255);
+                    }
+                }
+                if let Some(&(d, warm)) = steam_map.get(&(gx, gy)) {
+                    let a = d as f32 / 255.0;
+                    if a > 0.02 {
+                        let lift = (a * 90.0) as u8;
+                        let warm_add = ((warm as f32 / 255.0) * a * 40.0) as u8;
+                        px[0] = px[0].saturating_add(lift).saturating_add(warm_add).min(255);
+                        px[1] = px[1].saturating_add(lift).min(255);
+                        px[2] = px[2].saturating_add(lift.saturating_sub(warm_add / 2)).min(255);
+                    }
+                }
+                if let Some(&d) = cave_map.get(&(gx, gy)) {
+                    let a = d as f32 / 255.0;
+                    if a > 0.02 {
+                        let lift = (a * 55.0) as u8;
+                        px[0] = px[0].saturating_add(lift).min(255);
+                        px[1] = px[1].saturating_add(lift).min(255);
+                        px[2] = px[2].saturating_add(lift).min(255);
                     }
                 }
                 let i = ((row as usize) * cols as usize + col as usize) * 4;
@@ -916,8 +961,11 @@ mod tests {
         assert!(!host.frame().present.humidity_overlay);
         let ack = host.apply(ClientCommand::SetPresentHints(PresentHints {
             humidity_overlay: true,
+            steam_overlay: true,
+            cave_humidity_overlay: true,
         }));
         assert!(ack.ok, "{}", ack.detail);
-        assert!(host.frame().present.humidity_overlay);
+        let p = host.frame().present;
+        assert!(p.humidity_overlay && p.steam_overlay && p.cave_humidity_overlay);
     }
 }

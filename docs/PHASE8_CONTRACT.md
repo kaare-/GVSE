@@ -139,7 +139,7 @@ client should **split panels** so sim dials always go through commands.
 
 | Constant | Bump when |
 |----------|-----------|
-| `VIEW_SCHEMA` | ViewFrame layout (v5 `sim`; v6 `host`; v7 `present`) |
+| `VIEW_SCHEMA` | ViewFrame layout (v5 `sim`; v6 `host`; v7–8 `present` fields) |
 | `COMMAND_SCHEMA` | Commands (v2 save; v3 SetSimSettings; v4 SetPresentHints) |
 | `SIM_SCHEMA_VERSION` | unchanged role — durable save only (`save.rs`) |
 
@@ -173,10 +173,10 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       `127.0.0.1:0`, announce before stamp).
 - [x] `SetSimSettings` + `ViewFrame.sim` (`COMMAND_SCHEMA` 3).
 - [x] `HostInfo` crumbs on `ViewFrame`.
-- [x] `SetPresentHints` + humidity overlay wash (`VIEW_SCHEMA` 7 /
-      `COMMAND_SCHEMA` 4).
+- [x] `SetPresentHints` + humidity / steam / caveH strip washes
+      (`VIEW_SCHEMA` 8 / `COMMAND_SCHEMA` 4).
 - [ ] Owner Mac notarize — **pinned until 2026-11-15**.
-- [ ] Later: Steam / IPC harden / MAS.
+- [ ] Later: Steam storefront / IPC harden / MAS.
 
 ## Non-goals
 
