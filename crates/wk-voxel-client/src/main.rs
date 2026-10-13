@@ -788,20 +788,32 @@ impl SpikeApp {
                     sky[0], sky[1], sky[2],
                 )))
                 .show(ctx, |ui| {
-                    let avail = ui.available_size();
+                    let rect = ui.available_rect_before_wrap();
+                    // Cover-scale: fill the window (no sky letterbox bars).
+                    // Strip is wider aspect than a typical window, so we crop
+                    // a little left/right instead of banding top/bottom.
                     if let Some(tex) = &terrain_tex {
                         let tw = view.terrain.cols as f32;
                         let th = view.terrain.rows as f32;
-                        let scale = (avail.x / tw).min(avail.y / th).max(1.0);
+                        let scale = (rect.width() / tw).max(rect.height() / th);
                         let size = egui::vec2(tw * scale, th * scale);
-                        ui.centered_and_justified(|ui| {
-                            ui.image((tex.id(), size));
-                        });
+                        let image_rect = egui::Rect::from_center_size(rect.center(), size);
+                        let uv = egui::Rect::from_min_max(
+                            egui::pos2(0.0, 0.0),
+                            egui::pos2(1.0, 1.0),
+                        );
+                        ui.set_clip_rect(rect);
+                        ui.painter().image(
+                            tex.id(),
+                            image_rect,
+                            uv,
+                            egui::Color32::WHITE,
+                        );
                     }
 
                     let local = view.sky.celestial_local_u8 as f32 / 255.0;
-                    let body_x = avail.x * (0.12 + 0.76 * local);
-                    let body_y = avail.y * 0.12;
+                    let body_x = rect.left() + rect.width() * (0.12 + 0.76 * local);
+                    let body_y = rect.top() + rect.height() * 0.12;
                     let (r, g, b, rad) = if view.sky.is_day {
                         (255, 214, 90, 10.0)
                     } else {
