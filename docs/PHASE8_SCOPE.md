@@ -97,13 +97,14 @@ around sea level + sky + palette/glitter). Unit tests use
       (macroquad / headless; client host streams Compact, soak gate
       unchanged).
 
-## Owner next (after Apple pack scripts)
+## Owner next
 
 | Pick | Notes |
 |------|--------|
-| **Notarize on Mac** | Owner: `bundle.sh --sign` + `notarize.sh` with Dev ID |
-| **Steam depots** | After Apple smoke green |
-| **E2 / redirect** | Phase 5 leftover or other program |
+| **Apple notarize** | **Pinned → 2026-11-15** (Dev membership expired). Scripts stay; no Mac notarize until then. |
+| **E2 / redirect** | Phase 5 leftover or other program — open now |
+| **Sim / present backlog** | Continue A client + host; soak stays macroquad |
+| **Steam depots** | After Apple smoke green (post-pin) |
 | **IPC harden** | multi-client, auth, delta strip — later |
 
 ## Acceptance (proposed)
@@ -134,4 +135,6 @@ the client, abandoning the macroquad soak viewer.
 8. OOP host: `wk-voxel-host` + viewer `--connect` (localhost postcard).
 9. Apple pack: notarized `.app` scripts first (not MAS); owner credentials
    on Mac for real notarize.
-10. Optional leftover: E2 tipped grey-log (Phase 5).
+10. **2026-10-13:** Apple notarize **pinned until 2026-11-15** (membership
+    expired / cost). Resume then; do not block other wedges.
+11. Optional leftover: E2 tipped grey-log (Phase 5).

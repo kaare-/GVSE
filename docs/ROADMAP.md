@@ -361,8 +361,8 @@ host `step_world` on Compact + stream/park, `VIEW_SCHEMA` 4; optional
 `--connect` to `wk-voxel-host` TCP). **Owner:** client = viewer / camera /
 limited commands; host = sim. **Apple pack:** scripts in
 `packaging/macos/` ([`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md));
-owner Mac notarize. **Next:** notarize smoke on Mac, Steam, or redirect.
-Soak stays macroquad.
+**notarize pinned until 2026-11-15** (Dev membership). **Next:** E2 /
+redirect / sim backlog; Steam after Apple smoke. Soak stays macroquad.
 
 ---
 
@@ -447,6 +447,7 @@ Soak stays macroquad.
 | 2026-10-12 | Phase 8 Compact host | Default Host stamps Compact + stream/park; strip band ~384; tests `for_tests()` |
 | 2026-10-13 | Phase 8 OOP host | `wk-voxel-host` TCP postcard IPC; viewer `--connect`; in-process default |
 | 2026-10-13 | Phase 8 Apple pack | Notarized `.app` scripts + runbook; owner Mac signs with Dev ID |
+| 2026-10-13 | Phase 8 Apple pin | Notarize deferred to **2026-11-15** (membership expired); scripts kept |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

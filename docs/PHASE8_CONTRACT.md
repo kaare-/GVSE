@@ -167,6 +167,7 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       `--connect HOST:PORT` (in-process still default).
 - [x] Apple packaging scripts (Developer ID + notarize runbook);
       [`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md).
+- [ ] Owner Mac notarize — **pinned until 2026-11-15**.
 - [ ] Later: Steam / IPC harden / MAS.
 
 ## Non-goals
