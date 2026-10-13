@@ -18,18 +18,18 @@ use wk_voxel::{
     is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, season_fraction_cfg,
     cave_humidity_haze_wash, restore_all_from_store, sky_rgb_at_height_phased, sky_rgb_phased,
     stamp_world, steam_haze_wash, step_world, sync_residency, wake_floating_competent,
-    CarbonBudget, CarbonConfig, Cell, ClimateConfig, CloudConfig, CloudStore,
+    Blueprint, CarbonBudget, CarbonConfig, Cell, ClimateConfig, CloudConfig, CloudStore,
     CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap,
     GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig,
-    PhaseConfig, SimSnapshot, SteamConfig, StreamWindow, SupportMap, SyncResidencyStats,
-    Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W,
-    STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
+    PhaseConfig, SimSnapshot, SpawnFail, SteamConfig, StreamWindow, SupportMap,
+    SyncResidencyStats, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams,
+    CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
 pub const VIEW_SCHEMA: u32 = 9;
 /// Bump when [`ClientCommand`] enum breaks.
-pub const COMMAND_SCHEMA: u32 = 6;
+pub const COMMAND_SCHEMA: u32 = 7;
 /// Max paint brush radius (cells); diameter = 2·r+1.
 pub const MAX_PAINT_RADIUS: i32 = 16;
 /// Default disk slot for F5 / F9.
@@ -243,6 +243,48 @@ impl PaintBrush {
     }
 }
 
+/// Built-in organism presets for operator spawn (macroquad F2 templates).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[repr(u8)]
+pub enum SpawnPreset {
+    #[default]
+    Atom = 0,
+    Plant = 1,
+    Seaweed = 2,
+    Fungus = 3,
+    Epiphyte = 4,
+}
+
+impl SpawnPreset {
+    pub const ALL: [SpawnPreset; 5] = [
+        SpawnPreset::Atom,
+        SpawnPreset::Plant,
+        SpawnPreset::Seaweed,
+        SpawnPreset::Fungus,
+        SpawnPreset::Epiphyte,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Atom => "Atom",
+            Self::Plant => "Plant",
+            Self::Seaweed => "Seaweed",
+            Self::Fungus => "Fungus",
+            Self::Epiphyte => "Epiphyte",
+        }
+    }
+
+    pub fn blueprint(self) -> Blueprint {
+        match self {
+            Self::Atom => Blueprint::atom(),
+            Self::Plant => Blueprint::minimal_plant(),
+            Self::Seaweed => Blueprint::minimal_seaweed(),
+            Self::Fungus => Blueprint::minimal_fungus(),
+            Self::Epiphyte => Blueprint::minimal_epiphyte(),
+        }
+    }
+}
+
 /// Viewer → host. Host drains between steps; never mid-step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientCommand {
@@ -271,6 +313,12 @@ pub enum ClientCommand {
         y: i32,
         brush: PaintBrush,
         radius: u8,
+    },
+    /// Operator spawn built-in blueprint at click (macroquad F2 presets).
+    SpawnOrganism {
+        col: i32,
+        y: i32,
+        preset: SpawnPreset,
     },
     Quit,
 }
@@ -499,7 +547,8 @@ impl Host {
             | ClientCommand::Load { .. }
             | ClientCommand::ResetWorld { .. }
             | ClientCommand::SetSimSettings(_)
-            | ClientCommand::PaintTerrain { .. } => matches!(role, Operator),
+            | ClientCommand::PaintTerrain { .. }
+            | ClientCommand::SpawnOrganism { .. } => matches!(role, Operator),
         }
     }
 
@@ -677,6 +726,52 @@ impl Host {
                     id,
                     ok: true,
                     detail: format!("paint {:?} r={r} n={painted}", brush),
+                }
+            }
+            ClientCommand::SpawnOrganism { col, y, preset } => {
+                let bp = preset.blueprint();
+                if !bp.can_editor_spawn() {
+                    CommandAck {
+                        id,
+                        ok: false,
+                        detail: format!("preset {:?} cannot spawn", preset),
+                    }
+                } else {
+                    let body = bp.modules_relative_to_nucleus();
+                    match self.organisms.spawn_blueprint_free(
+                        &self.world,
+                        col,
+                        y,
+                        body,
+                        40.0,
+                        bp.genome,
+                    ) {
+                        Ok(()) => CommandAck {
+                            id,
+                            ok: true,
+                            detail: format!(
+                                "spawned {} at ({},{}) living={}",
+                                bp.name,
+                                col,
+                                y,
+                                self.organisms.living_count()
+                            ),
+                        },
+                        Err(SpawnFail::PopCap) => CommandAck {
+                            id,
+                            ok: false,
+                            detail: format!(
+                                "pop cap {}/{}",
+                                self.organisms.living_count(),
+                                self.organisms.atom_cap()
+                            ),
+                        },
+                        Err(e) => CommandAck {
+                            id,
+                            ok: false,
+                            detail: format!("spawn {:?}: {e:?}", preset),
+                        },
+                    }
                 }
             }
             ClientCommand::Quit => {
@@ -1345,5 +1440,43 @@ mod tests {
             .get_cell(col, y)
             .expect("painted cell");
         assert_eq!(c.material, MaterialId::Stone);
+    }
+
+    #[test]
+    fn spawn_organism_preset_atom() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        // Free spawn needs Air near the click — paint a wet column seat.
+        let col = host.focus_col;
+        let y = host.params.sea_level_y;
+        host.apply(ClientCommand::PaintTerrain {
+            col,
+            y: y - 1,
+            brush: PaintBrush::Sand,
+            radius: 0,
+        });
+        host.apply(ClientCommand::PaintTerrain {
+            col,
+            y,
+            brush: PaintBrush::Water,
+            radius: 0,
+        });
+        let before = host.organisms.living_count();
+        let ack = host.apply(ClientCommand::SpawnOrganism {
+            col,
+            y,
+            preset: SpawnPreset::Atom,
+        });
+        assert!(ack.ok, "{}", ack.detail);
+        assert!(host.organisms.living_count() > before);
+        let deny = host.apply_as(
+            ipc::PeerRole::Viewer,
+            ClientCommand::SpawnOrganism {
+                col,
+                y,
+                preset: SpawnPreset::Atom,
+            },
+        );
+        assert!(!deny.ok);
     }
 }

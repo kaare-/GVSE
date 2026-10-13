@@ -465,6 +465,7 @@ client ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md),
 | 2026-10-13 | Phase 8 mp/auth impl | Hello token; concurrent peers; Viewer/Operator command gate |
 | 2026-10-13 | Phase 8 operator w1 | Role-aware viewer UI; sim/save gated to Operator |
 | 2026-10-13 | Phase 8 operator paint | `PaintTerrain` + F3 brush (`COMMAND_SCHEMA` 6) |
+| 2026-10-13 | Phase 8 operator spawn | `SpawnOrganism` presets + F2 (`COMMAND_SCHEMA` 7) |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
