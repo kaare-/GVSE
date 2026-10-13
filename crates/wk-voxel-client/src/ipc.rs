@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ClientCommand, ViewFrame, COMMAND_SCHEMA, VIEW_SCHEMA};
 
-/// Default bind / connect address for the OOP host spike.
+/// Default bind / connect address (loopback).
 pub const DEFAULT_HOST_ADDR: &str = "127.0.0.1:17420";
+/// Explicit LAN bind (`--lan`). **No auth** — trusted networks only.
+pub const LAN_HOST_ADDR: &str = "0.0.0.0:17420";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ClientMsg {
@@ -194,6 +196,8 @@ impl SpawnedHost {
         }
         let mut cmd = Command::new(host_bin);
         cmd.arg("--bind").arg("127.0.0.1:0");
+        // Parent owns lifetime; host must not linger waiting for a 2nd client.
+        cmd.arg("--once");
         if dev {
             cmd.arg("--dev");
         }

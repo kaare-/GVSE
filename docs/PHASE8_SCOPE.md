@@ -106,9 +106,10 @@ around sea level + sky + palette/glitter). Unit tests use
 18. [x] **Parity note** — park=0 / TRACKED soaks stay macroquad/headless;
       A-client Compact stream is not the mass gate
       ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)).
-19. Phase 8 infra spike sufficient; Compact stream re-profile
-    confirms ~115 sim-FPS — **agent parked**; owner pick next
-    ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)).
+19. Phase 8 infra spike sufficient; Compact stream ~115 sim-FPS.
+20. **Owner path (2026-10-13):** host ship → remote multiplayer/auth
+    → operator client ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md),
+    [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md)).
 
 ## Backlog (ordered)
 
