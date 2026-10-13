@@ -52,7 +52,13 @@ cargo run -p wk-voxel-client --release -- \
 - F3 / checkbox toggles paint; brush + radius; click cover-scale strip
 - Palette mirrors macroquad F3 (Erase/Water/Ice/…/Bedrock)
 
+## Spawn (wedge 3)
+
+- `ClientCommand::SpawnOrganism` (`COMMAND_SCHEMA` 7) — Operator only
+- F2 / checkbox; presets Atom / Plant / Seaweed / Fungus / Epiphyte
+- Click cover-scale strip (one-shot press); host `spawn_blueprint_free`
+
 ## Later wedges
 
-- Spawn organism / blueprint editor
+- Full blueprint paint editor (macroquad F2 canvas)
 - Broader sim dials (steam, stream disk, perf) aligned with macroquad Tab

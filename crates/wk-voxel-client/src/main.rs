@@ -25,7 +25,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{ConnectOpts, PeerRole, RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
-    ClientCommand, Host, HostInfo, PaintBrush, PresentHints, SimSettings, ViewFrame,
+    ClientCommand, Host, HostInfo, PaintBrush, PresentHints, SimSettings, SpawnPreset, ViewFrame,
     DEFAULT_SAVE_SLOT, DEFAULT_STEP_PERIOD_MS, MAX_PAINT_RADIUS, MAX_VIEW_COLS, MIN_VIEW_COLS,
     VIEW_SCHEMA,
 };
@@ -397,6 +397,8 @@ fn main() {
         paint_open: false,
         paint_brush: PaintBrush::Sand,
         paint_radius: 0u8,
+        spawn_open: false,
+        spawn_preset: SpawnPreset::Atom,
         last_terrain_rect: None,
         held: HeldPan::default(),
         hud_open: true,
@@ -432,7 +434,9 @@ struct SpikeApp {
     paint_open: bool,
     paint_brush: PaintBrush,
     paint_radius: u8,
-    /// Cover-scale terrain blit rect from last frame (for paint hit-test).
+    spawn_open: bool,
+    spawn_preset: SpawnPreset,
+    /// Cover-scale terrain blit rect from last frame (for paint/spawn hit-test).
     last_terrain_rect: Option<egui::Rect>,
     held: HeldPan,
     hud_open: bool,
@@ -860,10 +864,13 @@ impl SpikeApp {
         let mut paint_open = self.paint_open;
         let mut paint_brush = self.paint_brush;
         let mut paint_radius = self.paint_radius;
+        let mut spawn_open = self.spawn_open;
+        let mut spawn_preset = self.spawn_preset;
         let mut settings_cmd = None;
         let mut present_cmd = None;
         let mut op_cmd: Option<ClientCommand> = None;
         let mut paint_cmd: Option<ClientCommand> = None;
+        let mut spawn_cmd: Option<ClientCommand> = None;
         let mut hud_open = self.hud_open;
         let mut terrain_rect_out: Option<egui::Rect> = None;
 
@@ -1055,6 +1062,7 @@ impl SpikeApp {
                                 });
                                 ui.checkbox(&mut paint_open, "paint (F3)");
                                 if paint_open {
+                                    spawn_open = false;
                                     ui.add(
                                         egui::Slider::new(
                                             &mut paint_radius,
@@ -1075,6 +1083,26 @@ impl SpikeApp {
                                         });
                                     ui.label(
                                         egui::RichText::new("click terrain to paint")
+                                            .small()
+                                            .color(egui::Color32::from_rgb(140, 160, 120)),
+                                    );
+                                }
+                                ui.checkbox(&mut spawn_open, "spawn (F2)");
+                                if spawn_open {
+                                    paint_open = false;
+                                    egui::ComboBox::from_label("preset")
+                                        .selected_text(spawn_preset.label())
+                                        .show_ui(ui, |ui| {
+                                            for p in SpawnPreset::ALL {
+                                                ui.selectable_value(
+                                                    &mut spawn_preset,
+                                                    p,
+                                                    p.label(),
+                                                );
+                                            }
+                                        });
+                                    ui.label(
+                                        egui::RichText::new("click terrain to spawn")
                                             .small()
                                             .color(egui::Color32::from_rgb(140, 160, 120)),
                                     );
@@ -1108,7 +1136,7 @@ impl SpikeApp {
 
                     ui.add_space(4.0);
                     let hints = if is_operator {
-                        "arrows pan · [ ] · Space/N · F3 paint · F5/F9 · R · Esc · H"
+                        "arrows pan · [ ] · Space/N · F2 spawn · F3 paint · F5/F9 · R · Esc · H"
                     } else {
                         "arrows pan · [ ] width · Space pause · N step · Esc · H hud"
                     };
@@ -1119,11 +1147,17 @@ impl SpikeApp {
                     );
                 });
 
-            // Paint click: terrain under pointer, not when UI wants the click.
+            // Paint / spawn click: terrain under pointer, not when UI wants the click.
             if is_operator
-                && paint_open
+                && (paint_open || spawn_open)
                 && !ctx.wants_pointer_input()
-                && ctx.input(|i| i.pointer.primary_down())
+                && ctx.input(|i| {
+                    if spawn_open {
+                        i.pointer.primary_pressed()
+                    } else {
+                        i.pointer.primary_down()
+                    }
+                })
             {
                 if let (Some(pos), Some(image_rect)) =
                     (ctx.pointer_interact_pos(), terrain_rect_out)
@@ -1139,12 +1173,20 @@ impl SpikeApp {
                         let y = view.terrain.origin_y
                             + (view.terrain.rows as i32 - 1)
                             - (v * view.terrain.rows as f32).floor() as i32;
-                        paint_cmd = Some(ClientCommand::PaintTerrain {
-                            col,
-                            y,
-                            brush: paint_brush,
-                            radius: paint_radius,
-                        });
+                        if spawn_open {
+                            spawn_cmd = Some(ClientCommand::SpawnOrganism {
+                                col,
+                                y,
+                                preset: spawn_preset,
+                            });
+                        } else {
+                            paint_cmd = Some(ClientCommand::PaintTerrain {
+                                col,
+                                y,
+                                brush: paint_brush,
+                                radius: paint_radius,
+                            });
+                        }
                     }
                 }
             }
@@ -1157,6 +1199,8 @@ impl SpikeApp {
         self.paint_open = paint_open;
         self.paint_brush = paint_brush;
         self.paint_radius = paint_radius;
+        self.spawn_open = spawn_open;
+        self.spawn_preset = spawn_preset;
         self.last_terrain_rect = terrain_rect_out;
         if let Some(s) = settings_cmd {
             if is_operator {
@@ -1170,6 +1214,9 @@ impl SpikeApp {
             self.pending.push(c);
         }
         if let Some(c) = paint_cmd {
+            self.pending.push(c);
+        }
+        if let Some(c) = spawn_cmd {
             self.pending.push(c);
         }
 
@@ -1302,9 +1349,20 @@ impl ApplicationHandler for SpikeApp {
                     PhysicalKey::Code(KeyCode::KeyH) => {
                         self.hud_open = !self.hud_open;
                     }
+                    PhysicalKey::Code(KeyCode::F2) => {
+                        if self.bridge().map(|b| b.is_operator()).unwrap_or(false) {
+                            self.spawn_open = !self.spawn_open;
+                            if self.spawn_open {
+                                self.paint_open = false;
+                            }
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::F3) => {
                         if self.bridge().map(|b| b.is_operator()).unwrap_or(false) {
                             self.paint_open = !self.paint_open;
+                            if self.paint_open {
+                                self.spawn_open = false;
+                            }
                         }
                     }
                     PhysicalKey::Code(KeyCode::Space) => {
