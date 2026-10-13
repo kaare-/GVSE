@@ -10,10 +10,11 @@ stay the agent execution lists.
 
 | Rule | Meaning |
 |------|---------|
-| Host owns truth | Sim / mass / organisms only on world server |
-| Player world allowlist | Live-server interactions are **few and explicit** |
-| Studio = total freedom | Creature / blueprint design offline or in private space |
-| Operator ≠ player | Fine-tune live worlds; full tools + settings |
+| Host owns truth | Sim / mass / organisms only on whichever host runs that world |
+| Three world tiers | **Lab** (offline) · **Shadow** (BYO mesh) · **Wild** (official sub) |
+| Player world allowlist | Live interactions are **few and explicit** (stricter in Wild) |
+| Studio = total freedom | Creature / blueprint design; not the live Wild editor |
+| Operator ≠ player | Fine-tune official / owned hosts; full tools + settings |
 | Region has a max | One instance = one capacity envelope; grow map by **sharding** |
 | Soak stays macroquad | Park/TRACKED gates do not move to the ship client |
 
@@ -65,15 +66,22 @@ paint-over.
 **Contract owed:** studio ↔ server blueprint schema + versioning +
 reject path on live spawn.
 
-### 4. World server — load + regions
+### 4. Worlds — Lab · Shadow · Wild
 
-- One **region** = one sim instance with a **max size / load envelope**
-  (today’s planning unit ≈ Compact 4096×tropopause + stream/park).
-- To grow the **world**, **shard** (more regions) and join at edges
-  with **halo + handoff** (design later; see
-  [`HOSTING_COST.md`](HOSTING_COST.md)).
-- More players in one place ≠ clone the sim; tighten interest / present
-  first, then bigger box, then split the hot region.
+One **region** = one sim process with a **max load envelope** (planning
+unit ≈ Compact 4096×tropopause + stream/park). Grow a continuous map by
+**sharding** + **halo / handoff** (design later).
+
+| Tier | Who pays compute | What it is |
+|------|------------------|------------|
+| **Lab** | Player’s machine | Offline (or local-only) laboratory — as big as the box allows; full experimentation; no AWS bill |
+| **Shadow** | Player / friends | Self-hosted shards, **dynamically connected** into a mesh when peers are online; scrap/homelab welcome; our software does discovery + seam, not the power bill |
+| **Wild** | Subscription | Official always-on regions — the “real” wilderness where creatures prove themselves; Glance/Presence economics apply ([`HOSTING_COST.md`](HOSTING_COST.md)) |
+
+**Money model:** client + Lab free (or Steam one-time); **Wild is the
+sub**; Shadow is optional social/infra without forcing everyone onto
+the paid mesh. Creatures can stay Lab forever, roam Shadow when hosts
+are up, or be released into Wild when the player wants stakes.
 
 ### 5. Operator client
 
@@ -93,13 +101,14 @@ multiplayer/auth are the start; TLS, compression, and public exposure
 harden next ([`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md),
 [`HOSTING_COST.md`](HOSTING_COST.md)).
 
-### 8. Hosting continuum
+### 8. Hosting continuum *(maps to tiers)*
 
-| Track | Use |
-|-------|-----|
-| **Official** | AWS (or similar) for public / paid regions |
-| **Scrap / homelab** | BC-250, old consoles, mining→game rigs — fine for **dev / community BYO host**, not the GDPR/Steam backbone unless productized |
-| **Listen / friends** | Owner Mac / home host for small groups |
+| Track | Tier | Use |
+|-------|------|-----|
+| **Official AWS** | Wild | Paid public / always-on regions; GDPR backbone |
+| **Shadow mesh** | Shadow | BC-250, old consoles, home NAS — first-class, not a shame path |
+| **Lab local** | Lab | Single-machine universe; default for “just play / science” |
+| **Listen / friends** | Shadow | Small group without going Wild |
 
 ### 9. Stores
 
@@ -116,11 +125,13 @@ Moderation / bans if public regions exist.
 
 Write these before large UI or AWS spend:
 
-1. **Player world allowlist** — exact live cmds  
+1. **Player allowlist per tier** — Lab vs Shadow vs Wild cmds  
 2. **Studio / blueprint schema** — version + validate  
 3. **Region capacity number** — cols × height × target FPS × max peers  
-4. **Identity** — anonymous / Steam / optional email  
-5. **Money + who hosts** — who pays for a public Compact shard  
+4. **Identity** — anonymous / Steam / optional email (Wild needs this)  
+5. **Money** — Wild = subscription; Lab/Shadow = player hardware  
+6. **Shadow discovery + halo** — how BYO shards find neighbors safely  
+7. **Migrate Lab → Shadow → Wild** — export / quarantine / release rules  
 
 ## Suggested dig order *(when choosing)*
 
@@ -131,15 +142,16 @@ Write these before large UI or AWS spend:
 | C | Region max + cost realism | [`HOSTING_COST.md`](HOSTING_COST.md) |
 | D | Biology depth | Parallel; soak-gated |
 | E | Brand / menus | After A–B so screens have jobs |
-| F | Halo / shard handoff | After region max locked |
-| G | Official AWS + Steam | After compression + allowlist |
+| F | Halo / shard handoff | Lab seams first; then Shadow; Wild last |
+| G | Wild AWS + Steam sub | After compression + allowlist + Lab solid |
 
 ## Explicit non-goals *(until unlocked)*
 
-- Seamless MMO before halo design note  
-- Autoscale sim boxes on raw player count  
-- Full editor powers for every live player  
-- Treating scrap hardware as the compliance host  
+- Seamless Wild MMO before halo design note  
+- Autoscale official sim boxes on raw player count  
+- Full editor powers for every Wild player  
+- Forcing all play through subscription (Lab/Shadow remain)  
+- Treating Shadow scrap hosts as the GDPR system of record  
 
 ## Related docs
 
