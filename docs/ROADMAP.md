@@ -470,6 +470,7 @@ client ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md),
 | 2026-10-13 | Phase 8 operator spawn | `SpawnOrganism` presets + F2 (`COMMAND_SCHEMA` 7) |
 | 2026-10-13 | Product pillars | Studio / player allowlist / region-shard / ops / ship ([`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)) |
 | 2026-10-13 | Hosting cost sketch | Compact ~115 FPS; strip ~1 MiB×20 Hz; WAN needs compression ([`HOSTING_COST.md`](HOSTING_COST.md)) |
+| 2026-10-13 | World tiers | Lab (offline) · Shadow (BYO mesh) · Wild (official sub) |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

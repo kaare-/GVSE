@@ -97,12 +97,32 @@ do not OOM.
 \*Egress dominates until compression lands. Numbers assume the
 **≥20× + 10 Hz** target above.
 
-### Homelab / scrap
+### Homelab / scrap → **Shadow** tier
 
 Power + residential uplink, not AWS list. A BC-250 / mini-PC can run
 **one Compact** for LAN/friends if uplink is the limit (~20–50 Mbit
-upload → **must** compress; often only 1 remote peer). Fine for
-**dev / community BYO**; weak for GDPR, Steam-trust, and 24/7 public.
+upload → **must** compress; often only 1–2 remote peers).
+
+In the product model this is **first-class Shadow**: player-hosted
+shards that can **dynamically link** when online. Our cost is mostly
+**relay/directory** (cheap) if peers mesh P2P; full relay of strips
+re-creates the egress cliff. Prefer: hole-punch / local LAN / optional
+small TURN for signaling — not proxying every ViewFrame through AWS.
+
+**Lab** (offline local) is $0 hosting. **Wild** (official sub) is where
+the AWS numbers in this doc apply. See
+[`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md) § Lab · Shadow · Wild.
+
+## Money takeaway
+
+| Tier | Who pays | Recurring product fee? |
+|------|----------|----------------------|
+| Lab | Player electricity | No |
+| Shadow | Player / friends hardware + uplink | No (optional tip jar / sub for directory niceties) |
+| Wild | Us (AWS) → **player subscription** | **Yes — that’s the point** |
+
+Wild without a sub only works as a tiny loss-leader demo, not 10k
+casual Presence.
 
 ## How it gets realistic
 
@@ -110,11 +130,12 @@ Ordered levers (do before scaling instances):
 
 1. **Compress ViewFrame** (zstd on RGBA or tile codec) — mandatory for WAN  
 2. **Delta / dirty rectangles** — strip rarely fully changes  
-3. **Remote present ≤10 Hz**; keep 20 Hz for local/LAN  
+3. **Remote present ≤10 Hz**; keep 20 Hz for local/LAN / Lab  
 4. **Interest** — overlapping cameras; avoid union→full-resident  
 5. **Region max = Compact** (or measured twin); shard for map size  
-6. **Session length economics** — bill or design for play sessions, not 24/7 AFK viewers  
-7. **CDN later** only helps static/marketing; **sim strips stay peer→host**
+6. **Session length economics** — Glance vs Presence; no 24/7 AFK strips  
+7. **Shadow P2P** — don’t hairpin BYO mesh video through official egress  
+8. **CDN later** only helps static/marketing; **sim strips stay peer→host**
 
 ## Region capacity (working definition)
 
