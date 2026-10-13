@@ -165,7 +165,9 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       `Host::for_tests()` keeps tiny ring for CI.
 - [x] Out-of-process host: `wk-voxel-host` + postcard IPC; viewer
       `--connect HOST:PORT` (in-process still default).
-- [ ] Later: ship packaging / IPC harden.
+- [x] Apple packaging scripts (Developer ID + notarize runbook);
+      [`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md).
+- [ ] Later: Steam / IPC harden / MAS.
 
 ## Non-goals
 
@@ -192,5 +194,6 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 5. [x] Host `step_world` + viewer framing (`VIEW_SCHEMA` 4).
 6. [x] Compact-sized in-process host + stream residency.
 7. [x] Out-of-process host binary + localhost IPC.
-8. Ship packaging / IPC harden when ready.
-9. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+8. [x] Apple notarize scripts + owner Mac runbook.
+9. Steam / IPC harden / MAS when ready.
+10. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
