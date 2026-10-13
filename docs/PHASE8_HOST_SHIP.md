@@ -15,7 +15,7 @@ multiplayer yet — that is the next wedge after this acceptance closes.
 | Listen before stamp | Keep; `--spawn-host` needs the announce line |
 | Session reconnect | After viewer disconnect (or crash), accept the next client; world kept |
 | `--once` | Exit after one session (CI / smoke) |
-| `--lan` | Bind `0.0.0.0:17420` (explicit; still **no auth**) |
+| `--lan` | Bind `0.0.0.0:17420` (requires `--token` unless `--insecure`) |
 | `--bind HOST:PORT` | Override (wins over `--lan` if both set → bind wins) |
 | `--seed N` | Compact worldgen seed |
 | `--dev` | Tiny ring (tests / fast smoke) |
@@ -24,10 +24,9 @@ multiplayer yet — that is the next wedge after this acceptance closes.
 
 ## Non-goals (next wedges)
 
-- Auth / tokens / TLS
-- Multiple concurrent viewers
-- Operator / editor client
-- Public internet exposure without auth (LAN flag is for trusted LAN only)
+- TLS / encrypted transport
+- Operator / editor client UI
+- Public internet exposure without auth (LAN requires `--token`)
 
 ## Run (local)
 
@@ -39,12 +38,12 @@ cargo run -p wk-voxel-client --release --bin wk-voxel-host
 cargo run -p wk-voxel-client --release -- --connect 127.0.0.1:17420
 ```
 
-LAN (trusted network only — **no auth**):
+LAN (token required; see [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md)):
 
 ```bash
-cargo run -p wk-voxel-client --release --bin wk-voxel-host -- --lan
+cargo run -p wk-voxel-client --release --bin wk-voxel-host -- --lan --token SECRET
 # peer:
-cargo run -p wk-voxel-client --release -- --connect <host-lan-ip>:17420
+cargo run -p wk-voxel-client --release -- --connect <host-lan-ip>:17420 --token SECRET
 ```
 
 ## Acceptance

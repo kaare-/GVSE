@@ -23,7 +23,7 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
-use wk_voxel_client::ipc::{RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
+use wk_voxel_client::ipc::{ConnectOpts, PeerRole, RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
     ClientCommand, Host, HostInfo, PresentHints, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT,
     DEFAULT_STEP_PERIOD_MS, MAX_VIEW_COLS, MIN_VIEW_COLS, VIEW_SCHEMA,
@@ -36,8 +36,12 @@ const PAN_Y_STEP: i32 = 24;
 
 enum SimBridge {
     Local(Host),
-    /// `addr` kept for reconnect after a dropped session.
-    Remote { remote: RemoteHost, addr: String },
+    /// `addr` + connect opts kept for reconnect after a dropped session.
+    Remote {
+        remote: RemoteHost,
+        addr: String,
+        opts: ConnectOpts,
+    },
     /// Child host process; Drop kills it.
     Spawned(SpawnedHost),
 }
@@ -52,7 +56,7 @@ struct HeldPan {
 
 enum LaunchIntent {
     Local { dev: bool },
-    Connect(String),
+    Connect { addr: String, opts: ConnectOpts },
     Spawn { dev: bool },
 }
 
@@ -61,7 +65,7 @@ impl LaunchIntent {
         match self {
             Self::Local { dev: true } => "Starting tiny in-process host…",
             Self::Local { dev: false } => "Stamping Compact world…",
-            Self::Connect(_) => "Connecting to host…",
+            Self::Connect { .. } => "Connecting to host…",
             Self::Spawn { dev: true } => "Spawning tiny host…",
             Self::Spawn { dev: false } => "Spawning Compact host (stamp may take a bit)…",
         }
@@ -77,12 +81,17 @@ impl LaunchIntent {
                 log::info!("in-process Compact Host::default()");
                 Ok(SimBridge::Local(Host::default()))
             }
-            Self::Connect(addr) => {
-                log::info!("connecting to host at {addr}");
-                RemoteHost::connect(&*addr)
+            Self::Connect { addr, opts } => {
+                log::info!(
+                    "connecting to host at {addr} role={:?} auth={}",
+                    opts.role_hint,
+                    opts.token.is_some()
+                );
+                RemoteHost::connect_with(&*addr, &opts)
                     .map(|remote| SimBridge::Remote {
                         remote,
                         addr: addr.clone(),
+                        opts,
                     })
                     .map_err(|e| format!("connect {addr}: {e}"))
             }
@@ -173,11 +182,11 @@ impl SimBridge {
     fn frame(&mut self) -> ViewFrame {
         match self {
             Self::Local(h) => h.frame(),
-            Self::Remote { remote, addr } => match remote.pull() {
+            Self::Remote { remote, addr, opts } => match remote.pull() {
                 Ok(f) => f,
                 Err(e) => {
                     log::warn!("remote pull: {e} — reconnecting to {addr}");
-                    match RemoteHost::connect(&**addr) {
+                    match RemoteHost::connect_with(&**addr, opts) {
                         Ok(r) => {
                             *remote = r;
                             pull_remote(remote)
@@ -254,16 +263,32 @@ fn parse_intent() -> LaunchIntent {
     let mut connect: Option<String> = None;
     let mut spawn_host = false;
     let mut dev = false;
+    let mut token = env::var("WK_VOXEL_HOST_TOKEN").ok().filter(|s| !s.is_empty());
+    let mut name: Option<String> = None;
+    let mut operator = false;
     let mut args = env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dev" => dev = true,
             "--spawn-host" => spawn_host = true,
+            "--operator" => operator = true,
             "--connect" => {
                 connect = Some(
                     args.next()
                         .unwrap_or_else(|| DEFAULT_HOST_ADDR.to_string()),
                 );
+            }
+            "--token" => {
+                token = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("--token requires SECRET");
+                    std::process::exit(2);
+                }));
+            }
+            "--name" => {
+                name = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("--name requires LABEL");
+                    std::process::exit(2);
+                }));
             }
             "-h" | "--help" => {
                 eprintln!(
@@ -271,7 +296,10 @@ fn parse_intent() -> LaunchIntent {
                      default: in-process Compact host\n\
                      --dev: tiny ring (in-process or with --spawn-host)\n\
                      --connect: TCP to existing wk-voxel-host (default {DEFAULT_HOST_ADDR})\n\
-                     --spawn-host: launch wk-voxel-host child + connect"
+                     --spawn-host: launch wk-voxel-host child + connect\n\
+                     --token SECRET: join/ops token (env WK_VOXEL_HOST_TOKEN)\n\
+                     --name LABEL: optional peer name\n\
+                     --operator: request Operator role (needs host --ops-token)"
                 );
                 std::process::exit(0);
             }
@@ -288,7 +316,18 @@ fn parse_intent() -> LaunchIntent {
     if spawn_host {
         LaunchIntent::Spawn { dev }
     } else if let Some(addr) = connect {
-        LaunchIntent::Connect(addr)
+        LaunchIntent::Connect {
+            addr,
+            opts: ConnectOpts {
+                token,
+                role_hint: if operator {
+                    PeerRole::Operator
+                } else {
+                    PeerRole::Viewer
+                },
+                client_name: name,
+            },
+        }
     } else {
         LaunchIntent::Local { dev }
     }

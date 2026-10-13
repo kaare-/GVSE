@@ -1,11 +1,11 @@
 # Phase 8 — Remote multiplayer + auth *(design note)*
 
-**Status:** design only (2026-10-13). Unlock implement after host ship
-([`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md), #449). Owner path:
+**Status:** implemented (2026-10-13). Owner path:
 **host ship → remote multiplayer/auth → operator client**.
 
-Do **not** land protocol code from this file until the acceptance table
-below is checked off in a follow-up PR that cites this note.
+Wire: `Hello` token / role + concurrent `serve_peer_shared` in
+`crates/wk-voxel-client` (`--token`, `--ops-token`, `--max-peers`,
+`--insecure`; viewer `--token` / `--name` / `--operator`).
 
 ## Intent
 
@@ -123,17 +123,17 @@ Single-player in-process and `--spawn-host` loopback remain unchanged
 
 ## Acceptance (implement PR must meet)
 
-- [ ] Design note merged (this file) before protocol code lands
-- [ ] Host with `--token` rejects Hello without / with wrong token
-- [ ] Loopback `--spawn-host` still works with no token configured
-- [ ] `--lan` without token fails closed unless `--insecure`
-- [ ] Two concurrent viewers, distinct cameras, same `sim_tick`
-- [ ] Viewer cannot `ResetWorld` / `SetSimSettings`; ops-token can
-- [ ] `Quit` from one peer does not drop others; world continues
-- [ ] Schema mismatch still clear-fails (existing behavior)
-- [ ] Tests: auth reject, two-peer camera smoke, role deny
-- [ ] Backlog / contract pointers updated; `COMMAND_SCHEMA` /
-      Hello versioning bumped only as needed
+- [x] Design note merged (this file) before protocol code lands
+- [x] Host with `--token` rejects Hello without / with wrong token
+- [x] Loopback `--spawn-host` still works with no token configured
+- [x] `--lan` without token fails closed unless `--insecure`
+- [x] Two concurrent viewers, distinct cameras, same `sim_tick`
+- [x] Viewer cannot `ResetWorld` / `SetSimSettings`; ops-token can
+- [x] `Quit` from one peer does not drop others; world continues
+- [x] Schema mismatch still clear-fails (existing behavior)
+- [x] Tests: auth reject, two-peer camera smoke, role deny (`tests/mp_auth.rs`)
+- [x] Backlog / contract pointers updated; Hello extended (no
+      `COMMAND_SCHEMA` bump — commands unchanged)
 
 ## Non-goals (explicit)
 

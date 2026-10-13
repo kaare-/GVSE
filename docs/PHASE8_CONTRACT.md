@@ -14,9 +14,8 @@ is a **viewer** (camera + limited commands); host owns sim.
 3. **Presentation may lag.** Client paints the latest **view frame**; it
    must not call into `tick` / `step_world` itself.
 4. **Single-player first.** In-process host+client remains the default.
-   Out-of-process localhost IPC is landed; remote multiplayer / auth is
-   designed in [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md) (implement
-   after that note).
+   Out-of-process IPC + remote multiplayer / auth landed
+   ([`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md)).
 
 ## Topology (spike → ship)
 
@@ -32,8 +31,8 @@ Default (in-process):
 
 Optional (OOP / ship host):
   wk-voxel-host  ←── TCP postcard (Hello/Cmd/Pull ↔ HelloAck/Frame) ──→  wk-voxel-client --connect
-  Default bind 127.0.0.1:17420. Host ship: one client + reconnect.
-  Multiplayer + token auth: see [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md).
+  Default bind 127.0.0.1:17420. Concurrent peers + token auth:
+  [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md).
 ```
 
 Dev path unchanged: `wk-voxel-app` (macroquad) may keep calling

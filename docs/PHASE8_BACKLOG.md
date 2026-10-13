@@ -25,6 +25,7 @@ applies.
 | 15 | Viewer UX polish | held-key diagonal pan; 20 Hz present; HUD + load screen |
 | 16 | Viewer fill | cover-scale strip (no letterbox bars) |
 | 17 | Host ship | reconnect loop; `--lan` / `--once` / `--seed`; runbook |
+| 18 | Multiplayer + auth | token Hello; N peers; Viewer/Operator roles |
 
 ## Soak / park gate (parity)
 
@@ -35,19 +36,17 @@ applies.
 ## Owner path (2026-10-13) — locked order
 
 1. **Host ship** — ✅ landed. See [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md).
-2. **Remote multiplayer + auth** — design note
-   [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md); implement only after
-   that note merges (token, N peers, viewer vs operator role).
+2. **Remote multiplayer + auth** — ✅ landed.
+   See [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md).
 3. **Operator client** — full tools + settings control against a live
-   host (circle back after multiplayer/auth).
+   host (next).
 
 Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Land **multiplayer/auth design note** ([`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md)),
-then implement against its acceptance table (no protocol code without
-the note).
+**Operator client** — full tool + settings UI on Operator role
+([`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md) After this).
 
 ## Pinned / later
 
@@ -64,6 +63,6 @@ the note).
 
 - Changing ship stack away from A
 - Spending money / renewing Apple membership early
-- Skipping multiplayer/auth design note to jump to implement
+- Skipping operator client to jump to packaging / Steam
 - Dropping macroquad soak harness
 - Large redirect outside this ordered path
