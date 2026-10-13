@@ -177,6 +177,8 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       (`VIEW_SCHEMA` 8 / `COMMAND_SCHEMA` 4).
 - [x] Broader Compact default view (720) + vertical pan `focus_y`
       (`VIEW_SCHEMA` 9 / `COMMAND_SCHEMA` 5); `[`/`]` view width.
+- [x] Viewer UX: held-key diagonal pan, firm ~20 Hz present, load
+      screen, quieter HUD (H toggles).
 - [ ] Owner Mac notarize — **pinned until 2026-11-15**.
 - [ ] Later: Steam storefront / IPC harden / MAS.
 
