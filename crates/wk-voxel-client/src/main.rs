@@ -540,10 +540,20 @@ impl SpikeApp {
                     }
                     ui.separator();
                     ui.label("present (host)");
-                    if ui
+                    let mut p_changed = false;
+                    p_changed |= ui
                         .checkbox(&mut draft_present.humidity_overlay, "humidity_overlay")
-                        .changed()
-                    {
+                        .changed();
+                    p_changed |= ui
+                        .checkbox(&mut draft_present.steam_overlay, "steam_overlay")
+                        .changed();
+                    p_changed |= ui
+                        .checkbox(
+                            &mut draft_present.cave_humidity_overlay,
+                            "cave_humidity_overlay",
+                        )
+                        .changed();
+                    if p_changed {
                         present_cmd = Some(draft_present.clone());
                     }
                     ui.separator();

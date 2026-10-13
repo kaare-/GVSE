@@ -100,10 +100,14 @@ around sea level + sky + palette/glitter). Unit tests use
 15. [x] **SetSimSettings** — `ViewFrame.sim` + viewer checkboxes
     (`COMMAND_SCHEMA` 3).
 16. [x] **HostInfo** — resident/parked chunk + organism crumbs.
-17. [x] **PresentHints** — humidity overlay on strip (`VIEW_SCHEMA` 7).
+17. [x] **PresentHints** — humidity / steam / caveH overlays on strip
+      (`VIEW_SCHEMA` 8).
 18. [x] **Parity note** — park=0 / TRACKED soaks stay macroquad/headless;
       A-client Compact stream is not the mass gate
       ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)).
+19. Phase 8 infra spike sufficient; default next =
+    Compact stream re-profile → ≥1 ms surgical win
+    ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)).
 
 ## Backlog (ordered)
 
