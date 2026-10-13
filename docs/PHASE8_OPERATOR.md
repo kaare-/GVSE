@@ -46,8 +46,13 @@ cargo run -p wk-voxel-client --release -- \
 - [x] Operator can Save/Load/Reset + sim dials (keys + buttons)
 - [x] Host role gate still rejects Viewer mutating cmds (`mp_auth`)
 
+## Paint (wedge 2)
+
+- `ClientCommand::PaintTerrain` (`COMMAND_SCHEMA` 6) — Operator only
+- F3 / checkbox toggles paint; brush + radius; click cover-scale strip
+- Palette mirrors macroquad F3 (Erase/Water/Ice/…/Bedrock)
+
 ## Later wedges
 
-- Paint / brush (`PaintTerrain`) + click mapping
 - Spawn organism / blueprint editor
 - Broader sim dials (steam, stream disk, perf) aligned with macroquad Tab
