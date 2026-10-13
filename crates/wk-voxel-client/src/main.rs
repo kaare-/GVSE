@@ -23,7 +23,7 @@ use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
     ClientCommand, Host, HostInfo, PresentHints, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT,
-    VIEW_SCHEMA,
+    MAX_VIEW_COLS, MIN_VIEW_COLS, VIEW_SCHEMA,
 };
 
 enum SimBridge {
@@ -41,6 +41,7 @@ fn empty_frame() -> ViewFrame {
         world_width_cols: 0,
         world_height: 0,
         focus_col: 0,
+        focus_y: 0,
         view_cols: 0,
         last_step_ms: 0,
         product_step: false,
@@ -126,11 +127,27 @@ impl SimBridge {
         }
     }
 
+    fn focus_y(&self) -> i32 {
+        match self {
+            Self::Local(h) => h.focus_y,
+            Self::Remote(r) => r.last().map(|f| f.focus_y).unwrap_or(0),
+            Self::Spawned(s) => s.remote.last().map(|f| f.focus_y).unwrap_or(0),
+        }
+    }
+
     fn view_cols(&self) -> i32 {
         match self {
             Self::Local(h) => h.view_cols,
             Self::Remote(r) => r.last().map(|f| f.view_cols).unwrap_or(96),
             Self::Spawned(s) => s.remote.last().map(|f| f.view_cols).unwrap_or(96),
+        }
+    }
+
+    fn set_camera(&self, focus_col: i32, view_cols: i32, focus_y: i32) -> ClientCommand {
+        ClientCommand::SetCamera {
+            focus_col,
+            view_cols: view_cols.clamp(MIN_VIEW_COLS, MAX_VIEW_COLS),
+            focus_y,
         }
     }
 
@@ -462,6 +479,7 @@ impl SpikeApp {
                     if let Some(tex) = &terrain_tex {
                         let tw = view.terrain.cols as f32;
                         let th = view.terrain.rows as f32;
+                        // Fill the panel; nearest-neighbor keeps the MS Paint look.
                         let scale = (avail.x / tw).min(avail.y / th).max(1.0);
                         let size = egui::vec2(tw * scale, th * scale);
                         ui.centered_and_justified(|ui| {
@@ -498,8 +516,8 @@ impl SpikeApp {
                         if view.product_step { "" } else { " (held)" }
                     ));
                     ui.label(format!(
-                        "paused {} · focus {} · view {}",
-                        view.paused, view.focus_col, view.view_cols
+                        "paused {} · focus {},{} · view {}",
+                        view.paused, view.focus_col, view.focus_y, view.view_cols
                     ));
                     ui.label(format!(
                         "world {}×{} · strip {}×{}{}",
@@ -581,7 +599,9 @@ impl SpikeApp {
                         present_cmd = Some(draft_present.clone());
                     }
                     ui.separator();
-                    ui.small("Space pause · N step · ←/→ pan · F5 save · F9 load · R reset · Esc quit");
+                    ui.small(
+                        "Space pause · N step · ←/→/↑/↓ pan · [/] view width · F5 save · F9 load · R reset · Esc quit",
+                    );
                     ui.small("client = viewer; host owns step_world + save/load + sim");
                 });
         });
@@ -707,16 +727,47 @@ impl ApplicationHandler for SpikeApp {
                         self.pending.push(ClientCommand::StepOnce);
                     }
                     PhysicalKey::Code(KeyCode::ArrowLeft) => {
-                        self.pending.push(ClientCommand::SetCamera {
-                            focus_col: self.bridge.focus_col().saturating_sub(8),
-                            view_cols: self.bridge.view_cols(),
-                        });
+                        self.pending.push(self.bridge.set_camera(
+                            self.bridge.focus_col().saturating_sub(16),
+                            self.bridge.view_cols(),
+                            self.bridge.focus_y(),
+                        ));
                     }
                     PhysicalKey::Code(KeyCode::ArrowRight) => {
-                        self.pending.push(ClientCommand::SetCamera {
-                            focus_col: self.bridge.focus_col().saturating_add(8),
-                            view_cols: self.bridge.view_cols(),
-                        });
+                        self.pending.push(self.bridge.set_camera(
+                            self.bridge.focus_col().saturating_add(16),
+                            self.bridge.view_cols(),
+                            self.bridge.focus_y(),
+                        ));
+                    }
+                    PhysicalKey::Code(KeyCode::ArrowUp) => {
+                        // World +y is up; strip origin follows focus_y.
+                        self.pending.push(self.bridge.set_camera(
+                            self.bridge.focus_col(),
+                            self.bridge.view_cols(),
+                            self.bridge.focus_y().saturating_add(24),
+                        ));
+                    }
+                    PhysicalKey::Code(KeyCode::ArrowDown) => {
+                        self.pending.push(self.bridge.set_camera(
+                            self.bridge.focus_col(),
+                            self.bridge.view_cols(),
+                            self.bridge.focus_y().saturating_sub(24),
+                        ));
+                    }
+                    PhysicalKey::Code(KeyCode::BracketRight) => {
+                        self.pending.push(self.bridge.set_camera(
+                            self.bridge.focus_col(),
+                            self.bridge.view_cols().saturating_add(80),
+                            self.bridge.focus_y(),
+                        ));
+                    }
+                    PhysicalKey::Code(KeyCode::BracketLeft) => {
+                        self.pending.push(self.bridge.set_camera(
+                            self.bridge.focus_col(),
+                            self.bridge.view_cols().saturating_sub(80),
+                            self.bridge.focus_y(),
+                        ));
                     }
                     PhysicalKey::Code(KeyCode::F5) => {
                         self.pending.push(ClientCommand::Save {
