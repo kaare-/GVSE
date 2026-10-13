@@ -25,8 +25,8 @@ rules.
 
 ## Open questions (owner)
 
-1. **Ship target first?** Steam desktop, Apple (Mac App Store / notarized
-   .app), or both? (Stack A supports either; packaging differs.)
+1. ~~**Ship target first?**~~ **Apple notarized `.app` first** (outside
+   MAS); Steam later. Scripts: [`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md).
 2. **Multiplayer now or later?** Default: single-player in-process first;
    netcode is a separate program of work ([`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)).
 
@@ -90,15 +90,19 @@ around sea level + sky + palette/glitter). Unit tests use
     `COMPACT_VIEW_COLS` (320) + park far chunks; extract ~view×384 band.
 11. [x] **Out-of-process host** — `wk-voxel-host` TCP + postcard IPC;
     viewer `--connect`; in-process remains default.
-12. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+12. [x] **Apple pack scripts** — `packaging/macos/*` +
+    [`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md); owner Mac runs
+    codesign/notarize.
+13. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host streams Compact, soak gate
       unchanged).
 
-## Owner next (after OOP host)
+## Owner next (after Apple pack scripts)
 
 | Pick | Notes |
 |------|--------|
-| **Ship packaging** | Steam / notarize A binary |
+| **Notarize on Mac** | Owner: `bundle.sh --sign` + `notarize.sh` with Dev ID |
+| **Steam depots** | After Apple smoke green |
 | **E2 / redirect** | Phase 5 leftover or other program |
 | **IPC harden** | multi-client, auth, delta strip — later |
 
@@ -128,4 +132,6 @@ the client, abandoning the macroquad soak viewer.
 7. Compact host: default stamp 4096×tropopause + stream/park; tests use
    `for_tests()`.
 8. OOP host: `wk-voxel-host` + viewer `--connect` (localhost postcard).
-9. Optional leftover: E2 tipped grey-log (Phase 5).
+9. Apple pack: notarized `.app` scripts first (not MAS); owner credentials
+   on Mac for real notarize.
+10. Optional leftover: E2 tipped grey-log (Phase 5).
