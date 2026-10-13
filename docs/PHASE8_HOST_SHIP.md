@@ -57,5 +57,5 @@ cargo run -p wk-voxel-client --release -- --connect <host-lan-ip>:17420
 
 ## After this
 
-Scope **remote multiplayer + auth** (design note first), then
-**operator client** with full tool/settings control.
+**Remote multiplayer + auth** — [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md),
+then **operator client** with full tool/settings control.

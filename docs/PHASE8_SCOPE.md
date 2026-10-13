@@ -109,7 +109,8 @@ around sea level + sky + palette/glitter). Unit tests use
 19. Phase 8 infra spike sufficient; Compact stream ~115 sim-FPS.
 20. **Owner path (2026-10-13):** host ship → remote multiplayer/auth
     → operator client ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md),
-    [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md)).
+    [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md),
+    [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md)).
 
 ## Backlog (ordered)
 
