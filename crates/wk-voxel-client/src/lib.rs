@@ -18,12 +18,13 @@ use wk_voxel::{
     sync_residency, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
     CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap,
     GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig,
-    SimSnapshot, SteamConfig, StreamWindow, SupportMap, Temperature, Wind, World, WorldStep,
-    WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
+    SimSnapshot, SteamConfig, StreamWindow, SupportMap, SyncResidencyStats, Temperature, Wind,
+    World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, STRATOSPHERE_CELLS,
+    TROPOSPHERE_TOP_Y,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
-pub const VIEW_SCHEMA: u32 = 5;
+pub const VIEW_SCHEMA: u32 = 6;
 /// Bump when [`ClientCommand`] enum breaks.
 pub const COMMAND_SCHEMA: u32 = 3;
 /// Default disk slot for F5 / F9.
@@ -95,6 +96,17 @@ impl Default for SimSettings {
     }
 }
 
+/// Lightweight host HUD crumbs (not a mass audit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HostInfo {
+    pub resident_chunks: u32,
+    pub parked_chunks: u32,
+    pub live_organisms: u32,
+    pub parked_organisms: u32,
+    pub last_evicted: u32,
+    pub last_reloaded: u32,
+}
+
 /// Camera-window extract for the viewer (not a durable `SimSnapshot`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewFrame {
@@ -110,6 +122,7 @@ pub struct ViewFrame {
     pub product_step: bool,
     pub sky: SkyPresent,
     pub sim: SimSettings,
+    pub host: HostInfo,
     pub terrain: TerrainStrip,
     pub command_acks: Vec<CommandAck>,
 }
@@ -184,6 +197,7 @@ pub struct Host {
     last_step_ms: u32,
     last_step_wall: Instant,
     product_step: bool,
+    last_residency: SyncResidencyStats,
 }
 
 /// Tiny ring for unit tests / fast CI (not Compact).
@@ -316,6 +330,7 @@ impl Host {
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
             product_step: true,
+            last_residency: SyncResidencyStats::default(),
         };
         // Compact stamp is full-width; park far chunks before the first frame.
         if compact {
@@ -553,7 +568,9 @@ impl Host {
         let t0 = Instant::now();
         self.arm_stream_window();
         // Park far chunks under the camera window (Compact RAM).
-        let _ = sync_residency(&mut self.world);
+        if let Ok(stats) = sync_residency(&mut self.world) {
+            self.last_residency = stats;
+        }
         let _ = step_world(
             WorldStep {
                 world: &mut self.world,
@@ -687,6 +704,15 @@ impl Host {
         let acks = std::mem::take(&mut self.pending_acks);
         let sky = self.sky_present();
         let terrain = self.extract_terrain(&sky);
+        let host = HostInfo {
+            resident_chunks: self.world.chunks.len() as u32,
+            parked_chunks: self.world.chunk_store.len() as u32,
+            live_organisms: (self.organisms.atoms.len() + self.organisms.corpses.len()) as u32,
+            parked_organisms: (self.organisms.parked.len() + self.organisms.parked_corpses.len())
+                as u32,
+            last_evicted: self.last_residency.evicted as u32,
+            last_reloaded: self.last_residency.reloaded as u32,
+        };
         ViewFrame {
             contract_version: VIEW_SCHEMA,
             sim_tick: self.world.tick,
@@ -699,6 +725,7 @@ impl Host {
             product_step: self.product_step,
             sky,
             sim: self.sim.clone(),
+            host,
             terrain,
             command_acks: acks,
         }
@@ -837,5 +864,14 @@ mod tests {
             ..s
         }));
         assert!(!bad.ok);
+    }
+
+    #[test]
+    fn host_info_reports_resident_chunks() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let frame = host.frame();
+        assert!(frame.host.resident_chunks > 0);
+        assert_eq!(frame.host.parked_chunks, 0);
     }
 }

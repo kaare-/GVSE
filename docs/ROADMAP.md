@@ -362,9 +362,10 @@ host `step_world` on Compact + stream/park, `VIEW_SCHEMA` 4; optional
 limited commands; host = sim. **Apple pack:** scripts in
 `packaging/macos/` ([`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md));
 **notarize pinned until 2026-11-15** (Dev membership). Host
-Save/Load/ResetWorld; `--spawn-host`; SetSimSettings (`VIEW_SCHEMA` 5 /
-`COMMAND_SCHEMA` 3). **Ordered backlog:** [`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md).
-Apple notarize pinned → 2026-11-15. Soak stays macroquad.
+Save/Load/ResetWorld; `--spawn-host`; SetSimSettings + HostInfo
+(`VIEW_SCHEMA` 6 / `COMMAND_SCHEMA` 3). **Ordered backlog:**
+[`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md). Apple notarize pinned →
+2026-11-15. Soak stays macroquad.
 
 ---
 
@@ -453,6 +454,7 @@ Apple notarize pinned → 2026-11-15. Soak stays macroquad.
 | 2026-10-13 | Phase 8 host cmds | Save/Load/ResetWorld (`COMMAND_SCHEMA` 2); F5/F9/R; IPC + in-process |
 | 2026-10-13 | Phase 8 spawn-host | Viewer `--spawn-host` launches `wk-voxel-host` child + connects |
 | 2026-10-13 | Phase 8 sim settings | SetSimSettings + ViewFrame.sim; PHASE8_BACKLOG ordered path |
+| 2026-10-13 | Phase 8 HostInfo | ViewFrame.host chunk/org residency crumbs (`VIEW_SCHEMA` 6) |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |

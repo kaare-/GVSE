@@ -16,15 +16,14 @@ applies.
 | 6 | Apple pack scripts | `packaging/macos/*` — **notarize pinned → 2026-11-15** |
 | 7 | Save/Load/Reset | `COMMAND_SCHEMA` 2→3 path |
 | 8 | `--spawn-host` | child host + connect |
-| 9 | SetSimSettings | `ViewFrame.sim`; viewer checkboxes (`VIEW_SCHEMA` 5) |
+| 9 | SetSimSettings | `ViewFrame.sim`; viewer checkboxes |
+| 10 | HostInfo crumbs | resident/parked chunks + org counts (`VIEW_SCHEMA` 6) |
 
 ## Agent default next (no owner pick needed)
 
-1. **HostInfo crumbs** — park/TRACKED / resident chunk count in
-   `ViewFrame` HUD (no new ownership).
-2. **Present parity gaps** — humidity/steam overlay toggles as
+1. **Present parity gaps** — humidity/steam overlay toggles as
    present-hints or client-local; keep mass on host.
-3. **Compact soak parity note** — keep park=0 gate on macroquad/
+2. **Compact soak parity note** — keep park=0 gate on macroquad/
    headless; optionally document A-client stream soak separately.
 
 ## Pinned / owner-only

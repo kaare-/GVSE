@@ -98,8 +98,10 @@ around sea level + sky + palette/glitter). Unit tests use
 14. [x] **`--spawn-host`** — viewer launches `wk-voxel-host` child
     (ephemeral port); HUD `spawn-host`.
 15. [x] **SetSimSettings** — `ViewFrame.sim` + viewer checkboxes
-    (`VIEW_SCHEMA` 5 / `COMMAND_SCHEMA` 3).
-16. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+    (`COMMAND_SCHEMA` 3).
+16. [x] **HostInfo** — resident/parked chunk + organism crumbs
+    (`VIEW_SCHEMA` 6).
+17. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host streams Compact, soak gate
       unchanged).
 

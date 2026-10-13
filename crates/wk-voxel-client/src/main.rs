@@ -21,7 +21,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
-    ClientCommand, Host, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT, VIEW_SCHEMA,
+    ClientCommand, Host, HostInfo, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT, VIEW_SCHEMA,
 };
 
 enum SimBridge {
@@ -52,6 +52,7 @@ fn empty_frame() -> ViewFrame {
             is_day: false,
         },
         sim: SimSettings::default(),
+        host: HostInfo::default(),
         terrain: wk_voxel_client::TerrainStrip {
             origin_col: 0,
             origin_y: 0,
@@ -475,6 +476,15 @@ impl SpikeApp {
                         } else {
                             ""
                         }
+                    ));
+                    ui.label(format!(
+                        "chunks {} live / {} park · org {} / {} · sync −{} +{}",
+                        view.host.resident_chunks,
+                        view.host.parked_chunks,
+                        view.host.live_organisms,
+                        view.host.parked_organisms,
+                        view.host.last_evicted,
+                        view.host.last_reloaded
                     ));
                     ui.label(format!(
                         "sky rgb({},{},{}) · {} · dn {} · season {}",

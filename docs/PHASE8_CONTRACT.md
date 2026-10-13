@@ -139,7 +139,7 @@ client should **split panels** so sim dials always go through commands.
 
 | Constant | Bump when |
 |----------|-----------|
-| `VIEW_SCHEMA` | ViewFrame field layout breaks (v5: `sim: SimSettings`) |
+| `VIEW_SCHEMA` | ViewFrame field layout breaks (v5 `sim`; v6 `host: HostInfo`) |
 | `COMMAND_SCHEMA` | ClientCommand enum breaks (v2 Save/Load/Reset; v3 SetSimSettings) |
 | `SIM_SCHEMA_VERSION` | unchanged role — durable save only (`save.rs`) |
 
@@ -171,8 +171,8 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       F5 / F9 / R; works in-process and over IPC.
 - [x] Viewer `--spawn-host` launches `wk-voxel-host` child (bind
       `127.0.0.1:0`, announce before stamp).
-- [x] `SetSimSettings` + `ViewFrame.sim` (`VIEW_SCHEMA` 5 /
-      `COMMAND_SCHEMA` 3).
+- [x] `SetSimSettings` + `ViewFrame.sim` (`COMMAND_SCHEMA` 3).
+- [x] `HostInfo` crumbs on `ViewFrame` (`VIEW_SCHEMA` 6).
 - [ ] Owner Mac notarize — **pinned until 2026-11-15**.
 - [ ] Later: Steam / IPC harden / MAS.
 
