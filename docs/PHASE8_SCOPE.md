@@ -93,7 +93,9 @@ around sea level + sky + palette/glitter). Unit tests use
 12. [x] **Apple pack scripts** — `packaging/macos/*` +
     [`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md); owner Mac runs
     codesign/notarize.
-13. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+13. [x] **Host durable cmds** — `Save` / `Load` / `ResetWorld`
+    (`COMMAND_SCHEMA` 2); F5 / F9 / R on viewer.
+14. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host streams Compact, soak gate
       unchanged).
 
@@ -101,9 +103,10 @@ around sea level + sky + palette/glitter). Unit tests use
 
 | Pick | Notes |
 |------|--------|
-| **Apple notarize** | **Pinned → 2026-11-15** (Dev membership expired). Scripts stay; no Mac notarize until then. |
-| **E2 / redirect** | Phase 5 leftover or other program — open now |
-| **Sim / present backlog** | Continue A client + host; soak stays macroquad |
+| **`--spawn-host`** | Viewer launches `wk-voxel-host` child + connects |
+| **SetSimSettings** | Climate / organisms dials through commands |
+| **Apple notarize** | **Pinned → 2026-11-15** (Dev membership expired) |
+| **E2 visual** | Tipped grey logs at 1× — owner eyes only |
 | **Steam depots** | After Apple smoke green (post-pin) |
 | **IPC harden** | multi-client, auth, delta strip — later |
 
@@ -137,4 +140,5 @@ the client, abandoning the macroquad soak viewer.
    on Mac for real notarize.
 10. **2026-10-13:** Apple notarize **pinned until 2026-11-15** (membership
     expired / cost). Resume then; do not block other wedges.
-11. Optional leftover: E2 tipped grey-log (Phase 5).
+11. Host Save/Load/ResetWorld + viewer keys (`COMMAND_SCHEMA` 2).
+12. Optional leftover: E2 tipped grey-log (Phase 5).

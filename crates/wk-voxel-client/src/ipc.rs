@@ -287,4 +287,50 @@ mod tests {
         let _ = remote.pull();
         server.join().unwrap();
     }
+
+    #[test]
+    fn tcp_save_load_reset_over_ipc() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let slot = format!("ipc_test_{}", std::process::id());
+        let slot_for_server = slot.clone();
+        let server = thread::spawn(move || {
+            let mut host = Host::for_tests();
+            let (stream, _) = listener.accept().unwrap();
+            let _ = serve_client(stream, &mut host);
+            let _ = std::fs::remove_file(wk_voxel::SimSnapshot::save_path(&slot_for_server));
+        });
+
+        let mut remote = RemoteHost::connect(addr).unwrap();
+        remote
+            .apply_all([
+                ClientCommand::SetPaused(true),
+                ClientCommand::StepOnce,
+                ClientCommand::StepOnce,
+            ])
+            .unwrap();
+        let t = remote.pull().unwrap().sim_tick;
+        remote
+            .apply_all([ClientCommand::Save { slot: slot.clone() }])
+            .unwrap();
+        let ack_frame = remote.pull().unwrap();
+        assert!(
+            ack_frame.command_acks.iter().any(|a| a.ok && a.detail.contains("saved")),
+            "{:?}",
+            ack_frame.command_acks
+        );
+        remote
+            .apply_all([ClientCommand::ResetWorld { seed: Some(1) }])
+            .unwrap();
+        assert_eq!(remote.pull().unwrap().sim_tick, 0);
+        remote
+            .apply_all([ClientCommand::Load { slot: slot.clone() }])
+            .unwrap();
+        let loaded = remote.pull().unwrap();
+        assert_eq!(loaded.sim_tick, t);
+        remote.apply_all([ClientCommand::Quit]).unwrap();
+        let _ = remote.pull();
+        server.join().unwrap();
+        let _ = std::fs::remove_file(wk_voxel::SimSnapshot::save_path(&slot));
+    }
 }

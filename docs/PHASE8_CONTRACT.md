@@ -140,7 +140,7 @@ client should **split panels** so sim dials always go through commands.
 | Constant | Bump when |
 |----------|-----------|
 | `VIEW_SCHEMA` | ViewFrame field layout breaks |
-| `COMMAND_SCHEMA` | ClientCommand enum breaks |
+| `COMMAND_SCHEMA` | ClientCommand enum breaks (v2: Save/Load/ResetWorld) |
 | `SIM_SCHEMA_VERSION` | unchanged role — durable save only (`save.rs`) |
 
 Spike may hard-code v1 and reject mismatches with a clear HUD string.
@@ -167,8 +167,10 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       `--connect HOST:PORT` (in-process still default).
 - [x] Apple packaging scripts (Developer ID + notarize runbook);
       [`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md).
+- [x] Host `Save` / `Load` / `ResetWorld` (`COMMAND_SCHEMA` 2); viewer
+      F5 / F9 / R; works in-process and over IPC.
 - [ ] Owner Mac notarize — **pinned until 2026-11-15**.
-- [ ] Later: Steam / IPC harden / MAS.
+- [ ] Later: `--spawn-host`, SetSimSettings, Steam / IPC harden / MAS.
 
 ## Non-goals
 
@@ -196,5 +198,6 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 6. [x] Compact-sized in-process host + stream residency.
 7. [x] Out-of-process host binary + localhost IPC.
 8. [x] Apple notarize scripts + owner Mac runbook.
-9. Steam / IPC harden / MAS when ready.
-10. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+9. [x] Host save/load/reset commands (`COMMAND_SCHEMA` 2).
+10. Viewer `--spawn-host` / SetSimSettings / Steam when ready.
+11. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
