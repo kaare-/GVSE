@@ -2964,6 +2964,8 @@ dependencies = [
  "jobserver",
  "log",
  "pollster",
+ "postcard",
+ "serde",
  "unicode-segmentation",
  "url",
  "wayland-backend",

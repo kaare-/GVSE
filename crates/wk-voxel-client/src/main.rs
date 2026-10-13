@@ -1,8 +1,12 @@
-//! Phase 8 A client: egui + wgpu / winit over an in-process [`Host`].
+//! Phase 8 A client: egui + wgpu / winit over in-process or IPC host.
 //!
-//! Terrain strip from the host is shown as an egui `ColorImage` (wgpu-backed).
-//! Sky / glitter / full palette parity are later wedges.
+//! ```text
+//! wk-voxel-client                         # in-process Compact
+//! wk-voxel-client --dev                   # in-process tiny ring
+//! wk-voxel-client --connect 127.0.0.1:17420
+//! ```
 
+use std::env;
 use std::sync::Arc;
 
 use egui_wgpu::wgpu;
@@ -13,16 +17,157 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+use wk_voxel_client::ipc::{RemoteHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{ClientCommand, Host, ViewFrame, VIEW_SCHEMA};
+
+enum SimBridge {
+    Local(Host),
+    Remote(RemoteHost),
+}
+
+impl SimBridge {
+    fn apply_all(&mut self, cmds: Vec<ClientCommand>) {
+        match self {
+            Self::Local(h) => h.apply_all(cmds),
+            Self::Remote(r) => {
+                if let Err(e) = r.apply_all(cmds) {
+                    log::error!("remote apply: {e}");
+                }
+            }
+        }
+    }
+
+    fn frame(&mut self) -> ViewFrame {
+        match self {
+            Self::Local(h) => h.frame(),
+            Self::Remote(r) => match r.pull() {
+                Ok(f) => f,
+                Err(e) => {
+                    log::error!("remote pull: {e}");
+                    r.last().cloned().unwrap_or_else(|| ViewFrame {
+                        contract_version: VIEW_SCHEMA,
+                        sim_tick: 0,
+                        paused: true,
+                        world_width_cols: 0,
+                        world_height: 0,
+                        focus_col: 0,
+                        view_cols: 0,
+                        last_step_ms: 0,
+                        product_step: false,
+                        sky: wk_voxel_client::SkyPresent {
+                            sky_rgb: [40, 40, 48],
+                            day_night_u8: 0,
+                            phase_u8: 0,
+                            celestial_local_u8: 0,
+                            moon_phase_u8: 0,
+                            season_u8: 0,
+                            is_day: false,
+                        },
+                        terrain: wk_voxel_client::TerrainStrip {
+                            origin_col: 0,
+                            origin_y: 0,
+                            cols: 0,
+                            rows: 0,
+                            rgba: Vec::new(),
+                        },
+                        command_acks: Vec::new(),
+                    })
+                }
+            },
+        }
+    }
+
+    fn quit_requested(&self) -> bool {
+        match self {
+            Self::Local(h) => h.quit_requested,
+            Self::Remote(r) => r.quit_requested(),
+        }
+    }
+
+    fn paused(&self) -> bool {
+        match self {
+            Self::Local(h) => h.paused,
+            Self::Remote(r) => r.last().map(|f| f.paused).unwrap_or(false),
+        }
+    }
+
+    fn focus_col(&self) -> i32 {
+        match self {
+            Self::Local(h) => h.focus_col,
+            Self::Remote(r) => r.last().map(|f| f.focus_col).unwrap_or(0),
+        }
+    }
+
+    fn view_cols(&self) -> i32 {
+        match self {
+            Self::Local(h) => h.view_cols,
+            Self::Remote(r) => r.last().map(|f| f.view_cols).unwrap_or(96),
+        }
+    }
+
+    fn mode_label(&self) -> &'static str {
+        match self {
+            Self::Local(_) => "in-process",
+            Self::Remote(_) => "IPC",
+        }
+    }
+}
+
+fn parse_args() -> SimBridge {
+    let mut connect: Option<String> = None;
+    let mut dev = false;
+    let mut args = env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--dev" => dev = true,
+            "--connect" => {
+                connect = Some(
+                    args.next()
+                        .unwrap_or_else(|| DEFAULT_HOST_ADDR.to_string()),
+                );
+            }
+            "-h" | "--help" => {
+                eprintln!(
+                    "wk-voxel-client [--dev] [--connect HOST:PORT]\n\
+                     default: in-process Compact host\n\
+                     --dev: tiny in-process ring\n\
+                     --connect: TCP to wk-voxel-host (default {DEFAULT_HOST_ADDR})"
+                );
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("unknown arg: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if let Some(addr) = connect {
+        log::info!("connecting to host at {addr}");
+        match RemoteHost::connect(&*addr) {
+            Ok(r) => SimBridge::Remote(r),
+            Err(e) => {
+                eprintln!("connect {addr}: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else if dev {
+        log::info!("in-process Host::for_tests()");
+        SimBridge::Local(Host::for_tests())
+    } else {
+        log::info!("in-process Compact Host::default()");
+        SimBridge::Local(Host::default())
+    }
+}
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
+    let bridge = parse_args();
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = SpikeApp {
-        host: Host::default(),
+        bridge,
         view: None,
         window: None,
         gpu: None,
@@ -44,7 +189,7 @@ struct GpuState {
 }
 
 struct SpikeApp {
-    host: Host,
+    bridge: SimBridge,
     view: Option<ViewFrame>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
@@ -60,11 +205,15 @@ impl SpikeApp {
         if self.gpu.is_some() {
             return;
         }
+        let title = format!(
+            "wk-voxel-client (viewer · Phase 8 A · {})",
+            self.bridge.mode_label()
+        );
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("wk-voxel-client (viewer · Phase 8 A)")
+                        .with_title(title)
                         .with_inner_size(LogicalSize::new(1100.0, 640.0)),
                 )
                 .expect("window"),
@@ -150,8 +299,8 @@ impl SpikeApp {
 
     fn pump_host(&mut self) {
         let cmds = std::mem::take(&mut self.pending);
-        self.host.apply_all(cmds);
-        self.view = Some(self.host.frame());
+        self.bridge.apply_all(cmds);
+        self.view = Some(self.bridge.frame());
     }
 
     fn upload_terrain(&mut self, view: &ViewFrame) {
@@ -176,14 +325,17 @@ impl SpikeApp {
     }
 
     fn render(&mut self) {
-        if self.host.quit_requested {
+        if self.bridge.quit_requested() {
             return;
         }
         let Some(window) = self.window.clone() else {
             return;
         };
 
-        let view = self.view.clone().unwrap_or_else(|| self.host.frame());
+        let view = self
+            .view
+            .clone()
+            .unwrap_or_else(|| self.bridge.frame());
         if !view.schema_ok() {
             log::error!(
                 "ViewFrame schema mismatch: got {} want {}",
@@ -203,6 +355,7 @@ impl SpikeApp {
             return;
         };
 
+        let mode = self.bridge.mode_label();
         let raw_input = egui_state.take_egui_input(&window);
         let terrain_tex = self.terrain_tex.clone();
         let sky = view.sky.sky_rgb;
@@ -223,7 +376,6 @@ impl SpikeApp {
                         });
                     }
 
-                    // Simple sun/moon marker along the top of the strip.
                     let local = view.sky.celestial_local_u8 as f32 / 255.0;
                     let body_x = avail.x * (0.12 + 0.76 * local);
                     let body_y = avail.y * 0.12;
@@ -245,7 +397,7 @@ impl SpikeApp {
                 .default_pos([12.0, 12.0])
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label(format!("VIEW_SCHEMA {}", view.contract_version));
+                    ui.label(format!("VIEW_SCHEMA {} · {mode}", view.contract_version));
                     ui.label(format!(
                         "sim_tick {} · step_world {} ms{}",
                         view.sim_tick,
@@ -384,21 +536,21 @@ impl ApplicationHandler for SpikeApp {
                     }
                     PhysicalKey::Code(KeyCode::Space) => {
                         self.pending
-                            .push(ClientCommand::SetPaused(!self.host.paused));
+                            .push(ClientCommand::SetPaused(!self.bridge.paused()));
                     }
                     PhysicalKey::Code(KeyCode::KeyN) => {
                         self.pending.push(ClientCommand::StepOnce);
                     }
                     PhysicalKey::Code(KeyCode::ArrowLeft) => {
                         self.pending.push(ClientCommand::SetCamera {
-                            focus_col: self.host.focus_col.saturating_sub(8),
-                            view_cols: self.host.view_cols,
+                            focus_col: self.bridge.focus_col().saturating_sub(8),
+                            view_cols: self.bridge.view_cols(),
                         });
                     }
                     PhysicalKey::Code(KeyCode::ArrowRight) => {
                         self.pending.push(ClientCommand::SetCamera {
-                            focus_col: self.host.focus_col.saturating_add(8),
-                            view_cols: self.host.view_cols,
+                            focus_col: self.bridge.focus_col().saturating_add(8),
+                            view_cols: self.bridge.view_cols(),
                         });
                     }
                     _ => {}
@@ -406,7 +558,7 @@ impl ApplicationHandler for SpikeApp {
             }
             WindowEvent::RedrawRequested => {
                 self.pump_host();
-                if self.host.quit_requested {
+                if self.bridge.quit_requested() {
                     event_loop.exit();
                     return;
                 }

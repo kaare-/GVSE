@@ -88,17 +88,19 @@ around sea level + sky + palette/glitter). Unit tests use
 9. [x] **Grow host** — `step_world` + climate fields; present throttled.
 10. [x] **Compact host** — default `Host` stamps Compact; stream
     `COMPACT_VIEW_COLS` (320) + park far chunks; extract ~view×384 band.
-11. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+11. [x] **Out-of-process host** — `wk-voxel-host` TCP + postcard IPC;
+    viewer `--connect`; in-process remains default.
+12. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host streams Compact, soak gate
       unchanged).
 
-## Owner next (after Compact host)
+## Owner next (after OOP host)
 
 | Pick | Notes |
 |------|--------|
 | **Ship packaging** | Steam / notarize A binary |
-| **Out-of-process host** | Split host binary; same ViewFrame / commands |
 | **E2 / redirect** | Phase 5 leftover or other program |
+| **IPC harden** | multi-client, auth, delta strip — later |
 
 ## Acceptance (proposed)
 
@@ -125,4 +127,5 @@ the client, abandoning the macroquad soak viewer.
 6. Grow-host (`step_world`) landed (#432). Soak stays macroquad.
 7. Compact host: default stamp 4096×tropopause + stream/park; tests use
    `for_tests()`.
-8. Optional leftover: E2 tipped grey-log (Phase 5).
+8. OOP host: `wk-voxel-host` + viewer `--connect` (localhost postcard).
+9. Optional leftover: E2 tipped grey-log (Phase 5).

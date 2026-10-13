@@ -1,12 +1,15 @@
-//! Phase 8 ship-client contract types + in-process **sim host**.
+//! Phase 8 ship-client contract types + in-process / IPC **sim host**.
 //!
-//! The binary is a **viewer**: camera, HUD, limited [`ClientCommand`]s.
-//! Host owns [`step_world`] + terrain extract. See
+//! Viewer binaries paint [`ViewFrame`]; host owns [`step_world`].
+//! Out-of-process: [`ipc`] over localhost TCP. See
 //! [`docs/PHASE8_CONTRACT.md`](../../docs/PHASE8_CONTRACT.md).
 
 mod present;
+pub mod ipc;
 
 use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
 
 use wk_voxel::{
     apply_season_sky_tint, celestial_local_cfg, climate_with_season, day_night_factor_cfg,
@@ -32,7 +35,7 @@ pub const DEFAULT_STEP_PERIOD_MS: u64 = 50;
 pub const COMPACT_VIEW_COLS: i32 = 320;
 
 /// Camera-window RGBA strip (row-major, y=0 at top / high world-y).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerrainStrip {
     pub origin_col: i32,
     pub origin_y: i32,
@@ -49,7 +52,7 @@ impl TerrainStrip {
 }
 
 /// Host-authored sky / climate presentation (packed for `Eq`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkyPresent {
     pub sky_rgb: [u8; 3],
     pub day_night_u8: u8,
@@ -67,7 +70,7 @@ impl SkyPresent {
 }
 
 /// Camera-window extract for the viewer (not a durable `SimSnapshot`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewFrame {
     pub contract_version: u32,
     pub sim_tick: u64,
@@ -90,7 +93,7 @@ impl ViewFrame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandAck {
     pub id: u64,
     pub ok: bool,
@@ -98,7 +101,7 @@ pub struct CommandAck {
 }
 
 /// Viewer → host. Host drains between steps; never mid-step.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientCommand {
     /// Pan / zoom the camera window (viewer owns UX; host owns residency).
     SetCamera { focus_col: i32, view_cols: i32 },

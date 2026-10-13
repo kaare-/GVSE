@@ -3,11 +3,13 @@ name = "wk-voxel-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Phase 8 ship-client spike: egui + wgpu / winit over an in-process host"
+description = "Phase 8 ship-client spike: egui + wgpu / winit viewer + in-process / IPC host"
 
 [dependencies]
 wk-voxel = { path = "../wk-voxel" }
 wk-material = { path = "../wk-material" }
+serde = { workspace = true }
+postcard = { workspace = true }
 
 # Presentation stack (pinned for rustc 1.83 — see PHASE8_CONTRACT.md).
 winit = { workspace = true }
@@ -39,6 +41,10 @@ cc = { workspace = true }
 [[bin]]
 name = "wk-voxel-client"
 path = "src/main.rs"
+
+[[bin]]
+name = "wk-voxel-host"
+path = "src/bin/wk-voxel-host.rs"
 
 [lib]
 name = "wk_voxel_client"
