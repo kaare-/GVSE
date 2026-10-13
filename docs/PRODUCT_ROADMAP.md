@@ -21,22 +21,25 @@ stay the agent execution lists.
 ## Pillars
 
 ```text
-┌─────────────────┐     allowlist cmds      ┌──────────────────┐
-│ Design studio   │ ──────────────────────► │ World server(s)  │
-│ (total freedom) │   validated blueprints  │ region = max size│
-└─────────────────┘                         │ shard + halo later│
-                                            └────────┬─────────┘
-┌─────────────────┐     limited interact     │
-│ Player client   │ ◄── ViewFrame / auth ────┤
-│ (viewer+)       │                          │
-└─────────────────┘                          │
-┌─────────────────┐     full ops tools       │
-│ Operator client │ ◄────────────────────────┘
-│ (fine-tune)     │
-└─────────────────┘
+                    ┌─────────────────────────────────────────┐
+  blueprints        │  Lab — offline local universe             │
+ ──────────────►    │  size = what your machine allows          │
+ Design studio      └─────────────────────────────────────────┘
+ (total freedom)                      │ optional export / migrate
+                    ┌─────────────────▼───────────────────────┐
+                    │  Shadow — player-hosted shards            │
+                    │  dynamically linked at edges (halo)       │
+                    │  your power / uplink; we help connect     │
+                    └─────────────────┬───────────────────────┘
+                                      │ optional "release to wild"
+                    ┌─────────────────▼───────────────────────┐
+                    │  Wild — official world server (sub)       │
+                    │  see what creatures do in the real mesh   │
+                    └─────────────────────────────────────────┘
 
-Ship surface: menus · brand · visual language · Steam / App Store
-Ops / legal:  hosting · security · GDPR · accounts · support
+Player client: Glance / Presence · allowlist by tier
+Operator: fine-tune Wild (and owned Lab/Shadow hosts)
+Ship / legal: menus · brand · Steam · GDPR on official path
 ```
 
 ### 1. Biology / sim depth
