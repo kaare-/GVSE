@@ -146,8 +146,8 @@ Single-player in-process and `--spawn-host` loopback remain unchanged
 
 ## After this
 
-**Operator client** — dedicated UI with full tool + settings control,
-using the Operator role from this wedge ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)).
+**Operator client** — [`PHASE8_OPERATOR.md`](PHASE8_OPERATOR.md) (wedge 1
+landed: role-aware UI). Paint/spawn follow.
 
 ## Open only if implement hits a wall
 

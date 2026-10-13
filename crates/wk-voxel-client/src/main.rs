@@ -210,6 +210,18 @@ impl SimBridge {
         }
     }
 
+    fn role(&self) -> PeerRole {
+        match self {
+            Self::Local(_) => PeerRole::Operator,
+            Self::Remote { remote, .. } => remote.role,
+            Self::Spawned(s) => s.remote.role,
+        }
+    }
+
+    fn is_operator(&self) -> bool {
+        matches!(self.role(), PeerRole::Operator)
+    }
+
     fn paused(&self) -> bool {
         match self {
             Self::Local(h) => h.paused,
@@ -380,6 +392,7 @@ fn main() {
         draft_sim_ready: false,
         draft_present: PresentHints::default(),
         draft_present_ready: false,
+        draft_slot: DEFAULT_SAVE_SLOT.into(),
         held: HeldPan::default(),
         hud_open: true,
         load_started: Instant::now(),
@@ -410,6 +423,7 @@ struct SpikeApp {
     draft_sim_ready: bool,
     draft_present: PresentHints,
     draft_present_ready: bool,
+    draft_slot: String,
     held: HeldPan,
     hud_open: bool,
     load_started: Instant,
@@ -814,6 +828,30 @@ impl SpikeApp {
         }
         self.upload_terrain(&view);
 
+        if !self.draft_sim_ready {
+            self.draft_sim = view.sim.clone();
+            self.draft_sim_ready = true;
+        }
+        if !self.draft_present_ready {
+            self.draft_present = view.present.clone();
+            self.draft_present_ready = true;
+        }
+        let is_operator = self
+            .bridge()
+            .map(|b| b.is_operator())
+            .unwrap_or(true);
+        let role = self
+            .bridge()
+            .map(|b| b.role())
+            .unwrap_or(PeerRole::Operator);
+        let mut draft = self.draft_sim.clone();
+        let mut draft_present = self.draft_present.clone();
+        let mut draft_slot = self.draft_slot.clone();
+        let mut settings_cmd = None;
+        let mut present_cmd = None;
+        let mut op_cmd: Option<ClientCommand> = None;
+        let mut hud_open = self.hud_open;
+
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -823,20 +861,6 @@ impl SpikeApp {
         let Some(egui_renderer) = self.egui_renderer.as_mut() else {
             return;
         };
-
-        if !self.draft_sim_ready {
-            self.draft_sim = view.sim.clone();
-            self.draft_sim_ready = true;
-        }
-        if !self.draft_present_ready {
-            self.draft_present = view.present.clone();
-            self.draft_present_ready = true;
-        }
-        let mut draft = self.draft_sim.clone();
-        let mut draft_present = self.draft_present.clone();
-        let mut settings_cmd = None;
-        let mut present_cmd = None;
-        let mut hud_open = self.hud_open;
         let raw_input = egui_state.take_egui_input(&window);
         let terrain_tex = self.terrain_tex.clone();
         let sky = view.sky.sky_rgb;
@@ -911,8 +935,9 @@ impl SpikeApp {
                     );
                     ui.label(
                         egui::RichText::new(format!(
-                            "{} · focus {},{} · view {}",
+                            "{} · {:?} · focus {},{} · view {}",
                             if view.paused { "paused" } else { "running" },
+                            role,
                             view.focus_col,
                             view.focus_y,
                             view.view_cols
@@ -951,34 +976,75 @@ impl SpikeApp {
                             }
                         });
 
-                    egui::CollapsingHeader::new("sim")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            let mut changed = false;
-                            changed |= ui.checkbox(&mut draft.organisms_on, "organisms").changed();
-                            changed |= ui.checkbox(&mut draft.evap_on, "evaporation").changed();
-                            changed |= ui.checkbox(&mut draft.cond_rain_on, "rain").changed();
-                            changed |= ui.checkbox(&mut draft.karst_on, "karst").changed();
-                            ui.horizontal(|ui| {
-                                ui.label("day");
-                                changed |= ui
-                                    .add(
-                                        egui::DragValue::new(&mut draft.day_ticks)
-                                            .range(1..=10_000u64),
-                                    )
-                                    .changed();
-                                ui.label("night");
-                                changed |= ui
-                                    .add(
-                                        egui::DragValue::new(&mut draft.night_ticks)
-                                            .range(1..=10_000u64),
-                                    )
-                                    .changed();
+                    if is_operator {
+                        egui::CollapsingHeader::new("sim")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                let mut changed = false;
+                                changed |=
+                                    ui.checkbox(&mut draft.organisms_on, "organisms").changed();
+                                changed |=
+                                    ui.checkbox(&mut draft.evap_on, "evaporation").changed();
+                                changed |=
+                                    ui.checkbox(&mut draft.cond_rain_on, "rain").changed();
+                                changed |= ui.checkbox(&mut draft.karst_on, "karst").changed();
+                                ui.horizontal(|ui| {
+                                    ui.label("day");
+                                    changed |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut draft.day_ticks)
+                                                .range(1..=10_000u64),
+                                        )
+                                        .changed();
+                                    ui.label("night");
+                                    changed |= ui
+                                        .add(
+                                            egui::DragValue::new(&mut draft.night_ticks)
+                                                .range(1..=10_000u64),
+                                        )
+                                        .changed();
+                                });
+                                if changed {
+                                    settings_cmd = Some(draft.clone());
+                                }
                             });
-                            if changed {
-                                settings_cmd = Some(draft.clone());
-                            }
-                        });
+
+                        egui::CollapsingHeader::new("operator")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("slot");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut draft_slot)
+                                            .desired_width(80.0),
+                                    );
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Save").clicked() {
+                                        let slot = draft_slot.trim().to_string();
+                                        if !slot.is_empty() {
+                                            op_cmd = Some(ClientCommand::Save { slot });
+                                        }
+                                    }
+                                    if ui.button("Load").clicked() {
+                                        let slot = draft_slot.trim().to_string();
+                                        if !slot.is_empty() {
+                                            op_cmd = Some(ClientCommand::Load { slot });
+                                        }
+                                    }
+                                    if ui.button("Reset").clicked() {
+                                        op_cmd =
+                                            Some(ClientCommand::ResetWorld { seed: None });
+                                    }
+                                });
+                            });
+                    } else {
+                        ui.label(
+                            egui::RichText::new("viewer — sim / save gated (need --operator)")
+                                .small()
+                                .color(egui::Color32::from_rgb(160, 140, 110)),
+                        );
+                    }
 
                     egui::CollapsingHeader::new("overlays")
                         .default_open(false)
@@ -999,12 +1065,15 @@ impl SpikeApp {
                         });
 
                     ui.add_space(4.0);
+                    let hints = if is_operator {
+                        "arrows pan · [ ] width · Space pause · N step · F5/F9 · R · Esc · H hud"
+                    } else {
+                        "arrows pan · [ ] width · Space pause · N step · Esc · H hud"
+                    };
                     ui.label(
-                        egui::RichText::new(
-                            "arrows pan · [ ] width · Space pause · N step · F5/F9 · R · Esc · H hud",
-                        )
-                        .small()
-                        .color(egui::Color32::from_rgb(110, 125, 140)),
+                        egui::RichText::new(hints)
+                            .small()
+                            .color(egui::Color32::from_rgb(110, 125, 140)),
                     );
                 });
         });
@@ -1012,11 +1081,17 @@ impl SpikeApp {
         self.hud_open = hud_open;
         self.draft_sim = draft;
         self.draft_present = draft_present;
+        self.draft_slot = draft_slot;
         if let Some(s) = settings_cmd {
-            self.pending.push(ClientCommand::SetSimSettings(s));
+            if is_operator {
+                self.pending.push(ClientCommand::SetSimSettings(s));
+            }
         }
         if let Some(p) = present_cmd {
             self.pending.push(ClientCommand::SetPresentHints(p));
+        }
+        if let Some(c) = op_cmd {
+            self.pending.push(c);
         }
 
         egui_state.handle_platform_output(&window, egui_output.platform_output);
@@ -1176,18 +1251,32 @@ impl ApplicationHandler for SpikeApp {
                         }
                     }
                     PhysicalKey::Code(KeyCode::F5) => {
-                        self.pending.push(ClientCommand::Save {
-                            slot: DEFAULT_SAVE_SLOT.into(),
-                        });
+                        if self.bridge().map(|b| b.is_operator()).unwrap_or(false) {
+                            let slot = self.draft_slot.trim().to_string();
+                            let slot = if slot.is_empty() {
+                                DEFAULT_SAVE_SLOT.into()
+                            } else {
+                                slot
+                            };
+                            self.pending.push(ClientCommand::Save { slot });
+                        }
                     }
                     PhysicalKey::Code(KeyCode::F9) => {
-                        self.pending.push(ClientCommand::Load {
-                            slot: DEFAULT_SAVE_SLOT.into(),
-                        });
+                        if self.bridge().map(|b| b.is_operator()).unwrap_or(false) {
+                            let slot = self.draft_slot.trim().to_string();
+                            let slot = if slot.is_empty() {
+                                DEFAULT_SAVE_SLOT.into()
+                            } else {
+                                slot
+                            };
+                            self.pending.push(ClientCommand::Load { slot });
+                        }
                     }
                     PhysicalKey::Code(KeyCode::KeyR) => {
-                        self.pending
-                            .push(ClientCommand::ResetWorld { seed: None });
+                        if self.bridge().map(|b| b.is_operator()).unwrap_or(false) {
+                            self.pending
+                                .push(ClientCommand::ResetWorld { seed: None });
+                        }
                     }
                     _ => {}
                 }

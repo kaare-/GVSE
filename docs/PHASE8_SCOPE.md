@@ -110,7 +110,8 @@ around sea level + sky + palette/glitter). Unit tests use
 20. **Owner path (2026-10-13):** host ship → remote multiplayer/auth
     → operator client ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md),
     [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md),
-    [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md)).
+    [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md),
+    [`PHASE8_OPERATOR.md`](PHASE8_OPERATOR.md)).
 
 ## Backlog (ordered)
 
