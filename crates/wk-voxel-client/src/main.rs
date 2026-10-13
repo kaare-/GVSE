@@ -21,7 +21,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
-    ClientCommand, Host, HostInfo, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT, VIEW_SCHEMA,
+    ClientCommand, Host, HostInfo, PresentHints, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT,
+    VIEW_SCHEMA,
 };
 
 enum SimBridge {
@@ -53,6 +54,7 @@ fn empty_frame() -> ViewFrame {
         },
         sim: SimSettings::default(),
         host: HostInfo::default(),
+        present: PresentHints::default(),
         terrain: wk_voxel_client::TerrainStrip {
             origin_col: 0,
             origin_y: 0,
@@ -224,6 +226,8 @@ fn main() {
         terrain_tex: None,
         draft_sim: SimSettings::default(),
         draft_sim_ready: false,
+        draft_present: PresentHints::default(),
+        draft_present_ready: false,
     };
 
     event_loop.run_app(&mut app).expect("run");
@@ -249,6 +253,8 @@ struct SpikeApp {
     /// Local edit buffer; flushed to host via [`ClientCommand::SetSimSettings`].
     draft_sim: SimSettings,
     draft_sim_ready: bool,
+    draft_present: PresentHints,
+    draft_present_ready: bool,
 }
 
 impl SpikeApp {
@@ -411,8 +417,14 @@ impl SpikeApp {
             self.draft_sim = view.sim.clone();
             self.draft_sim_ready = true;
         }
+        if !self.draft_present_ready {
+            self.draft_present = view.present.clone();
+            self.draft_present_ready = true;
+        }
         let mut draft = self.draft_sim.clone();
+        let mut draft_present = self.draft_present.clone();
         let mut settings_cmd = None;
+        let mut present_cmd = None;
         let raw_input = egui_state.take_egui_input(&window);
         let terrain_tex = self.terrain_tex.clone();
         let sky = view.sky.sky_rgb;
@@ -527,14 +539,26 @@ impl SpikeApp {
                         settings_cmd = Some(draft.clone());
                     }
                     ui.separator();
+                    ui.label("present (host)");
+                    if ui
+                        .checkbox(&mut draft_present.humidity_overlay, "humidity_overlay")
+                        .changed()
+                    {
+                        present_cmd = Some(draft_present.clone());
+                    }
+                    ui.separator();
                     ui.small("Space pause · N step · ←/→ pan · F5 save · F9 load · R reset · Esc quit");
                     ui.small("client = viewer; host owns step_world + save/load + sim");
                 });
         });
 
         self.draft_sim = draft;
+        self.draft_present = draft_present;
         if let Some(s) = settings_cmd {
             self.pending.push(ClientCommand::SetSimSettings(s));
+        }
+        if let Some(p) = present_cmd {
+            self.pending.push(ClientCommand::SetPresentHints(p));
         }
 
         egui_state.handle_platform_output(&window, egui_output.platform_output);

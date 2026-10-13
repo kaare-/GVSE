@@ -99,11 +99,11 @@ around sea level + sky + palette/glitter). Unit tests use
     (ephemeral port); HUD `spawn-host`.
 15. [x] **SetSimSettings** — `ViewFrame.sim` + viewer checkboxes
     (`COMMAND_SCHEMA` 3).
-16. [x] **HostInfo** — resident/parked chunk + organism crumbs
-    (`VIEW_SCHEMA` 6).
-17. [ ] **Parity gate** — Compact soak park=0 still green on soak host
-      (macroquad / headless; client host streams Compact, soak gate
-      unchanged).
+16. [x] **HostInfo** — resident/parked chunk + organism crumbs.
+17. [x] **PresentHints** — humidity overlay on strip (`VIEW_SCHEMA` 7).
+18. [x] **Parity note** — park=0 / TRACKED soaks stay macroquad/headless;
+      A-client Compact stream is not the mass gate
+      ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)).
 
 ## Backlog (ordered)
 
