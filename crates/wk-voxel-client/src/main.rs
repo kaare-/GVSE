@@ -3,9 +3,10 @@
 //! ```text
 //! wk-voxel-client                         # in-process Compact
 //! wk-voxel-client --dev                   # in-process tiny ring
-//! wk-voxel-client --connect 127.0.0.1:17420
-//! wk-voxel-client --spawn-host            # child wk-voxel-host (Compact)
-//! wk-voxel-client --spawn-host --dev      # child tiny host
+//! cargo run -p wk-voxel-client --release -- --connect 127.0.0.1:17420
+//! cargo run -p wk-voxel-client --release -- --spawn-host            # Compact host child
+//! cargo run -p wk-voxel-client --release -- --spawn-host --dev      # tiny host child
+//! (package default-run is wk-voxel-client; host bin: --bin wk-voxel-host)
 //! ```
 
 use std::env;

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Phase 8 ship-client spike: egui + wgpu / winit viewer + in-process / IPC host"
+default-run = "wk-voxel-client"
 
 [dependencies]
 wk-voxel = { path = "../wk-voxel" }
