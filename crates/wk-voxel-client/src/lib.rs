@@ -24,9 +24,9 @@ use wk_voxel::{
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
-pub const VIEW_SCHEMA: u32 = 6;
+pub const VIEW_SCHEMA: u32 = 7;
 /// Bump when [`ClientCommand`] enum breaks.
-pub const COMMAND_SCHEMA: u32 = 3;
+pub const COMMAND_SCHEMA: u32 = 4;
 /// Default disk slot for F5 / F9.
 pub const DEFAULT_SAVE_SLOT: &str = "quick";
 
@@ -107,6 +107,13 @@ pub struct HostInfo {
     pub last_reloaded: u32,
 }
 
+/// Presentation dials stamped by the host (viewer may request via command).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PresentHints {
+    /// Soft humidity wash on air / sky-fill cells in the terrain strip.
+    pub humidity_overlay: bool,
+}
+
 /// Camera-window extract for the viewer (not a durable `SimSnapshot`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewFrame {
@@ -123,6 +130,7 @@ pub struct ViewFrame {
     pub sky: SkyPresent,
     pub sim: SimSettings,
     pub host: HostInfo,
+    pub present: PresentHints,
     pub terrain: TerrainStrip,
     pub command_acks: Vec<CommandAck>,
 }
@@ -155,6 +163,8 @@ pub enum ClientCommand {
     ResetWorld { seed: Option<u64> },
     /// Replace host sim dials (climate lengths + pass enables).
     SetSimSettings(SimSettings),
+    /// Presentation-only dials (host stamps into ViewFrame / strip).
+    SetPresentHints(PresentHints),
     Quit,
 }
 
@@ -186,6 +196,7 @@ pub struct Host {
     fungi: FungiConfig,
     competent: CompetentFallConfig,
     sim: SimSettings,
+    present: PresentHints,
     pub paused: bool,
     pub focus_col: i32,
     pub view_cols: i32,
@@ -318,6 +329,7 @@ impl Host {
             fungi: FungiConfig::default(),
             competent: CompetentFallConfig::default(),
             sim: SimSettings::default(),
+            present: PresentHints::default(),
             paused: false,
             focus_col,
             view_cols,
@@ -452,6 +464,14 @@ impl Host {
                     }
                 }
             }
+            ClientCommand::SetPresentHints(hints) => {
+                self.present = hints;
+                CommandAck {
+                    id,
+                    ok: true,
+                    detail: format!("present humidity={}", self.present.humidity_overlay),
+                }
+            }
             ClientCommand::Quit => {
                 self.quit_requested = true;
                 CommandAck {
@@ -533,6 +553,7 @@ impl Host {
         let step_period = self.step_period;
         let next_ack_id = self.next_ack_id;
         let sim = self.sim.clone();
+        let present = self.present.clone();
         let pending = std::mem::take(&mut self.pending_acks);
         *self = Host::new(params);
         self.paused = paused;
@@ -542,6 +563,7 @@ impl Host {
         self.next_ack_id = next_ack_id;
         self.pending_acks = pending;
         self.apply_sim_settings(sim);
+        self.present = present;
     }
 
     fn apply_sim_settings(&mut self, settings: SimSettings) {
@@ -679,6 +701,17 @@ impl Host {
                 if px[3] == 0 {
                     px = [sky_row[0], sky_row[1], sky_row[2], 255];
                 }
+                if self.present.humidity_overlay {
+                    // Soft cool wash from vapour mass (diagnostic, not cartoon banks).
+                    let h = self.humidity.at_cell(gx, gy);
+                    let t = (h / 6.0).clamp(0.0, 1.0);
+                    if t > 0.02 {
+                        let wash = (t * 70.0) as u8;
+                        px[0] = px[0].saturating_sub(wash / 3);
+                        px[1] = px[1].saturating_sub(wash / 5);
+                        px[2] = px[2].saturating_add(wash).min(255);
+                    }
+                }
                 let i = ((row as usize) * cols as usize + col as usize) * 4;
                 rgba[i..i + 4].copy_from_slice(&px);
             }
@@ -726,6 +759,7 @@ impl Host {
             sky,
             sim: self.sim.clone(),
             host,
+            present: self.present.clone(),
             terrain,
             command_acks: acks,
         }
@@ -873,5 +907,17 @@ mod tests {
         let frame = host.frame();
         assert!(frame.host.resident_chunks > 0);
         assert_eq!(frame.host.parked_chunks, 0);
+    }
+
+    #[test]
+    fn present_hints_humidity_toggle() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        assert!(!host.frame().present.humidity_overlay);
+        let ack = host.apply(ClientCommand::SetPresentHints(PresentHints {
+            humidity_overlay: true,
+        }));
+        assert!(ack.ok, "{}", ack.detail);
+        assert!(host.frame().present.humidity_overlay);
     }
 }

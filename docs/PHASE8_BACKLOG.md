@@ -17,14 +17,21 @@ applies.
 | 7 | Save/Load/Reset | `COMMAND_SCHEMA` 2→3 path |
 | 8 | `--spawn-host` | child host + connect |
 | 9 | SetSimSettings | `ViewFrame.sim`; viewer checkboxes |
-| 10 | HostInfo crumbs | resident/parked chunks + org counts (`VIEW_SCHEMA` 6) |
+| 10 | HostInfo crumbs | resident/parked chunks + org counts |
+| 11 | PresentHints | humidity overlay wash (`VIEW_SCHEMA` 7 / `COMMAND_SCHEMA` 4) |
+
+## Soak / park gate (parity)
+
+- **Canonical park=0 / TRACKED soaks** stay on **macroquad / headless**
+  (`wk-voxel-app` + integration tests). Do not treat A-client Compact
+  stream as a substitute mass gate.
+- A-client Compact host is for ship UX + stream residency; optional
+  future “stream soak” is a separate measurement, not a Phase 0 replace.
 
 ## Agent default next (no owner pick needed)
 
-1. **Present parity gaps** — humidity/steam overlay toggles as
-   present-hints or client-local; keep mass on host.
-2. **Compact soak parity note** — keep park=0 gate on macroquad/
-   headless; optionally document A-client stream soak separately.
+1. **More present parity** — steam/cave haze overlays when useful.
+2. Then: sim/perf OPEN items on park-bank ([`ROADMAP.md`](ROADMAP.md)).
 
 ## Pinned / owner-only
 
