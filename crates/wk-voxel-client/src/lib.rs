@@ -18,14 +18,15 @@ use wk_voxel::{
     sync_residency, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
     CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap,
     GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig,
-    SimSnapshot, SteamConfig, StreamWindow, SupportMap, Temperature, Wind, World, WorldStep,
-    WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
+    SimSnapshot, SteamConfig, StreamWindow, SupportMap, SyncResidencyStats, Temperature, Wind,
+    World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, STRATOSPHERE_CELLS,
+    TROPOSPHERE_TOP_Y,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
-pub const VIEW_SCHEMA: u32 = 4;
+pub const VIEW_SCHEMA: u32 = 6;
 /// Bump when [`ClientCommand`] enum breaks.
-pub const COMMAND_SCHEMA: u32 = 2;
+pub const COMMAND_SCHEMA: u32 = 3;
 /// Default disk slot for F5 / F9.
 pub const DEFAULT_SAVE_SLOT: &str = "quick";
 
@@ -71,6 +72,41 @@ impl SkyPresent {
     }
 }
 
+/// Host-owned sim dials (viewer edits via [`ClientCommand::SetSimSettings`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimSettings {
+    pub organisms_on: bool,
+    pub evap_on: bool,
+    pub cond_rain_on: bool,
+    pub karst_on: bool,
+    pub day_ticks: u64,
+    pub night_ticks: u64,
+}
+
+impl Default for SimSettings {
+    fn default() -> Self {
+        Self {
+            organisms_on: false,
+            evap_on: true,
+            cond_rain_on: true,
+            karst_on: true,
+            day_ticks: 180,
+            night_ticks: 180,
+        }
+    }
+}
+
+/// Lightweight host HUD crumbs (not a mass audit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HostInfo {
+    pub resident_chunks: u32,
+    pub parked_chunks: u32,
+    pub live_organisms: u32,
+    pub parked_organisms: u32,
+    pub last_evicted: u32,
+    pub last_reloaded: u32,
+}
+
 /// Camera-window extract for the viewer (not a durable `SimSnapshot`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewFrame {
@@ -85,6 +121,8 @@ pub struct ViewFrame {
     /// True when the last host advance used full [`step_world`].
     pub product_step: bool,
     pub sky: SkyPresent,
+    pub sim: SimSettings,
+    pub host: HostInfo,
     pub terrain: TerrainStrip,
     pub command_acks: Vec<CommandAck>,
 }
@@ -115,6 +153,8 @@ pub enum ClientCommand {
     Load { slot: String },
     /// Re-stamp worldgen (same shape); `None` seed bumps current seed.
     ResetWorld { seed: Option<u64> },
+    /// Replace host sim dials (climate lengths + pass enables).
+    SetSimSettings(SimSettings),
     Quit,
 }
 
@@ -145,6 +185,7 @@ pub struct Host {
     grain: GrainConfig,
     fungi: FungiConfig,
     competent: CompetentFallConfig,
+    sim: SimSettings,
     pub paused: bool,
     pub focus_col: i32,
     pub view_cols: i32,
@@ -156,6 +197,7 @@ pub struct Host {
     last_step_ms: u32,
     last_step_wall: Instant,
     product_step: bool,
+    last_residency: SyncResidencyStats,
 }
 
 /// Tiny ring for unit tests / fast CI (not Compact).
@@ -275,6 +317,7 @@ impl Host {
             grain: GrainConfig::default(),
             fungi: FungiConfig::default(),
             competent: CompetentFallConfig::default(),
+            sim: SimSettings::default(),
             paused: false,
             focus_col,
             view_cols,
@@ -287,6 +330,7 @@ impl Host {
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
             product_step: true,
+            last_residency: SyncResidencyStats::default(),
         };
         // Compact stamp is full-width; park far chunks before the first frame.
         if compact {
@@ -384,6 +428,30 @@ impl Host {
                     detail: format!("reset seed={}", self.params.seed),
                 }
             }
+            ClientCommand::SetSimSettings(settings) => {
+                if settings.day_ticks == 0 || settings.night_ticks == 0 {
+                    CommandAck {
+                        id,
+                        ok: false,
+                        detail: "day_ticks and night_ticks must be > 0".into(),
+                    }
+                } else {
+                    self.apply_sim_settings(settings);
+                    CommandAck {
+                        id,
+                        ok: true,
+                        detail: format!(
+                            "sim org={} evap={} rain={} karst={} day={} night={}",
+                            self.sim.organisms_on,
+                            self.sim.evap_on,
+                            self.sim.cond_rain_on,
+                            self.sim.karst_on,
+                            self.sim.day_ticks,
+                            self.sim.night_ticks
+                        ),
+                    }
+                }
+            }
             ClientCommand::Quit => {
                 self.quit_requested = true;
                 CommandAck {
@@ -464,6 +532,7 @@ impl Host {
         let view_cols = self.view_cols;
         let step_period = self.step_period;
         let next_ack_id = self.next_ack_id;
+        let sim = self.sim.clone();
         let pending = std::mem::take(&mut self.pending_acks);
         *self = Host::new(params);
         self.paused = paused;
@@ -472,6 +541,17 @@ impl Host {
         self.step_period = step_period;
         self.next_ack_id = next_ack_id;
         self.pending_acks = pending;
+        self.apply_sim_settings(sim);
+    }
+
+    fn apply_sim_settings(&mut self, settings: SimSettings) {
+        self.sim = settings;
+        self.climate.day_ticks = self.sim.day_ticks.max(1);
+        self.climate.night_ticks = self.sim.night_ticks.max(1);
+    }
+
+    pub fn sim_settings(&self) -> &SimSettings {
+        &self.sim
     }
 
     pub fn apply_all(&mut self, cmds: impl IntoIterator<Item = ClientCommand>) {
@@ -488,7 +568,9 @@ impl Host {
         let t0 = Instant::now();
         self.arm_stream_window();
         // Park far chunks under the camera window (Compact RAM).
-        let _ = sync_residency(&mut self.world);
+        if let Ok(stats) = sync_residency(&mut self.world) {
+            self.last_residency = stats;
+        }
         let _ = step_world(
             WorldStep {
                 world: &mut self.world,
@@ -520,10 +602,10 @@ impl Host {
                 humidity_diffusion_alpha: 0.15,
                 sea_level_y: self.params.sea_level_y,
                 sky_ceiling_y: self.params.sky_ceiling_y,
-                evap_on: true,
-                cond_rain_on: true,
-                karst_on: true,
-                organisms_on: false,
+                evap_on: self.sim.evap_on,
+                cond_rain_on: self.sim.cond_rain_on,
+                karst_on: self.sim.karst_on,
+                organisms_on: self.sim.organisms_on,
             },
             None,
         );
@@ -622,6 +704,15 @@ impl Host {
         let acks = std::mem::take(&mut self.pending_acks);
         let sky = self.sky_present();
         let terrain = self.extract_terrain(&sky);
+        let host = HostInfo {
+            resident_chunks: self.world.chunks.len() as u32,
+            parked_chunks: self.world.chunk_store.len() as u32,
+            live_organisms: (self.organisms.atoms.len() + self.organisms.corpses.len()) as u32,
+            parked_organisms: (self.organisms.parked.len() + self.organisms.parked_corpses.len())
+                as u32,
+            last_evicted: self.last_residency.evicted as u32,
+            last_reloaded: self.last_residency.reloaded as u32,
+        };
         ViewFrame {
             contract_version: VIEW_SCHEMA,
             sim_tick: self.world.tick,
@@ -633,6 +724,8 @@ impl Host {
             last_step_ms: self.last_step_ms,
             product_step: self.product_step,
             sky,
+            sim: self.sim.clone(),
+            host,
             terrain,
             command_acks: acks,
         }
@@ -749,5 +842,36 @@ mod tests {
         assert_eq!(host.world_seed(), s0.wrapping_add(1));
         host.apply(ClientCommand::ResetWorld { seed: Some(42) });
         assert_eq!(host.world_seed(), 42);
+    }
+
+    #[test]
+    fn set_sim_settings_gates_and_climate() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let mut s = host.sim_settings().clone();
+        s.organisms_on = true;
+        s.evap_on = false;
+        s.day_ticks = 90;
+        s.night_ticks = 270;
+        let ack = host.apply(ClientCommand::SetSimSettings(s.clone()));
+        assert!(ack.ok, "{}", ack.detail);
+        assert_eq!(host.sim_settings(), &s);
+        let frame = host.frame();
+        assert_eq!(frame.contract_version, VIEW_SCHEMA);
+        assert_eq!(frame.sim, s);
+        let bad = host.apply(ClientCommand::SetSimSettings(SimSettings {
+            day_ticks: 0,
+            ..s
+        }));
+        assert!(!bad.ok);
+    }
+
+    #[test]
+    fn host_info_reports_resident_chunks() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let frame = host.frame();
+        assert!(frame.host.resident_chunks > 0);
+        assert_eq!(frame.host.parked_chunks, 0);
     }
 }

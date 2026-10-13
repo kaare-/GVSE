@@ -21,7 +21,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
-    ClientCommand, Host, ViewFrame, DEFAULT_SAVE_SLOT, VIEW_SCHEMA,
+    ClientCommand, Host, HostInfo, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT, VIEW_SCHEMA,
 };
 
 enum SimBridge {
@@ -51,6 +51,8 @@ fn empty_frame() -> ViewFrame {
             season_u8: 0,
             is_day: false,
         },
+        sim: SimSettings::default(),
+        host: HostInfo::default(),
         terrain: wk_voxel_client::TerrainStrip {
             origin_col: 0,
             origin_y: 0,
@@ -220,6 +222,8 @@ fn main() {
         egui_renderer: None,
         pending: Vec::new(),
         terrain_tex: None,
+        draft_sim: SimSettings::default(),
+        draft_sim_ready: false,
     };
 
     event_loop.run_app(&mut app).expect("run");
@@ -242,6 +246,9 @@ struct SpikeApp {
     egui_renderer: Option<egui_wgpu::Renderer>,
     pending: Vec<ClientCommand>,
     terrain_tex: Option<egui::TextureHandle>,
+    /// Local edit buffer; flushed to host via [`ClientCommand::SetSimSettings`].
+    draft_sim: SimSettings,
+    draft_sim_ready: bool,
 }
 
 impl SpikeApp {
@@ -400,6 +407,12 @@ impl SpikeApp {
         };
 
         let mode = self.bridge.mode_label();
+        if !self.draft_sim_ready {
+            self.draft_sim = view.sim.clone();
+            self.draft_sim_ready = true;
+        }
+        let mut draft = self.draft_sim.clone();
+        let mut settings_cmd = None;
         let raw_input = egui_state.take_egui_input(&window);
         let terrain_tex = self.terrain_tex.clone();
         let sky = view.sky.sky_rgb;
@@ -465,6 +478,15 @@ impl SpikeApp {
                         }
                     ));
                     ui.label(format!(
+                        "chunks {} live / {} park · org {} / {} · sync −{} +{}",
+                        view.host.resident_chunks,
+                        view.host.parked_chunks,
+                        view.host.live_organisms,
+                        view.host.parked_organisms,
+                        view.host.last_evicted,
+                        view.host.last_reloaded
+                    ));
+                    ui.label(format!(
                         "sky rgb({},{},{}) · {} · dn {} · season {}",
                         view.sky.sky_rgb[0],
                         view.sky.sky_rgb[1],
@@ -481,10 +503,39 @@ impl SpikeApp {
                         ));
                     }
                     ui.separator();
+                    ui.label("sim (host)");
+                    let mut changed = false;
+                    changed |= ui
+                        .checkbox(&mut draft.organisms_on, "organisms_on")
+                        .changed();
+                    changed |= ui.checkbox(&mut draft.evap_on, "evap_on").changed();
+                    changed |= ui
+                        .checkbox(&mut draft.cond_rain_on, "cond_rain_on")
+                        .changed();
+                    changed |= ui.checkbox(&mut draft.karst_on, "karst_on").changed();
+                    ui.horizontal(|ui| {
+                        ui.label("day");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut draft.day_ticks).range(1..=10_000u64))
+                            .changed();
+                        ui.label("night");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut draft.night_ticks).range(1..=10_000u64))
+                            .changed();
+                    });
+                    if changed {
+                        settings_cmd = Some(draft.clone());
+                    }
+                    ui.separator();
                     ui.small("Space pause · N step · ←/→ pan · F5 save · F9 load · R reset · Esc quit");
-                    ui.small("client = viewer; host owns step_world + save/load");
+                    ui.small("client = viewer; host owns step_world + save/load + sim");
                 });
         });
+
+        self.draft_sim = draft;
+        if let Some(s) = settings_cmd {
+            self.pending.push(ClientCommand::SetSimSettings(s));
+        }
 
         egui_state.handle_platform_output(&window, egui_output.platform_output);
         let tris = self
