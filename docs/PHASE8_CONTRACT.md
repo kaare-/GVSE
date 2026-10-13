@@ -193,6 +193,9 @@ header only; egui HUD shows `sim_tick`. Keys: Space pause, N step,
 
 Linux run deps (not needed for `cargo test`): `libxkbcommon-x11-0`,
 Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
+macOS uses Metal by default. Set `WK_VOXEL_FORCE_FALLBACK_ADAPTER=1` only
+for software/GL fallback (Linux Xvfb spikes) — forcing fallback on Mac
+returns no adapter and used to abort inside winit’s launch callback.
 
 ## Next
 

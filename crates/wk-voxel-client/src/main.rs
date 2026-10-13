@@ -209,7 +209,7 @@ fn parse_args() -> SimBridge {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let bridge = parse_args();
     let event_loop = EventLoop::new().expect("event loop");
@@ -259,9 +259,11 @@ struct SpikeApp {
 }
 
 impl SpikeApp {
-    fn ensure_gpu(&mut self, event_loop: &ActiveEventLoop) {
+    /// Init window + wgpu. Must not panic: on macOS this runs inside AppKit's
+    /// `applicationDidFinishLaunching` (`extern "C"` / cannot-unwind).
+    fn ensure_gpu(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         if self.gpu.is_some() {
-            return;
+            return Ok(());
         }
         let title = format!(
             "wk-voxel-client (viewer · Phase 8 A · {})",
@@ -274,7 +276,7 @@ impl SpikeApp {
                         .with_title(title)
                         .with_inner_size(LogicalSize::new(1100.0, 640.0)),
                 )
-                .expect("window"),
+                .map_err(|e| format!("create_window: {e}"))?,
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -283,13 +285,30 @@ impl SpikeApp {
         });
         let surface = instance
             .create_surface(window.clone())
-            .expect("surface");
+            .map_err(|e| format!("create_surface: {e}"))?;
+        // Default: real GPU (Metal on macOS). Force software/GL only when
+        // WK_VOXEL_FORCE_FALLBACK_ADAPTER=1 — used for headless Linux spikes.
+        // force_fallback_adapter=true made Mac Metal return no adapter and
+        // `.expect` aborted inside winit's cannot-unwind launch callback.
+        let force_fallback = env::var_os("WK_VOXEL_FORCE_FALLBACK_ADAPTER").is_some();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
+            power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
-            force_fallback_adapter: true,
+            force_fallback_adapter: force_fallback,
         }))
-        .expect("adapter");
+        .ok_or_else(|| {
+            format!(
+                "no wgpu adapter (force_fallback={force_fallback}; \
+                 unset WK_VOXEL_FORCE_FALLBACK_ADAPTER for Metal/Vulkan)"
+            )
+        })?;
+        let info = adapter.get_info();
+        log::info!(
+            "wgpu adapter {:?} {:?} {:?}",
+            info.name,
+            info.backend,
+            info.device_type
+        );
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("wk-voxel-client"),
@@ -300,10 +319,13 @@ impl SpikeApp {
             },
             None,
         ))
-        .expect("device");
+        .map_err(|e| format!("request_device: {e}"))?;
 
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
+        if caps.formats.is_empty() {
+            return Err("surface has no texture formats".into());
+        }
         let format = caps
             .formats
             .iter()
@@ -316,7 +338,7 @@ impl SpikeApp {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Opaque),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -341,6 +363,7 @@ impl SpikeApp {
             config,
         });
         self.window = Some(window);
+        Ok(())
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -641,7 +664,12 @@ impl SpikeApp {
 
 impl ApplicationHandler for SpikeApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        self.ensure_gpu(event_loop);
+        if let Err(e) = self.ensure_gpu(event_loop) {
+            // Do not panic — macOS runs this under cannot-unwind AppKit code.
+            eprintln!("wk-voxel-client: GPU/window init failed: {e}");
+            event_loop.exit();
+            return;
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
