@@ -97,19 +97,17 @@ around sea level + sky + palette/glitter). Unit tests use
     (`COMMAND_SCHEMA` 2); F5 / F9 / R on viewer.
 14. [x] **`--spawn-host`** — viewer launches `wk-voxel-host` child
     (ephemeral port); HUD `spawn-host`.
-15. [ ] **Parity gate** — Compact soak park=0 still green on soak host
+15. [x] **SetSimSettings** — `ViewFrame.sim` + viewer checkboxes
+    (`VIEW_SCHEMA` 5 / `COMMAND_SCHEMA` 3).
+16. [ ] **Parity gate** — Compact soak park=0 still green on soak host
       (macroquad / headless; client host streams Compact, soak gate
       unchanged).
 
-## Owner next
+## Backlog (ordered)
 
-| Pick | Notes |
-|------|--------|
-| **SetSimSettings** | Climate / organisms dials through commands |
-| **Apple notarize** | **Pinned → 2026-11-15** (Dev membership expired) |
-| **E2 visual** | Tipped grey logs at 1× — owner eyes only |
-| **Steam depots** | After Apple smoke green (post-pin) |
-| **IPC harden** | multi-client, auth, delta strip — later |
+See [`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md) — agent default path.
+Pinned: Apple notarize → **2026-11-15**. Owner-only: E2 visual, Steam,
+MAS/multiplayer.
 
 ## Acceptance (proposed)
 
@@ -143,4 +141,6 @@ the client, abandoning the macroquad soak viewer.
     expired / cost). Resume then; do not block other wedges.
 11. Host Save/Load/ResetWorld + viewer keys (`COMMAND_SCHEMA` 2).
 12. Viewer `--spawn-host` (child host + IPC).
-13. Optional leftover: E2 tipped grey-log (Phase 5).
+13. Ordered backlog doc ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)).
+14. SetSimSettings + `ViewFrame.sim` (`VIEW_SCHEMA` 5 / `COMMAND_SCHEMA` 3).
+15. Optional leftover: E2 tipped grey-log (Phase 5).

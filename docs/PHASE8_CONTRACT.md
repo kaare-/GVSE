@@ -139,8 +139,8 @@ client should **split panels** so sim dials always go through commands.
 
 | Constant | Bump when |
 |----------|-----------|
-| `VIEW_SCHEMA` | ViewFrame field layout breaks |
-| `COMMAND_SCHEMA` | ClientCommand enum breaks (v2: Save/Load/ResetWorld) |
+| `VIEW_SCHEMA` | ViewFrame field layout breaks (v5: `sim: SimSettings`) |
+| `COMMAND_SCHEMA` | ClientCommand enum breaks (v2 Save/Load/Reset; v3 SetSimSettings) |
 | `SIM_SCHEMA_VERSION` | unchanged role — durable save only (`save.rs`) |
 
 Spike may hard-code v1 and reject mismatches with a clear HUD string.
@@ -171,8 +171,10 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       F5 / F9 / R; works in-process and over IPC.
 - [x] Viewer `--spawn-host` launches `wk-voxel-host` child (bind
       `127.0.0.1:0`, announce before stamp).
+- [x] `SetSimSettings` + `ViewFrame.sim` (`VIEW_SCHEMA` 5 /
+      `COMMAND_SCHEMA` 3).
 - [ ] Owner Mac notarize — **pinned until 2026-11-15**.
-- [ ] Later: SetSimSettings, Steam / IPC harden / MAS.
+- [ ] Later: Steam / IPC harden / MAS.
 
 ## Non-goals
 
@@ -202,5 +204,6 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 8. [x] Apple notarize scripts + owner Mac runbook.
 9. [x] Host save/load/reset commands (`COMMAND_SCHEMA` 2).
 10. [x] Viewer `--spawn-host` child process.
-11. SetSimSettings / Steam when ready.
-12. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+11. [x] SetSimSettings + ViewFrame.sim.
+12. Present parity / HostInfo crumbs per [`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md).
+13. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
