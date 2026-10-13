@@ -397,6 +397,38 @@ impl Host {
         self.params.seed
     }
 
+    /// Whether `role` may apply `cmd` (Operator = full; Viewer = camera/clock/present).
+    pub fn command_allowed(role: ipc::PeerRole, cmd: &ClientCommand) -> bool {
+        use ipc::PeerRole::*;
+        match cmd {
+            ClientCommand::SetCamera { .. }
+            | ClientCommand::SetPaused(_)
+            | ClientCommand::StepOnce
+            | ClientCommand::SetPresentHints(_)
+            | ClientCommand::Quit => true,
+            ClientCommand::Save { .. }
+            | ClientCommand::Load { .. }
+            | ClientCommand::ResetWorld { .. }
+            | ClientCommand::SetSimSettings(_) => matches!(role, Operator),
+        }
+    }
+
+    /// Apply with a peer role gate (IPC multiplayer). Local in-process uses [`Self::apply`].
+    pub fn apply_as(&mut self, role: ipc::PeerRole, cmd: ClientCommand) -> CommandAck {
+        if !Self::command_allowed(role, &cmd) {
+            let id = self.next_ack_id;
+            self.next_ack_id += 1;
+            let ack = CommandAck {
+                id,
+                ok: false,
+                detail: format!("role {role:?} cannot {cmd:?}"),
+            };
+            self.pending_acks.push(ack.clone());
+            return ack;
+        }
+        self.apply(cmd)
+    }
+
     pub fn apply(&mut self, cmd: ClientCommand) -> CommandAck {
         let id = self.next_ack_id;
         self.next_ack_id += 1;
@@ -639,13 +671,70 @@ impl Host {
         }
     }
 
+    /// Pop the most recent ack (IPC peers keep acks out-of-band per session).
+    pub fn take_last_ack(&mut self) -> Option<CommandAck> {
+        self.pending_acks.pop()
+    }
+
+    pub fn push_acks(&mut self, mut acks: Vec<CommandAck>) {
+        self.pending_acks.append(&mut acks);
+    }
+
     pub fn is_compact(&self) -> bool {
         self.params.width_cols >= (CHUNK_CELLS_W as i32) * 64
     }
 
+    /// Arm `stream_window` to cover all peer cameras (wrap-aware span).
+    pub fn arm_union_stream_window(&mut self, cams: &[(i32, i32)]) {
+        if cams.is_empty() {
+            self.arm_stream_window();
+            return;
+        }
+        if cams.len() == 1 {
+            let (focus, view) = cams[0];
+            self.world.stream_window = Some(StreamWindow::new(focus, view.max(1)));
+            return;
+        }
+        let width = self.params.width_cols.max(1);
+        // Cover each peer's [focus-view/2, focus+view/2] on the wrap ring.
+        let mut intervals: Vec<(i32, i32)> = cams
+            .iter()
+            .map(|&(focus, view)| {
+                let half = view.max(1) / 2;
+                let lo = focus.wrapping_sub(half).rem_euclid(width);
+                (lo, view.max(1))
+            })
+            .collect();
+        intervals.sort_by_key(|i| i.0);
+        // Greedy merge on unwrapped line; if total coverage ≥ width, keep all.
+        let mut cover = 0i32;
+        let mut start = intervals[0].0;
+        let mut end = start + intervals[0].1;
+        for &(lo, view) in intervals.iter().skip(1) {
+            let hi = lo + view;
+            if lo <= end {
+                end = end.max(hi);
+            } else {
+                cover += end - start;
+                start = lo;
+                end = hi;
+            }
+        }
+        cover += end - start;
+        if cover >= width {
+            self.world.stream_window = Some(StreamWindow::new(0, width));
+        } else {
+            let view = (end - start).clamp(1, width);
+            let focus = start.wrapping_add(view / 2);
+            self.world.stream_window = Some(StreamWindow::new(focus, view));
+        }
+    }
+
     fn step_once(&mut self) {
         let t0 = Instant::now();
-        self.arm_stream_window();
+        if self.world.stream_window.is_none() {
+            self.arm_stream_window();
+        }
         // Park far chunks under the camera window (Compact RAM).
         if let Ok(stats) = sync_residency(&mut self.world) {
             self.last_residency = stats;
@@ -819,6 +908,48 @@ impl Host {
 
     /// Present a view frame. Auto-steps at [`Self::step_period`] when running.
     pub fn frame(&mut self) -> ViewFrame {
+        self.arm_stream_window();
+        self.frame_inner()
+    }
+
+    /// Present for one IPC peer camera; `peer_cams` drives union residency before step.
+    pub fn frame_as(
+        &mut self,
+        focus_col: i32,
+        view_cols: i32,
+        focus_y: i32,
+        present: PresentHints,
+        peer_cams: &[(i32, i32)],
+    ) -> ViewFrame {
+        let saved = (
+            self.focus_col,
+            self.view_cols,
+            self.focus_y,
+            self.present.clone(),
+        );
+        self.focus_col = focus_col;
+        self.view_cols = view_cols
+            .clamp(MIN_VIEW_COLS, MAX_VIEW_COLS)
+            .min(self.params.width_cols.max(1));
+        self.focus_y = focus_y.clamp(
+            self.params.bedrock_floor_y,
+            self.params.sky_ceiling_y - 1,
+        );
+        self.present = present;
+        if peer_cams.is_empty() {
+            self.arm_stream_window();
+        } else {
+            self.arm_union_stream_window(peer_cams);
+        }
+        let frame = self.frame_inner();
+        self.focus_col = saved.0;
+        self.view_cols = saved.1;
+        self.focus_y = saved.2;
+        self.present = saved.3;
+        frame
+    }
+
+    fn frame_inner(&mut self) -> ViewFrame {
         if !self.paused {
             let due = self.step_period.is_zero()
                 || self.last_step_wall.elapsed() >= self.step_period;
