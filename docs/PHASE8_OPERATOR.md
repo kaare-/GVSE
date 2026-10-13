@@ -1,13 +1,13 @@
 # Phase 8 — Operator client *(wedge 1)*
 
-**Status:** landed (2026-10-13). Owner path:
+**Status:** wedge 1 + paint landed (2026-10-13). Owner path:
 **host ship → remote multiplayer/auth → operator client**.
 
 ## Intent
 
 Same egui viewer binary (`wk-voxel-client`) with role-aware UI. Operator
-gets full sim dials + save/load/reset against a live host; Viewer keeps
-camera / present / clock only.
+gets full sim dials + save/load/reset + terrain paint against a live
+host; Viewer keeps camera / present / clock only.
 
 ## Defaults
 
@@ -46,8 +46,13 @@ cargo run -p wk-voxel-client --release -- \
 - [x] Operator can Save/Load/Reset + sim dials (keys + buttons)
 - [x] Host role gate still rejects Viewer mutating cmds (`mp_auth`)
 
+## Paint (wedge 2)
+
+- `ClientCommand::PaintTerrain` (`COMMAND_SCHEMA` 6) — Operator only
+- F3 / checkbox toggles paint; brush + radius; click cover-scale strip
+- Palette mirrors macroquad F3 (Erase/Water/Ice/…/Bedrock)
+
 ## Later wedges
 
-- Paint / brush (`PaintTerrain`) + click mapping
 - Spawn organism / blueprint editor
 - Broader sim dials (steam, stream disk, perf) aligned with macroquad Tab

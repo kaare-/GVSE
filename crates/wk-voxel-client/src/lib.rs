@@ -12,22 +12,26 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use wk_material::MaterialId;
 use wk_voxel::{
     apply_season_sky_tint, celestial_local_cfg, climate_with_season, day_night_factor_cfg,
     is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, season_fraction_cfg,
     cave_humidity_haze_wash, restore_all_from_store, sky_rgb_at_height_phased, sky_rgb_phased,
-    stamp_world, steam_haze_wash, step_world, sync_residency, CarbonBudget, CarbonConfig,
-    ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig,
-    FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity, KarstConfig,
-    LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SimSnapshot, SteamConfig,
-    StreamWindow, SupportMap, SyncResidencyStats, Temperature, Wind, World, WorldStep,
-    WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
+    stamp_world, steam_haze_wash, step_world, sync_residency, wake_floating_competent,
+    CarbonBudget, CarbonConfig, Cell, ClimateConfig, CloudConfig, CloudStore,
+    CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap,
+    GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig,
+    PhaseConfig, SimSnapshot, SteamConfig, StreamWindow, SupportMap, SyncResidencyStats,
+    Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W,
+    STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
 pub const VIEW_SCHEMA: u32 = 9;
 /// Bump when [`ClientCommand`] enum breaks.
-pub const COMMAND_SCHEMA: u32 = 5;
+pub const COMMAND_SCHEMA: u32 = 6;
+/// Max paint brush radius (cells); diameter = 2·r+1.
+pub const MAX_PAINT_RADIUS: i32 = 16;
 /// Default disk slot for F5 / F9.
 pub const DEFAULT_SAVE_SLOT: &str = "quick";
 
@@ -161,6 +165,84 @@ pub struct CommandAck {
     pub detail: String,
 }
 
+/// Terrain paint brush (mirrors macroquad F3 palette; Operator only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[repr(u8)]
+pub enum PaintBrush {
+    Erase = 0,
+    Water = 1,
+    Ice = 2,
+    Snow = 3,
+    #[default]
+    Sand = 4,
+    Gravel = 5,
+    LooseRock = 6,
+    Rock = 7,
+    Clay = 8,
+    Organic = 9,
+    LooseLimestone = 10,
+    Soil = 11,
+    Limestone = 12,
+    Bedrock = 13,
+}
+
+impl PaintBrush {
+    pub const ALL: [PaintBrush; 14] = [
+        PaintBrush::Erase,
+        PaintBrush::Water,
+        PaintBrush::Ice,
+        PaintBrush::Snow,
+        PaintBrush::Sand,
+        PaintBrush::Gravel,
+        PaintBrush::LooseRock,
+        PaintBrush::Rock,
+        PaintBrush::Clay,
+        PaintBrush::Organic,
+        PaintBrush::LooseLimestone,
+        PaintBrush::Soil,
+        PaintBrush::Limestone,
+        PaintBrush::Bedrock,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Erase => "Erase",
+            Self::Water => "Water",
+            Self::Ice => "Ice",
+            Self::Snow => "Snow",
+            Self::Sand => "Sand",
+            Self::Gravel => "Gravel",
+            Self::LooseRock => "LooseRock",
+            Self::Rock => "Rock",
+            Self::Clay => "Clay",
+            Self::Organic => "Organic",
+            Self::LooseLimestone => "LooseLime",
+            Self::Soil => "Soil",
+            Self::Limestone => "Limestone",
+            Self::Bedrock => "Bedrock",
+        }
+    }
+
+    pub fn to_cell(self) -> Cell {
+        match self {
+            Self::Erase => Cell::air(),
+            Self::Water => Cell::water(),
+            Self::Ice => Cell::solid(MaterialId::Ice),
+            Self::Snow => Cell::solid(MaterialId::Snow),
+            Self::Sand => Cell::solid(MaterialId::Sand),
+            Self::Gravel => Cell::solid(MaterialId::Gravel),
+            Self::LooseRock => Cell::solid(MaterialId::LooseRock),
+            Self::LooseLimestone => Cell::solid(MaterialId::LooseLimestone),
+            Self::Rock => Cell::solid(MaterialId::Stone),
+            Self::Clay => Cell::solid(MaterialId::Clay),
+            Self::Soil => Cell::solid(MaterialId::Soil),
+            Self::Organic => Cell::solid(MaterialId::Organic),
+            Self::Limestone => Cell::solid(MaterialId::Limestone),
+            Self::Bedrock => Cell::solid(MaterialId::Bedrock),
+        }
+    }
+}
+
 /// Viewer → host. Host drains between steps; never mid-step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientCommand {
@@ -183,6 +265,13 @@ pub enum ClientCommand {
     SetSimSettings(SimSettings),
     /// Presentation-only dials (host stamps into ViewFrame / strip).
     SetPresentHints(PresentHints),
+    /// Operator terrain paint disk (macroquad F3 parity).
+    PaintTerrain {
+        col: i32,
+        y: i32,
+        brush: PaintBrush,
+        radius: u8,
+    },
     Quit,
 }
 
@@ -409,7 +498,8 @@ impl Host {
             ClientCommand::Save { .. }
             | ClientCommand::Load { .. }
             | ClientCommand::ResetWorld { .. }
-            | ClientCommand::SetSimSettings(_) => matches!(role, Operator),
+            | ClientCommand::SetSimSettings(_)
+            | ClientCommand::PaintTerrain { .. } => matches!(role, Operator),
         }
     }
 
@@ -549,6 +639,44 @@ impl Host {
                         self.present.steam_overlay,
                         self.present.cave_humidity_overlay
                     ),
+                }
+            }
+            ClientCommand::PaintTerrain {
+                col,
+                y,
+                brush,
+                radius,
+            } => {
+                let r = (radius as i32).clamp(0, MAX_PAINT_RADIUS);
+                let cell = brush.to_cell();
+                let mut painted = 0u32;
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        if dx * dx + dy * dy > r * r {
+                            continue;
+                        }
+                        let gx = self.world.wrap_x(col + dx);
+                        let gy = y + dy;
+                        if gy < self.params.bedrock_floor_y || gy >= self.params.sky_ceiling_y {
+                            continue;
+                        }
+                        self.world.set_cell(gx, gy, cell);
+                        painted += 1;
+                    }
+                }
+                if matches!(brush, PaintBrush::Erase) {
+                    wake_floating_competent(&mut self.world);
+                }
+                self.geotech.rebuild(&self.world);
+                self.support.rebuild(&self.world);
+                if self.is_compact() {
+                    self.arm_stream_window();
+                    let _ = sync_residency(&mut self.world);
+                }
+                CommandAck {
+                    id,
+                    ok: true,
+                    detail: format!("paint {:?} r={r} n={painted}", brush),
                 }
             }
             ClientCommand::Quit => {
@@ -1188,5 +1316,34 @@ mod tests {
             PeerRole::Viewer,
             &ClientCommand::SetSimSettings(SimSettings::default())
         ));
+        assert!(!Host::command_allowed(
+            PeerRole::Viewer,
+            &ClientCommand::PaintTerrain {
+                col: 0,
+                y: 40,
+                brush: PaintBrush::Sand,
+                radius: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn paint_terrain_writes_disk() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let col = host.focus_col;
+        let y = host.focus_y;
+        let ack = host.apply(ClientCommand::PaintTerrain {
+            col,
+            y,
+            brush: PaintBrush::Rock,
+            radius: 1,
+        });
+        assert!(ack.ok, "{}", ack.detail);
+        let c = host
+            .world
+            .get_cell(col, y)
+            .expect("painted cell");
+        assert_eq!(c.material, MaterialId::Stone);
     }
 }

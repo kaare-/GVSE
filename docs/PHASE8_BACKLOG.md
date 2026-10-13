@@ -27,6 +27,7 @@ applies.
 | 17 | Host ship | reconnect loop; `--lan` / `--once` / `--seed`; runbook |
 | 18 | Multiplayer + auth | token Hello; N peers; Viewer/Operator roles |
 | 19 | Operator client w1 | role-aware UI; sim + save/load/reset gated |
+| 20 | Operator paint | `PaintTerrain` + F3 brush click (`COMMAND_SCHEMA` 6) |
 
 ## Soak / park gate (parity)
 
@@ -39,15 +40,14 @@ applies.
 1. **Host ship** — ✅ landed. See [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md).
 2. **Remote multiplayer + auth** — ✅ landed.
    See [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md).
-3. **Operator client** — ✅ wedge 1 landed (role UI + sim/save gate).
-   See [`PHASE8_OPERATOR.md`](PHASE8_OPERATOR.md). Paint/spawn later.
+3. **Operator client** — ✅ wedge 1 + paint landed.
+   See [`PHASE8_OPERATOR.md`](PHASE8_OPERATOR.md). Spawn later.
 
 Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Operator **paint / spawn** tools (contract `PaintTerrain` /
-`SpawnOrganism`), or Apple notarize track if owner asks.
+Operator **spawn organism** tools, or Apple notarize track if owner asks.
 
 ## Pinned / later
 

@@ -25,8 +25,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{ConnectOpts, PeerRole, RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
-    ClientCommand, Host, HostInfo, PresentHints, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT,
-    DEFAULT_STEP_PERIOD_MS, MAX_VIEW_COLS, MIN_VIEW_COLS, VIEW_SCHEMA,
+    ClientCommand, Host, HostInfo, PaintBrush, PresentHints, SimSettings, ViewFrame,
+    DEFAULT_SAVE_SLOT, DEFAULT_STEP_PERIOD_MS, MAX_PAINT_RADIUS, MAX_VIEW_COLS, MIN_VIEW_COLS,
+    VIEW_SCHEMA,
 };
 
 /// Match host auto-step cadence — firm ~20 Hz present / pull.
@@ -393,6 +394,10 @@ fn main() {
         draft_present: PresentHints::default(),
         draft_present_ready: false,
         draft_slot: DEFAULT_SAVE_SLOT.into(),
+        paint_open: false,
+        paint_brush: PaintBrush::Sand,
+        paint_radius: 0u8,
+        last_terrain_rect: None,
         held: HeldPan::default(),
         hud_open: true,
         load_started: Instant::now(),
@@ -424,6 +429,11 @@ struct SpikeApp {
     draft_present: PresentHints,
     draft_present_ready: bool,
     draft_slot: String,
+    paint_open: bool,
+    paint_brush: PaintBrush,
+    paint_radius: u8,
+    /// Cover-scale terrain blit rect from last frame (for paint hit-test).
+    last_terrain_rect: Option<egui::Rect>,
     held: HeldPan,
     hud_open: bool,
     load_started: Instant,
@@ -847,10 +857,15 @@ impl SpikeApp {
         let mut draft = self.draft_sim.clone();
         let mut draft_present = self.draft_present.clone();
         let mut draft_slot = self.draft_slot.clone();
+        let mut paint_open = self.paint_open;
+        let mut paint_brush = self.paint_brush;
+        let mut paint_radius = self.paint_radius;
         let mut settings_cmd = None;
         let mut present_cmd = None;
         let mut op_cmd: Option<ClientCommand> = None;
+        let mut paint_cmd: Option<ClientCommand> = None;
         let mut hud_open = self.hud_open;
+        let mut terrain_rect_out: Option<egui::Rect> = None;
 
         let Some(gpu) = self.gpu.as_mut() else {
             return;
@@ -880,6 +895,7 @@ impl SpikeApp {
                         let scale = (rect.width() / tw).max(rect.height() / th);
                         let size = egui::vec2(tw * scale, th * scale);
                         let image_rect = egui::Rect::from_center_size(rect.center(), size);
+                        terrain_rect_out = Some(image_rect);
                         let uv = egui::Rect::from_min_max(
                             egui::pos2(0.0, 0.0),
                             egui::pos2(1.0, 1.0),
@@ -1037,6 +1053,32 @@ impl SpikeApp {
                                             Some(ClientCommand::ResetWorld { seed: None });
                                     }
                                 });
+                                ui.checkbox(&mut paint_open, "paint (F3)");
+                                if paint_open {
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut paint_radius,
+                                            0..=MAX_PAINT_RADIUS as u8,
+                                        )
+                                        .text("radius"),
+                                    );
+                                    egui::ComboBox::from_label("brush")
+                                        .selected_text(paint_brush.label())
+                                        .show_ui(ui, |ui| {
+                                            for b in PaintBrush::ALL {
+                                                ui.selectable_value(
+                                                    &mut paint_brush,
+                                                    b,
+                                                    b.label(),
+                                                );
+                                            }
+                                        });
+                                    ui.label(
+                                        egui::RichText::new("click terrain to paint")
+                                            .small()
+                                            .color(egui::Color32::from_rgb(140, 160, 120)),
+                                    );
+                                }
                             });
                     } else {
                         ui.label(
@@ -1066,7 +1108,7 @@ impl SpikeApp {
 
                     ui.add_space(4.0);
                     let hints = if is_operator {
-                        "arrows pan · [ ] width · Space pause · N step · F5/F9 · R · Esc · H hud"
+                        "arrows pan · [ ] · Space/N · F3 paint · F5/F9 · R · Esc · H"
                     } else {
                         "arrows pan · [ ] width · Space pause · N step · Esc · H hud"
                     };
@@ -1076,12 +1118,46 @@ impl SpikeApp {
                             .color(egui::Color32::from_rgb(110, 125, 140)),
                     );
                 });
+
+            // Paint click: terrain under pointer, not when UI wants the click.
+            if is_operator
+                && paint_open
+                && !ctx.wants_pointer_input()
+                && ctx.input(|i| i.pointer.primary_down())
+            {
+                if let (Some(pos), Some(image_rect)) =
+                    (ctx.pointer_interact_pos(), terrain_rect_out)
+                {
+                    if image_rect.contains(pos) && view.terrain.cols > 0 && view.terrain.rows > 0
+                    {
+                        let u = ((pos.x - image_rect.min.x) / image_rect.width())
+                            .clamp(0.0, 0.999);
+                        let v = ((pos.y - image_rect.min.y) / image_rect.height())
+                            .clamp(0.0, 0.999);
+                        let col = view.terrain.origin_col
+                            + (u * view.terrain.cols as f32).floor() as i32;
+                        let y = view.terrain.origin_y
+                            + (view.terrain.rows as i32 - 1)
+                            - (v * view.terrain.rows as f32).floor() as i32;
+                        paint_cmd = Some(ClientCommand::PaintTerrain {
+                            col,
+                            y,
+                            brush: paint_brush,
+                            radius: paint_radius,
+                        });
+                    }
+                }
+            }
         });
 
         self.hud_open = hud_open;
         self.draft_sim = draft;
         self.draft_present = draft_present;
         self.draft_slot = draft_slot;
+        self.paint_open = paint_open;
+        self.paint_brush = paint_brush;
+        self.paint_radius = paint_radius;
+        self.last_terrain_rect = terrain_rect_out;
         if let Some(s) = settings_cmd {
             if is_operator {
                 self.pending.push(ClientCommand::SetSimSettings(s));
@@ -1091,6 +1167,9 @@ impl SpikeApp {
             self.pending.push(ClientCommand::SetPresentHints(p));
         }
         if let Some(c) = op_cmd {
+            self.pending.push(c);
+        }
+        if let Some(c) = paint_cmd {
             self.pending.push(c);
         }
 
@@ -1222,6 +1301,11 @@ impl ApplicationHandler for SpikeApp {
                     }
                     PhysicalKey::Code(KeyCode::KeyH) => {
                         self.hud_open = !self.hud_open;
+                    }
+                    PhysicalKey::Code(KeyCode::F3) => {
+                        if self.bridge().map(|b| b.is_operator()).unwrap_or(false) {
+                            self.paint_open = !self.paint_open;
+                        }
                     }
                     PhysicalKey::Code(KeyCode::Space) => {
                         if let Some(b) = self.bridge() {

@@ -142,7 +142,7 @@ client should **split panels** so sim dials always go through commands.
 | Constant | Bump when |
 |----------|-----------|
 | `VIEW_SCHEMA` | ViewFrame layout (v5 `sim`; v6 `host`; v7–8 `present`; v9 `focus_y`) |
-| `COMMAND_SCHEMA` | Commands (v2 save; v3 SetSimSettings; v4 SetPresentHints; v5 `SetCamera.focus_y`) |
+| `COMMAND_SCHEMA` | Commands (v2 save; v3 SetSimSettings; v4 SetPresentHints; v5 `SetCamera.focus_y`; v6 `PaintTerrain`) |
 | `SIM_SCHEMA_VERSION` | unchanged role — durable save only (`save.rs`) |
 
 Spike may hard-code v1 and reject mismatches with a clear HUD string.
