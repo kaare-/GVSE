@@ -20,6 +20,7 @@ Do not ask clarifying questions when a default applies.
 | 10 | HostInfo crumbs | resident/parked chunks + org counts |
 | 11 | PresentHints | humidity overlay wash |
 | 12 | Steam/cave present | steam + caveH overlays (`VIEW_SCHEMA` 8) |
+| 14 | Broader view + V-pan | Compact view 720; `focus_y` ↑/↓; `[`/`]` width (`VIEW_SCHEMA` 9) |
 | 13 | Compact stream re-profile | confirms ~115 sim-FPS; hotspots body/temp/steam |
 
 ## Soak / park gate (parity)

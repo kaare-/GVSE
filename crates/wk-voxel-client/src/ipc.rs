@@ -80,7 +80,7 @@ pub fn read_msg<T: for<'de> Deserialize<'de>, R: Read>(r: &mut R) -> Result<T, I
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    // Compact strip ~320×384×4 ≈ 480 KiB; allow headroom for acks.
+    // Compact strip ~720×384×4 ≈ 1.1 MiB (up to MAX_VIEW_COLS); 8 MiB headroom.
     if len > 8 * 1024 * 1024 {
         return Err(IpcError::Codec(format!("frame len {len} exceeds 8 MiB")));
     }
@@ -401,6 +401,7 @@ mod tests {
         let cmd = ClientMsg::Cmd(ClientCommand::SetCamera {
             focus_col: 12,
             view_cols: 64,
+            focus_y: 40,
         });
         let bytes = postcard::to_allocvec(&cmd).unwrap();
         let back: ClientMsg = postcard::from_bytes(&bytes).unwrap();

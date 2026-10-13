@@ -25,9 +25,9 @@ use wk_voxel::{
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
-pub const VIEW_SCHEMA: u32 = 8;
+pub const VIEW_SCHEMA: u32 = 9;
 /// Bump when [`ClientCommand`] enum breaks.
-pub const COMMAND_SCHEMA: u32 = 4;
+pub const COMMAND_SCHEMA: u32 = 5;
 /// Default disk slot for F5 / F9.
 pub const DEFAULT_SAVE_SLOT: &str = "quick";
 
@@ -35,8 +35,14 @@ const HUMIDITY_TILE_COLS: i32 = 4;
 const CLIMATE_WIND_VX: f32 = 0.05;
 /// Default max sim rate while the viewer presents (~20 Hz).
 pub const DEFAULT_STEP_PERIOD_MS: u64 = 50;
-/// Camera window width for Compact stream (matches Phase 6 stream probes).
-pub const COMPACT_VIEW_COLS: i32 = 320;
+/// Camera window width for Compact stream (viewer default; was 320).
+/// Wider so the strip fills a typical window; stream cost scales with cols.
+pub const COMPACT_VIEW_COLS: i32 = 720;
+/// Vertical extract band for Compact (~view × this).
+pub const COMPACT_VIEW_ROWS: i32 = 384;
+/// Clamp for viewer `[` / `]` view-width changes.
+pub const MIN_VIEW_COLS: i32 = 96;
+pub const MAX_VIEW_COLS: i32 = 1600;
 
 /// Camera-window RGBA strip (row-major, y=0 at top / high world-y).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +134,8 @@ pub struct ViewFrame {
     pub world_width_cols: i32,
     pub world_height: i32,
     pub focus_col: i32,
+    /// Mid-column of the vertical extract band (Compact); ignored on tiny rings.
+    pub focus_y: i32,
     pub view_cols: i32,
     pub last_step_ms: u32,
     /// True when the last host advance used full [`step_world`].
@@ -157,7 +165,12 @@ pub struct CommandAck {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientCommand {
     /// Pan / zoom the camera window (viewer owns UX; host owns residency).
-    SetCamera { focus_col: i32, view_cols: i32 },
+    SetCamera {
+        focus_col: i32,
+        view_cols: i32,
+        /// Mid of Compact vertical band; clamped to world height.
+        focus_y: i32,
+    },
     SetPaused(bool),
     StepOnce,
     /// Durable [`SimSnapshot`] to `saves/<slot>.gvsesim` (host-only I/O).
@@ -204,6 +217,8 @@ pub struct Host {
     present: PresentHints,
     pub paused: bool,
     pub focus_col: i32,
+    /// Mid-row of Compact strip band (world y).
+    pub focus_y: i32,
     pub view_cols: i32,
     pub quit_requested: bool,
     /// Min wall time between auto product steps (present may be faster).
@@ -308,6 +323,7 @@ impl Host {
         } else {
             96.min(params.width_cols)
         };
+        let focus_y = params.sea_level_y;
         let mut host = Self {
             world,
             params,
@@ -337,6 +353,7 @@ impl Host {
             present: PresentHints::default(),
             paused: false,
             focus_col,
+            focus_y,
             view_cols,
             quit_requested: false,
             step_period: Duration::from_millis(DEFAULT_STEP_PERIOD_MS),
@@ -380,6 +397,7 @@ impl Host {
             ClientCommand::SetCamera {
                 focus_col,
                 view_cols,
+                focus_y,
             } => {
                 if view_cols <= 0 {
                     CommandAck {
@@ -389,11 +407,23 @@ impl Host {
                     }
                 } else {
                     self.focus_col = focus_col;
-                    self.view_cols = view_cols.min(self.params.width_cols);
+                    self.view_cols = view_cols
+                        .clamp(MIN_VIEW_COLS, MAX_VIEW_COLS)
+                        .min(self.params.width_cols);
+                    self.focus_y = focus_y.clamp(
+                        self.params.bedrock_floor_y,
+                        self.params.sky_ceiling_y - 1,
+                    );
+                    if self.is_compact() {
+                        self.arm_stream_window();
+                    }
                     CommandAck {
                         id,
                         ok: true,
-                        detail: "camera".into(),
+                        detail: format!(
+                            "camera col={} y={} view={}",
+                            self.focus_col, self.focus_y, self.view_cols
+                        ),
                     }
                 }
             }
@@ -529,8 +559,15 @@ impl Host {
         self.landscape = LandscapeBodyStore::new();
         self.geotech.rebuild(&self.world);
         self.support.rebuild(&self.world);
-        self.view_cols = self.view_cols.clamp(1, self.params.width_cols);
+        self.view_cols = self
+            .view_cols
+            .clamp(MIN_VIEW_COLS, MAX_VIEW_COLS)
+            .min(self.params.width_cols.max(1));
         self.focus_col = self.focus_col.rem_euclid(self.params.width_cols.max(1));
+        self.focus_y = self.focus_y.clamp(
+            self.params.bedrock_floor_y,
+            self.params.sky_ceiling_y - 1,
+        );
         if self.is_compact() {
             self.arm_stream_window();
             let _ = sync_residency(&mut self.world);
@@ -567,8 +604,11 @@ impl Host {
         let pending = std::mem::take(&mut self.pending_acks);
         *self = Host::new(params);
         self.paused = paused;
-        self.view_cols = view_cols.min(self.params.width_cols);
+        self.view_cols = view_cols
+            .clamp(MIN_VIEW_COLS, MAX_VIEW_COLS)
+            .min(self.params.width_cols);
         self.focus_col = self.params.width_cols / 2;
+        self.focus_y = self.params.sea_level_y;
         self.step_period = step_period;
         self.next_ack_id = next_ack_id;
         self.pending_acks = pending;
@@ -668,10 +708,10 @@ impl Host {
     fn extract_terrain(&self, sky: &SkyPresent) -> TerrainStrip {
         let cols = self.view_cols.max(1) as u32;
         // Full column height for small worlds; Compact extracts a band
-        // around sea level so the strip stays viewer-sized (~view×384).
+        // around focus_y so the strip stays viewer-sized (~view×384).
         let (origin_y, rows) = if self.is_compact() {
-            let band = 384i32;
-            let mid = self.params.sea_level_y;
+            let band = COMPACT_VIEW_ROWS;
+            let mid = self.focus_y;
             let lo = (mid - band / 2).max(self.params.bedrock_floor_y);
             let hi = (lo + band).min(self.params.sky_ceiling_y);
             (lo, (hi - lo).max(1) as u32)
@@ -798,6 +838,7 @@ impl Host {
             world_width_cols: self.params.width_cols,
             world_height: self.world_height(),
             focus_col: self.focus_col,
+            focus_y: self.focus_y,
             view_cols: self.view_cols,
             last_step_ms: self.last_step_ms,
             product_step: self.product_step,
@@ -836,9 +877,25 @@ mod tests {
         let ack = host.apply(ClientCommand::SetCamera {
             focus_col: 10,
             view_cols: 0,
+            focus_y: host.focus_y,
         });
         assert!(!ack.ok);
         assert_eq!(host.view_cols, before);
+    }
+
+    #[test]
+    fn camera_sets_focus_y() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let target = (host.params.bedrock_floor_y + host.params.sky_ceiling_y) / 2;
+        let ack = host.apply(ClientCommand::SetCamera {
+            focus_col: host.focus_col,
+            view_cols: host.view_cols,
+            focus_y: target,
+        });
+        assert!(ack.ok, "{}", ack.detail);
+        assert_eq!(host.focus_y, target);
+        assert_eq!(host.frame().focus_y, target);
     }
 
     #[test]

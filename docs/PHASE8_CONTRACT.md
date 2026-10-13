@@ -99,7 +99,7 @@ Queue drained by host **before** or **between** `step_world` calls
 
 | Command | Effect on host | Notes |
 |---------|----------------|-------|
-| `SetCamera { focus_col, view_cols }` | Updates `stream_window` intent for next residency sync | Client owns pan UX; host owns residency |
+| `SetCamera { focus_col, view_cols, focus_y }` | Updates `stream_window` + Compact vertical band | Client owns pan UX; host owns residency |
 | `SetPaused(bool)` / `StepOnce` | Gate `step_world` | Space / pause parity with demo |
 | `SetSimSettings { … }` | Climate, steam, organisms_on, stream_disk, … | Sim-affecting dials only |
 | `SetPresentHints { … }` | Optional: glitter on, overlay masks | If host stamps these into ViewFrame; else client-local |
@@ -139,8 +139,8 @@ client should **split panels** so sim dials always go through commands.
 
 | Constant | Bump when |
 |----------|-----------|
-| `VIEW_SCHEMA` | ViewFrame layout (v5 `sim`; v6 `host`; v7–8 `present` fields) |
-| `COMMAND_SCHEMA` | Commands (v2 save; v3 SetSimSettings; v4 SetPresentHints) |
+| `VIEW_SCHEMA` | ViewFrame layout (v5 `sim`; v6 `host`; v7–8 `present`; v9 `focus_y`) |
+| `COMMAND_SCHEMA` | Commands (v2 save; v3 SetSimSettings; v4 SetPresentHints; v5 `SetCamera.focus_y`) |
 | `SIM_SCHEMA_VERSION` | unchanged role — durable save only (`save.rs`) |
 
 Spike may hard-code v1 and reject mismatches with a clear HUD string.
@@ -175,6 +175,8 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
 - [x] `HostInfo` crumbs on `ViewFrame`.
 - [x] `SetPresentHints` + humidity / steam / caveH strip washes
       (`VIEW_SCHEMA` 8 / `COMMAND_SCHEMA` 4).
+- [x] Broader Compact default view (720) + vertical pan `focus_y`
+      (`VIEW_SCHEMA` 9 / `COMMAND_SCHEMA` 5); `[`/`]` view width.
 - [ ] Owner Mac notarize — **pinned until 2026-11-15**.
 - [ ] Later: Steam storefront / IPC harden / MAS.
 

@@ -87,7 +87,8 @@ around sea level + sky + palette/glitter). Unit tests use
 8. [x] **Palette / glitter** — app-aligned cell colours + water glitter.
 9. [x] **Grow host** — `step_world` + climate fields; present throttled.
 10. [x] **Compact host** — default `Host` stamps Compact; stream
-    `COMPACT_VIEW_COLS` (320) + park far chunks; extract ~view×384 band.
+    `COMPACT_VIEW_COLS` (720) + park far chunks; extract ~view×384 band;
+    vertical pan via `focus_y`.
 11. [x] **Out-of-process host** — `wk-voxel-host` TCP + postcard IPC;
     viewer `--connect`; in-process remains default.
 12. [x] **Apple pack scripts** — `packaging/macos/*` +
