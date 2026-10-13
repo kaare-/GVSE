@@ -22,6 +22,7 @@ Do not ask clarifying questions when a default applies.
 | 12 | Steam/cave present | steam + caveH overlays (`VIEW_SCHEMA` 8) |
 | 13 | Compact stream re-profile | confirms ~115 sim-FPS; hotspots body/temp/steam |
 | 14 | Broader view + V-pan | Compact view 720; `focus_y` ↑/↓; `[`/`]` width (`VIEW_SCHEMA` 9) |
+| 15 | Viewer UX polish | held-key diagonal pan; 20 Hz present; HUD + load screen |
 
 ## Soak / park gate (parity)
 

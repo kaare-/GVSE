@@ -10,27 +10,98 @@
 //! ```
 
 use std::env;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use egui_wgpu::wgpu;
 use egui_wgpu::ScreenDescriptor;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
     ClientCommand, Host, HostInfo, PresentHints, SimSettings, ViewFrame, DEFAULT_SAVE_SLOT,
-    MAX_VIEW_COLS, MIN_VIEW_COLS, VIEW_SCHEMA,
+    DEFAULT_STEP_PERIOD_MS, MAX_VIEW_COLS, MIN_VIEW_COLS, VIEW_SCHEMA,
 };
+
+/// Match host auto-step cadence — firm ~20 Hz present / pull.
+const PRESENT_PERIOD: Duration = Duration::from_millis(DEFAULT_STEP_PERIOD_MS);
+const PAN_COL_STEP: i32 = 16;
+const PAN_Y_STEP: i32 = 24;
 
 enum SimBridge {
     Local(Host),
     Remote(RemoteHost),
     /// Child host process; Drop kills it.
     Spawned(SpawnedHost),
+}
+
+#[derive(Clone, Copy, Default)]
+struct HeldPan {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+}
+
+enum LaunchIntent {
+    Local { dev: bool },
+    Connect(String),
+    Spawn { dev: bool },
+}
+
+impl LaunchIntent {
+    fn loading_message(&self) -> &'static str {
+        match self {
+            Self::Local { dev: true } => "Starting tiny in-process host…",
+            Self::Local { dev: false } => "Stamping Compact world…",
+            Self::Connect(_) => "Connecting to host…",
+            Self::Spawn { dev: true } => "Spawning tiny host…",
+            Self::Spawn { dev: false } => "Spawning Compact host (stamp may take a bit)…",
+        }
+    }
+
+    fn open(self) -> Result<SimBridge, String> {
+        match self {
+            Self::Local { dev: true } => {
+                log::info!("in-process Host::for_tests()");
+                Ok(SimBridge::Local(Host::for_tests()))
+            }
+            Self::Local { dev: false } => {
+                log::info!("in-process Compact Host::default()");
+                Ok(SimBridge::Local(Host::default()))
+            }
+            Self::Connect(addr) => {
+                log::info!("connecting to host at {addr}");
+                RemoteHost::connect(&*addr)
+                    .map(SimBridge::Remote)
+                    .map_err(|e| format!("connect {addr}: {e}"))
+            }
+            Self::Spawn { dev } => {
+                log::info!("spawning wk-voxel-host (dev={dev})");
+                SpawnedHost::spawn(dev)
+                    .map(|s| {
+                        log::info!("spawned host pid={}", s.child_id());
+                        SimBridge::Spawned(s)
+                    })
+                    .map_err(|e| format!("spawn-host: {e}"))
+            }
+        }
+    }
+}
+
+enum Boot {
+    Loading {
+        rx: Receiver<Result<SimBridge, String>>,
+        message: &'static str,
+    },
+    Ready(SimBridge),
+    Failed(String),
 }
 
 fn empty_frame() -> ViewFrame {
@@ -46,7 +117,7 @@ fn empty_frame() -> ViewFrame {
         last_step_ms: 0,
         product_step: false,
         sky: wk_voxel_client::SkyPresent {
-            sky_rgb: [40, 40, 48],
+            sky_rgb: [28, 32, 40],
             day_night_u8: 0,
             phase_u8: 0,
             celestial_local_u8: 0,
@@ -160,7 +231,7 @@ impl SimBridge {
     }
 }
 
-fn parse_args() -> SimBridge {
+fn parse_intent() -> LaunchIntent {
     let mut connect: Option<String> = None;
     let mut spawn_host = false;
     let mut dev = false;
@@ -196,44 +267,49 @@ fn parse_args() -> SimBridge {
         std::process::exit(2);
     }
     if spawn_host {
-        log::info!("spawning wk-voxel-host (dev={dev})");
-        match SpawnedHost::spawn(dev) {
-            Ok(s) => {
-                log::info!("spawned host pid={}", s.child_id());
-                SimBridge::Spawned(s)
-            }
-            Err(e) => {
-                eprintln!("spawn-host: {e}");
-                std::process::exit(1);
-            }
-        }
+        LaunchIntent::Spawn { dev }
     } else if let Some(addr) = connect {
-        log::info!("connecting to host at {addr}");
-        match RemoteHost::connect(&*addr) {
-            Ok(r) => SimBridge::Remote(r),
-            Err(e) => {
-                eprintln!("connect {addr}: {e}");
-                std::process::exit(1);
-            }
-        }
-    } else if dev {
-        log::info!("in-process Host::for_tests()");
-        SimBridge::Local(Host::for_tests())
+        LaunchIntent::Connect(addr)
     } else {
-        log::info!("in-process Compact Host::default()");
-        SimBridge::Local(Host::default())
+        LaunchIntent::Local { dev }
     }
+}
+
+fn panel_frame() -> egui::Frame {
+    egui::Frame::popup(&egui::Style::default())
+        .fill(egui::Color32::from_rgba_unmultiplied(16, 20, 28, 230))
+        .stroke(egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(120, 140, 160, 80),
+        ))
+        .rounding(egui::Rounding::same(10.0))
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .shadow(egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 4.0),
+            blur: 18.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(90),
+        })
 }
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let bridge = parse_args();
+    let intent = parse_intent();
+    let message = intent.loading_message();
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("wk-host-boot".into())
+        .spawn(move || {
+            let _ = tx.send(intent.open());
+        })
+        .expect("spawn boot thread");
+
     let event_loop = EventLoop::new().expect("event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + PRESENT_PERIOD));
 
     let mut app = SpikeApp {
-        bridge,
+        boot: Boot::Loading { rx, message },
         view: None,
         window: None,
         gpu: None,
@@ -246,6 +322,10 @@ fn main() {
         draft_sim_ready: false,
         draft_present: PresentHints::default(),
         draft_present_ready: false,
+        held: HeldPan::default(),
+        hud_open: true,
+        load_started: Instant::now(),
+        next_present: Instant::now(),
     };
 
     event_loop.run_app(&mut app).expect("run");
@@ -259,7 +339,7 @@ struct GpuState {
 }
 
 struct SpikeApp {
-    bridge: SimBridge,
+    boot: Boot,
     view: Option<ViewFrame>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
@@ -268,24 +348,96 @@ struct SpikeApp {
     egui_renderer: Option<egui_wgpu::Renderer>,
     pending: Vec<ClientCommand>,
     terrain_tex: Option<egui::TextureHandle>,
-    /// Local edit buffer; flushed to host via [`ClientCommand::SetSimSettings`].
     draft_sim: SimSettings,
     draft_sim_ready: bool,
     draft_present: PresentHints,
     draft_present_ready: bool,
+    held: HeldPan,
+    hud_open: bool,
+    load_started: Instant,
+    next_present: Instant,
 }
 
 impl SpikeApp {
+    fn bridge_mut(&mut self) -> Option<&mut SimBridge> {
+        match &mut self.boot {
+            Boot::Ready(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    fn bridge(&self) -> Option<&SimBridge> {
+        match &self.boot {
+            Boot::Ready(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    fn poll_boot(&mut self) {
+        let Boot::Loading { rx, message } = &self.boot else {
+            return;
+        };
+        let message = *message;
+        match rx.try_recv() {
+            Ok(Ok(bridge)) => {
+                if let Some(w) = &self.window {
+                    w.set_title(&format!(
+                        "wk-voxel · {} · Phase 8",
+                        bridge.mode_label()
+                    ));
+                }
+                log::info!("boot ready ({})", bridge.mode_label());
+                self.boot = Boot::Ready(bridge);
+            }
+            Ok(Err(e)) => {
+                eprintln!("wk-voxel-client: {e}");
+                self.boot = Boot::Failed(e);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                let _ = message;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.boot = Boot::Failed("boot thread exited without result".into());
+            }
+        }
+    }
+
+    fn flush_held_pan(&mut self) {
+        let Some(bridge) = self.bridge() else {
+            return;
+        };
+        let mut d_col = 0i32;
+        let mut d_y = 0i32;
+        if self.held.left {
+            d_col -= PAN_COL_STEP;
+        }
+        if self.held.right {
+            d_col += PAN_COL_STEP;
+        }
+        if self.held.up {
+            d_y += PAN_Y_STEP;
+        }
+        if self.held.down {
+            d_y -= PAN_Y_STEP;
+        }
+        if d_col == 0 && d_y == 0 {
+            return;
+        }
+        let cmd = bridge.set_camera(
+            bridge.focus_col().saturating_add(d_col),
+            bridge.view_cols(),
+            bridge.focus_y().saturating_add(d_y),
+        );
+        self.pending.push(cmd);
+    }
+
     /// Init window + wgpu. Must not panic: on macOS this runs inside AppKit's
     /// `applicationDidFinishLaunching` (`extern "C"` / cannot-unwind).
     fn ensure_gpu(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         if self.gpu.is_some() {
             return Ok(());
         }
-        let title = format!(
-            "wk-voxel-client (viewer · Phase 8 A · {})",
-            self.bridge.mode_label()
-        );
+        let title = "wk-voxel · starting…".to_string();
         let window = Arc::new(
             event_loop
                 .create_window(
@@ -303,10 +455,6 @@ impl SpikeApp {
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| format!("create_surface: {e}"))?;
-        // Default: real GPU (Metal on macOS). Force software/GL only when
-        // WK_VOXEL_FORCE_FALLBACK_ADAPTER=1 — used for headless Linux spikes.
-        // force_fallback_adapter=true made Mac Metal return no adapter and
-        // `.expect` aborted inside winit's cannot-unwind launch callback.
         let force_fallback = env::var_os("WK_VOXEL_FORCE_FALLBACK_ADAPTER").is_some();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -354,8 +502,12 @@ impl SpikeApp {
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Opaque),
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: caps
+                .alpha_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Opaque),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -396,9 +548,13 @@ impl SpikeApp {
     }
 
     fn pump_host(&mut self) {
+        self.flush_held_pan();
         let cmds = std::mem::take(&mut self.pending);
-        self.bridge.apply_all(cmds);
-        self.view = Some(self.bridge.frame());
+        let Some(bridge) = self.bridge_mut() else {
+            return;
+        };
+        bridge.apply_all(cmds);
+        self.view = Some(bridge.frame());
     }
 
     fn upload_terrain(&mut self, view: &ViewFrame) {
@@ -422,19 +578,176 @@ impl SpikeApp {
         }
     }
 
-    fn render(&mut self) {
-        if self.bridge.quit_requested() {
-            return;
+    fn schedule_present(&mut self, event_loop: &ActiveEventLoop) {
+        self.next_present = Instant::now() + PRESENT_PERIOD;
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_present));
+    }
+
+    fn render_boot_or_play(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_boot();
+        match &self.boot {
+            Boot::Loading { .. } | Boot::Failed(_) => self.render_splash(event_loop),
+            Boot::Ready(_) => {
+                self.pump_host();
+                if self.bridge().is_some_and(|b| b.quit_requested()) {
+                    event_loop.exit();
+                    return;
+                }
+                self.render_play(event_loop);
+            }
         }
+    }
+
+    fn render_splash(&mut self, event_loop: &ActiveEventLoop) {
         let Some(window) = self.window.clone() else {
             return;
         };
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(egui_state) = self.egui_state.as_mut() else {
+            return;
+        };
+        let Some(egui_renderer) = self.egui_renderer.as_mut() else {
+            return;
+        };
+
+        let (title, detail, failed) = match &self.boot {
+            Boot::Loading { message, .. } => ("wk-voxel", *message, false),
+            Boot::Failed(e) => ("wk-voxel", e.as_str(), true),
+            Boot::Ready(_) => return,
+        };
+        let elapsed = self.load_started.elapsed().as_secs_f32();
+
+        let raw_input = egui_state.take_egui_input(&window);
+        let egui_output = self.egui_ctx.run(raw_input, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(egui::Color32::from_rgb(14, 18, 24)))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(ui.available_height() * 0.28);
+                        ui.label(
+                            egui::RichText::new(title)
+                                .size(42.0)
+                                .color(egui::Color32::from_rgb(230, 236, 242))
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("Phase 8 viewer")
+                                .size(16.0)
+                                .color(egui::Color32::from_rgb(140, 160, 180)),
+                        );
+                        ui.add_space(28.0);
+                        if failed {
+                            ui.label(
+                                egui::RichText::new(detail)
+                                    .size(15.0)
+                                    .color(egui::Color32::from_rgb(240, 120, 110)),
+                            );
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new("Esc to quit")
+                                    .size(13.0)
+                                    .color(egui::Color32::from_rgb(120, 130, 140)),
+                            );
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(16.0));
+                                ui.label(
+                                    egui::RichText::new(detail)
+                                        .size(15.0)
+                                        .color(egui::Color32::from_rgb(190, 200, 210)),
+                                );
+                            });
+                            ui.add_space(10.0);
+                            ui.label(
+                                egui::RichText::new(format!("{elapsed:.1}s"))
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(100, 110, 120)),
+                            );
+                        }
+                    });
+                });
+        });
+
+        egui_state.handle_platform_output(&window, egui_output.platform_output);
+        let tris = self
+            .egui_ctx
+            .tessellate(egui_output.shapes, egui_output.pixels_per_point);
+        let Ok(surface_tex) = gpu.surface.get_current_texture() else {
+            self.schedule_present(event_loop);
+            return;
+        };
+        let view_tex = surface_tex
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let screen = ScreenDescriptor {
+            size_in_pixels: [gpu.config.width, gpu.config.height],
+            pixels_per_point: window.scale_factor() as f32,
+        };
+        for (id, image_delta) in &egui_output.textures_delta.set {
+            egui_renderer.update_texture(&gpu.device, &gpu.queue, *id, image_delta);
+        }
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("splash"),
+            });
+        let cb = egui_renderer.update_buffers(
+            &gpu.device,
+            &gpu.queue,
+            &mut encoder,
+            &tris,
+            &screen,
+        );
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("splash"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view_tex,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 14.0 / 255.0,
+                                g: 18.0 / 255.0,
+                                b: 24.0 / 255.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                })
+                .forget_lifetime();
+            egui_renderer.render(&mut pass, &tris, &screen);
+        }
+        for id in &egui_output.textures_delta.free {
+            egui_renderer.free_texture(id);
+        }
+        gpu.queue
+            .submit(cb.into_iter().chain(std::iter::once(encoder.finish())));
+        surface_tex.present();
+        self.schedule_present(event_loop);
+    }
+
+    fn render_play(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let Some(bridge) = self.bridge() else {
+            return;
+        };
+        let mode = bridge.mode_label();
 
         let view = self
             .view
             .clone()
-            .unwrap_or_else(|| self.bridge.frame());
-        if !view.schema_ok() {
+            .unwrap_or_else(empty_frame);
+        if !view.schema_ok() && view.world_width_cols > 0 {
             log::error!(
                 "ViewFrame schema mismatch: got {} want {}",
                 view.contract_version,
@@ -453,7 +766,6 @@ impl SpikeApp {
             return;
         };
 
-        let mode = self.bridge.mode_label();
         if !self.draft_sim_ready {
             self.draft_sim = view.sim.clone();
             self.draft_sim_ready = true;
@@ -466,6 +778,7 @@ impl SpikeApp {
         let mut draft_present = self.draft_present.clone();
         let mut settings_cmd = None;
         let mut present_cmd = None;
+        let mut hud_open = self.hud_open;
         let raw_input = egui_state.take_egui_input(&window);
         let terrain_tex = self.terrain_tex.clone();
         let sky = view.sky.sky_rgb;
@@ -479,7 +792,6 @@ impl SpikeApp {
                     if let Some(tex) = &terrain_tex {
                         let tw = view.terrain.cols as f32;
                         let th = view.terrain.rows as f32;
-                        // Fill the panel; nearest-neighbor keeps the MS Paint look.
                         let scale = (avail.x / tw).min(avail.y / th).max(1.0);
                         let size = egui::vec2(tw * scale, th * scale);
                         ui.centered_and_justified(|ui| {
@@ -504,108 +816,130 @@ impl SpikeApp {
                     );
                 });
 
-            egui::Window::new("viewer")
-                .default_pos([12.0, 12.0])
+            egui::Window::new("wk-voxel")
+                .default_pos([16.0, 16.0])
                 .resizable(false)
+                .collapsible(true)
+                .open(&mut hud_open)
+                .frame(panel_frame())
                 .show(ctx, |ui| {
-                    ui.label(format!("VIEW_SCHEMA {} · {mode}", view.contract_version));
-                    ui.label(format!(
-                        "sim_tick {} · step_world {} ms{}",
-                        view.sim_tick,
-                        view.last_step_ms,
-                        if view.product_step { "" } else { " (held)" }
-                    ));
-                    ui.label(format!(
-                        "paused {} · focus {},{} · view {}",
-                        view.paused, view.focus_col, view.focus_y, view.view_cols
-                    ));
-                    ui.label(format!(
-                        "world {}×{} · strip {}×{}{}",
-                        view.world_width_cols,
-                        view.world_height,
-                        view.terrain.cols,
-                        view.terrain.rows,
-                        if view.world_width_cols >= 4096 {
-                            " · Compact stream"
-                        } else {
-                            ""
-                        }
-                    ));
-                    ui.label(format!(
-                        "chunks {} live / {} park · org {} / {} · sync −{} +{}",
-                        view.host.resident_chunks,
-                        view.host.parked_chunks,
-                        view.host.live_organisms,
-                        view.host.parked_organisms,
-                        view.host.last_evicted,
-                        view.host.last_reloaded
-                    ));
-                    ui.label(format!(
-                        "sky rgb({},{},{}) · {} · dn {} · season {}",
-                        view.sky.sky_rgb[0],
-                        view.sky.sky_rgb[1],
-                        view.sky.sky_rgb[2],
-                        if view.sky.is_day { "day" } else { "night" },
-                        view.sky.day_night_u8,
-                        view.sky.season_u8
-                    ));
-                    if let Some(ack) = view.command_acks.last() {
-                        ui.label(format!(
-                            "ack {} {}",
-                            if ack.ok { "ok" } else { "err" },
-                            ack.detail
-                        ));
-                    }
-                    ui.separator();
-                    ui.label("sim (host)");
-                    let mut changed = false;
-                    changed |= ui
-                        .checkbox(&mut draft.organisms_on, "organisms_on")
-                        .changed();
-                    changed |= ui.checkbox(&mut draft.evap_on, "evap_on").changed();
-                    changed |= ui
-                        .checkbox(&mut draft.cond_rain_on, "cond_rain_on")
-                        .changed();
-                    changed |= ui.checkbox(&mut draft.karst_on, "karst_on").changed();
-                    ui.horizontal(|ui| {
-                        ui.label("day");
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut draft.day_ticks).range(1..=10_000u64))
-                            .changed();
-                        ui.label("night");
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut draft.night_ticks).range(1..=10_000u64))
-                            .changed();
-                    });
-                    if changed {
-                        settings_cmd = Some(draft.clone());
-                    }
-                    ui.separator();
-                    ui.label("present (host)");
-                    let mut p_changed = false;
-                    p_changed |= ui
-                        .checkbox(&mut draft_present.humidity_overlay, "humidity_overlay")
-                        .changed();
-                    p_changed |= ui
-                        .checkbox(&mut draft_present.steam_overlay, "steam_overlay")
-                        .changed();
-                    p_changed |= ui
-                        .checkbox(
-                            &mut draft_present.cave_humidity_overlay,
-                            "cave_humidity_overlay",
-                        )
-                        .changed();
-                    if p_changed {
-                        present_cmd = Some(draft_present.clone());
-                    }
-                    ui.separator();
-                    ui.small(
-                        "Space pause · N step · ←/→/↑/↓ pan · [/] view width · F5 save · F9 load · R reset · Esc quit",
+                    ui.style_mut().spacing.item_spacing = egui::vec2(6.0, 5.0);
+                    ui.label(
+                        egui::RichText::new(format!("{mode} · schema {}", view.contract_version))
+                            .small()
+                            .color(egui::Color32::from_rgb(140, 160, 175)),
                     );
-                    ui.small("client = viewer; host owns step_world + save/load + sim");
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "tick {} · {} ms/step{}",
+                            view.sim_tick,
+                            view.last_step_ms,
+                            if view.product_step { "" } else { " · held" }
+                        ))
+                        .strong()
+                        .color(egui::Color32::from_rgb(230, 236, 242)),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} · focus {},{} · view {}",
+                            if view.paused { "paused" } else { "running" },
+                            view.focus_col,
+                            view.focus_y,
+                            view.view_cols
+                        ))
+                        .color(egui::Color32::from_rgb(200, 210, 220)),
+                    );
+
+                    egui::CollapsingHeader::new("world")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(format!(
+                                "{}×{} · strip {}×{}",
+                                view.world_width_cols,
+                                view.world_height,
+                                view.terrain.cols,
+                                view.terrain.rows
+                            ));
+                            ui.label(format!(
+                                "chunks {} / {} park · org {} / {}",
+                                view.host.resident_chunks,
+                                view.host.parked_chunks,
+                                view.host.live_organisms,
+                                view.host.parked_organisms
+                            ));
+                            ui.label(format!(
+                                "{} · season {}",
+                                if view.sky.is_day { "day" } else { "night" },
+                                view.sky.season_u8
+                            ));
+                            if let Some(ack) = view.command_acks.last() {
+                                ui.label(format!(
+                                    "ack {} — {}",
+                                    if ack.ok { "ok" } else { "err" },
+                                    ack.detail
+                                ));
+                            }
+                        });
+
+                    egui::CollapsingHeader::new("sim")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let mut changed = false;
+                            changed |= ui.checkbox(&mut draft.organisms_on, "organisms").changed();
+                            changed |= ui.checkbox(&mut draft.evap_on, "evaporation").changed();
+                            changed |= ui.checkbox(&mut draft.cond_rain_on, "rain").changed();
+                            changed |= ui.checkbox(&mut draft.karst_on, "karst").changed();
+                            ui.horizontal(|ui| {
+                                ui.label("day");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut draft.day_ticks)
+                                            .range(1..=10_000u64),
+                                    )
+                                    .changed();
+                                ui.label("night");
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut draft.night_ticks)
+                                            .range(1..=10_000u64),
+                                    )
+                                    .changed();
+                            });
+                            if changed {
+                                settings_cmd = Some(draft.clone());
+                            }
+                        });
+
+                    egui::CollapsingHeader::new("overlays")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            let mut p_changed = false;
+                            p_changed |= ui
+                                .checkbox(&mut draft_present.humidity_overlay, "humidity")
+                                .changed();
+                            p_changed |= ui
+                                .checkbox(&mut draft_present.steam_overlay, "steam")
+                                .changed();
+                            p_changed |= ui
+                                .checkbox(&mut draft_present.cave_humidity_overlay, "cave humidity")
+                                .changed();
+                            if p_changed {
+                                present_cmd = Some(draft_present.clone());
+                            }
+                        });
+
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "arrows pan · [ ] width · Space pause · N step · F5/F9 · R · Esc · H hud",
+                        )
+                        .small()
+                        .color(egui::Color32::from_rgb(110, 125, 140)),
+                    );
                 });
         });
 
+        self.hud_open = hud_open;
         self.draft_sim = draft;
         self.draft_present = draft_present;
         if let Some(s) = settings_cmd {
@@ -621,6 +955,7 @@ impl SpikeApp {
             .tessellate(egui_output.shapes, egui_output.pixels_per_point);
 
         let Ok(surface_tex) = gpu.surface.get_current_texture() else {
+            self.schedule_present(event_loop);
             return;
         };
         let view_tex = surface_tex
@@ -678,14 +1013,13 @@ impl SpikeApp {
         gpu.queue
             .submit(cb.into_iter().chain(std::iter::once(encoder.finish())));
         surface_tex.present();
-        window.request_redraw();
+        self.schedule_present(event_loop);
     }
 }
 
 impl ApplicationHandler for SpikeApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(e) = self.ensure_gpu(event_loop) {
-            // Do not panic — macOS runs this under cannot-unwind AppKit code.
             eprintln!("wk-voxel-client: GPU/window init failed: {e}");
             event_loop.exit();
             return;
@@ -709,65 +1043,67 @@ impl ApplicationHandler for SpikeApp {
 
         match event {
             WindowEvent::CloseRequested => {
-                self.pending.push(ClientCommand::Quit);
+                if matches!(self.boot, Boot::Ready(_)) {
+                    self.pending.push(ClientCommand::Quit);
+                } else {
+                    event_loop.exit();
+                }
             }
             WindowEvent::Resized(size) => self.resize(size.width, size.height),
             WindowEvent::KeyboardInput {
                 event: key_event, ..
-            } if key_event.state.is_pressed() => {
-                match key_event.physical_key {
+            } => {
+                let pressed = key_event.state == ElementState::Pressed;
+                let physical = key_event.physical_key;
+                // Track arrows for diagonal hold (press + release).
+                match physical {
+                    PhysicalKey::Code(KeyCode::ArrowLeft) => self.held.left = pressed,
+                    PhysicalKey::Code(KeyCode::ArrowRight) => self.held.right = pressed,
+                    PhysicalKey::Code(KeyCode::ArrowUp) => self.held.up = pressed,
+                    PhysicalKey::Code(KeyCode::ArrowDown) => self.held.down = pressed,
+                    _ => {}
+                }
+                if !pressed || key_event.repeat {
+                    return;
+                }
+                // One-shot keys.
+                match physical {
                     PhysicalKey::Code(KeyCode::Escape) => {
-                        self.pending.push(ClientCommand::Quit);
+                        if matches!(self.boot, Boot::Ready(_)) {
+                            self.pending.push(ClientCommand::Quit);
+                        } else {
+                            event_loop.exit();
+                        }
+                    }
+                    PhysicalKey::Code(KeyCode::KeyH) => {
+                        self.hud_open = !self.hud_open;
                     }
                     PhysicalKey::Code(KeyCode::Space) => {
-                        self.pending
-                            .push(ClientCommand::SetPaused(!self.bridge.paused()));
+                        if let Some(b) = self.bridge() {
+                            self.pending
+                                .push(ClientCommand::SetPaused(!b.paused()));
+                        }
                     }
                     PhysicalKey::Code(KeyCode::KeyN) => {
                         self.pending.push(ClientCommand::StepOnce);
                     }
-                    PhysicalKey::Code(KeyCode::ArrowLeft) => {
-                        self.pending.push(self.bridge.set_camera(
-                            self.bridge.focus_col().saturating_sub(16),
-                            self.bridge.view_cols(),
-                            self.bridge.focus_y(),
-                        ));
-                    }
-                    PhysicalKey::Code(KeyCode::ArrowRight) => {
-                        self.pending.push(self.bridge.set_camera(
-                            self.bridge.focus_col().saturating_add(16),
-                            self.bridge.view_cols(),
-                            self.bridge.focus_y(),
-                        ));
-                    }
-                    PhysicalKey::Code(KeyCode::ArrowUp) => {
-                        // World +y is up; strip origin follows focus_y.
-                        self.pending.push(self.bridge.set_camera(
-                            self.bridge.focus_col(),
-                            self.bridge.view_cols(),
-                            self.bridge.focus_y().saturating_add(24),
-                        ));
-                    }
-                    PhysicalKey::Code(KeyCode::ArrowDown) => {
-                        self.pending.push(self.bridge.set_camera(
-                            self.bridge.focus_col(),
-                            self.bridge.view_cols(),
-                            self.bridge.focus_y().saturating_sub(24),
-                        ));
-                    }
                     PhysicalKey::Code(KeyCode::BracketRight) => {
-                        self.pending.push(self.bridge.set_camera(
-                            self.bridge.focus_col(),
-                            self.bridge.view_cols().saturating_add(80),
-                            self.bridge.focus_y(),
-                        ));
+                        if let Some(b) = self.bridge() {
+                            self.pending.push(b.set_camera(
+                                b.focus_col(),
+                                b.view_cols().saturating_add(80),
+                                b.focus_y(),
+                            ));
+                        }
                     }
                     PhysicalKey::Code(KeyCode::BracketLeft) => {
-                        self.pending.push(self.bridge.set_camera(
-                            self.bridge.focus_col(),
-                            self.bridge.view_cols().saturating_sub(80),
-                            self.bridge.focus_y(),
-                        ));
+                        if let Some(b) = self.bridge() {
+                            self.pending.push(b.set_camera(
+                                b.focus_col(),
+                                b.view_cols().saturating_sub(80),
+                                b.focus_y(),
+                            ));
+                        }
                     }
                     PhysicalKey::Code(KeyCode::F5) => {
                         self.pending.push(ClientCommand::Save {
@@ -787,20 +1123,18 @@ impl ApplicationHandler for SpikeApp {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.pump_host();
-                if self.bridge.quit_requested() {
-                    event_loop.exit();
-                    return;
-                }
-                self.render();
+                self.render_boot_or_play(event_loop);
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if Instant::now() >= self.next_present {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_present));
     }
 }
