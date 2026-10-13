@@ -169,8 +169,10 @@ Spike may hard-code v1 and reject mismatches with a clear HUD string.
       [`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md).
 - [x] Host `Save` / `Load` / `ResetWorld` (`COMMAND_SCHEMA` 2); viewer
       F5 / F9 / R; works in-process and over IPC.
+- [x] Viewer `--spawn-host` launches `wk-voxel-host` child (bind
+      `127.0.0.1:0`, announce before stamp).
 - [ ] Owner Mac notarize — **pinned until 2026-11-15**.
-- [ ] Later: `--spawn-host`, SetSimSettings, Steam / IPC harden / MAS.
+- [ ] Later: SetSimSettings, Steam / IPC harden / MAS.
 
 ## Non-goals
 
@@ -199,5 +201,6 @@ Mesa (`mesa-vulkan-drivers` and/or GL). Spike enables PRIMARY|GL backends.
 7. [x] Out-of-process host binary + localhost IPC.
 8. [x] Apple notarize scripts + owner Mac runbook.
 9. [x] Host save/load/reset commands (`COMMAND_SCHEMA` 2).
-10. Viewer `--spawn-host` / SetSimSettings / Steam when ready.
-11. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
+10. [x] Viewer `--spawn-host` child process.
+11. SetSimSettings / Steam when ready.
+12. Keep `wk-voxel-app` (macroquad) as soak/dev until A presentation parity.
