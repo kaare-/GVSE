@@ -35,3 +35,7 @@ jobs:
         # under crates/wk-voxel/tests, which is where the soak and mass-audit
         # probes live.
         run: cargo test --workspace
+
+      - name: macOS packaging layout (dry-run)
+        # No Metal / codesign here — owner Mac runs notarize.sh.
+        run: ./packaging/macos/check_layout.sh
