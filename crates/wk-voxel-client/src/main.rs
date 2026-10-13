@@ -36,7 +36,8 @@ const PAN_Y_STEP: i32 = 24;
 
 enum SimBridge {
     Local(Host),
-    Remote(RemoteHost),
+    /// `addr` kept for reconnect after a dropped session.
+    Remote { remote: RemoteHost, addr: String },
     /// Child host process; Drop kills it.
     Spawned(SpawnedHost),
 }
@@ -79,7 +80,10 @@ impl LaunchIntent {
             Self::Connect(addr) => {
                 log::info!("connecting to host at {addr}");
                 RemoteHost::connect(&*addr)
-                    .map(SimBridge::Remote)
+                    .map(|remote| SimBridge::Remote {
+                        remote,
+                        addr: addr.clone(),
+                    })
                     .map_err(|e| format!("connect {addr}: {e}"))
             }
             Self::Spawn { dev } => {
@@ -153,8 +157,8 @@ impl SimBridge {
     fn apply_all(&mut self, cmds: Vec<ClientCommand>) {
         match self {
             Self::Local(h) => h.apply_all(cmds),
-            Self::Remote(r) => {
-                if let Err(e) = r.apply_all(cmds) {
+            Self::Remote { remote, .. } => {
+                if let Err(e) = remote.apply_all(cmds) {
                     log::error!("remote apply: {e}");
                 }
             }
@@ -169,7 +173,22 @@ impl SimBridge {
     fn frame(&mut self) -> ViewFrame {
         match self {
             Self::Local(h) => h.frame(),
-            Self::Remote(r) => pull_remote(r),
+            Self::Remote { remote, addr } => match remote.pull() {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("remote pull: {e} — reconnecting to {addr}");
+                    match RemoteHost::connect(&**addr) {
+                        Ok(r) => {
+                            *remote = r;
+                            pull_remote(remote)
+                        }
+                        Err(re) => {
+                            log::error!("reconnect {addr}: {re}");
+                            remote.last().cloned().unwrap_or_else(empty_frame)
+                        }
+                    }
+                }
+            },
             Self::Spawned(s) => pull_remote(&mut s.remote),
         }
     }
@@ -177,7 +196,7 @@ impl SimBridge {
     fn quit_requested(&self) -> bool {
         match self {
             Self::Local(h) => h.quit_requested,
-            Self::Remote(r) => r.quit_requested(),
+            Self::Remote { remote, .. } => remote.quit_requested(),
             Self::Spawned(s) => s.remote.quit_requested(),
         }
     }
@@ -185,7 +204,7 @@ impl SimBridge {
     fn paused(&self) -> bool {
         match self {
             Self::Local(h) => h.paused,
-            Self::Remote(r) => r.last().map(|f| f.paused).unwrap_or(false),
+            Self::Remote { remote, .. } => remote.last().map(|f| f.paused).unwrap_or(false),
             Self::Spawned(s) => s.remote.last().map(|f| f.paused).unwrap_or(false),
         }
     }
@@ -193,7 +212,7 @@ impl SimBridge {
     fn focus_col(&self) -> i32 {
         match self {
             Self::Local(h) => h.focus_col,
-            Self::Remote(r) => r.last().map(|f| f.focus_col).unwrap_or(0),
+            Self::Remote { remote, .. } => remote.last().map(|f| f.focus_col).unwrap_or(0),
             Self::Spawned(s) => s.remote.last().map(|f| f.focus_col).unwrap_or(0),
         }
     }
@@ -201,7 +220,7 @@ impl SimBridge {
     fn focus_y(&self) -> i32 {
         match self {
             Self::Local(h) => h.focus_y,
-            Self::Remote(r) => r.last().map(|f| f.focus_y).unwrap_or(0),
+            Self::Remote { remote, .. } => remote.last().map(|f| f.focus_y).unwrap_or(0),
             Self::Spawned(s) => s.remote.last().map(|f| f.focus_y).unwrap_or(0),
         }
     }
@@ -209,7 +228,7 @@ impl SimBridge {
     fn view_cols(&self) -> i32 {
         match self {
             Self::Local(h) => h.view_cols,
-            Self::Remote(r) => r.last().map(|f| f.view_cols).unwrap_or(96),
+            Self::Remote { remote, .. } => remote.last().map(|f| f.view_cols).unwrap_or(96),
             Self::Spawned(s) => s.remote.last().map(|f| f.view_cols).unwrap_or(96),
         }
     }
@@ -225,7 +244,7 @@ impl SimBridge {
     fn mode_label(&self) -> &'static str {
         match self {
             Self::Local(_) => "in-process",
-            Self::Remote(_) => "IPC",
+            Self::Remote { .. } => "IPC",
             Self::Spawned(_) => "spawn-host",
         }
     }

@@ -273,6 +273,13 @@ impl Host {
         host
     }
 
+    /// Compact ring with an explicit worldgen seed (host CLI `--seed`).
+    pub fn compact_with_seed(seed: u64) -> Self {
+        let mut params = compact_worldgen_params();
+        params.seed = seed;
+        Self::new(params)
+    }
+
     pub fn new(params: WorldgenParams) -> Self {
         let mut world = World::new(params.seed);
         stamp_world(&mut world, &params);
