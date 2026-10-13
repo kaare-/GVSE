@@ -1,8 +1,8 @@
 # Phase 8 — Ordered backlog *(agent default path)*
 
-**Status:** 2026-10-13. Agent follows this list top-down until blocked
-on an **owner decision**. Do not ask clarifying questions when a default
-applies.
+**Status:** 2026-10-13 — **agent parked; owner pick required**.
+Agent follows this list top-down until blocked on an **owner decision**.
+Do not ask clarifying questions when a default applies.
 
 ## Done
 
@@ -20,6 +20,7 @@ applies.
 | 10 | HostInfo crumbs | resident/parked chunks + org counts |
 | 11 | PresentHints | humidity overlay wash |
 | 12 | Steam/cave present | steam + caveH overlays (`VIEW_SCHEMA` 8) |
+| 13 | Compact stream re-profile | confirms ~115 sim-FPS; hotspots body/temp/steam |
 
 ## Soak / park gate (parity)
 
@@ -29,22 +30,35 @@ applies.
 - A-client Compact host is for ship UX + stream residency; optional
   future “stream soak” is a separate measurement, not a Phase 0 replace.
 
-## Agent default next (no owner pick needed)
+## Agent default next — PARKED (needs owner pick)
 
-Phase 8 host/viewer infra is **sufficient** for ship UX. Do not open
-new present wedges unless a soak/play gap demands it. Ordered path:
+Phase 8 host/viewer infra is **sufficient**. Compact stream+evict
+re-profile on park-bank tip:
 
-1. **Re-profile Compact stream+evict** on park-bank tip
-   (`perf_profile_stretch_stream_ab` / equivalent) — refresh hotspot
-   table after Phases 4–8 stack; log under `/opt/cursor/artifacts/`.
-2. **One ≥1 ms surgical win** from that table — prefer seepage /
-   bodies / field shell that does **not** coarsen weather, skip
-   condensation lottery, or reopen Phase 6 hotspot #2 (river tip
-   regression risk). Gate: short soak park=0 + TRACKED flat.
-3. Repeat 1→2 while clear ≥1 ms wins remain; otherwise park and wait
-   for owner (notarize date, E2 visual, or a named phase).
+| Mode | Wall ms/tick | ~sim-FPS | Residency |
+|------|-------------:|---------:|-----------|
+| full-resident | 52.6 | ~19 | chunks=1088 |
+| stream view=320 + evict | **8.7** | **~115** | 1088→459 (store=629) |
 
-Refs: [`VOXEL_PERF.md`](VOXEL_PERF.md), [`ROADMAP.md`](ROADMAP.md).
+Stream hotspots: rock bodies **2.15**, temperature **1.59**, steam
+**1.22**, seepage **0.79**. Log:
+`/opt/cursor/artifacts/phase8-compact-stream-reprofile.log`.
+
+≥30 / Compact ~115 goals are **already met**. Remaining body/temp/steam
+cuts are optional headroom (same class as Phase 4 “owner wants more
+FPS”), not required wins. Do **not** invent wedges.
+
+### Owner pick (choose one)
+
+| Pick | What happens |
+|------|----------------|
+| **A. Idle until 2026-11-15** | Agent idle / daily lists only; Apple notarize then |
+| **B. Optional FPS headroom** | One ≥1 ms cut on Compact or 5 km (bodies / temp / steam / wind) with soak gate |
+| **C. A-client editors** | `PaintTerrain` / `SpawnOrganism` (or subset) via `ClientCommand` |
+| **D. E2 visual** | Owner play/Xvfb on tipped grey-log (Phase 5 leftover) |
+| **E. Named new phase** | You name Phase 9+ scope; agent scopes then executes |
+
+Default if silent: **A** (do not spend cycles inventing sim wedges).
 
 ## Pinned / owner-only
 
@@ -55,6 +69,7 @@ Refs: [`VOXEL_PERF.md`](VOXEL_PERF.md), [`ROADMAP.md`](ROADMAP.md).
 | Steam depots | after Apple smoke | same binaries |
 | MAS / multiplayer / auth | later | explicit unlock |
 | Phase 6 hotspot #2 (land/metab) | owner / harvest-neutral design | deferred — river tip starve |
+| Optional FPS headroom | owner pick **B** | Compact/5 km leftovers |
 
 ## Stop and ask owner only if
 
@@ -63,9 +78,5 @@ Refs: [`VOXEL_PERF.md`](VOXEL_PERF.md), [`ROADMAP.md`](ROADMAP.md).
 - Starting multiplayer or MAS sandbox
 - Dropping macroquad soak harness
 - Reopening Phase 6 hotspot #2 without a harvest-neutral plan
+- Taking optional FPS headroom without pick **B**
 - Large redirect outside this ordered path
-
-## Default if measurement finds no ≥1 ms win
-
-Park sim/perf; do not invent wedges. Wait for Apple notarize date,
-owner E2 visual, or an explicit new phase name.

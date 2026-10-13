@@ -363,10 +363,10 @@ limited commands; host = sim. **Apple pack:** scripts in
 `packaging/macos/` ([`PHASE8_APPLE_PACK.md`](PHASE8_APPLE_PACK.md));
 **notarize pinned until 2026-11-15** (Dev membership). Host
 Host/viewer infra landed through PresentHints steam/cave
-(`VIEW_SCHEMA` 8) — **Phase 8 agent spike sufficient**. **Next (no
-owner pick):** re-profile Compact stream+evict → one ≥1 ms surgical
-win ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)). Apple notarize pinned
-→ 2026-11-15. Soak stays macroquad.
+(`VIEW_SCHEMA` 8) — **Phase 8 agent spike sufficient**. Compact
+stream re-profile confirms **~115** sim-FPS (no required ≥1 ms win).
+**Agent parked** — owner pick next ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)).
+Apple notarize pinned → 2026-11-15. Soak stays macroquad.
 
 ---
 
@@ -458,6 +458,7 @@ win ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)). Apple notarize pinned
 | 2026-10-13 | Phase 8 HostInfo | ViewFrame.host chunk/org residency crumbs (`VIEW_SCHEMA` 6) |
 | 2026-10-13 | Phase 8 present hints | SetPresentHints humidity overlay wash (`VIEW_SCHEMA` 7) |
 | 2026-10-13 | Phase 8 steam/cave present | PresentHints steam + caveH washes (`VIEW_SCHEMA` 8) |
+| 2026-10-13 | Compact stream re-profile | Confirms ~115 sim-FPS stream+evict; no ≥1 ms required win |
 | 2026-10-09 | Phase 4 bodies | Climatic probe: Compact bodies ~9 ms = real falls; streaming next vs CA |
 | 2026-10-07 | Phase 2 closed | Owner: close Phase 2; Phase 3 ice (design discussion first) |
 | 2026-10-07 | Phase 2 Xvfb | Stable pipe straws on vent hill @tick~1122; UW plumes not clear in pan — owner close vs re-pan |
