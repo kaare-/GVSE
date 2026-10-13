@@ -479,3 +479,14 @@ re-profile.
 12. **Phase 6 5k organisms-on soak (2026-10-12):** 5000t / 48 plants —
     living=59, park=0, preferential_root=0, root_residue=0, TRACKED
     −0.33/t. Log: `phase6-organisms-5k-soak.log`. Phase 6 agent-parked.
+13. **Phase 8 Compact stream re-profile (2026-10-13):**
+    `perf_profile_stretch_stream_ab` on park-bank tip after Phase 8
+    host/viewer stack. Confirms prior Phase 4 closeout — no regression.
+    Full-resident wall **52.6** ms (~**19** sim-FPS), chunks=1088.
+    Stream view=320+evict wall **8.7** ms (~**115** sim-FPS),
+    chunks **1088 → 459** (store=629). Stream-on hotspots: rock bodies
+    **2.15**, temperature **1.59**, steam **1.22**, seepage **0.79**.
+    Log: `/opt/cursor/artifacts/phase8-compact-stream-reprofile.log`.
+    ≥30 / Compact ~115 goals still met; leftover body/temp/steam cuts
+    are optional headroom only (owner unlock) — see
+    [`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md).
