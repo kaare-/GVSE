@@ -35,8 +35,9 @@ applies.
 ## Owner path (2026-10-13) — locked order
 
 1. **Host ship** — ✅ landed. See [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md).
-2. **Remote multiplayer + auth** — next; own design note before coding
-   (tokens / allowlist / TLS-or-equivalent).
+2. **Remote multiplayer + auth** — design note
+   [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md); implement only after
+   that note merges (token, N peers, viewer vs operator role).
 3. **Operator client** — full tools + settings control against a live
    host (circle back after multiplayer/auth).
 
@@ -44,8 +45,9 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Host ship landed. Next: short **multiplayer/auth design note**, then
-implement (do not code multiplayer without that note).
+Land **multiplayer/auth design note** ([`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md)),
+then implement against its acceptance table (no protocol code without
+the note).
 
 ## Pinned / later
 
@@ -62,6 +64,6 @@ implement (do not code multiplayer without that note).
 
 - Changing ship stack away from A
 - Spending money / renewing Apple membership early
-- Skipping host ship to jump to multiplayer
+- Skipping multiplayer/auth design note to jump to implement
 - Dropping macroquad soak harness
 - Large redirect outside this ordered path
