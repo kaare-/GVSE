@@ -14,18 +14,20 @@ use serde::{Deserialize, Serialize};
 use wk_voxel::{
     apply_season_sky_tint, celestial_local_cfg, climate_with_season, day_night_factor_cfg,
     is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, season_fraction_cfg,
-    sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, step_world, sync_residency,
-    CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig,
-    CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity,
-    KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SteamConfig,
-    StreamWindow, SupportMap, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams,
-    CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
+    restore_all_from_store, sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, step_world,
+    sync_residency, CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CloudStore,
+    CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap,
+    GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig,
+    SimSnapshot, SteamConfig, StreamWindow, SupportMap, Temperature, Wind, World, WorldStep,
+    WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
 pub const VIEW_SCHEMA: u32 = 4;
 /// Bump when [`ClientCommand`] enum breaks.
-pub const COMMAND_SCHEMA: u32 = 1;
+pub const COMMAND_SCHEMA: u32 = 2;
+/// Default disk slot for F5 / F9.
+pub const DEFAULT_SAVE_SLOT: &str = "quick";
 
 const HUMIDITY_TILE_COLS: i32 = 4;
 const CLIMATE_WIND_VX: f32 = 0.05;
@@ -107,6 +109,12 @@ pub enum ClientCommand {
     SetCamera { focus_col: i32, view_cols: i32 },
     SetPaused(bool),
     StepOnce,
+    /// Durable [`SimSnapshot`] to `saves/<slot>.gvsesim` (host-only I/O).
+    Save { slot: String },
+    /// Load snapshot from disk; replaces live world on the host.
+    Load { slot: String },
+    /// Re-stamp worldgen (same shape); `None` seed bumps current seed.
+    ResetWorld { seed: Option<u64> },
     Quit,
 }
 
@@ -300,6 +308,10 @@ impl Host {
         (self.params.sky_ceiling_y - self.params.bedrock_floor_y).max(1)
     }
 
+    pub fn world_seed(&self) -> u64 {
+        self.params.seed
+    }
+
     pub fn apply(&mut self, cmd: ClientCommand) -> CommandAck {
         let id = self.next_ack_id;
         self.next_ack_id += 1;
@@ -340,6 +352,38 @@ impl Host {
                     detail: "step_once".into(),
                 }
             }
+            ClientCommand::Save { slot } => match self.save_slot(&slot) {
+                Ok(path) => CommandAck {
+                    id,
+                    ok: true,
+                    detail: format!("saved {}", path.display()),
+                },
+                Err(e) => CommandAck {
+                    id,
+                    ok: false,
+                    detail: format!("save: {e}"),
+                },
+            },
+            ClientCommand::Load { slot } => match self.load_slot(&slot) {
+                Ok(()) => CommandAck {
+                    id,
+                    ok: true,
+                    detail: format!("loaded {slot}"),
+                },
+                Err(e) => CommandAck {
+                    id,
+                    ok: false,
+                    detail: format!("load: {e}"),
+                },
+            },
+            ClientCommand::ResetWorld { seed } => {
+                self.reset_world(seed);
+                CommandAck {
+                    id,
+                    ok: true,
+                    detail: format!("reset seed={}", self.params.seed),
+                }
+            }
             ClientCommand::Quit => {
                 self.quit_requested = true;
                 CommandAck {
@@ -351,6 +395,83 @@ impl Host {
         };
         self.pending_acks.push(ack.clone());
         ack
+    }
+
+    fn flush_streaming_for_save(&mut self) {
+        let _ = restore_all_from_store(&mut self.world);
+        let _ = self
+            .organisms
+            .sync_organism_residency(self.world.wrap_width, None);
+        self.world.stream_window = None;
+    }
+
+    fn to_snapshot(&mut self) -> SimSnapshot {
+        self.flush_streaming_for_save();
+        SimSnapshot::new(
+            self.params,
+            self.world.clone(),
+            self.humidity.clone(),
+            self.wind.clone(),
+            self.temperature.clone(),
+            self.clouds.clone(),
+            self.organisms.clone(),
+            self.carbon,
+        )
+    }
+
+    fn apply_snapshot(&mut self, snap: SimSnapshot) {
+        self.params = snap.params;
+        self.world = snap.world;
+        self.humidity = snap.humidity;
+        self.wind = snap.wind;
+        self.temperature = snap.temperature;
+        self.clouds = snap.clouds;
+        self.organisms = snap.organisms;
+        self.carbon = snap.carbon;
+        self.landscape = LandscapeBodyStore::new();
+        self.geotech.rebuild(&self.world);
+        self.support.rebuild(&self.world);
+        self.view_cols = self.view_cols.clamp(1, self.params.width_cols);
+        self.focus_col = self.focus_col.rem_euclid(self.params.width_cols.max(1));
+        if self.is_compact() {
+            self.arm_stream_window();
+            let _ = sync_residency(&mut self.world);
+        }
+    }
+
+    fn save_slot(&mut self, slot: &str) -> Result<std::path::PathBuf, String> {
+        let snap = self.to_snapshot();
+        let path = snap.save_to_disk(slot)?;
+        // Resume streaming under the camera after the full-resident flush.
+        if self.is_compact() {
+            self.arm_stream_window();
+            let _ = sync_residency(&mut self.world);
+        }
+        Ok(path)
+    }
+
+    fn load_slot(&mut self, slot: &str) -> Result<(), String> {
+        let path = SimSnapshot::save_path(slot);
+        let snap = SimSnapshot::load_from_disk(&path)?;
+        self.apply_snapshot(snap);
+        Ok(())
+    }
+
+    fn reset_world(&mut self, seed: Option<u64>) {
+        let mut params = self.params;
+        params.seed = seed.unwrap_or(params.seed.wrapping_add(1));
+        let paused = self.paused;
+        let view_cols = self.view_cols;
+        let step_period = self.step_period;
+        let next_ack_id = self.next_ack_id;
+        let pending = std::mem::take(&mut self.pending_acks);
+        *self = Host::new(params);
+        self.paused = paused;
+        self.view_cols = view_cols.min(self.params.width_cols);
+        self.focus_col = self.params.width_cols / 2;
+        self.step_period = step_period;
+        self.next_ack_id = next_ack_id;
+        self.pending_acks = pending;
     }
 
     pub fn apply_all(&mut self, cmds: impl IntoIterator<Item = ClientCommand>) {
@@ -595,5 +716,38 @@ mod tests {
         assert_eq!(p.width_cols, (CHUNK_CELLS_W as i32) * 64);
         assert!(p.sky_ceiling_y >= TROPOSPHERE_TOP_Y);
         assert!(p.wrap_x);
+    }
+
+    #[test]
+    fn save_load_roundtrip_preserves_tick() {
+        let slot = format!("client_test_{}", std::process::id());
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        for _ in 0..3 {
+            host.apply(ClientCommand::StepOnce);
+        }
+        let tick = host.frame().sim_tick;
+        let ack = host.apply(ClientCommand::Save {
+            slot: slot.clone(),
+        });
+        assert!(ack.ok, "{}", ack.detail);
+        host.apply(ClientCommand::ResetWorld { seed: Some(999) });
+        let mid = host.frame().sim_tick;
+        assert_eq!(mid, 0);
+        let ack = host.apply(ClientCommand::Load { slot: slot.clone() });
+        assert!(ack.ok, "{}", ack.detail);
+        let loaded = host.frame().sim_tick;
+        assert_eq!(loaded, tick);
+        let _ = std::fs::remove_file(SimSnapshot::save_path(&slot));
+    }
+
+    #[test]
+    fn reset_world_bumps_seed() {
+        let mut host = Host::for_tests();
+        let s0 = host.world_seed();
+        host.apply(ClientCommand::ResetWorld { seed: None });
+        assert_eq!(host.world_seed(), s0.wrapping_add(1));
+        host.apply(ClientCommand::ResetWorld { seed: Some(42) });
+        assert_eq!(host.world_seed(), 42);
     }
 }

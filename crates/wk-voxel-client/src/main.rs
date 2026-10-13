@@ -18,7 +18,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{RemoteHost, DEFAULT_HOST_ADDR};
-use wk_voxel_client::{ClientCommand, Host, ViewFrame, VIEW_SCHEMA};
+use wk_voxel_client::{
+    ClientCommand, Host, ViewFrame, DEFAULT_SAVE_SLOT, VIEW_SCHEMA,
+};
 
 enum SimBridge {
     Local(Host),
@@ -429,9 +431,16 @@ impl SpikeApp {
                         view.sky.day_night_u8,
                         view.sky.season_u8
                     ));
+                    if let Some(ack) = view.command_acks.last() {
+                        ui.label(format!(
+                            "ack {} {}",
+                            if ack.ok { "ok" } else { "err" },
+                            ack.detail
+                        ));
+                    }
                     ui.separator();
-                    ui.small("Space pause · N step · ←/→ pan · Esc quit");
-                    ui.small("client = viewer; host owns step_world");
+                    ui.small("Space pause · N step · ←/→ pan · F5 save · F9 load · R reset · Esc quit");
+                    ui.small("client = viewer; host owns step_world + save/load");
                 });
         });
 
@@ -552,6 +561,20 @@ impl ApplicationHandler for SpikeApp {
                             focus_col: self.bridge.focus_col().saturating_add(8),
                             view_cols: self.bridge.view_cols(),
                         });
+                    }
+                    PhysicalKey::Code(KeyCode::F5) => {
+                        self.pending.push(ClientCommand::Save {
+                            slot: DEFAULT_SAVE_SLOT.into(),
+                        });
+                    }
+                    PhysicalKey::Code(KeyCode::F9) => {
+                        self.pending.push(ClientCommand::Load {
+                            slot: DEFAULT_SAVE_SLOT.into(),
+                        });
+                    }
+                    PhysicalKey::Code(KeyCode::KeyR) => {
+                        self.pending
+                            .push(ClientCommand::ResetWorld { seed: None });
                     }
                     _ => {}
                 }
