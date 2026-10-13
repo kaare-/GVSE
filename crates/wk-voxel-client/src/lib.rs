@@ -1163,4 +1163,30 @@ mod tests {
         let p = host.frame().present;
         assert!(p.humidity_overlay && p.steam_overlay && p.cave_humidity_overlay);
     }
+
+    #[test]
+    fn operator_role_gates_mutating_cmds() {
+        use ipc::PeerRole;
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let deny = host.apply_as(PeerRole::Viewer, ClientCommand::ResetWorld { seed: None });
+        assert!(!deny.ok, "{}", deny.detail);
+        let allow = host.apply_as(
+            PeerRole::Operator,
+            ClientCommand::ResetWorld { seed: Some(9) },
+        );
+        assert!(allow.ok, "{}", allow.detail);
+        assert!(Host::command_allowed(
+            PeerRole::Viewer,
+            &ClientCommand::SetCamera {
+                focus_col: 0,
+                view_cols: 96,
+                focus_y: 40,
+            }
+        ));
+        assert!(!Host::command_allowed(
+            PeerRole::Viewer,
+            &ClientCommand::SetSimSettings(SimSettings::default())
+        ));
+    }
 }
