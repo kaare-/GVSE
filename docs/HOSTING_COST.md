@@ -131,12 +131,88 @@ remote present ≤10 Hz once WAN path exists
 To increase **world** size → **more regions + halo/handoff**, not a
 bigger single process (5 km single-box already showed temp/rain cost).
 
+## Fun scale: ~10k players (mostly casual)
+
+**10k accounts ≠ 10k ViewFrames.** Mix assumed:
+
+| Cohort | Habit | Wire product |
+|--------|--------|----------------|
+| **Bus / kill-time** | Open 30–90 s, check creature / season / “is my fungus alive?” | **Lite status** — small JSON / tiny thumbnail / last snapshot (KB, not MiB×Hz) |
+| **Session play** | Sit 10–40 min, pan a bit | Compressed ViewFrame, **5–10 Hz**, one camera |
+| **TV lean-back** | World as ambient on a big screen | One long stream, **5–10 Hz**, maybe wider strip; still compressed |
+| **Glued** | Few power users / streamers | Full viewer; cap concurrent per region |
+
+### Concurrent load sketch (illustrative)
+
+For **10k registered**, casual games often see roughly:
+
+```text
+DAU           ~2k–4k   (20–40%)
+Peak online   ~200–600 (sessions open — many lite)
+Heavy strip   ~20–80   (real ViewFrame pullers at once)
+TV / glued    ~5–20    (long-lived, hungry)
+```
+
+If **every** peak-online user got today’s raw 20 Hz strip, egress alone
+is fantasy money. If **lite-first**:
+
+| Path | Peak count | Payload class | Egress order (compressed targets) |
+|------|------------|---------------|-----------------------------------|
+| Lite check-in | 300 | ~1–20 KB / open | **Negligible** (GB/day, not TiB) |
+| Session strip | 40 @ 10 Hz, ~20× smaller than raw | ~0.5–2 Mbit/s each | ~**$150–600 / mo** if those 40 were 24/7; real sessions ≪ that |
+| TV / glued | 10 @ 10 Hz | ~1–4 Mbit/s each | **~$80–300 / mo** if 24/7; evenings-only cheaper |
+
+**Compute:** creatures live in **regions**. 10k players’ organisms do not
+fit one Compact forever — you shard by map and/or by “world instance.”
+
+Rough region count if each Compact comfortably holds sim for a slice of
+life (order-of-magnitude, not sim math):
+
+```text
+Suppose ~50–200 “active homes” of load per region
+→ tens to low hundreds of region processes at 10k players
+→ @ ~$80–120/mo reserved-ish each → $4k–20k/mo compute if all hot
+```
+
+That upper band is **if every region is always-on and full**. Reality
+for casual:
+
+- Cold regions **hibernate** (park to disk, wake on check-in)  
+- Many players share a **public** region; private gardens are rarer  
+- Lite check-in can hit a **read replica / snapshot service**, not wake
+  full CA if the design allows “stale by minutes”
+
+**Ballpark official stack at 10k casual** (after compression + lite API):
+
+| Layer | Role | Crude $/mo |
+|-------|------|------------|
+| Always-on public regions | A few “main worlds” / showcases | $300–1.5k |
+| Wake-on-demand shards | Player gardens / quiet zones | $200–2k (bursty) |
+| Lite API + auth + DB | Bus check-ins, creature cards | $50–300 |
+| Egress (strips + lite) | Dominated by TV/session, not bus | $200–1.5k |
+| **Total (order)** | | **~$1k–5k / mo** early;  
+| | | **tens of k$** only if many hot always-on regions + fat TV |
+
+Without **lite check-in**, you accidentally build a 10k-seat video CDN
+and the bill follows that industry, not a voxel toy.
+
+### Product implication
+
+The player client needs **two gears** (see
+[`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)):
+
+1. **Glance** — bus/TV thumbnail / creature sheet / “world postcard”  
+2. **Presence** — real ViewFrame session (paid in CPU + egress)
+
+Studio stays offline/freedom. Operator still tunes live regions.
+
 ## Open measurements *(before trusting $)*
 
 - [ ] zstd ratio on real Compact strips (day/night, busy shore)  
 - [ ] RSS / peak RAM of `wk-voxel-host --` Compact on a known box  
 - [ ] Tick ms with 4 peers at opposite ends of the ring  
 - [ ] Actual Mbps after compression at 10 Hz  
+- [ ] Lite snapshot size (creature card / 64×36 postcard)  
 
 ## Related
 

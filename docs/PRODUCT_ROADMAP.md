@@ -49,6 +49,11 @@ Ship client is a **viewer** with a short, written allowlist of live
 interactions (camera, present, maybe seed/drop later — **not** full
 paint). Everything else is denied by host role policy.
 
+At casual scale (bus check-ins, TV lean-back), the client needs **two
+gears**: **Glance** (lite status / postcard — cheap) vs **Presence**
+(real ViewFrame — expensive). See [`HOSTING_COST.md`](HOSTING_COST.md)
+§ “10k players”.
+
 **Contract owed:** one-page player allowlist before more world UI.
 
 ### 3. Design studio (creature space)
