@@ -144,8 +144,9 @@ Ordered levers (do before scaling instances):
 Official region = Compact 4096 × tropopause, stream+park, ≥30 sim-FPS
 under load, peers 4/8, WAN present ≤10 Hz after compress.
 
-To increase **world** size → **more regions + halo/handoff**, not a
-bigger single process (5 km single-box already showed temp/rain cost).
+To increase **world** size → **more regions + halo/handoff**
+([`HALO_SHARD.md`](HALO_SHARD.md)), not a bigger single process (5 km
+single-box already showed temp/rain cost).
 
 ## Fun scale: ~10k players (mostly casual)
 
