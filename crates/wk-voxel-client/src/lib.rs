@@ -743,11 +743,12 @@ impl Host {
             }
             ClientCommand::SpawnOrganism { col, y, preset } => {
                 let bp = preset.blueprint();
-                if !bp.can_editor_spawn() {
+                // Operator presets are Lab-gate (built-ins always pass).
+                if let Err(detail) = bp.validate_for_spawn(wk_voxel::SpawnGate::Lab) {
                     CommandAck {
                         id,
                         ok: false,
-                        detail: format!("preset {:?} cannot spawn", preset),
+                        detail: format!("preset {:?}: {detail}", preset),
                     }
                 } else {
                     let body = bp.modules_relative_to_nucleus();
