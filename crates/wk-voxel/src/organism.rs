@@ -26,9 +26,9 @@ use crate::climate::{
 };
 use crate::clouds::{CloudStore, DOWNPOUR_MASS};
 use crate::fungi::{
-    colonize_and_compost_cfg, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
-    fill_ghost_root_voids, max_mycelium_near, prune_stale_root_residue, FungiConfig,
-    forage_organic_energy,
+    colonize_and_compost_cfg, digest_budget_units, digest_labile,
+    dissolve_corpse_to_organic_with_drip, drip_corpse_settle_litter, fill_ghost_root_voids,
+    max_mycelium_near, prune_stale_root_residue, FungiConfig, forage_organic_energy,
     fruiting_body_supported, fungus_should_hibernate, fungus_upkeep, is_fungus, is_fungus_seated,
     is_surface_stalk, try_emergent_fruiting, try_spore, FRUIT_SUPPORT_MIN_AGE,
     FUNGUS_HIBERNATE_MAX_TICKS,
@@ -568,6 +568,9 @@ pub struct Corpse {
     /// Standing-dead Stem integrity `(local_x, local_y, 0..1)`. Missing ⇒ 1.0.
     #[serde(default)]
     pub stem_integrity: Vec<(i16, i16, f32)>,
+    /// Dig D3b: soft litter already dripped during settle (deducted at dissolve).
+    #[serde(default)]
+    pub litter_dripped: u16,
 }
 
 impl Corpse {
@@ -624,6 +627,7 @@ impl Corpse {
             fallen,
             upright_growth,
             stem_integrity,
+            litter_dripped: 0,
         }
     }
 
@@ -2577,10 +2581,22 @@ impl OrganismStore {
         if self.corpse_total() >= self.corpse_cap() {
             // Cap pressure: dissolve oldest live corpse (parked stay frozen).
             if let Some(old) = self.corpses.first().cloned() {
-                dissolve_corpse_to_organic(world, old.gx, old.gy, &old.body);
+                dissolve_corpse_to_organic_with_drip(
+                    world,
+                    old.gx,
+                    old.gy,
+                    &old.body,
+                    old.litter_dripped,
+                );
                 self.corpses.remove(0);
             } else if let Some(old) = self.parked_corpses.first().cloned() {
-                dissolve_corpse_to_organic(world, old.gx, old.gy, &old.body);
+                dissolve_corpse_to_organic_with_drip(
+                    world,
+                    old.gx,
+                    old.gy,
+                    &old.body,
+                    old.litter_dripped,
+                );
                 self.parked_corpses.remove(0);
             }
         }
@@ -2664,6 +2680,15 @@ impl OrganismStore {
                     || corpse_adjacent_stream(world, corpse);
                 let settle_step = if in_stream { 5 } else { 1 };
                 corpse.settled_ticks = corpse.settled_ticks.saturating_add(settle_step);
+                // Dig D3b: soft litter drips during settle (not only at dissolve).
+                drip_corpse_settle_litter(
+                    world,
+                    corpse.gx,
+                    corpse.settled_ticks,
+                    settle_step,
+                    &corpse.body,
+                    &mut corpse.litter_dripped,
+                );
                 if corpse.settled_ticks >= CORPSE_SETTLE_LAND_TICKS {
                     dissolve.push(i);
                 }
@@ -2684,7 +2709,16 @@ impl OrganismStore {
             };
             if on_bed {
                 corpse.vel_y = 0.0;
-                corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
+                let settle_step = 1u32;
+                corpse.settled_ticks = corpse.settled_ticks.saturating_add(settle_step);
+                drip_corpse_settle_litter(
+                    world,
+                    corpse.gx,
+                    corpse.settled_ticks,
+                    settle_step,
+                    &corpse.body,
+                    &mut corpse.litter_dripped,
+                );
                 if corpse.settled_ticks >= CORPSE_SETTLE_WATER_TICKS {
                     dissolve.push(i);
                 }
@@ -2697,7 +2731,13 @@ impl OrganismStore {
         dissolve.dedup();
         for &i in dissolve.iter().rev() {
             if let Some(c) = self.corpses.get(i).cloned() {
-                dissolve_corpse_to_organic(world, c.gx, c.gy, &c.body);
+                dissolve_corpse_to_organic_with_drip(
+                    world,
+                    c.gx,
+                    c.gy,
+                    &c.body,
+                    c.litter_dripped,
+                );
             }
             if i < self.corpses.len() {
                 self.corpses.swap_remove(i);
@@ -6276,7 +6316,7 @@ mod tests {
         assert_eq!(store.corpse_count(), 1, "death should leave a lingering corpse");
         assert!(
             crate::fungi::soft_litter_at(&w, 4) == 0,
-            "litter waits until dissolve, not instant death"
+            "litter waits for settle drip / dissolve, not instant death"
         );
         // Grey corpse still drawable.
         let draw = store.draw_list(&w, 0, 0.0);
@@ -6284,16 +6324,23 @@ mod tests {
         let (_, _, rgb) = draw[0];
         assert!(rgb.0 <= 120 && rgb.2 <= 70, "corpse should be desaturated brown-grey");
 
-        // Fast-forward settle.
-        store.corpses[0].settled_ticks = CORPSE_SETTLE_WATER_TICKS - 1;
-        // Pin on bed so settle counts.
+        // Dig D3b: settle pulses drip soft litter before final dissolve.
         store.corpses[0].gy = 1;
         store.corpses[0].fy = 1.0;
+        store.corpses[0].settled_ticks = crate::fungi::CORPSE_SETTLE_LITTER_PERIOD - 1;
         store.step(&mut w, 1);
+        assert_eq!(store.corpse_count(), 1, "one period should not dissolve yet");
+        let mid = crate::fungi::soft_litter_at(&w, 4);
+        assert!(mid > 0, "settle drip should bank litter before dissolve");
+        assert!(store.corpses[0].litter_dripped > 0);
+
+        // Fast-forward settle to dissolve.
+        store.corpses[0].settled_ticks = CORPSE_SETTLE_WATER_TICKS - 1;
+        store.step(&mut w, 2);
         assert_eq!(store.corpse_count(), 0, "settled corpse should dissolve");
         assert!(
-            crate::fungi::soft_litter_at(&w, 4) > 0,
-            "dissolve should bank soft litter for fungi"
+            crate::fungi::soft_litter_at(&w, 4) >= mid,
+            "dissolve should keep dripped litter and may add remainder"
         );
         // Body modules that sat in dry Air become Organic (nucleus+photo at bed).
         let organic_cells = (0..10)

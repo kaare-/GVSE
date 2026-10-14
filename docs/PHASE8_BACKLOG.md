@@ -48,9 +48,9 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig **A–C** + ViewFrame zstd + WAN 10 Hz + Dig **D1–D3** done. Dig **D5**
-drought↔alloc (D4 grey-log stays owner-only)
-([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md)). Next: Dig D3b/D5b or Apple
+Dig **A–C** + ViewFrame zstd + WAN 10 Hz + Dig **D1–D5** on park-bank
+(D4 grey-log owner-only). Dig **D3b** corpse settle litter drip
+([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md)). Next: Dig D5b or Apple
 notarize (pinned **2026-11-15**). Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Pinned / later
@@ -65,6 +65,7 @@ notarize (pinned **2026-11-15**). Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
 | Dig D2 Release | Operator `ReleaseBlueprint` | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Dig D3 habit caps | Soft plant/fungus/atom ceilings | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Dig D5 drought alloc | Stressed grow-pulse root lean | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
+| Dig D3b litter drip | Corpse settle → soft litter | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Optional FPS headroom | owner ask | Compact/5 km leftovers |
 
 ## Stop and ask owner only if

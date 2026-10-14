@@ -1,8 +1,8 @@
 # Biology depth *(dig D)*
 
-**Status:** D5 in progress (2026-10-14). Product dig order **D** from
+**Status:** D3b in progress (2026-10-14). Product dig order **D** from
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Soak-gated; no ship-UI
-work under this dig.
+work under this dig. Dig D2–D5 merged to park-bank.
 
 ## Intent
 
@@ -33,86 +33,62 @@ single-leaf paths unchanged.
 ## D2 — Release ecology path *(done)*
 
 Studio → world entry under [`SpawnGate::Release`](../crates/wk-voxel/src/blueprint.rs)
-([`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md)). Not free
-`SpawnOrganism` / paint — postcard `.gvsecrt` bytes with host
-quarantine, cooldown, and a soft living budget.
-
-| Dial | Default (Operator-first) |
-|------|--------------------------|
-| Who | Operator only this wedge (Wild player Release stays allowlist-later) |
-| Wire | `ClientCommand::ReleaseBlueprint { col, y, bytes }` (`COMMAND_SCHEMA` 8) |
-| Size | ≤ `MAX_RELEASE_BLUEPRINT_BYTES` (64 KiB) |
-| Modules | ≤ `MAX_RELEASE_MODULES` (256) after Mid-only quarantine |
-| Gate | `Blueprint::quarantine_for_release` → `validate_for_spawn(Release)` |
-| Cooldown | `RELEASE_COOLDOWN_TICKS` (30) between successes; cleared on `ResetWorld` |
-| Cap | `RELEASE_LIVE_SOFT_CAP` (32) living + existing atom pop cap |
-| Quarantine | Mid lane only; genome clamped to mutation ranges; disk file untouched |
+([`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md)). Postcard `.gvsecrt`
+bytes with host quarantine, cooldown, and a soft living budget.
 
 ### Acceptance
 
-- [x] Contract in this file + studio / allowlist crumbs  
-- [x] `ReleaseBlueprint` on host; Operator allow / Viewer deny  
-- [x] Invalid habit / oversize / cooldown / soft-cap reject with ACK detail  
-- [x] Built-in atom blueprint Release places living organism  
-- [ ] Wild player Release (identity + per-account dials) — later  
+- [x] `ReleaseBlueprint` (`COMMAND_SCHEMA` 8); Operator allow / Viewer deny  
+- [x] Quarantine / cooldown / soft-cap / oversize rejects  
 
 ## D3 — Population / litter ecology *(done)*
 
-Phase 6 already soft-capped litter / residue **maps**. Dig D3 soft-caps
-**living habits** so one bloom (esp. fungi) cannot wallpaper the global
-`MAX_ATOMS` bucket. HUD already shows `p=/f=/a=` — soft-caps match that
-split. Parked stream-side life counts (same fairness as pop cap).
+Living habit soft-caps inside `MAX_ATOMS` (plants 180 / fungi 48 /
+atoms 128). Parked stream-side life counts.
+
+### Acceptance
+
+- [x] `habit_soft_cap_blocks_fungus_not_plant`  
+- [x] `SpawnFail::HabitCap` on host + editor  
+
+## D3b — Corpse settle → soft-litter drip *(this wedge)*
+
+Phase 6 soft-capped litter **maps**. Dig D3b improves litter
+**turnover**: resting corpses drip soft litter during settle (half of
+`death_litter_budget`), and dissolve banks only the remainder. Instant
+death still leaves zero litter (grey linger first).
 
 | Dial | Default |
 |------|---------|
-| Plants | `HABIT_SOFT_CAP_PLANTS` = 180 |
-| Fungi | `HABIT_SOFT_CAP_FUNGI` = 48 |
-| Atoms (floaters + epiphytes) | `HABIT_SOFT_CAP_ATOMS` = 128 |
-| Global | existing `MAX_ATOMS` / `atom_cap` still binds |
-| Gates | sprout / spore birth / fission / emergent fruiting / plant spore-bank wake / editor+Release spawn |
-| Litter maps | unchanged (Phase 6 GC) |
+| Period | `CORPSE_SETTLE_LITTER_PERIOD` = 60 settled ticks |
+| Drip | `CORPSE_SETTLE_LITTER_DRIP` = 1 unit / pulse |
+| Cap | half of `death_litter_budget` during settle |
+| Track | `Corpse::litter_dripped` (serde default 0) |
+| Dissolve | `dissolve_corpse_to_organic_with_drip` |
 
 ### Acceptance
 
 - [x] Contract in this file  
-- [x] `habit_soft_cap_blocks_fungus_not_plant` — fungus soft-cap binds; plant still spawns  
-- [x] Parked fungi count toward habit soft-cap  
-- [x] Host / macroquad editor surface `SpawnFail::HabitCap`  
-- [ ] Short organisms-on soak still park=0 / TRACKED flat (CI stack)  
+- [x] `death_leaves_grey_corpse_then_organic` — drip mid-settle; dissolve keeps litter  
+- [x] Instant death still litter=0  
+- [ ] CI voxel stack green  
 
 ## D4 — E2 tipped grey-log *(owner-only; skipped)*
 
-Pose + `corpse_rgb` already land in sim; accept is 1× studio eyeball
-([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)). Agent does not
-block — play/Xvfb when Kaare has eyes.
+Pose + `corpse_rgb` already land; accept is 1× studio eyeball.
 
-## D5 — Climate×life on existing genes *(this wedge)*
+## D5 — Climate×life on existing genes *(done)*
 
-Drought already scales photo / soft root budget. Dig D5 adds a
-**temporary grow-pulse alloc lean** under [`DroughtBand::Stressed`]:
-root-heavy genomes dig harder; leaf-heavy barely move. No new Genome
-fields. Hydrated / Dormant / bathing / fallen paths unchanged (other
-urgencies own those). Genome restored after `try_grow_plant`.
-
-| Dial | Default |
-|------|---------|
-| When | Grounded, not bathing, `DroughtBand::Stressed` |
-| Root boost | `DROUGHT_ALLOC_ROOT_BOOST` × `alloc_root` gene (0.35) |
-| Leaf trim | `DROUGHT_ALLOC_LEAF_TRIM` × gene (0.40) on `alloc_leaf` |
-| Helper | `apply_drought_alloc_stress` |
+Drought-stressed grow-pulse `alloc_root` lean (`apply_drought_alloc_stress`).
 
 ### Acceptance
 
-- [x] Contract in this file  
 - [x] `drought_alloc_boost_gene_scaled_stressed_only`  
-- [x] Hydrated / bathing no-ops  
-- [ ] Dig D1 river cost-limit still green (CI)  
 
 ## Later Dig D options *(not this PR)*
 
 | Id | Topic |
 |----|--------|
-| D3b | Corpse settle → soft-litter drip (litter turnover follow-on) |
 | D5b | Cold↔`metabolic_rate` Q10 throttle (E46d-safe; no cold death) |
 
 ## Related
