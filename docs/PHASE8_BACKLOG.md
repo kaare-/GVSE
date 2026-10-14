@@ -48,13 +48,11 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig order **A** done (`WorldTier` + [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)).
-Dig order **B**: [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md) (contract)
-→ shared validate helper / Lab `.gvsecrt` path when coding. Then Apple
-notarize (pinned **2026-11-15**), or owner-picked pillar from
-[`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Hosting realism:
-[`HOSTING_COST.md`](HOSTING_COST.md) (compress ViewFrame before public
-AWS).
+Dig **A–B** done (allowlist, studio blueprint + validate). Dig **C**:
+[`REGION_CAPACITY.md`](REGION_CAPACITY.md) + envelope constants. Next:
+ViewFrame compression before public AWS, or dig **D** biology, or Apple
+notarize (pinned **2026-11-15**). Cost sketch:
+[`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Pinned / later
 
