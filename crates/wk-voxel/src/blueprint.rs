@@ -18,7 +18,7 @@ pub const BLUEPRINT_EXT: &str = "gvsecrt";
 pub enum SpawnGate {
     /// Local Lab / studio / Operator presets — nucleus + non-empty.
     Lab,
-    /// Future Wild/Shadow Release — must match a known habit.
+    /// Dig D2 Release (Wild/Shadow / Operator stub) — must match a known habit.
     Release,
 }
 
@@ -168,6 +168,26 @@ impl Genome {
         let r = self.alloc_root.max(0.0);
         let sum = (s + l + r).max(1e-6);
         (s / sum, l / sum, r / sum)
+    }
+
+    /// Clamp gene dials to mutation ranges (Release quarantine).
+    pub fn quarantine_for_release(mut self) -> Self {
+        self.metabolic_rate = self.metabolic_rate.clamp(0.2, 2.0);
+        self.reproduce_at = self.reproduce_at.clamp(0.3, 0.95);
+        self.clone_fidelity = self.clone_fidelity.clamp(0.05, 1.0);
+        self.buoyancy_bias = self.buoyancy_bias.clamp(0.0, 1.0);
+        self.root_depth_bias = self.root_depth_bias.clamp(0.0, 1.0);
+        self.alloc_stem = self.alloc_stem.clamp(0.0, 1.0);
+        self.alloc_leaf = self.alloc_leaf.clamp(0.0, 1.0);
+        self.alloc_root = self.alloc_root.clamp(0.0, 1.0);
+        self.leaf_absorb = self.leaf_absorb.clamp(0.05, 1.0);
+        self.shade_efficiency = self.shade_efficiency.clamp(0.0, 1.0);
+        self.digest_rate = self.digest_rate.clamp(0.05, 2.0);
+        self.temp_optimum = self.temp_optimum.clamp(0.0, 40.0);
+        self.temp_width = self.temp_width.clamp(2.0, 40.0);
+        self.attach_prefer = self.attach_prefer.clamp(0.0, 1.0);
+        self.host_leave_fraction = self.host_leave_fraction.clamp(0.0, 1.0);
+        self
     }
 
     /// Deterministic per-trait mutation. High `clone_fidelity` → small jitter.
@@ -1143,6 +1163,21 @@ impl Blueprint {
         Ok(())
     }
 
+    /// Host quarantine for Dig D2 Release: Mid lane only + clamped genome.
+    /// Does not mutate the on-disk file — returns a host-local copy.
+    pub fn quarantine_for_release(&self) -> Result<Self, String> {
+        self.validate_for_spawn(SpawnGate::Release)?;
+        let mut out = self.clone();
+        out.modules.retain(|m| m.lane == LaneId::Mid);
+        if out.modules.is_empty() {
+            return Err("release quarantine stripped all modules (Mid lane required)".into());
+        }
+        out.genome = out.genome.quarantine_for_release();
+        // Re-check habit after Mid-only filter (Fore/Back-only bodies die here).
+        out.validate_for_spawn(SpawnGate::Release)?;
+        Ok(out)
+    }
+
     /// Anchor = first Nucleus (canvas coords).
     pub fn nucleus_origin(&self) -> Option<(i16, i16)> {
         self.modules
@@ -1258,6 +1293,22 @@ mod tests {
         let mut future = Blueprint::atom();
         future.schema_version = BLUEPRINT_SCHEMA_VERSION + 1;
         assert!(future.validate_for_spawn(SpawnGate::Lab).is_err());
+    }
+
+    #[test]
+    fn quarantine_for_release_clamps_genome_and_keeps_mid() {
+        let mut bp = Blueprint::atom();
+        bp.genome.metabolic_rate = 99.0;
+        bp.modules.push(PlacedModule {
+            x: 2,
+            y: 0,
+            lane: LaneId::Fore,
+            module: ModuleId::Photosystem,
+        });
+        let q = bp.quarantine_for_release().expect("atom release");
+        assert!((q.genome.metabolic_rate - 2.0).abs() < 1e-5);
+        assert!(q.modules.iter().all(|m| m.lane == LaneId::Mid));
+        assert!(q.is_valid_atom());
     }
 
     #[test]

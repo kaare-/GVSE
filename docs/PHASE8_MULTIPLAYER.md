@@ -85,7 +85,7 @@ once; N presents may lag independently.
 | `SetPaused` / `StepOnce` | ✓ | ✗ (shared clock) | ✓ |
 | `SetSimSettings` | ✗ | ✗ | ✓ |
 | `Save` / `Load` / `ResetWorld` | ✗ | ✗ | ✓ |
-| `PaintTerrain` / `SpawnOrganism` | ✗ | ✗ | ✓ |
+| `PaintTerrain` / `SpawnOrganism` / `ReleaseBlueprint` | ✗ | ✗ | ✓ |
 | `Quit` | session only | session only | same (does **not** tear down host) |
 
 `--tier` on `wk-voxel-host` (default Lab on loopback, Shadow on `--lan`).

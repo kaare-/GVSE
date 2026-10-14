@@ -29,11 +29,19 @@ use wk_voxel::{
 /// Bump when [`ViewFrame`] field layout breaks.
 pub const VIEW_SCHEMA: u32 = 10;
 /// Bump when [`ClientCommand`] enum breaks.
-pub const COMMAND_SCHEMA: u32 = 7;
+pub const COMMAND_SCHEMA: u32 = 8;
 /// Max paint brush radius (cells); diameter = 2·r+1.
 pub const MAX_PAINT_RADIUS: i32 = 16;
 /// Default disk slot for F5 / F9.
 pub const DEFAULT_SAVE_SLOT: &str = "quick";
+/// Dig D2: max postcard bytes for [`ClientCommand::ReleaseBlueprint`].
+pub const MAX_RELEASE_BLUEPRINT_BYTES: usize = 64 * 1024;
+/// Dig D2: min sim ticks between successful Releases (same host).
+pub const RELEASE_COOLDOWN_TICKS: u64 = 30;
+/// Dig D2: soft living budget for the Release path (still ≤ atom pop cap).
+pub const RELEASE_LIVE_SOFT_CAP: usize = 32;
+/// Dig D2: max Mid modules after quarantine.
+pub const MAX_RELEASE_MODULES: usize = 256;
 
 const HUMIDITY_TILE_COLS: i32 = 4;
 const CLIMATE_WIND_VX: f32 = 0.05;
@@ -425,6 +433,13 @@ pub enum ClientCommand {
         y: i32,
         preset: SpawnPreset,
     },
+    /// Dig D2 Release: validated `.gvsecrt` bytes (not free Wild paint-in).
+    /// Operator-only for this wedge; Wild player Release stays allowlist-later.
+    ReleaseBlueprint {
+        col: i32,
+        y: i32,
+        bytes: Vec<u8>,
+    },
     Quit,
 }
 
@@ -471,6 +486,8 @@ pub struct Host {
     last_step_wall: Instant,
     product_step: bool,
     last_residency: SyncResidencyStats,
+    /// Dig D2: tick of last successful [`ClientCommand::ReleaseBlueprint`].
+    last_release_tick: Option<u64>,
 }
 
 /// Tiny ring for unit tests / fast CI (not Compact).
@@ -615,6 +632,7 @@ impl Host {
                 .unwrap_or_else(Instant::now),
             product_step: true,
             last_residency: SyncResidencyStats::default(),
+            last_release_tick: None,
         };
         // Compact stamp is full-width; park far chunks before the first frame.
         if compact {
@@ -662,7 +680,8 @@ impl Host {
             | ClientCommand::ResetWorld { .. }
             | ClientCommand::SetSimSettings(_)
             | ClientCommand::PaintTerrain { .. }
-            | ClientCommand::SpawnOrganism { .. } => matches!(role, Operator),
+            | ClientCommand::SpawnOrganism { .. }
+            | ClientCommand::ReleaseBlueprint { .. } => matches!(role, Operator),
         }
     }
 
@@ -766,6 +785,7 @@ impl Host {
             },
             ClientCommand::ResetWorld { seed } => {
                 self.reset_world(seed);
+                self.last_release_tick = None;
                 CommandAck {
                     id,
                     ok: true,
@@ -894,6 +914,9 @@ impl Host {
                     }
                 }
             }
+            ClientCommand::ReleaseBlueprint { col, y, bytes } => {
+                self.apply_release_blueprint(id, col, y, &bytes)
+            }
             ClientCommand::Quit => {
                 self.quit_requested = true;
                 CommandAck {
@@ -905,6 +928,115 @@ impl Host {
         };
         self.pending_acks.push(ack.clone());
         ack
+    }
+
+    /// Dig D2 Release path: decode → quarantine → cooldown/cap → place.
+    fn apply_release_blueprint(
+        &mut self,
+        id: u64,
+        col: i32,
+        y: i32,
+        bytes: &[u8],
+    ) -> CommandAck {
+        if bytes.len() > MAX_RELEASE_BLUEPRINT_BYTES {
+            return CommandAck {
+                id,
+                ok: false,
+                detail: format!(
+                    "release blueprint {} bytes exceeds max {MAX_RELEASE_BLUEPRINT_BYTES}",
+                    bytes.len()
+                ),
+            };
+        }
+        if let Some(last) = self.last_release_tick {
+            let elapsed = self.world.tick.saturating_sub(last);
+            if elapsed < RELEASE_COOLDOWN_TICKS {
+                return CommandAck {
+                    id,
+                    ok: false,
+                    detail: format!(
+                        "release cooldown {}/{} ticks",
+                        elapsed, RELEASE_COOLDOWN_TICKS
+                    ),
+                };
+            }
+        }
+        let living = self.organisms.living_count();
+        if living >= RELEASE_LIVE_SOFT_CAP {
+            return CommandAck {
+                id,
+                ok: false,
+                detail: format!("release live soft cap {living}/{RELEASE_LIVE_SOFT_CAP}"),
+            };
+        }
+        let bp = match Blueprint::from_bytes(bytes) {
+            Ok(bp) => bp,
+            Err(e) => {
+                return CommandAck {
+                    id,
+                    ok: false,
+                    detail: format!("release decode: {e}"),
+                };
+            }
+        };
+        let bp = match bp.quarantine_for_release() {
+            Ok(bp) => bp,
+            Err(e) => {
+                return CommandAck {
+                    id,
+                    ok: false,
+                    detail: format!("release quarantine: {e}"),
+                };
+            }
+        };
+        if bp.modules.len() > MAX_RELEASE_MODULES {
+            return CommandAck {
+                id,
+                ok: false,
+                detail: format!(
+                    "release modules {} exceeds max {MAX_RELEASE_MODULES}",
+                    bp.modules.len()
+                ),
+            };
+        }
+        let body = bp.modules_relative_to_nucleus();
+        match self.organisms.spawn_blueprint_free(
+            &self.world,
+            col,
+            y,
+            body,
+            40.0,
+            bp.genome,
+        ) {
+            Ok(()) => {
+                self.last_release_tick = Some(self.world.tick);
+                CommandAck {
+                    id,
+                    ok: true,
+                    detail: format!(
+                        "released {} at ({},{}) living={}",
+                        bp.name,
+                        col,
+                        y,
+                        self.organisms.living_count()
+                    ),
+                }
+            }
+            Err(SpawnFail::PopCap) => CommandAck {
+                id,
+                ok: false,
+                detail: format!(
+                    "pop cap {}/{}",
+                    self.organisms.living_count(),
+                    self.organisms.atom_cap()
+                ),
+            },
+            Err(e) => CommandAck {
+                id,
+                ok: false,
+                detail: format!("release spawn: {e:?}"),
+            },
+        }
     }
 
     fn flush_streaming_for_save(&mut self) {
@@ -1697,5 +1829,137 @@ mod tests {
             },
         );
         assert!(!deny.ok);
+    }
+
+    fn paint_wet_seat(host: &mut Host, col: i32, y: i32) {
+        host.apply(ClientCommand::PaintTerrain {
+            col,
+            y: y - 1,
+            brush: PaintBrush::Sand,
+            radius: 0,
+        });
+        host.apply(ClientCommand::PaintTerrain {
+            col,
+            y,
+            brush: PaintBrush::Water,
+            radius: 0,
+        });
+    }
+
+    #[test]
+    fn release_blueprint_atom_operator_ok_viewer_denied() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let col = host.focus_col;
+        let y = host.params.sea_level_y;
+        paint_wet_seat(&mut host, col, y);
+        let bytes = Blueprint::atom().to_bytes().unwrap();
+        let before = host.organisms.living_count();
+        let ack = host.apply(ClientCommand::ReleaseBlueprint {
+            col,
+            y,
+            bytes: bytes.clone(),
+        });
+        assert!(ack.ok, "{}", ack.detail);
+        assert!(ack.detail.contains("released"));
+        assert!(host.organisms.living_count() > before);
+
+        let deny = host.apply_as(
+            ipc::PeerRole::Viewer,
+            ipc::WorldTier::Wild,
+            ClientCommand::ReleaseBlueprint {
+                col,
+                y,
+                bytes,
+            },
+        );
+        assert!(!deny.ok);
+    }
+
+    #[test]
+    fn release_blueprint_rejects_invalid_habit_and_oversize() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let col = host.focus_col;
+        let y = host.params.sea_level_y;
+        paint_wet_seat(&mut host, col, y);
+
+        let nucleus_only = Blueprint {
+            schema_version: wk_voxel::BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![wk_voxel::PlacedModule {
+                x: 0,
+                y: 0,
+                lane: wk_voxel::LaneId::Mid,
+                module: wk_voxel::ModuleId::Nucleus,
+            }],
+            genome: wk_voxel::Genome::default(),
+            name: "n".into(),
+            notes: String::new(),
+        };
+        let bad = host.apply(ClientCommand::ReleaseBlueprint {
+            col,
+            y,
+            bytes: nucleus_only.to_bytes().unwrap(),
+        });
+        assert!(!bad.ok, "nucleus-only must fail Release gate");
+        assert!(
+            bad.detail.contains("quarantine") || bad.detail.contains("habit"),
+            "{}",
+            bad.detail
+        );
+
+        let huge = vec![0u8; MAX_RELEASE_BLUEPRINT_BYTES + 1];
+        let over = host.apply(ClientCommand::ReleaseBlueprint {
+            col,
+            y,
+            bytes: huge,
+        });
+        assert!(!over.ok);
+        assert!(over.detail.contains("exceeds max"), "{}", over.detail);
+    }
+
+    #[test]
+    fn release_blueprint_cooldown_and_soft_cap() {
+        let mut host = Host::for_tests();
+        host.apply(ClientCommand::SetPaused(true));
+        let col = host.focus_col;
+        let y = host.params.sea_level_y;
+        paint_wet_seat(&mut host, col, y);
+        let bytes = Blueprint::atom().to_bytes().unwrap();
+
+        let first = host.apply(ClientCommand::ReleaseBlueprint {
+            col,
+            y,
+            bytes: bytes.clone(),
+        });
+        assert!(first.ok, "{}", first.detail);
+
+        let cool = host.apply(ClientCommand::ReleaseBlueprint {
+            col: col + 2,
+            y,
+            bytes: bytes.clone(),
+        });
+        assert!(!cool.ok);
+        assert!(cool.detail.contains("cooldown"), "{}", cool.detail);
+
+        host.world.tick = host.world.tick.saturating_add(RELEASE_COOLDOWN_TICKS);
+        // Soft-cap: fill living budget without using Release.
+        while host.organisms.living_count() < RELEASE_LIVE_SOFT_CAP {
+            host.organisms.parked.push(wk_voxel::Atom::from_body(
+                0,
+                0,
+                1.0,
+                vec![(0, 0, wk_voxel::ModuleId::Nucleus)],
+            ));
+        }
+        let capped = host.apply(ClientCommand::ReleaseBlueprint {
+            col: col + 4,
+            y,
+            bytes,
+        });
+        assert!(!capped.ok);
+        assert!(capped.detail.contains("soft cap"), "{}", capped.detail);
     }
 }

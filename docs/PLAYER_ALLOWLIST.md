@@ -53,14 +53,15 @@ while the process allows paint/spawn — that is Lab privilege, not Wild.
 | `Save` / `Load` / `ResetWorld` | ✗ | ✗ | ✓ | ✓ |
 | `PaintTerrain` | ✗ | ✗ | ✓ | ✓ |
 | `SpawnOrganism` (live paint-in) | ✗ | ✗ | ✓ | ✓ |
-| **Release blueprint to world** | later† | later† | n/a (local) | later |
+| **Release blueprint to world** | later† | later† | n/a (local) | ✓ Dig D2 |
 | **Emote / pin camera share** | later | later | later | — |
 | Tear down host process | ✗ | ✗ | ✓ (local) | owner |
 
 \*Wild pause would stop everyone’s weather — deny for players.  
 †**Release** = validated studio blueprint → host places under strict
 rules (cooldown, cap, quarantine). Not free `SpawnOrganism` / paint.
-Own design note when unlocked.
+Operator path: `ReleaseBlueprint` ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md)
+Dig D2). Wild/Shadow **player** Release still later (identity).
 
 ## Defaults locked here
 

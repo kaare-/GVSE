@@ -48,7 +48,8 @@ Continue ecology, organisms, climate, mass integrity. Park=0 / TRACKED
 soaks remain the gate. Independent of ship UI polish.
 
 **Contract:** [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) — Dig D1 = Phase 6
-hotspot #2 harvest-neutral (tip-sky–scaled light cache).
+hotspot #2 harvest-neutral; Dig D2 = Release ecology path
+(`ReleaseBlueprint` + quarantine / cooldown / soft cap).
 
 ### 2. Player client + world allowlist
 
@@ -150,7 +151,7 @@ Write these before large UI or AWS spend:
 | A | Player allowlist | [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md) — stops world UI sprawl |
 | B | Studio / blueprint contract | [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md) — studio rewrite target |
 | C | Region max + cost realism | [`REGION_CAPACITY.md`](REGION_CAPACITY.md) + [`HOSTING_COST.md`](HOSTING_COST.md) |
-| D | Biology depth | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) — D1 land/metab harvest-neutral |
+| D | Biology depth | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) — D1 harvest-neutral; D2 Release |
 | E | Brand / menus | After A–B so screens have jobs |
 | F | Halo / shard handoff | Lab seams first; then Shadow; Wild last |
 | G | Wild AWS + Steam sub | After compression + allowlist + Lab solid |
