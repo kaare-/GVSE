@@ -12,6 +12,16 @@ pub const BLUEPRINT_SCHEMA_VERSION: u16 = 1;
 pub const BLUEPRINT_DIR: &str = "blueprints";
 pub const BLUEPRINT_EXT: &str = "gvsecrt";
 
+/// How strictly a blueprint must pass before live placement.
+/// See [`docs/STUDIO_BLUEPRINT.md`](../../../docs/STUDIO_BLUEPRINT.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnGate {
+    /// Local Lab / studio / Operator presets — nucleus + non-empty.
+    Lab,
+    /// Future Wild/Shadow Release — must match a known habit.
+    Release,
+}
+
 /// Depth lane — Mid only for Set A voxel editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u8)]
@@ -1108,6 +1118,31 @@ impl Blueprint {
         self.nucleus_count() >= 1 && !self.modules.is_empty()
     }
 
+    /// Shared reject path for Lab / Release ([`docs/STUDIO_BLUEPRINT.md`]).
+    pub fn validate_for_spawn(&self, gate: SpawnGate) -> Result<(), String> {
+        if self.schema_version > BLUEPRINT_SCHEMA_VERSION {
+            return Err(format!(
+                "blueprint schema {} newer than supported {}",
+                self.schema_version, BLUEPRINT_SCHEMA_VERSION
+            ));
+        }
+        match gate {
+            SpawnGate::Lab => {
+                if !self.can_editor_spawn() {
+                    return Err("need at least one Nucleus on a non-empty canvas".into());
+                }
+            }
+            SpawnGate::Release => {
+                if !self.is_valid_creature() {
+                    return Err(
+                        "release requires a valid atom/plant/fungus/epiphyte habit".into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Anchor = first Nucleus (canvas coords).
     pub fn nucleus_origin(&self) -> Option<(i16, i16)> {
         self.modules
@@ -1182,6 +1217,47 @@ mod tests {
         let loaded = Blueprint::from_bytes(&bp.to_bytes().unwrap()).unwrap();
         assert!(loaded.is_valid_atom());
         assert_eq!(loaded.modules.len(), 2);
+    }
+
+    #[test]
+    fn validate_for_spawn_lab_vs_release() {
+        let atom = Blueprint::atom();
+        assert!(atom.validate_for_spawn(SpawnGate::Lab).is_ok());
+        assert!(atom.validate_for_spawn(SpawnGate::Release).is_ok());
+
+        let empty = Blueprint {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![],
+            genome: Genome::default(),
+            name: "empty".into(),
+            notes: String::new(),
+        };
+        assert!(empty.validate_for_spawn(SpawnGate::Lab).is_err());
+        assert!(empty.validate_for_spawn(SpawnGate::Release).is_err());
+
+        // Nucleus-only: Lab ok, Release needs a full habit.
+        let nucleus_only = Blueprint {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![PlacedModule {
+                x: 0,
+                y: 0,
+                lane: LaneId::Mid,
+                module: ModuleId::Nucleus,
+            }],
+            genome: Genome::default(),
+            name: "n".into(),
+            notes: String::new(),
+        };
+        assert!(nucleus_only.validate_for_spawn(SpawnGate::Lab).is_ok());
+        assert!(nucleus_only.validate_for_spawn(SpawnGate::Release).is_err());
+
+        let mut future = Blueprint::atom();
+        future.schema_version = BLUEPRINT_SCHEMA_VERSION + 1;
+        assert!(future.validate_for_spawn(SpawnGate::Lab).is_err());
     }
 
     #[test]

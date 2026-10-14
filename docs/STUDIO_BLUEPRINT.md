@@ -108,7 +108,7 @@ Out of this contract: brand, full axon/wire editor, Wild Presence UI.
 | Item | Notes |
 |------|-------|
 | Document `BLUEPRINT_SCHEMA_VERSION` in ship README / host banner | optional crumb |
-| Shared validate helper used by app + client host | `Blueprint::validate_for_spawn()` |
+| Shared validate helper used by app + client host | `Blueprint::validate_for_spawn(SpawnGate)` ✅ |
 | Operator “load .gvsecrt” | later; presets enough now |
 | `ReleaseBlueprint` cmd | schema bump; allowlist row already “later” |
 | Retire stale EDITOR wire/gene fields or implement with bump | pick one |
@@ -116,10 +116,11 @@ Out of this contract: brand, full axon/wire editor, Wild Presence UI.
 ## Acceptance for the next studio PR
 
 - [x] This file linked from product roadmap + Phase 8 backlog  
-- [ ] Studio (or Lab path) round-trips `.gvsecrt` schema 1  
-- [ ] Invalid / newer schema rejected with clear ACK/detail  
-- [ ] No raw blueprint on Wild Viewer command path  
-- [ ] Preset spawn still works for Operator  
+- [x] Shared `validate_for_spawn(Lab|Release)` on host + macroquad editor  
+- [ ] Studio (or Lab path) round-trips `.gvsecrt` schema 1 on ship client  
+- [x] Invalid / newer schema rejected with clear detail  
+- [x] No raw blueprint on Wild Viewer command path (presets only)  
+- [x] Preset spawn still works for Operator  
 
 ## Related
 

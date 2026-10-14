@@ -78,8 +78,8 @@ pub use audit::{
     tracked_totals, SatTotals, CELL_SAT_TICK_TOLERANCE,
 };
 pub use blueprint::{
-    ensure_symbiont_inherited, mutate_body, Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR,
-    BODY_MUTATION_MAX_EDITS, BODY_MUTATION_MAX_MODULES,
+    ensure_symbiont_inherited, mutate_body, Blueprint, Genome, LaneId, PlacedModule, SpawnGate,
+    BLUEPRINT_DIR, BODY_MUTATION_MAX_EDITS, BODY_MUTATION_MAX_MODULES,
 };
 pub use budget::{
     BudgetDelta, BudgetLedger, BudgetProbe, BudgetSnap, FreeSatScope, SnowOtherStage,

@@ -3,7 +3,7 @@
 //! Set A Atom + Set D plant + Set E fungus.
 
 use macroquad::prelude::*;
-use wk_voxel::{Blueprint, LaneId, ModuleId, PlacedModule};
+use wk_voxel::{Blueprint, LaneId, ModuleId, PlacedModule, SpawnGate};
 
 const CELL_PX: f32 = 22.0;
 const CANVAS_ORIGIN: (f32, f32) = (40.0, 80.0);
@@ -184,12 +184,13 @@ impl CreatureEditor {
             }
         }
         if is_key_pressed(KeyCode::Enter) {
-            if self.blueprint.can_editor_spawn() {
-                self.spawn_picker = true;
-                self.status =
-                    "SPAWN — click any Air cell (Esc cancel); odd mixes may not thrive".into();
-            } else {
-                self.status = "Need at least one Nucleus on the canvas".into();
+            match self.blueprint.validate_for_spawn(SpawnGate::Lab) {
+                Ok(()) => {
+                    self.spawn_picker = true;
+                    self.status =
+                        "SPAWN — click any Air cell (Esc cancel); odd mixes may not thrive".into();
+                }
+                Err(e) => self.status = e,
             }
         }
         if is_key_pressed(KeyCode::Escape) && self.spawn_picker {
