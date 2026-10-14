@@ -48,6 +48,18 @@ pub const COMPACT_VIEW_ROWS: i32 = 384;
 pub const MIN_VIEW_COLS: i32 = 96;
 pub const MAX_VIEW_COLS: i32 = 1600;
 
+/// Official Wild / recommended Shadow region width (cols).
+/// See [`docs/REGION_CAPACITY.md`](../../docs/REGION_CAPACITY.md).
+pub const REGION_WIDTH_COLS: i32 = (CHUNK_CELLS_W as i32) * 64;
+/// Soft concurrent Presence peers per region process.
+pub const REGION_SOFT_PEERS: u8 = ipc::DEFAULT_MAX_PEERS;
+/// Hard peer cap (wire).
+pub const REGION_HARD_PEERS: u8 = ipc::MAX_PEERS_CAP;
+/// Planning floor: sim-FPS under Presence load before refusing more pressure.
+pub const REGION_LOAD_SIM_FPS_FLOOR: u32 = 30;
+/// WAN present cadence target once ViewFrame compression lands (Hz).
+pub const REGION_WAN_PRESENT_HZ: u32 = 10;
+
 /// Camera-window RGBA strip (row-major, y=0 at top / high world-y).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerrainStrip {
@@ -384,13 +396,14 @@ pub fn client_dev_worldgen_params() -> WorldgenParams {
     }
 }
 
-/// WORLDGEN Compact ring — 64 chunks / 4096 cols × tropopause (~1 km).
+/// WORLDGEN Compact ring — [`REGION_WIDTH_COLS`] × tropopause (~1 km).
 ///
 /// Same shape as the soak / perf Compact stretch. Viewer streams a
 /// [`COMPACT_VIEW_COLS`] window and parks far chunks via `sync_residency`.
+/// Envelope contract: [`docs/REGION_CAPACITY.md`](../../docs/REGION_CAPACITY.md).
 pub fn compact_worldgen_params() -> WorldgenParams {
     WorldgenParams {
-        width_cols: (CHUNK_CELLS_W as i32) * 64,
+        width_cols: REGION_WIDTH_COLS,
         sky_ceiling_y: TROPOSPHERE_TOP_Y + STRATOSPHERE_CELLS,
         ..WorldgenParams::default()
     }
@@ -454,7 +467,7 @@ impl Host {
         let mut support = SupportMap::new();
         support.rebuild(&world);
         let focus_col = params.width_cols / 2;
-        let compact = params.width_cols >= (CHUNK_CELLS_W as i32) * 64;
+        let compact = params.width_cols >= REGION_WIDTH_COLS;
         let climate = climate_with_season(
             &ClimateConfig {
                 day_ticks: 180,
@@ -1230,6 +1243,25 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_envelope_matches_compact_worldgen() {
+        let p = compact_worldgen_params();
+        assert_eq!(p.width_cols, REGION_WIDTH_COLS);
+        assert_eq!(REGION_WIDTH_COLS, 4096);
+        assert_eq!(REGION_SOFT_PEERS, 4);
+        assert_eq!(REGION_HARD_PEERS, 8);
+        assert_eq!(REGION_LOAD_SIM_FPS_FLOOR, 30);
+        assert_eq!(REGION_WAN_PRESENT_HZ, 10);
+        assert_eq!(COMPACT_VIEW_COLS, 720);
+        assert_eq!(COMPACT_VIEW_ROWS, 384);
+        assert_eq!(DEFAULT_STEP_PERIOD_MS, 50);
+        assert!(p.sky_ceiling_y > p.bedrock_floor_y);
+        assert_eq!(
+            p.sky_ceiling_y,
+            TROPOSPHERE_TOP_Y + STRATOSPHERE_CELLS
+        );
+    }
 
     #[test]
     fn pause_stops_auto_tick() {

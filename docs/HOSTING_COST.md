@@ -137,17 +137,11 @@ Ordered levers (do before scaling instances):
 7. **Shadow P2P** — don’t hairpin BYO mesh video through official egress  
 8. **CDN later** only helps static/marketing; **sim strips stay peer→host**
 
-## Region capacity (working definition)
+## Region capacity
 
-Until a soak locks better numbers, **official region** =
-
-```text
-Compact 4096 × tropopause
-stream + park
-target ≥30 sim-FPS under load (headroom from ~115 idle stream)
-max_peers = 4 (soft), 8 (hard)
-remote present ≤10 Hz once WAN path exists
-```
+**Contract:** [`REGION_CAPACITY.md`](REGION_CAPACITY.md) (dig C).
+Official region = Compact 4096 × tropopause, stream+park, ≥30 sim-FPS
+under load, peers 4/8, WAN present ≤10 Hz after compress.
 
 To increase **world** size → **more regions + halo/handoff**, not a
 bigger single process (5 km single-box already showed temp/rain cost).
@@ -237,6 +231,7 @@ Studio stays offline/freedom. Operator still tunes live regions.
 
 ## Related
 
+- [`REGION_CAPACITY.md`](REGION_CAPACITY.md) — locked envelope  
 - [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md) — pillars  
 - [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md) — peers / auth  
 - [`VOXEL_PERF.md`](VOXEL_PERF.md) — stream FPS history  
