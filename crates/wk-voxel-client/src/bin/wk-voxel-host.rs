@@ -17,11 +17,14 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
+use wk_voxel::SeamSide;
 use wk_voxel_client::ipc::{
     serve_peer_shared, PeerRegistry, ServeConfig, WorldTier, DEFAULT_HOST_ADDR,
     DEFAULT_MAX_PEERS, LAN_HOST_ADDR, MAX_PEERS_CAP,
 };
+use wk_voxel_client::seam_ipc::{seam_loop_dial, seam_loop_listen};
 use wk_voxel_client::{Host, COMMAND_SCHEMA, VIEW_SCHEMA};
 
 struct HostCli {
@@ -36,6 +39,21 @@ struct HostCli {
     max_peers: u8,
     /// Explicit `--tier`; else Lab on loopback, Shadow on LAN / public bind.
     tier: Option<WorldTier>,
+    /// Dig F1 Lab seam: open west|east face.
+    seam_side: Option<SeamSide>,
+    /// Dig F1: listen for seam dials on HOST:PORT.
+    seam_listen: Option<String>,
+    /// Dig F1: dial peer seam each product step.
+    seam_peer: Option<String>,
+    seam_token: Option<String>,
+}
+
+fn parse_seam_side(s: &str) -> Result<SeamSide, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "west" | "w" => Ok(SeamSide::West),
+        "east" | "e" => Ok(SeamSide::East),
+        other => Err(format!("unknown --seam-side '{other}' (west|east)")),
+    }
 }
 
 fn env_token(name: &str) -> Option<String> {
@@ -53,6 +71,10 @@ fn parse_cli() -> HostCli {
     let mut ops_token = env_token("WK_VOXEL_HOST_OPS_TOKEN");
     let mut max_peers = DEFAULT_MAX_PEERS;
     let mut tier = None;
+    let mut seam_side = None;
+    let mut seam_listen = None;
+    let mut seam_peer = None;
+    let mut seam_token = env_token("WK_VOXEL_SEAM_TOKEN");
     let mut args = env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -109,6 +131,34 @@ fn parse_cli() -> HostCli {
                 });
                 max_peers = ServeConfig::clamp_peers(n);
             }
+            "--seam-side" => {
+                let raw = args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-side requires west|east");
+                    std::process::exit(2);
+                });
+                seam_side = Some(parse_seam_side(&raw).unwrap_or_else(|e| {
+                    eprintln!("wk-voxel-host: {e}");
+                    std::process::exit(2);
+                }));
+            }
+            "--seam-listen" => {
+                seam_listen = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-listen requires HOST:PORT");
+                    std::process::exit(2);
+                }));
+            }
+            "--seam-peer" => {
+                seam_peer = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-peer requires HOST:PORT");
+                    std::process::exit(2);
+                }));
+            }
+            "--seam-token" => {
+                seam_token = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-token requires SECRET");
+                    std::process::exit(2);
+                }));
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "wk-voxel-host [options]\n\
@@ -123,9 +173,13 @@ fn parse_cli() -> HostCli {
                        --max-peers N      concurrent viewers (default {DEFAULT_MAX_PEERS}, max {MAX_PEERS_CAP})\n\
                        --tier lab|shadow|wild  world tier (default: lab on loopback, shadow on --lan)\n\
                        --insecure         allow non-loopback with no token (dev only)\n\
+                       --seam-side west|east  Dig F1 open Lab seam face\n\
+                       --seam-listen HOST:PORT  accept seam dials\n\
+                       --seam-peer HOST:PORT    dial peer seam (~20 Hz)\n\
+                       --seam-token SECRET      seam auth (env WK_VOXEL_SEAM_TOKEN)\n\
                      \n\
                      Schemas: VIEW_SCHEMA={VIEW_SCHEMA} COMMAND_SCHEMA={COMMAND_SCHEMA}\n\
-                     See docs/PHASE8_HOST_SHIP.md and docs/PHASE8_MULTIPLAYER.md"
+                     See docs/PHASE8_HOST_SHIP.md, docs/HALO_SHARD.md"
                 );
                 std::process::exit(0);
             }
@@ -145,6 +199,14 @@ fn parse_cli() -> HostCli {
     if once {
         max_peers = 1;
     }
+    if (seam_listen.is_some() || seam_peer.is_some()) && seam_side.is_none() {
+        eprintln!("wk-voxel-host: --seam-listen/--seam-peer require --seam-side");
+        std::process::exit(2);
+    }
+    if seam_listen.is_some() && seam_peer.is_some() {
+        eprintln!("wk-voxel-host: use only one of --seam-listen / --seam-peer");
+        std::process::exit(2);
+    }
     HostCli {
         bind,
         dev,
@@ -156,6 +218,10 @@ fn parse_cli() -> HostCli {
         ops_token,
         max_peers,
         tier,
+        seam_side,
+        seam_listen,
+        seam_peer,
+        seam_token,
     }
 }
 
@@ -198,7 +264,7 @@ fn main() {
         cli.token.is_some() || cli.ops_token.is_some()
     );
 
-    let host = if cli.dev {
+    let mut host = if cli.dev {
         log::info!("stamping dev (tiny) host");
         Host::for_tests()
     } else if let Some(seed) = cli.seed {
@@ -208,6 +274,10 @@ fn main() {
         log::info!("stamping Compact host (stream + park)");
         Host::default()
     };
+    if let Some(side) = cli.seam_side {
+        host.enable_lab_seam(side);
+        log::info!("Dig F1 Lab seam open side={side:?}");
+    }
     log::info!(
         "host ready compact={} seed={} focus={} view={}",
         host.is_compact(),
@@ -224,6 +294,27 @@ fn main() {
     log::info!("world_tier={}", world_tier.as_str());
 
     let host = Arc::new(Mutex::new(host));
+    if let Some(addr) = cli.seam_listen.clone() {
+        let side = cli.seam_side.expect("seam-side");
+        let h = host.clone();
+        let tok = cli.seam_token.clone();
+        thread::spawn(move || {
+            let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
+                eprintln!("seam-listen {addr}: {e}");
+                std::process::exit(1);
+            });
+            log::info!("seam listening on {addr} side={side:?}");
+            seam_loop_listen(listener, h, tok, side);
+        });
+    } else if let Some(peer) = cli.seam_peer.clone() {
+        let side = cli.seam_side.expect("seam-side");
+        let h = host.clone();
+        let tok = cli.seam_token.clone();
+        thread::spawn(move || {
+            log::info!("seam dialing {peer} side={side:?}");
+            seam_loop_dial(peer, h, tok, side, Duration::from_millis(50));
+        });
+    }
     let registry = Arc::new(Mutex::new(PeerRegistry::new(cli.max_peers)));
     let cfg = Arc::new(ServeConfig {
         token: cli.token.clone(),

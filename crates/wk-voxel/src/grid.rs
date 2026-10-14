@@ -114,6 +114,9 @@ pub struct World {
         crate::chunk::ChunkCoord,
         crate::frozen_backlog::FrozenBacklog,
     >,
+    /// Dig F1 Lab seam P0 buckets (inter-process edge). Not saved.
+    #[serde(skip, default)]
+    pub seam: crate::seam::SeamState,
     /// Soft labile litter (Set E) keyed by wrapped world-x column.
     /// Death deposits units here; fungi digest them before Organic cells.
     ///
@@ -342,6 +345,7 @@ impl World {
             chunk_store: crate::chunk_store::ChunkStore::default(),
             side_map_store: crate::chunk_store::SideMapStore::default(),
             frozen_backlog: FxHashMap::default(),
+            seam: crate::seam::SeamState::default(),
             soft_litter: FxHashMap::default(),
             root_residue: FxHashSet::default(),
             preferential_root: FxHashSet::default(),

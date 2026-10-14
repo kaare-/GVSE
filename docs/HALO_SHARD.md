@@ -1,9 +1,9 @@
 # Halo / shard handoff *(dig F contract)*
 
-**Status:** design locked as Lab-first defaults (2026-10-14). Product dig
-order **F** from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). No inter-process
-seam code yet — this note is the gate before smoke. Region envelope:
-[`REGION_CAPACITY.md`](REGION_CAPACITY.md). Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
+**Status:** F0 design locked; **F1 Lab P0 mass seam** landed (2026-10-14).
+Product dig order **F** from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md).
+Region envelope: [`REGION_CAPACITY.md`](REGION_CAPACITY.md). Cost:
+[`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Intent
 
@@ -131,7 +131,7 @@ ViewFrames through a relay for seam state.
 
 ## Acceptance gates
 
-### F0 — this note *(now)*
+### F0 — this note
 
 - [x] Doctrine + Lab geometry + payload order written  
 - [x] Linked from product / region / backlog docs  
@@ -139,11 +139,16 @@ ViewFrames through a relay for seam state.
 
 ### F1 — Lab mass seam smoke
 
-- [ ] Two Compact (or smaller Lab) hosts, abutting 1D seam on loopback  
-- [ ] Water can cross the face; TRACKED / sat totals close across the pair
-      (pair-sum drift bounded like a single-process soak)  
-- [ ] Kill one host → survivor edge goes absorbing; restart → backlog drains  
+- [x] Seam module + face export / backlog (`wk_voxel::seam`)  
+- [x] Postcard seam channel + host `--seam-*` CLI (`seam_ipc`, `SEAM_SCHEMA` 1)  
+- [x] In-process + TCP unit tests: pair sat conserved; neighbor-down keeps outbound  
+- [ ] Owner two-host loopback play smoke (`--dev --seam-side` / `--seam-listen` / `--seam-peer`)  
 - [ ] Macroquad / headless park gate on **each** region still green in isolation  
+
+**Landed API:** `attach_open_seam`, `export_seam_face`, `exchange_seam_p0`,
+`Host::enable_lab_seam` / `drain_seam_outbound` / `apply_seam_inbound`.
+Host flags: `--seam-side west|east`, `--seam-listen`, `--seam-peer`,
+`--seam-token`.
 
 ### F2 / F3
 

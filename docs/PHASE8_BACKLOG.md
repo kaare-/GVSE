@@ -48,11 +48,11 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig **F0** design note on park-bank: [`HALO_SHARD.md`](HALO_SHARD.md)
-(Lab-first seam contract). Next agent wedge after owner skim: **F1** two-host
-Lab mass seam smoke — or Dig **E** brand/menus / Apple notarize
-(**2026-11-15**) if owner redirects. Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
-Dig **D** agent-closed ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md); D4 owner visual).
+Dig **F1** Lab P0 mass seam on park-bank ([`HALO_SHARD.md`](HALO_SHARD.md)):
+`wk_voxel::seam` + host `--seam-*` IPC. Next: owner two-host smoke, then
+**F2** edge fields — or Dig **E** / Apple notarize (**2026-11-15**) if
+redirected. Cost: [`HOSTING_COST.md`](HOSTING_COST.md). Dig **D**
+agent-closed ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md); D4 owner visual).
 
 ## Pinned / later
 
@@ -62,9 +62,9 @@ Dig **D** agent-closed ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md); D4 owner visual)
 | Steam depots | after Apple smoke | same binaries |
 | MAS | later | explicit unlock |
 | E2 tipped grey-log visual | owner play/Xvfb | not a code blocker |
-| Dig F0 halo design | ✅ this pass | [`HALO_SHARD.md`](HALO_SHARD.md) |
-| Dig F1 Lab mass seam | after F0 skim | two-host P0 water/sediment |
-| Dig F2–F5 | after F1 | fields → life → Shadow → Wild |
+| Dig F0 halo design | ✅ | [`HALO_SHARD.md`](HALO_SHARD.md) |
+| Dig F1 Lab mass seam | ✅ code | seam + `--seam-*`; owner play smoke open |
+| Dig F2–F5 | after F1 smoke | fields → life → Shadow → Wild |
 | Dig D (biology) | agent-closed | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Optional FPS headroom | owner ask | Compact/5 km leftovers |
 

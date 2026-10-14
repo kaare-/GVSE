@@ -277,6 +277,29 @@ fn commit_air_sat_xfers(world: &mut World, xfers: &mut [((i32, i32), (i32, i32),
                         donor_before,
                     );
                 }
+            } else if src.material == MaterialId::Air {
+                // Dig F1: open Lab seam face → outbound backlog.
+                if let Some(side) = crate::seam::should_absorb_seam(world, to.0) {
+                    let donor_before = src.sat.0;
+                    let give = amt.min(donor_before as i32);
+                    if give > 0 {
+                        world.set_cell(
+                            from.0,
+                            from.1,
+                            Cell {
+                                sat: Sat(src.sat.0 - give as u8),
+                                ..src
+                            },
+                        );
+                        crate::seam::absorb_seam_water(
+                            world,
+                            from,
+                            side,
+                            give,
+                            donor_before,
+                        );
+                    }
+                }
             }
             continue;
         };
