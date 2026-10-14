@@ -50,6 +50,8 @@ getrandom = "=0.2.15"
 jobserver = "=0.1.32"
 unicode-segmentation = "=1.11.0"
 cc = "=1.1.31"
+# ViewFrame strip compression (Phase 8 WAN path).
+zstd = "0.13"
 
 [profile.test]
 opt-level = 2

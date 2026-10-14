@@ -274,13 +274,40 @@ pub fn read_msg<T: for<'de> Deserialize<'de>, R: Read>(r: &mut R) -> Result<T, I
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    // Compact strip ~720×384×4 ≈ 1.1 MiB (up to MAX_VIEW_COLS); 8 MiB headroom.
+    // Compact strip ~720×384×4 ≈ 1.1 MiB raw; zstd is smaller. 8 MiB headroom.
     if len > 8 * 1024 * 1024 {
         return Err(IpcError::Codec(format!("frame len {len} exceeds 8 MiB")));
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     postcard::from_bytes(&buf).map_err(|e| IpcError::Codec(e.to_string()))
+}
+
+/// Write [`HostMsg`], zstd-compressing [`HostMsg::Frame`] terrain for the wire.
+pub fn write_host_msg<W: Write>(w: &mut W, msg: &HostMsg) -> Result<(), IpcError> {
+    match msg {
+        HostMsg::Frame(frame) => {
+            let mut frame = frame.clone();
+            frame
+                .terrain
+                .compress_zstd()
+                .map_err(IpcError::Codec)?;
+            write_msg(w, &HostMsg::Frame(frame))
+        }
+        other => write_msg(w, other),
+    }
+}
+
+/// Read [`HostMsg`], expanding zstd terrain strips to raw RGBA for the viewer.
+pub fn read_host_msg<R: Read>(r: &mut R) -> Result<HostMsg, IpcError> {
+    let mut msg: HostMsg = read_msg(r)?;
+    if let HostMsg::Frame(ref mut frame) = msg {
+        frame
+            .terrain
+            .decompress_to_raw()
+            .map_err(IpcError::Codec)?;
+    }
+    Ok(msg)
 }
 
 /// Viewer connect options.
@@ -370,7 +397,7 @@ impl RemoteHost {
 
     pub fn pull(&mut self) -> Result<ViewFrame, IpcError> {
         write_msg(&mut self.stream, &ClientMsg::Pull)?;
-        match read_msg::<HostMsg, _>(&mut self.stream)? {
+        match read_host_msg(&mut self.stream)? {
             HostMsg::Frame(frame) => {
                 self.last = Some(frame.clone());
                 Ok(frame)
@@ -760,7 +787,7 @@ pub fn serve_peer_shared(
                     h.push_acks(acks);
                     h.frame_as(fc, vc, fy, present, &cams)
                 };
-                write_msg(&mut stream, &HostMsg::Frame(frame))?;
+                write_host_msg(&mut stream, &HostMsg::Frame(frame))?;
                 if peer_quit {
                     break;
                 }
@@ -918,7 +945,7 @@ fn serve_peer_on(
                 };
                 host.push_acks(acks);
                 let frame = host.frame_as(fc, vc, fy, present, &cams);
-                write_msg(&mut stream, &HostMsg::Frame(frame))?;
+                write_host_msg(&mut stream, &HostMsg::Frame(frame))?;
                 if peer_quit {
                     break;
                 }
@@ -943,10 +970,32 @@ mod tests {
         let mut host = Host::for_tests();
         host.apply(ClientCommand::SetPaused(true));
         let frame = host.frame();
+        let tick = frame.sim_tick;
         let msg = HostMsg::Frame(frame.clone());
         let bytes = postcard::to_allocvec(&msg).unwrap();
         let back: HostMsg = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back, HostMsg::Frame(frame));
+
+        // Wire path: zstd Frame is smaller than raw postcard Frame.
+        let mut raw_buf = Vec::new();
+        write_msg(&mut raw_buf, &msg).unwrap();
+        let mut zstd_buf = Vec::new();
+        write_host_msg(&mut zstd_buf, &msg).unwrap();
+        assert!(
+            zstd_buf.len() < raw_buf.len(),
+            "zstd wire {} should beat raw {}",
+            zstd_buf.len(),
+            raw_buf.len()
+        );
+        let mut cursor = std::io::Cursor::new(zstd_buf);
+        match read_host_msg(&mut cursor).unwrap() {
+            HostMsg::Frame(f) => {
+                assert_eq!(f.terrain.codec, crate::StripCodec::RawRgba);
+                assert!(f.terrain.byte_len_ok());
+                assert_eq!(f.sim_tick, tick);
+            }
+            other => panic!("expected Frame, got {other:?}"),
+        }
 
         let cmd = ClientMsg::Cmd(ClientCommand::SetCamera {
             focus_col: 12,

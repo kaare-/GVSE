@@ -141,7 +141,7 @@ client should **split panels** so sim dials always go through commands.
 
 | Constant | Bump when |
 |----------|-----------|
-| `VIEW_SCHEMA` | ViewFrame layout (v5 `sim`; v6 `host`; v7–8 `present`; v9 `focus_y`) |
+| `VIEW_SCHEMA` | ViewFrame layout (… v9 `focus_y`; **v10** `TerrainStrip.codec` + zstd IPC) |
 | `COMMAND_SCHEMA` | Commands (… v6 `PaintTerrain`; v7 `SpawnOrganism`) |
 | `SIM_SCHEMA_VERSION` | unchanged role — durable save only (`save.rs`) |
 

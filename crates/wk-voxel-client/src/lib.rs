@@ -27,7 +27,7 @@ use wk_voxel::{
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
-pub const VIEW_SCHEMA: u32 = 9;
+pub const VIEW_SCHEMA: u32 = 10;
 /// Bump when [`ClientCommand`] enum breaks.
 pub const COMMAND_SCHEMA: u32 = 7;
 /// Max paint brush radius (cells); diameter = 2·r+1.
@@ -60,6 +60,17 @@ pub const REGION_LOAD_SIM_FPS_FLOOR: u32 = 30;
 /// WAN present cadence target once ViewFrame compression lands (Hz).
 pub const REGION_WAN_PRESENT_HZ: u32 = 10;
 
+/// Wire encoding for [`TerrainStrip::rgba`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[repr(u8)]
+pub enum StripCodec {
+    /// Uncompressed RGBA8 (`cols * rows * 4` bytes).
+    #[default]
+    RawRgba = 0,
+    /// zstd of the raw RGBA8 blob (IPC WAN path).
+    ZstdRgba = 1,
+}
+
 /// Camera-window RGBA strip (row-major, y=0 at top / high world-y).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerrainStrip {
@@ -67,13 +78,72 @@ pub struct TerrainStrip {
     pub origin_y: i32,
     pub cols: u32,
     pub rows: u32,
-    /// `cols * rows * 4` bytes, RGBA8.
+    /// Encoding of [`Self::rgba`].
+    pub codec: StripCodec,
+    /// Payload: raw RGBA8 or zstd(raw), see [`Self::codec`].
     pub rgba: Vec<u8>,
 }
 
 impl TerrainStrip {
+    pub fn expected_raw_len(&self) -> usize {
+        (self.cols as usize).saturating_mul(self.rows as usize).saturating_mul(4)
+    }
+
     pub fn byte_len_ok(&self) -> bool {
-        self.rgba.len() == (self.cols as usize) * (self.rows as usize) * 4
+        let expected = self.expected_raw_len();
+        match self.codec {
+            StripCodec::RawRgba => self.rgba.len() == expected,
+            StripCodec::ZstdRgba => expected == 0 || !self.rgba.is_empty(),
+        }
+    }
+
+    /// Compress raw RGBA for the IPC wire (no-op if already zstd).
+    pub fn compress_zstd(&mut self) -> Result<(), String> {
+        if matches!(self.codec, StripCodec::ZstdRgba) {
+            return Ok(());
+        }
+        if !self.byte_len_ok() {
+            return Err("raw strip length mismatch".into());
+        }
+        if self.rgba.is_empty() {
+            self.codec = StripCodec::ZstdRgba;
+            return Ok(());
+        }
+        // Level 1 — present path cares about CPU at 10–20 Hz.
+        let compressed = zstd::encode_all(self.rgba.as_slice(), 1).map_err(|e| e.to_string())?;
+        self.rgba = compressed;
+        self.codec = StripCodec::ZstdRgba;
+        Ok(())
+    }
+
+    /// Expand to raw RGBA for blitting / in-process use.
+    pub fn decompress_to_raw(&mut self) -> Result<(), String> {
+        match self.codec {
+            StripCodec::RawRgba => {
+                if !self.byte_len_ok() {
+                    return Err("raw strip length mismatch".into());
+                }
+                Ok(())
+            }
+            StripCodec::ZstdRgba => {
+                let expected = self.expected_raw_len();
+                if expected == 0 {
+                    self.rgba.clear();
+                    self.codec = StripCodec::RawRgba;
+                    return Ok(());
+                }
+                let raw = zstd::decode_all(self.rgba.as_slice()).map_err(|e| e.to_string())?;
+                if raw.len() != expected {
+                    return Err(format!(
+                        "zstd strip {} bytes, expected {expected}",
+                        raw.len()
+                    ));
+                }
+                self.rgba = raw;
+                self.codec = StripCodec::RawRgba;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1152,6 +1222,7 @@ impl Host {
             origin_y,
             cols,
             rows,
+            codec: StripCodec::RawRgba,
             rgba,
         }
     }
@@ -1243,6 +1314,46 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terrain_strip_zstd_round_trip_and_ratio() {
+        let mut strip = TerrainStrip {
+            origin_col: 0,
+            origin_y: 0,
+            cols: 64,
+            rows: 32,
+            codec: StripCodec::RawRgba,
+            rgba: vec![0u8; 64 * 32 * 4],
+        };
+        // Sky-like: mostly constant with a few bright pixels (compresses well).
+        for i in (0..strip.rgba.len()).step_by(4) {
+            strip.rgba[i] = 40;
+            strip.rgba[i + 1] = 80;
+            strip.rgba[i + 2] = 160;
+            strip.rgba[i + 3] = 255;
+        }
+        for x in 0..8 {
+            let i = (x * 4) as usize;
+            strip.rgba[i] = 255;
+            strip.rgba[i + 1] = 220;
+            strip.rgba[i + 2] = 40;
+        }
+        let raw_len = strip.rgba.len();
+        strip.compress_zstd().unwrap();
+        assert_eq!(strip.codec, StripCodec::ZstdRgba);
+        let ratio = raw_len as f32 / strip.rgba.len().max(1) as f32;
+        assert!(
+            ratio >= 10.0,
+            "expected ≥10× on flat sky strip, got {ratio:.1}× ({} → {})",
+            raw_len,
+            strip.rgba.len()
+        );
+        strip.decompress_to_raw().unwrap();
+        assert_eq!(strip.codec, StripCodec::RawRgba);
+        assert_eq!(strip.rgba.len(), raw_len);
+        assert_eq!(strip.rgba[0], 255); // first bright pixel
+        assert_eq!(strip.rgba[8 * 4], 40); // past the bright run
+    }
 
     #[test]
     fn region_envelope_matches_compact_worldgen() {

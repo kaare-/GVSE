@@ -22,7 +22,7 @@ decimal; they do not change the **egress cliff**.
 | Resident chunks (stream) | **~459** loaded (was 1088 full) | `VOXEL_PERF` A/B |
 | 5 km single process | ~**74** sim-FPS after temp/rain stream — possible but heavier | Phase 4 |
 | Max peers (wire) | default **4**, hard **8** | `PHASE8_MULTIPLAYER` |
-| Encoding today | postcard + **raw RGBA** (no compression) | `ipc.rs` |
+| Encoding today | postcard + **zstd RGBA** on IPC Frame (`StripCodec`, VIEW_SCHEMA 10) | `ipc.rs` |
 
 ### CPU read
 
@@ -223,7 +223,8 @@ Studio stays offline/freedom. Operator still tunes live regions.
 
 ## Open measurements *(before trusting $)*
 
-- [ ] zstd ratio on real Compact strips (day/night, busy shore)  
+- [x] zstd on IPC Frame path (`StripCodec::ZstdRgba`, level 1)  
+- [ ] zstd ratio on **real** Compact strips (day/night, busy shore) vs flat-sky unit ≥10×  
 - [ ] RSS / peak RAM of `wk-voxel-host --` Compact on a known box  
 - [ ] Tick ms with 4 peers at opposite ends of the ring  
 - [ ] Actual Mbps after compression at 10 Hz  
