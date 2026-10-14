@@ -80,7 +80,8 @@ schema 1, validate/reject, Lab spawn vs future Release (not free Wild
 One **region** = one sim process with a **max load envelope** (planning
 unit ≈ Compact 4096×tropopause + stream/park — locked in
 [`REGION_CAPACITY.md`](REGION_CAPACITY.md)). Grow a continuous map by
-**sharding** + **halo / handoff** (design later).
+**sharding** + **halo / handoff** — Lab-first contract in
+[`HALO_SHARD.md`](HALO_SHARD.md).
 
 | Tier | Who pays compute | What it is |
 |------|------------------|------------|
@@ -140,7 +141,8 @@ Write these before large UI or AWS spend:
 3. **Region capacity number** — [`REGION_CAPACITY.md`](REGION_CAPACITY.md)
 4. **Identity** — anonymous / Steam / optional email (Wild needs this)  
 5. **Money** — Wild = subscription; Lab/Shadow = player hardware  
-6. **Shadow discovery + halo** — how BYO shards find neighbors safely  
+6. **Shadow discovery + halo** — [`HALO_SHARD.md`](HALO_SHARD.md) (Lab
+   seams first; Shadow discovery later)  
 7. **Migrate Lab → Shadow → Wild** — export / quarantine / release rules  
 
 ## Suggested dig order *(when choosing)*
@@ -152,12 +154,12 @@ Write these before large UI or AWS spend:
 | C | Region max + cost realism | [`REGION_CAPACITY.md`](REGION_CAPACITY.md) + [`HOSTING_COST.md`](HOSTING_COST.md) |
 | D | Biology depth | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) — D1–D3 + D5 (D4 owner visual) |
 | E | Brand / menus | After A–B so screens have jobs |
-| F | Halo / shard handoff | Lab seams first; then Shadow; Wild last |
+| F | Halo / shard handoff | [`HALO_SHARD.md`](HALO_SHARD.md) — Lab seams first; Shadow; Wild last |
 | G | Wild AWS + Steam sub | After compression + allowlist + Lab solid |
 
 ## Explicit non-goals *(until unlocked)*
 
-- Seamless Wild MMO before halo design note  
+- Seamless Wild MMO before Lab seam smoke ([`HALO_SHARD.md`](HALO_SHARD.md) F1)  
 - Autoscale official sim boxes on raw player count  
 - Full editor powers for every Wild player  
 - Forcing all play through subscription (Lab/Shadow remain)  
@@ -169,6 +171,7 @@ Write these before large UI or AWS spend:
 - Player gates: [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)  
 - Studio / blueprints: [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md)  
 - Region envelope: [`REGION_CAPACITY.md`](REGION_CAPACITY.md)  
+- Halo / shards: [`HALO_SHARD.md`](HALO_SHARD.md)  
 - Host / MP / ops: [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md),
   [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md),
   [`PHASE8_OPERATOR.md`](PHASE8_OPERATOR.md)  

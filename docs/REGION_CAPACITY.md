@@ -10,7 +10,7 @@ envelope** hosts and planners must not silently exceed.
 | Rule | Meaning |
 |------|---------|
 | One region = one sim process | No autoscale of tick work with player count |
-| Grow map by sharding | Halo / handoff later ([dig F](PRODUCT_ROADMAP.md)) |
+| Grow map by sharding | Halo / handoff ([`HALO_SHARD.md`](HALO_SHARD.md), dig F) |
 | Lab may be smaller or larger | Player hardware; not the Wild SKU |
 | Wild ships Compact envelope | Below numbers are the official unit |
 | Egress before more boxes | Compress ViewFrame before N× AWS regions |
@@ -53,7 +53,7 @@ the Wild default SKU. Lab may use it if the machine allows.
 | Peers at opposite ring ends | Union residency → ~19 FPS | Cap far cameras / interest; shard |
 | Raw RGBA @ 20 Hz WAN | ~170 Mbit/s/viewer | **Block** public Wild until compress |
 | Full-resident Compact | ~53 ms/tick | Never ship path |
-| “Just widen the ring” | Temps/rain/fields climb | New region + halo, not one fat process |
+| “Just widen the ring” | Temps/rain/fields climb | New region + halo ([`HALO_SHARD.md`](HALO_SHARD.md)), not one fat process |
 | 24/7 Presence AFK | Egress bill | Glance gear ([`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)) |
 
 ## Tier mapping
@@ -84,5 +84,6 @@ Before calling a build “Wild-ready region”:
 ## Related
 
 - [`HOSTING_COST.md`](HOSTING_COST.md) — $ / egress / 10k casual  
+- [`HALO_SHARD.md`](HALO_SHARD.md) — multi-region seam / handoff  
 - [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md) · [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)  
 - [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md) · [`VOXEL_PERF.md`](VOXEL_PERF.md)  

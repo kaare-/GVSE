@@ -48,10 +48,11 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig **D** agent-closed on park-bank (D1–D5 + D3b/D5b; D4 owner visual).
-[`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md). Next: Dig **E** brand/menus, or
-Apple notarize (pinned **2026-11-15**). Cost:
-[`HOSTING_COST.md`](HOSTING_COST.md).
+Dig **F0** design note on park-bank: [`HALO_SHARD.md`](HALO_SHARD.md)
+(Lab-first seam contract). Next agent wedge after owner skim: **F1** two-host
+Lab mass seam smoke — or Dig **E** brand/menus / Apple notarize
+(**2026-11-15**) if owner redirects. Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
+Dig **D** agent-closed ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md); D4 owner visual).
 
 ## Pinned / later
 
@@ -61,12 +62,10 @@ Apple notarize (pinned **2026-11-15**). Cost:
 | Steam depots | after Apple smoke | same binaries |
 | MAS | later | explicit unlock |
 | E2 tipped grey-log visual | owner play/Xvfb | not a code blocker |
-| Phase 6 hotspot #2 | Dig D1 tip-sky light cache | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
-| Dig D2 Release | Operator `ReleaseBlueprint` | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
-| Dig D3 habit caps | Soft plant/fungus/atom ceilings | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
-| Dig D5 drought alloc | Stressed grow-pulse root lean | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
-| Dig D3b litter drip | Corpse settle → soft litter | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
-| Dig D5b cold metab | Quiet winter × metabolic_rate | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
+| Dig F0 halo design | ✅ this pass | [`HALO_SHARD.md`](HALO_SHARD.md) |
+| Dig F1 Lab mass seam | after F0 skim | two-host P0 water/sediment |
+| Dig F2–F5 | after F1 | fields → life → Shadow → Wild |
+| Dig D (biology) | agent-closed | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Optional FPS headroom | owner ask | Compact/5 km leftovers |
 
 ## Stop and ask owner only if
