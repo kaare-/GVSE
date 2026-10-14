@@ -48,11 +48,10 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig **A–B** done (allowlist, studio blueprint + validate). Dig **C**:
-[`REGION_CAPACITY.md`](REGION_CAPACITY.md) + envelope constants. Next:
-ViewFrame compression before public AWS, or dig **D** biology, or Apple
-notarize (pinned **2026-11-15**). Cost sketch:
-[`HOSTING_COST.md`](HOSTING_COST.md).
+Dig **A–C** done. ViewFrame **zstd IPC** (`VIEW_SCHEMA` 10) landed —
+remeasure real Compact ratios before trusting $ in
+[`HOSTING_COST.md`](HOSTING_COST.md). Next: dig **D** biology, WAN
+present ≤10 Hz dial, or Apple notarize (pinned **2026-11-15**).
 
 ## Pinned / later
 

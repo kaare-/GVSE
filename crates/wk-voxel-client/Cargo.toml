@@ -11,6 +11,7 @@ wk-voxel = { path = "../wk-voxel" }
 wk-material = { path = "../wk-material" }
 serde = { workspace = true }
 postcard = { workspace = true }
+zstd = { workspace = true }
 
 # Presentation stack (pinned for rustc 1.83 — see PHASE8_CONTRACT.md).
 winit = { workspace = true }

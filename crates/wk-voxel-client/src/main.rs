@@ -147,6 +147,7 @@ fn empty_frame() -> ViewFrame {
             origin_y: 0,
             cols: 0,
             rows: 0,
+            codec: wk_voxel_client::StripCodec::RawRgba,
             rgba: Vec::new(),
         },
         command_acks: Vec::new(),
