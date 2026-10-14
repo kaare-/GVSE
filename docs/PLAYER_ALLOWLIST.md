@@ -94,5 +94,6 @@ Glance API and Release blueprint are **out of this wedge**.
 ## Related
 
 - [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md) · [`HOSTING_COST.md`](HOSTING_COST.md)  
+- [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md) · Release path  
 - [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md) · [`PHASE8_OPERATOR.md`](PHASE8_OPERATOR.md)  
 - [`PHASE8_CONTRACT.md`](PHASE8_CONTRACT.md)  
