@@ -47,8 +47,8 @@ Ship / legal: menus · brand · Steam · GDPR on official path
 Continue ecology, organisms, climate, mass integrity. Park=0 / TRACKED
 soaks remain the gate. Independent of ship UI polish.
 
-**Contract:** [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) — Dig D1–D5 on
-park-bank (D4 owner visual); Dig D3b corpse litter drip.
+**Contract:** [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) — Dig D1–D5 + D3b on
+park-bank; Dig D5b cold↔metab (D4 owner visual).
 
 ### 2. Player client + world allowlist
 
