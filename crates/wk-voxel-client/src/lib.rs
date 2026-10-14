@@ -59,6 +59,29 @@ pub const REGION_HARD_PEERS: u8 = ipc::MAX_PEERS_CAP;
 pub const REGION_LOAD_SIM_FPS_FLOOR: u32 = 30;
 /// WAN present cadence target once ViewFrame compression lands (Hz).
 pub const REGION_WAN_PRESENT_HZ: u32 = 10;
+/// Present period for Lab / loopback / spawn-host (ms) — 20 Hz.
+pub const REGION_LAN_PRESENT_PERIOD_MS: u64 = DEFAULT_STEP_PERIOD_MS;
+/// Present period for non-loopback `--connect` (ms) — [`REGION_WAN_PRESENT_HZ`].
+pub const REGION_WAN_PRESENT_PERIOD_MS: u64 = 1000 / REGION_WAN_PRESENT_HZ as u64;
+
+/// True when `host:port` (or bare host) targets loopback.
+pub fn host_addr_is_loopback(addr: &str) -> bool {
+    let host = addr
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(addr)
+        .trim_matches(|c| c == '[' || c == ']');
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// Viewer Pull cadence: 20 Hz on loopback Lab/LAN, 10 Hz on WAN connects.
+pub fn present_period_ms_for_connect(addr: &str) -> u64 {
+    if host_addr_is_loopback(addr) {
+        REGION_LAN_PRESENT_PERIOD_MS
+    } else {
+        REGION_WAN_PRESENT_PERIOD_MS
+    }
+}
 
 /// Wire encoding for [`TerrainStrip::rgba`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1364,6 +1387,8 @@ mod tests {
         assert_eq!(REGION_HARD_PEERS, 8);
         assert_eq!(REGION_LOAD_SIM_FPS_FLOOR, 30);
         assert_eq!(REGION_WAN_PRESENT_HZ, 10);
+        assert_eq!(REGION_WAN_PRESENT_PERIOD_MS, 100);
+        assert_eq!(REGION_LAN_PRESENT_PERIOD_MS, 50);
         assert_eq!(COMPACT_VIEW_COLS, 720);
         assert_eq!(COMPACT_VIEW_ROWS, 384);
         assert_eq!(DEFAULT_STEP_PERIOD_MS, 50);
@@ -1372,6 +1397,11 @@ mod tests {
             p.sky_ceiling_y,
             TROPOSPHERE_TOP_Y + STRATOSPHERE_CELLS
         );
+        assert!(host_addr_is_loopback("127.0.0.1:17420"));
+        assert!(host_addr_is_loopback("localhost:9"));
+        assert!(!host_addr_is_loopback("203.0.113.1:17420"));
+        assert_eq!(present_period_ms_for_connect("127.0.0.1:17420"), 50);
+        assert_eq!(present_period_ms_for_connect("203.0.113.1:17420"), 100);
     }
 
     #[test]

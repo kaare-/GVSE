@@ -71,7 +71,8 @@ Before calling a build “Wild-ready region”:
 - [ ] Compact stream park=0 / TRACKED soak still green (macroquad path)  
 - [ ] Host RSS measured on a known box ([`HOSTING_COST.md`](HOSTING_COST.md) open list)  
 - [ ] 4 overlapping peers keep ≥30 sim-FPS on target SKU  
-- [x] ViewFrame zstd IPC path exists (`VIEW_SCHEMA` 10); WAN still wants ≤10 Hz  
+- [x] ViewFrame zstd IPC path exists (`VIEW_SCHEMA` 10)  
+- [x] WAN `--connect` present ≤10 Hz (Lab/loopback stay 20 Hz)  
 - [x] Region envelope constants match this table (`REGION_*` in client)  
 
 ## Non-goals *(until unlocked)*

@@ -25,13 +25,10 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wk_voxel_client::ipc::{ConnectOpts, PeerRole, RemoteHost, SpawnedHost, DEFAULT_HOST_ADDR};
 use wk_voxel_client::{
-    ClientCommand, Host, HostInfo, PaintBrush, PresentHints, SimSettings, SpawnPreset, ViewFrame,
-    DEFAULT_SAVE_SLOT, DEFAULT_STEP_PERIOD_MS, MAX_PAINT_RADIUS, MAX_VIEW_COLS, MIN_VIEW_COLS,
-    VIEW_SCHEMA,
+    present_period_ms_for_connect, ClientCommand, Host, HostInfo, PaintBrush, PresentHints,
+    SimSettings, SpawnPreset, ViewFrame, DEFAULT_SAVE_SLOT, MAX_PAINT_RADIUS, MAX_VIEW_COLS,
+    MIN_VIEW_COLS, REGION_LAN_PRESENT_PERIOD_MS, VIEW_SCHEMA,
 };
-
-/// Match host auto-step cadence — firm ~20 Hz present / pull.
-const PRESENT_PERIOD: Duration = Duration::from_millis(DEFAULT_STEP_PERIOD_MS);
 const PAN_COL_STEP: i32 = 16;
 const PAN_Y_STEP: i32 = 24;
 
@@ -69,6 +66,14 @@ impl LaunchIntent {
             Self::Connect { .. } => "Connecting to host…",
             Self::Spawn { dev: true } => "Spawning tiny host…",
             Self::Spawn { dev: false } => "Spawning Compact host (stamp may take a bit)…",
+        }
+    }
+
+    /// Present / Pull period: Lab & loopback 20 Hz; WAN connect 10 Hz.
+    fn present_period_ms(&self) -> u64 {
+        match self {
+            Self::Local { .. } | Self::Spawn { .. } => REGION_LAN_PRESENT_PERIOD_MS,
+            Self::Connect { addr, .. } => present_period_ms_for_connect(addr),
         }
     }
 
@@ -310,6 +315,7 @@ fn parse_intent() -> LaunchIntent {
                      default: in-process Compact host\n\
                      --dev: tiny ring (in-process or with --spawn-host)\n\
                      --connect: TCP to existing wk-voxel-host (default {DEFAULT_HOST_ADDR})\n\
+                               (loopback 20 Hz present; WAN host → 10 Hz)\n\
                      --spawn-host: launch wk-voxel-host child + connect\n\
                      --token SECRET: join/ops token (env WK_VOXEL_HOST_TOKEN)\n\
                      --name LABEL: optional peer name\n\
@@ -369,6 +375,12 @@ fn main() {
 
     let intent = parse_intent();
     let message = intent.loading_message();
+    let present_period = Duration::from_millis(intent.present_period_ms());
+    log::info!(
+        "present cadence {} Hz ({} ms)",
+        1000 / present_period.as_millis().max(1),
+        present_period.as_millis()
+    );
     let (tx, rx) = mpsc::channel();
     thread::Builder::new()
         .name("wk-host-boot".into())
@@ -378,7 +390,7 @@ fn main() {
         .expect("spawn boot thread");
 
     let event_loop = EventLoop::new().expect("event loop");
-    event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + PRESENT_PERIOD));
+    event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + present_period));
 
     let mut app = SpikeApp {
         boot: Boot::Loading { rx, message },
@@ -405,6 +417,7 @@ fn main() {
         hud_open: true,
         load_started: Instant::now(),
         next_present: Instant::now(),
+        present_period,
     };
 
     event_loop.run_app(&mut app).expect("run");
@@ -443,6 +456,8 @@ struct SpikeApp {
     hud_open: bool,
     load_started: Instant,
     next_present: Instant,
+    /// Lab/loopback 20 Hz; WAN `--connect` 10 Hz ([`REGION_WAN_PRESENT_HZ`](wk_voxel_client::REGION_WAN_PRESENT_HZ)).
+    present_period: Duration,
 }
 
 impl SpikeApp {
@@ -666,7 +681,7 @@ impl SpikeApp {
     }
 
     fn schedule_present(&mut self, event_loop: &ActiveEventLoop) {
-        self.next_present = Instant::now() + PRESENT_PERIOD;
+        self.next_present = Instant::now() + self.present_period;
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_present));
     }
 

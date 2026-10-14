@@ -130,7 +130,8 @@ Ordered levers (do before scaling instances):
 
 1. **Compress ViewFrame** (zstd on RGBA or tile codec) — mandatory for WAN  
 2. **Delta / dirty rectangles** — strip rarely fully changes  
-3. **Remote present ≤10 Hz**; keep 20 Hz for local/LAN / Lab  
+3. **Remote present ≤10 Hz** — viewer `--connect` to non-loopback uses
+   100 ms Pull cadence; keep 20 Hz for local/LAN / Lab / `--spawn-host`  
 4. **Interest** — overlapping cameras; avoid union→full-resident  
 5. **Region max = Compact** (or measured twin); shard for map size  
 6. **Session length economics** — Glance vs Presence; no 24/7 AFK strips  
