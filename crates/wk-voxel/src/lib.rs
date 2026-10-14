@@ -183,8 +183,10 @@ pub use humidity::{
 pub use organism::{
     bake_tip_into_body, column_sky_light, fallen_body_offset, resolve_organism_draw_cells,
     rigid_tip_offset, Atom, BodyModule, Corpse, ModuleId, OrganismPassTimings, OrganismStepOutcome,
-    OrganismStepStats, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
+    habit_of, habit_of_body, OrganismStepStats, OrganismStore, HabitKind, SpawnFail, SporeRelease,
+    CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, HABIT_SOFT_CAP_ATOMS,
+    HABIT_SOFT_CAP_FUNGI, HABIT_SOFT_CAP_PLANTS, MAX_ATOMS, MAX_CORPSES,
+    MAX_FALLEN_WATERLINE_EXTENT,
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use pipe::{
