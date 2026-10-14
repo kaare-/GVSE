@@ -64,6 +64,64 @@ pub const MAX_ATOMS: usize = 256;
 /// Default lingering-corpse ceiling (same order as living pop).
 pub const MAX_CORPSES: usize = 256;
 
+/// Dig D3: soft habit ceilings inside [`MAX_ATOMS`] (anti-flood ecology).
+/// Sum may exceed the global cap — global still binds; each habit cannot
+/// wallpaper the region alone.
+pub const HABIT_SOFT_CAP_PLANTS: usize = 180;
+pub const HABIT_SOFT_CAP_FUNGI: usize = 48;
+pub const HABIT_SOFT_CAP_ATOMS: usize = 128;
+
+/// Living habit bucket for Dig D3 soft-caps (matches HUD `p=/f=/a=`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HabitKind {
+    Plant,
+    Fungus,
+    /// Set A floaters + epiphytes (no Root / Digest habit).
+    Atom,
+}
+
+impl HabitKind {
+    pub fn soft_cap(self) -> usize {
+        match self {
+            Self::Plant => HABIT_SOFT_CAP_PLANTS,
+            Self::Fungus => HABIT_SOFT_CAP_FUNGI,
+            Self::Atom => HABIT_SOFT_CAP_ATOMS,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Plant => "plant",
+            Self::Fungus => "fungus",
+            Self::Atom => "atom",
+        }
+    }
+}
+
+/// Habit of a living body (HUD / Dig D3 soft-cap).
+pub fn habit_of(atom: &Atom) -> HabitKind {
+    if is_land_plant(atom) {
+        HabitKind::Plant
+    } else if is_fungus(atom) {
+        HabitKind::Fungus
+    } else {
+        HabitKind::Atom
+    }
+}
+
+/// Habit from a blueprint / spawn body before an [`Atom`] exists.
+pub fn habit_of_body(body: &[(i16, i16, ModuleId)]) -> HabitKind {
+    let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+    let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+    if plant {
+        HabitKind::Plant
+    } else if fungus {
+        HabitKind::Fungus
+    } else {
+        HabitKind::Atom
+    }
+}
+
 fn default_max_atoms() -> usize {
     MAX_ATOMS
 }
@@ -76,6 +134,8 @@ fn default_max_corpses() -> usize {
 pub enum SpawnFail {
     /// Living entity count already at [`OrganismStore::max_atoms`].
     PopCap,
+    /// Dig D3: habit soft-cap full (plants / fungi / atoms).
+    HabitCap(HabitKind),
     /// Blueprint empty or missing a Nucleus.
     InvalidBody,
     /// No Air cell near the click.
@@ -1452,21 +1512,32 @@ impl OrganismStore {
     }
 
     /// Living habit breakdown: `(plants, fungi, atoms)`.
-    /// HUD uses this so a fungus spore bloom isn't mistaken for "invisible plants".
+    ///
+    /// Includes parked stream-side life so Dig D3 soft-caps and HUD match
+    /// [`Self::living_count`] (streaming is not a free habit slot).
     pub fn habit_counts(&self) -> (usize, usize, usize) {
         let mut plants = 0usize;
         let mut fungi = 0usize;
         let mut atoms = 0usize;
-        for a in &self.atoms {
-            if is_land_plant(a) {
-                plants += 1;
-            } else if is_fungus(a) {
-                fungi += 1;
-            } else {
-                atoms += 1;
+        for a in self.atoms.iter().chain(self.parked.iter()) {
+            match habit_of(a) {
+                HabitKind::Plant => plants += 1,
+                HabitKind::Fungus => fungi += 1,
+                HabitKind::Atom => atoms += 1,
             }
         }
         (plants, fungi, atoms)
+    }
+
+    /// Dig D3: whether `kind` has soft-cap room given pending same-habit births.
+    pub fn habit_has_room(&self, kind: HabitKind, pending_same: usize) -> bool {
+        let (p, f, a) = self.habit_counts();
+        let n = match kind {
+            HabitKind::Plant => p,
+            HabitKind::Fungus => f,
+            HabitKind::Atom => a,
+        };
+        n.saturating_add(pending_same) < kind.soft_cap()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1614,7 +1685,10 @@ impl OrganismStore {
             let gx_w = world.wrap_x(gx);
             if let Some(gy) = find_wet_slot(world, gx_w, y0, y1) {
                 let h = hash_u64(seed, gx_w as u64, ATOM_SEED_SALT);
-                if h % 3 == 0 && self.living_count() < self.atom_cap() {
+                if h % 3 == 0
+                    && self.living_count() < self.atom_cap()
+                    && self.habit_has_room(HabitKind::Atom, 0)
+                {
                     self.atoms.push(Atom::new(gx_w, gy, energy_max));
                 }
             }
@@ -1711,6 +1785,10 @@ impl OrganismStore {
         if self.living_count() >= self.atom_cap() || body.is_empty() {
             return false;
         }
+        let habit = habit_of_body(&body);
+        if !self.habit_has_room(habit, 0) {
+            return false;
+        }
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
         let epi = body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast) && !plant;
@@ -1791,6 +1869,10 @@ impl OrganismStore {
         }
         if body.is_empty() || !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
             return Err(SpawnFail::InvalidBody);
+        }
+        let habit = habit_of_body(&body);
+        if !self.habit_has_room(habit, 0) {
+            return Err(SpawnFail::HabitCap(habit));
         }
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
@@ -1955,6 +2037,8 @@ impl OrganismStore {
         // Cap room includes parked far atoms so streaming is not a free spawn slot.
         let pop = self.living_count();
         let atom_cap = self.atom_cap();
+        // Dig D3: running habit tallies (live+parked); births bump same-tick.
+        let (mut n_plants, mut n_fungi, mut n_atoms) = self.habit_counts();
         let growth_caps = self.growth_caps.clamp();
         let fungi_cfg = self.fungi;
         let bank_cfg = self.spore_bank;
@@ -2033,7 +2117,8 @@ impl OrganismStore {
         // (and corpse settle). Spores need a living body afterward.
         if self.atoms.is_empty() {
             if self.corpses.is_empty() {
-                let room = self.living_count() + births.len() < atom_cap;
+                let room = self.living_count() + births.len() < atom_cap
+                    && n_fungi < HabitKind::Fungus.soft_cap();
                 if let Some(child) =
                     try_emergent_fruiting(world, &fungus_cols, tick, room)
                 {
@@ -2049,7 +2134,8 @@ impl OrganismStore {
             }
             let t0 = Instant::now();
             self.step_corpses(world, tick, wind_vx);
-            let room = self.living_count() < atom_cap;
+            let room = self.living_count() < atom_cap
+                && n_fungi < HabitKind::Fungus.soft_cap();
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
                 stats.bump_birth(&child);
                 stats.emergent_fruiting += 1;
@@ -2110,7 +2196,8 @@ impl OrganismStore {
 
             if is_land_plant(atom) {
                 let t_land = Instant::now();
-                let room = pop + births.len() < atom_cap;
+                let room = pop + births.len() < atom_cap
+                    && n_plants < HabitKind::Plant.soft_cap();
                 let parent_gx = atom.gx;
                 let parent_gy = atom.gy;
                 let empty: [usize; 0] = [];
@@ -2156,6 +2243,7 @@ impl OrganismStore {
                     }
                     PlantStep::Sprout(child) => {
                         plant_cols.push(child.gx);
+                        n_plants += 1;
                         births.push(child);
                     }
                     PlantStep::Spore(child) => {
@@ -2166,6 +2254,7 @@ impl OrganismStore {
                             to_gy: child.gy,
                         });
                         plant_cols.push(child.gx);
+                        n_plants += 1;
                         births.push(child);
                     }
                     PlantStep::SporeBanked { gx, gy } => {
@@ -2186,7 +2275,8 @@ impl OrganismStore {
 
             let t_other = Instant::now();
             if is_fungus(atom) {
-                let room = pop + births.len() < atom_cap;
+                let room = pop + births.len() < atom_cap
+                    && n_fungi < HabitKind::Fungus.soft_cap();
                 let parent_gx = atom.gx;
                 let parent_gy = atom.gy;
                 match step_fungus(
@@ -2205,6 +2295,7 @@ impl OrganismStore {
                     PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(child) => {
                         fungus_cols.push(child.gx);
+                        n_fungi += 1;
                         births.push(child);
                     }
                     PlantStep::Spore(child) => {
@@ -2215,6 +2306,7 @@ impl OrganismStore {
                             to_gy: child.gy,
                         });
                         fungus_cols.push(child.gx);
+                        n_fungi += 1;
                         births.push(child);
                     }
                     PlantStep::SporeBanked { gx, gy } => {
@@ -2293,6 +2385,7 @@ impl OrganismStore {
             if atom.cooldown == 0
                 && atom.energy >= atom.energy_max * REPRODUCE_AT
                 && pop + births.len() < atom_cap
+                && n_atoms < HabitKind::Atom.soft_cap()
             {
                 // E46d: cold below the comfort band sterilises fission.
                 // Energy is not spent; the founder keeps living.
@@ -2310,6 +2403,7 @@ impl OrganismStore {
                     atom.energy -= cost;
                     atom.cooldown = REPRO_PERIOD;
                     if let Some(child) = try_fission(world, atom, cost * 0.5, tick) {
+                        n_atoms += 1;
                         births.push(child);
                     } else {
                         atom.energy += cost;
@@ -2376,7 +2470,11 @@ impl OrganismStore {
             .filter(|a| is_fungus(a))
             .map(|a| a.gx)
             .collect();
-        if self.living_count() < atom_cap {
+        // Refresh habit tallies after apply/deaths so post-pass gates match.
+        let (_np0, n_fungi_now, _na0) = self.habit_counts();
+        let fungus_emerge_room = self.living_count() < atom_cap
+            && n_fungi_now < HabitKind::Fungus.soft_cap();
+        if fungus_emerge_room {
             if let Some(child) =
                 try_emergent_fruiting(world, &fungus_cols_now, tick, true)
             {
@@ -2387,6 +2485,8 @@ impl OrganismStore {
             }
         }
         // Hibernating spore bank — wake when moisture / space / warmth return.
+        // Fungus bank packets inoculate cream (no Atom); plant wakes need
+        // both global and Dig D3 plant soft-cap room.
         let plant_cols_now: Vec<i32> = self
             .atoms
             .iter()
@@ -2399,7 +2499,12 @@ impl OrganismStore {
             .filter(|a| is_fungus(a))
             .map(|a| a.gx)
             .collect();
-        let room = atom_cap.saturating_sub(self.living_count());
+        let (n_plants_now, _nf1, _na1) = self.habit_counts();
+        let global_room = atom_cap.saturating_sub(self.living_count());
+        let plant_habit_room = HabitKind::Plant
+            .soft_cap()
+            .saturating_sub(n_plants_now);
+        let room = global_room.min(plant_habit_room);
         let mut bank = std::mem::take(&mut world.spore_bank);
         let woken = bank.step(
             world,
@@ -6988,6 +7093,48 @@ mod tests {
             "second spawn must fail at max_atoms=1"
         );
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn habit_soft_cap_blocks_fungus_not_plant() {
+        // Dig D3: fungus soft-cap can bind while global atom_cap still has room.
+        let mut w = World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Sand));
+            for y in 1..8 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut store = OrganismStore::new();
+        store.max_atoms = MAX_ATOMS;
+        let fungus = crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
+        for i in 0..HABIT_SOFT_CAP_FUNGI {
+            store.parked.push(Atom::from_body(
+                i as i32,
+                2,
+                20.0,
+                fungus.clone(),
+            ));
+        }
+        assert_eq!(
+            store.habit_counts().1,
+            HABIT_SOFT_CAP_FUNGI,
+            "parked fungi count toward habit soft-cap"
+        );
+        assert_eq!(
+            store.spawn_blueprint_free(&w, 4, 2, fungus, 40.0, Genome::default()),
+            Err(SpawnFail::HabitCap(HabitKind::Fungus)),
+        );
+        // Plants still have habit room (and global room).
+        let plant = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        assert!(
+            store
+                .spawn_blueprint_free(&w, 6, 2, plant, 40.0, Genome::default())
+                .is_ok(),
+            "plant spawn must not be blocked by fungus habit soft-cap"
+        );
+        assert_eq!(store.habit_counts().0, 1);
     }
 
     #[test]
