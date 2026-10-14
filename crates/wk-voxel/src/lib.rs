@@ -128,15 +128,18 @@ pub use failure::{
 };
 pub use fasthash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 pub use fungi::{
-    add_soft_litter, bind_strain_lineage, compost_organic_to_soil, fill_ghost_root_voids,
+    add_soft_litter, bind_strain_lineage, compost_organic_to_soil, death_litter_budget,
+    dissolve_corpse_to_organic, dissolve_corpse_to_organic_with_drip, drip_corpse_settle_litter,
+    fill_ghost_root_voids,
     infect_mycelium_at, infect_mycelium_with_lineage, is_fungus, is_surface_stalk,
     lineage_for_strain_at, max_mycelium_near, move_mycelium_meta, mycelium_energy_at,
     mycelium_shares_at, mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb,
     nearest_mycelium_lineage, prune_stale_root_residue, pull_mycelium_cargo_to, seed_mycelium_near,
     sip_mycelium_energy_near, soft_litter_at, stamp_mycelium_lineage, step_mycelium_field,
     step_mycelium_field_cfg, strain_lineage, swap_cells_preserving_mycelium, swap_mycelium_meta,
-    FungiConfig, MyceliumLineage, MyceliumLineageMap, FUNGUS_STALK_SPORE_MAX_DIST,
-    FUNGUS_STALK_SPORE_MIN_DIST, MYCELIUM_ENERGY_CAP, SOFT_LITTER_MAP_MAX,
+    FungiConfig, MyceliumLineage, MyceliumLineageMap, CORPSE_SETTLE_LITTER_DRIP,
+    CORPSE_SETTLE_LITTER_PERIOD, FUNGUS_STALK_SPORE_MAX_DIST, FUNGUS_STALK_SPORE_MIN_DIST,
+    MYCELIUM_ENERGY_CAP, SOFT_LITTER_MAP_MAX,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,

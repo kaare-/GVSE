@@ -151,6 +151,18 @@ pub const SOFT_LITTER_MAP_MAX: usize = 4_096;
 pub const DEATH_LITTER_PER_MODULE: u16 = 6;
 /// Cap soft litter added from one corpse.
 pub const DEATH_LITTER_MAX: u16 = 48;
+/// Dig D3b: settle-tick period between soft-litter drip pulses.
+pub const CORPSE_SETTLE_LITTER_PERIOD: u32 = 60;
+/// Dig D3b: soft litter units per settle drip pulse.
+pub const CORPSE_SETTLE_LITTER_DRIP: u16 = 1;
+
+/// Total soft-litter budget for a corpse body (dissolve + Dig D3b drip).
+pub fn death_litter_budget(body: &[(i16, i16, ModuleId)]) -> u16 {
+    let n = body.len().max(1);
+    (DEATH_LITTER_PER_MODULE as usize)
+        .saturating_mul(n)
+        .min(DEATH_LITTER_MAX as usize) as u16
+}
 /// Cream left on the new Soil cell after Organic compost — keeps a
 /// mineral corridor so networks can reconnect instead of hard-severing.
 pub const MYCELIUM_COMPOST_RESIDUAL: u8 = 12;
@@ -2745,6 +2757,38 @@ pub fn deposit_death_litter(world: &mut World, gx: i32, gy: i32, n_modules: usiz
     deposit_organic_cell(world, gx, gy);
 }
 
+/// Dig D3b: drip soft litter while a corpse rests (half budget max).
+///
+/// `settle_step` is the ticks just added to `settled_ticks` so stream
+/// 5× settle still crosses period boundaries correctly.
+pub fn drip_corpse_settle_litter(
+    world: &mut World,
+    gx: i32,
+    settled_ticks: u32,
+    settle_step: u32,
+    body: &[(i16, i16, ModuleId)],
+    litter_dripped: &mut u16,
+) {
+    let drip_cap = (death_litter_budget(body) / 2).max(1);
+    if *litter_dripped >= drip_cap || settle_step == 0 {
+        return;
+    }
+    let before = settled_ticks.saturating_sub(settle_step);
+    let pulses = (settled_ticks / CORPSE_SETTLE_LITTER_PERIOD)
+        .saturating_sub(before / CORPSE_SETTLE_LITTER_PERIOD);
+    if pulses == 0 {
+        return;
+    }
+    let add = (pulses as u16)
+        .saturating_mul(CORPSE_SETTLE_LITTER_DRIP)
+        .min(drip_cap.saturating_sub(*litter_dripped));
+    if add == 0 {
+        return;
+    }
+    add_soft_litter(world, gx, add);
+    *litter_dripped = litter_dripped.saturating_add(add);
+}
+
 /// Dissolve a lingering corpse into Organic matter + soft litter.
 ///
 /// Shoot modules (Stem / Nucleus / Photosystem) never become mid-air Organic
@@ -2758,11 +2802,21 @@ pub fn dissolve_corpse_to_organic(
     gy: i32,
     body: &[(i16, i16, ModuleId)],
 ) {
-    let n_modules = body.len().max(1);
-    let units = (DEATH_LITTER_PER_MODULE as usize)
-        .saturating_mul(n_modules)
-        .min(DEATH_LITTER_MAX as usize) as u16;
-    add_soft_litter(world, gx, units);
+    dissolve_corpse_to_organic_with_drip(world, gx, gy, body, 0);
+}
+
+/// Dissolve with Dig D3b settle drip already banked (avoid double-count).
+pub fn dissolve_corpse_to_organic_with_drip(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    body: &[(i16, i16, ModuleId)],
+    already_dripped: u16,
+) {
+    let units = death_litter_budget(body).saturating_sub(already_dripped);
+    if units > 0 {
+        add_soft_litter(world, gx, units);
+    }
 
     let mut painted = 0u32;
     for &(dx, dy, mid) in body {
