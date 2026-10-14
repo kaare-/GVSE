@@ -58,6 +58,12 @@ cargo run -p wk-voxel-client --release -- \
 - F2 / checkbox; presets Atom / Plant / Seaweed / Fungus / Epiphyte
 - Click cover-scale strip (one-shot press); host `spawn_blueprint_free`
 
+## Release (Dig D2)
+
+- `ClientCommand::ReleaseBlueprint` (`COMMAND_SCHEMA` 8) — Operator only
+- Postcard `.gvsecrt` bytes; host `quarantine_for_release` + cooldown/cap
+- No ship-UI button this wedge (API + tests); player Wild Release later
+
 ## Later wedges
 
 - Full blueprint paint editor (macroquad F2 canvas)

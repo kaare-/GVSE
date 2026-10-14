@@ -79,7 +79,7 @@ pub use audit::{
 };
 pub use blueprint::{
     ensure_symbiont_inherited, mutate_body, Blueprint, Genome, LaneId, PlacedModule, SpawnGate,
-    BLUEPRINT_DIR, BODY_MUTATION_MAX_EDITS, BODY_MUTATION_MAX_MODULES,
+    BLUEPRINT_DIR, BLUEPRINT_SCHEMA_VERSION, BODY_MUTATION_MAX_EDITS, BODY_MUTATION_MAX_MODULES,
 };
 pub use budget::{
     BudgetDelta, BudgetLedger, BudgetProbe, BudgetSnap, FreeSatScope, SnowOtherStage,

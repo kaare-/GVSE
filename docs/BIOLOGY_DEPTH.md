@@ -1,6 +1,6 @@
 # Biology depth *(dig D)*
 
-**Status:** D1 in progress (2026-10-14). Product dig order **D** from
+**Status:** D2 in progress (2026-10-14). Product dig order **D** from
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Soak-gated; no ship-UI
 work under this dig.
 
@@ -9,7 +9,7 @@ work under this dig.
 Deepen living worlds (ecology / organism cost / climate×life) without
 reopening TRACKED / park. Lab may feel richest; Wild stays allowlisted.
 
-## D1 — Hotspot #2 harvest-neutral *(this wedge)*
+## D1 — Hotspot #2 harvest-neutral *(done)*
 
 Phase 6 deferred land/metab cut
 ([`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)): tip×count-always
@@ -30,11 +30,36 @@ single-leaf paths unchanged.
 - [x] Short organisms-on soak: park=0, TRACKED −0.01/t, living=50  
 - [x] Linked from Phase 6 scope + product roadmap  
 
+## D2 — Release ecology path *(this wedge)*
+
+Studio → world entry under [`SpawnGate::Release`](../crates/wk-voxel/src/blueprint.rs)
+([`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md)). Not free
+`SpawnOrganism` / paint — postcard `.gvsecrt` bytes with host
+quarantine, cooldown, and a soft living budget.
+
+| Dial | Default (Operator-first) |
+|------|--------------------------|
+| Who | Operator only this wedge (Wild player Release stays allowlist-later) |
+| Wire | `ClientCommand::ReleaseBlueprint { col, y, bytes }` (`COMMAND_SCHEMA` 8) |
+| Size | ≤ `MAX_RELEASE_BLUEPRINT_BYTES` (64 KiB) |
+| Modules | ≤ `MAX_RELEASE_MODULES` (256) after Mid-only quarantine |
+| Gate | `Blueprint::quarantine_for_release` → `validate_for_spawn(Release)` |
+| Cooldown | `RELEASE_COOLDOWN_TICKS` (30) between successes; cleared on `ResetWorld` |
+| Cap | `RELEASE_LIVE_SOFT_CAP` (32) living + existing atom pop cap |
+| Quarantine | Mid lane only; genome clamped to mutation ranges; disk file untouched |
+
+### Acceptance
+
+- [x] Contract in this file + studio / allowlist crumbs  
+- [x] `ReleaseBlueprint` on host; Operator allow / Viewer deny  
+- [x] Invalid habit / oversize / cooldown / soft-cap reject with ACK detail  
+- [x] Built-in atom blueprint Release places living organism  
+- [ ] Wild player Release (identity + per-account dials) — later  
+
 ## Later Dig D options *(not this PR)*
 
 | Id | Topic |
 |----|--------|
-| D2 | Release ecology path (`SpawnGate::Release`) |
 | D3 | Population / litter ecology tuning |
 | D4 | E2 tipped grey-log owner visual |
 | D5 | Climate×life stress on existing genes |

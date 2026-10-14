@@ -57,7 +57,7 @@ migration note — not as silent postcard fields.
 | Decode | Always | `Blueprint::from_bytes`; newer schema → reject |
 | Lab / studio spawn | Local drop | `can_editor_spawn` (nucleus + non-empty) — today’s editor |
 | Habit check | Optional Lab warn | `is_valid_creature` (atom/plant/fungus/epiphyte) |
-| **Release** (Wild/Shadow) | Future | Must pass `is_valid_creature` + seat + caps |
+| **Release** (Wild/Shadow) | Dig D2 Operator stub | Must pass `is_valid_creature` + seat + caps |
 | Seat | All live drops | Host habitat rules (solid crown, wet air, …) |
 
 Reject → `CommandAck { ok: false, detail }` (or Release result). Never
@@ -70,25 +70,24 @@ partial mass write.
 | Operator (today) | `ClientCommand::SpawnOrganism { preset }` | Enum → built-in `Blueprint::*` on host |
 | Lab local / macroquad F2 | In-process studio → `spawn_blueprint_free` | Full `Blueprint` in-process (not over Wild wire) |
 | Studio rewrite | Edit + save `.gvsecrt`; Lab load/spawn | Disk file; host reads trusted path or bytes |
-| **Release** (later) | New cmd / API — **not** free `SpawnOrganism` | Validated blueprint bytes + quarantine rules |
+| **Release** (Dig D2) | `ClientCommand::ReleaseBlueprint { bytes }` | Validated blueprint bytes + quarantine rules |
 
-Do **not** put raw `Blueprint` on the public Wild command bus until
-Release is designed (size, rate limit, quarantine). Presets stay the
-Operator fast path.
+Presets stay the Operator fast path. Raw `Blueprint` structs are not on
+the Wild Viewer command bus — only postcard bytes through Release.
 
-## Release to Wild / Shadow *(owed later; defaults)*
+## Release to Wild / Shadow *(Dig D2 Operator stub)*
 
-Locked here so studio rewrite does not assume infinite drop rights:
+Locked defaults; player Wild Release stays allowlist-later:
 
 | Dial | Default |
 |------|---------|
-| Who | Account that owns the blueprint (Lab export) |
-| Where | Wild official host or Shadow owner-approved |
-| Caps | Per-player cooldown + live organism budget |
-| Quarantine | Host re-validates; may strip unknown modules / clamp genome |
-| Audit | Log name + schema + hash; no silent mutation of disk file |
+| Who | Operator this wedge; later account that owns the blueprint |
+| Where | Any host that accepts Operator cmds (Lab / owned Shadow / Wild ops) |
+| Caps | `RELEASE_COOLDOWN_TICKS` + `RELEASE_LIVE_SOFT_CAP` (+ atom pop cap) |
+| Quarantine | `Blueprint::quarantine_for_release` — Mid only + genome clamp |
+| Audit | ACK detail includes name; no silent mutation of disk file |
 
-Own design wedge when unlocked (dig order G / migrate pillar).
+Player Wild Release + per-account identity: dig order G / migrate pillar.
 
 ## Studio rewrite target *(product)*
 
@@ -110,7 +109,7 @@ Out of this contract: brand, full axon/wire editor, Wild Presence UI.
 | Document `BLUEPRINT_SCHEMA_VERSION` in ship README / host banner | optional crumb |
 | Shared validate helper used by app + client host | `Blueprint::validate_for_spawn(SpawnGate)` ✅ |
 | Operator “load .gvsecrt” | later; presets enough now |
-| `ReleaseBlueprint` cmd | schema bump; allowlist row already “later” |
+| `ReleaseBlueprint` cmd | Dig D2 ✅ (`COMMAND_SCHEMA` 8); Wild player row still later |
 | Retire stale EDITOR wire/gene fields or implement with bump | pick one |
 
 ## Acceptance for the next studio PR

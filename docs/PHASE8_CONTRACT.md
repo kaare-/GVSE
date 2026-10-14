@@ -107,6 +107,7 @@ Queue drained by host **before** or **between** `step_world` calls
 | `SetPresentHints { … }` | Optional: glitter on, overlay masks | If host stamps these into ViewFrame; else client-local |
 | `Save { slot }` / `Load { slot }` | `SimSnapshot` I/O | Client never writes `.gvsesim` itself |
 | `PaintTerrain { … }` / `SpawnOrganism { … }` | Editor mutations | Host validates; rejected → ACK error |
+| `ReleaseBlueprint { … }` | Dig D2 Release place | Postcard bytes; quarantine + cooldown/cap |
 | `ResetWorld { seed? }` | Rebuild via worldgen | R key parity |
 | `Quit` | Host teardown | Client closes window after ACK |
 
@@ -142,7 +143,7 @@ client should **split panels** so sim dials always go through commands.
 | Constant | Bump when |
 |----------|-----------|
 | `VIEW_SCHEMA` | ViewFrame layout (… v9 `focus_y`; **v10** `TerrainStrip.codec` + zstd IPC) |
-| `COMMAND_SCHEMA` | Commands (… v6 `PaintTerrain`; v7 `SpawnOrganism`) |
+| `COMMAND_SCHEMA` | Commands (… v7 `SpawnOrganism`; **v8** `ReleaseBlueprint`) |
 | `SIM_SCHEMA_VERSION` | unchanged role — durable save only (`save.rs`) |
 
 Spike may hard-code v1 and reject mismatches with a clear HUD string.
