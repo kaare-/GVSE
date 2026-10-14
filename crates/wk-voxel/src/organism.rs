@@ -2374,11 +2374,21 @@ impl OrganismStore {
             );
             let raw_harvest = PHOTON_RATE * light * n_photo;
             // Set A algae: bloom rate gated by dissolved C bucket.
-            let harvest = match carbon.as_deref_mut() {
+            let mut harvest = match carbon.as_deref_mut() {
                 Some(budget) => gate_algae_photo(budget, carbon_cfg, raw_harvest),
                 None => raw_harvest,
             };
-            let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
+            let mut upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
+            // Dig D5b: cold quiet (× metabolic_rate severity); E46d still
+            // owns fission sterilisation separately.
+            let cold_act = temperature
+                .map(|temp| {
+                    let (hx, hy) = temp.tile_of(atom.gx, atom.gy);
+                    cold_activity(temp.at_tile_packed(hx, hy), &atom.genome)
+                })
+                .unwrap_or(1.0);
+            harvest *= cold_act;
+            upkeep *= cold_act;
             atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
             if atom.energy <= 0.0 {
                 other_ns += t_other.elapsed();
@@ -3475,10 +3485,16 @@ fn step_land_plant(
     };
     let raw_harvest = PHOTON_RATE * light_sum * photo_scale;
     // Land plants lightly pull atmosphere C so litter oxidation isn't one-way.
-    let harvest = match carbon {
+    let mut harvest = match carbon {
         Some(budget) => gate_plant_photo(budget, carbon_cfg, raw_harvest),
         None => raw_harvest,
     };
+    // Dig D5b: cold throttles harvest + upkeep together (quiet, not dead).
+    let cold_act = temperature
+        .map(|t| cold_activity(organism_cold_celsius(t, atom), &atom.genome))
+        .unwrap_or(1.0);
+    harvest *= cold_act;
+    upkeep *= cold_act;
     let stress = match drought {
         DroughtBand::Stressed => DROUGHT_STRESS_DRAIN,
         DroughtBand::Hydrated | DroughtBand::Dormant => 0.0,
@@ -3548,7 +3564,14 @@ fn step_land_plant(
         .map(|t| heat_stress(organism_heat_celsius(t, atom), &atom.genome))
         .unwrap_or(0.0)
         > HEAT_BLOCKS_GROWTH;
-    if grow_day && !heat_blocks && !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT
+    // Dig D5b: coldest body cell quiet enough to skip elongation.
+    let cold_blocks = cold_act <= COLD_BLOCKS_GROWTH;
+    if grow_day
+        && !heat_blocks
+        && !cold_blocks
+        && !atom.fallen
+        && submerged
+        && light < SUBMERGED_STEM_URGE_LIGHT
     {
         if !stemless {
             atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
@@ -3560,7 +3583,7 @@ fn step_land_plant(
             atom.genome.alloc_stem = 0.0;
         }
     }
-    if grow_day && !heat_blocks {
+    if grow_day && !heat_blocks && !cold_blocks {
         let _ = try_grow_plant(
             world,
             atom,
@@ -5495,7 +5518,7 @@ fn is_wet_air(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Hot-side stress. `0` at or below `optimum + width`; `1` one width hotter.
-/// Cold never stresses — reproduction in the cold is a separate gate (E46d).
+/// Cold never energy-stresses — Dig D5b throttles activity; E46d gates fission.
 pub(crate) fn heat_stress(temp_c: f32, genome: &Genome) -> f32 {
     let width = genome.temp_width.max(1.0);
     let hot = temp_c - (genome.temp_optimum + width);
@@ -5504,6 +5527,35 @@ pub(crate) fn heat_stress(temp_c: f32, genome: &Genome) -> f32 {
     } else {
         hot / width
     }
+}
+
+/// Dig D5b: cold slack `0` at/above `optimum − width`; `1` one width colder.
+pub(crate) fn cold_slack(temp_c: f32, genome: &Genome) -> f32 {
+    let width = genome.temp_width.max(1.0);
+    let cold = (genome.temp_optimum - width) - temp_c;
+    if cold <= 0.0 {
+        0.0
+    } else {
+        (cold / width).min(1.0)
+    }
+}
+
+/// Floor for Dig D5b cold activity (never zero — E46d founder must survive).
+pub const COLD_ACTIVITY_FLOOR: f32 = 0.35;
+/// Growth blocked when cold activity falls at or below this (quiet winter).
+pub const COLD_BLOCKS_GROWTH: f32 = 0.55;
+
+/// Dig D5b: activity scale in cold. High `metabolic_rate` throttles harder;
+/// thrifty lineages stay relatively lively. Never kills (no cold energy drain).
+pub(crate) fn cold_activity(temp_c: f32, genome: &Genome) -> f32 {
+    let slack = cold_slack(temp_c, genome);
+    if slack <= 0.0 {
+        return 1.0;
+    }
+    let rate = genome.metabolic_rate.clamp(0.2, 2.0);
+    let severity = (rate / 2.0).clamp(0.1, 1.0);
+    let drop = slack * severity * (1.0 - COLD_ACTIVITY_FLOOR);
+    (1.0 - drop).max(COLD_ACTIVITY_FLOOR)
 }
 
 /// Hottest °C on the nucleus or any body cell.
@@ -5520,6 +5572,22 @@ fn organism_heat_celsius(temp: &Temperature, atom: &Atom) -> f32 {
     for &(dx, dy, _) in &atom.body {
         let t = sample(atom.gx + dx as i32, atom.gy + dy as i32);
         if t > best {
+            best = t;
+        }
+    }
+    best
+}
+
+/// Coldest body cell °C (Dig D5b crown/cold-air throttle).
+fn organism_cold_celsius(temp: &Temperature, atom: &Atom) -> f32 {
+    let sample = |gx: i32, gy: i32| {
+        let (hx, hy) = temp.tile_of(gx, gy);
+        temp.at_tile_packed(hx, hy)
+    };
+    let mut best = sample(atom.gx, atom.gy);
+    for &(dx, dy, _) in &atom.body {
+        let t = sample(atom.gx + dx as i32, atom.gy + dy as i32);
+        if t < best {
             best = t;
         }
     }
@@ -7990,6 +8058,34 @@ mod tests {
         narrow.temp_width = 4.0; // cold below 18 °C
         assert!(cold_blocks_reproduction(3.0, &narrow));
         assert!(!cold_blocks_reproduction(22.0, &narrow));
+    }
+
+    #[test]
+    fn cold_activity_throttles_hot_metab_harder() {
+        // Dig D5b: comfort = 1.0; deep cold floors; high metabolic_rate
+        // drops further than thrifty at the same °C.
+        let mut hot = Genome::default(); // opt 22, width 18 → cold edge 4 °C
+        hot.metabolic_rate = 2.0;
+        let mut thrifty = Genome::default();
+        thrifty.metabolic_rate = 0.2;
+        assert_eq!(cold_activity(22.0, &hot), 1.0);
+        assert_eq!(cold_activity(4.0, &hot), 1.0, "edge still full activity");
+        let hot_deep = cold_activity(-14.0, &hot); // one width below edge
+        let thrifty_deep = cold_activity(-14.0, &thrifty);
+        assert!(
+            (hot_deep - COLD_ACTIVITY_FLOOR).abs() < 1e-3,
+            "hot-metab at full slack → floor (got {hot_deep})"
+        );
+        assert!(
+            thrifty_deep > hot_deep + 0.05,
+            "thrifty stays livelier in cold: thrifty={thrifty_deep} hot={hot_deep}"
+        );
+        assert!(thrifty_deep <= 1.0);
+        assert!(hot_deep >= COLD_ACTIVITY_FLOOR);
+        assert!(
+            cold_activity(-14.0, &hot) <= COLD_BLOCKS_GROWTH,
+            "full slack must block growth"
+        );
     }
 
     /// E46d: 3 °C water with a narrow TempWidth yields zero births and a
