@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use wk_voxel_client::ipc::{
-    serve_peer_shared, PeerRegistry, ServeConfig, DEFAULT_HOST_ADDR, DEFAULT_MAX_PEERS,
-    LAN_HOST_ADDR, MAX_PEERS_CAP,
+    serve_peer_shared, PeerRegistry, ServeConfig, WorldTier, DEFAULT_HOST_ADDR,
+    DEFAULT_MAX_PEERS, LAN_HOST_ADDR, MAX_PEERS_CAP,
 };
 use wk_voxel_client::{Host, COMMAND_SCHEMA, VIEW_SCHEMA};
 
@@ -34,6 +34,8 @@ struct HostCli {
     token: Option<String>,
     ops_token: Option<String>,
     max_peers: u8,
+    /// Explicit `--tier`; else Lab on loopback, Shadow on LAN / public bind.
+    tier: Option<WorldTier>,
 }
 
 fn env_token(name: &str) -> Option<String> {
@@ -50,6 +52,7 @@ fn parse_cli() -> HostCli {
     let mut token = env_token("WK_VOXEL_HOST_TOKEN");
     let mut ops_token = env_token("WK_VOXEL_HOST_OPS_TOKEN");
     let mut max_peers = DEFAULT_MAX_PEERS;
+    let mut tier = None;
     let mut args = env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -57,6 +60,16 @@ fn parse_cli() -> HostCli {
             "--once" => once = true,
             "--lan" => lan = true,
             "--insecure" => insecure = true,
+            "--tier" => {
+                let raw = args.next().unwrap_or_else(|| {
+                    eprintln!("--tier requires lab|shadow|wild");
+                    std::process::exit(2);
+                });
+                tier = Some(WorldTier::parse_cli(&raw).unwrap_or_else(|e| {
+                    eprintln!("wk-voxel-host: {e}");
+                    std::process::exit(2);
+                }));
+            }
             "--bind" => {
                 bind = Some(args.next().unwrap_or_else(|| {
                     eprintln!("--bind requires HOST:PORT");
@@ -108,6 +121,7 @@ fn parse_cli() -> HostCli {
                        --token SECRET     join token (env WK_VOXEL_HOST_TOKEN)\n\
                        --ops-token SECRET operator token (env WK_VOXEL_HOST_OPS_TOKEN)\n\
                        --max-peers N      concurrent viewers (default {DEFAULT_MAX_PEERS}, max {MAX_PEERS_CAP})\n\
+                       --tier lab|shadow|wild  world tier (default: lab on loopback, shadow on --lan)\n\
                        --insecure         allow non-loopback with no token (dev only)\n\
                      \n\
                      Schemas: VIEW_SCHEMA={VIEW_SCHEMA} COMMAND_SCHEMA={COMMAND_SCHEMA}\n\
@@ -141,6 +155,7 @@ fn parse_cli() -> HostCli {
         token,
         ops_token,
         max_peers,
+        tier,
     }
 }
 
@@ -201,6 +216,13 @@ fn main() {
         host.view_cols
     );
 
+    let world_tier = cli.tier.unwrap_or(if loopback {
+        WorldTier::Lab
+    } else {
+        WorldTier::Shadow
+    });
+    log::info!("world_tier={}", world_tier.as_str());
+
     let host = Arc::new(Mutex::new(host));
     let registry = Arc::new(Mutex::new(PeerRegistry::new(cli.max_peers)));
     let cfg = Arc::new(ServeConfig {
@@ -208,6 +230,7 @@ fn main() {
         ops_token: cli.ops_token.clone(),
         max_peers: cli.max_peers,
         loopback,
+        world_tier,
     });
 
     if cli.once {

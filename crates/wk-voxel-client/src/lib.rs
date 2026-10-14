@@ -534,15 +534,23 @@ impl Host {
         self.params.seed
     }
 
-    /// Whether `role` may apply `cmd` (Operator = full; Viewer = camera/clock/present).
-    pub fn command_allowed(role: ipc::PeerRole, cmd: &ClientCommand) -> bool {
-        use ipc::PeerRole::*;
+    /// Whether `role` at `tier` may apply `cmd`.
+    ///
+    /// Operator = full tools. Viewer = camera / present / quit; pause/step only
+    /// on [`ipc::WorldTier::Lab`] (Shadow/Wild guests share one clock).
+    pub fn command_allowed(
+        role: ipc::PeerRole,
+        tier: ipc::WorldTier,
+        cmd: &ClientCommand,
+    ) -> bool {
+        use ipc::{PeerRole::*, WorldTier};
         match cmd {
             ClientCommand::SetCamera { .. }
-            | ClientCommand::SetPaused(_)
-            | ClientCommand::StepOnce
             | ClientCommand::SetPresentHints(_)
             | ClientCommand::Quit => true,
+            ClientCommand::SetPaused(_) | ClientCommand::StepOnce => {
+                matches!(role, Operator) || matches!(tier, WorldTier::Lab)
+            }
             ClientCommand::Save { .. }
             | ClientCommand::Load { .. }
             | ClientCommand::ResetWorld { .. }
@@ -552,15 +560,20 @@ impl Host {
         }
     }
 
-    /// Apply with a peer role gate (IPC multiplayer). Local in-process uses [`Self::apply`].
-    pub fn apply_as(&mut self, role: ipc::PeerRole, cmd: ClientCommand) -> CommandAck {
-        if !Self::command_allowed(role, &cmd) {
+    /// Apply with a peer role + world-tier gate (IPC multiplayer). Local in-process uses [`Self::apply`].
+    pub fn apply_as(
+        &mut self,
+        role: ipc::PeerRole,
+        tier: ipc::WorldTier,
+        cmd: ClientCommand,
+    ) -> CommandAck {
+        if !Self::command_allowed(role, tier, &cmd) {
             let id = self.next_ack_id;
             self.next_ack_id += 1;
             let ack = CommandAck {
                 id,
                 ok: false,
-                detail: format!("role {role:?} cannot {cmd:?}"),
+                detail: format!("role {role:?} tier {tier:?} cannot {cmd:?}"),
             };
             self.pending_acks.push(ack.clone());
             return ack;
@@ -1389,18 +1402,24 @@ mod tests {
 
     #[test]
     fn operator_role_gates_mutating_cmds() {
-        use ipc::PeerRole;
+        use ipc::{PeerRole, WorldTier};
         let mut host = Host::for_tests();
         host.apply(ClientCommand::SetPaused(true));
-        let deny = host.apply_as(PeerRole::Viewer, ClientCommand::ResetWorld { seed: None });
+        let deny = host.apply_as(
+            PeerRole::Viewer,
+            WorldTier::Lab,
+            ClientCommand::ResetWorld { seed: None },
+        );
         assert!(!deny.ok, "{}", deny.detail);
         let allow = host.apply_as(
             PeerRole::Operator,
+            WorldTier::Lab,
             ClientCommand::ResetWorld { seed: Some(9) },
         );
         assert!(allow.ok, "{}", allow.detail);
         assert!(Host::command_allowed(
             PeerRole::Viewer,
+            WorldTier::Wild,
             &ClientCommand::SetCamera {
                 focus_col: 0,
                 view_cols: 96,
@@ -1409,10 +1428,12 @@ mod tests {
         ));
         assert!(!Host::command_allowed(
             PeerRole::Viewer,
+            WorldTier::Wild,
             &ClientCommand::SetSimSettings(SimSettings::default())
         ));
         assert!(!Host::command_allowed(
             PeerRole::Viewer,
+            WorldTier::Wild,
             &ClientCommand::PaintTerrain {
                 col: 0,
                 y: 40,
@@ -1420,6 +1441,29 @@ mod tests {
                 radius: 0,
             }
         ));
+    }
+
+    #[test]
+    fn allowlist_role_tier_matrix_pause_step() {
+        use ipc::{PeerRole, WorldTier};
+        let pause = ClientCommand::SetPaused(true);
+        let step = ClientCommand::StepOnce;
+        // Lab: Viewer may clock-control (sandbox).
+        assert!(Host::command_allowed(PeerRole::Viewer, WorldTier::Lab, &pause));
+        assert!(Host::command_allowed(PeerRole::Viewer, WorldTier::Lab, &step));
+        // Shadow guest / Wild player: no shared-clock control.
+        for tier in [WorldTier::Shadow, WorldTier::Wild] {
+            assert!(!Host::command_allowed(PeerRole::Viewer, tier, &pause));
+            assert!(!Host::command_allowed(PeerRole::Viewer, tier, &step));
+            assert!(Host::command_allowed(PeerRole::Operator, tier, &pause));
+            assert!(Host::command_allowed(PeerRole::Operator, tier, &step));
+        }
+        let mut host = Host::for_tests();
+        let deny = host.apply_as(PeerRole::Viewer, WorldTier::Wild, pause.clone());
+        assert!(!deny.ok, "{}", deny.detail);
+        assert!(deny.detail.contains("Wild"));
+        let allow = host.apply_as(PeerRole::Operator, WorldTier::Wild, pause);
+        assert!(allow.ok, "{}", allow.detail);
     }
 
     #[test]
@@ -1471,6 +1515,7 @@ mod tests {
         assert!(host.organisms.living_count() > before);
         let deny = host.apply_as(
             ipc::PeerRole::Viewer,
+            ipc::WorldTier::Wild,
             ClientCommand::SpawnOrganism {
                 col,
                 y,

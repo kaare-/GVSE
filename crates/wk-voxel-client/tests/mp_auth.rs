@@ -94,6 +94,7 @@ fn two_peers_distinct_cameras_same_tick() {
         ops_token: None,
         max_peers: 4,
         loopback: true,
+        world_tier: Default::default(),
     });
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -159,6 +160,7 @@ fn ops_can_reset_viewer_cannot() {
         ops_token: Some("ops".into()),
         max_peers: 4,
         loopback: true,
+        world_tier: Default::default(),
     });
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
