@@ -48,9 +48,9 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig **A–D3b** on park-bank (D4 grey-log owner-only). Dig **D5b**
-cold↔`metabolic_rate` ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md)). Next:
-Apple notarize (pinned **2026-11-15**) or owner pick. Cost:
+Dig **D** agent-closed on park-bank (D1–D5 + D3b/D5b; D4 owner visual).
+[`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md). Next: Dig **E** brand/menus, or
+Apple notarize (pinned **2026-11-15**). Cost:
 [`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Pinned / later
