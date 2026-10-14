@@ -106,6 +106,10 @@ ring buffer of the last 32 canvas states.
 
 ## Blueprint save format
 
+**Wire / disk truth:** [`STUDIO_BLUEPRINT.md`](../STUDIO_BLUEPRINT.md)
+(live `Blueprint` in `wk-voxel` — no `wires` / `per_module_gene` in
+schema 1). The struct below is the historical editor sketch.
+
 Postcard binary, extension `.gvsecrt`, one file per blueprint:
 
 ```rust

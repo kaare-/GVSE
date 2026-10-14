@@ -68,8 +68,9 @@ Full freedom to design creatures / blueprints. Sketch studio exists but
 is **terribly out of date** — needs a rewrite or replacement, not a
 paint-over.
 
-**Contract owed:** studio ↔ server blueprint schema + versioning +
-reject path on live spawn.
+**Contract:** [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md) — `.gvsecrt`
+schema 1, validate/reject, Lab spawn vs future Release (not free Wild
+`SpawnOrganism`).
 
 ### 4. Worlds — Lab · Shadow · Wild
 
@@ -131,7 +132,7 @@ Moderation / bans if public regions exist.
 Write these before large UI or AWS spend:
 
 1. **Player allowlist per tier** — [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)
-2. **Studio / blueprint schema** — version + validate  
+2. **Studio / blueprint schema** — [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md)
 3. **Region capacity number** — cols × height × target FPS × max peers  
 4. **Identity** — anonymous / Steam / optional email (Wild needs this)  
 5. **Money** — Wild = subscription; Lab/Shadow = player hardware  
@@ -143,7 +144,7 @@ Write these before large UI or AWS spend:
 | Priority | Topic | Why |
 |----------|--------|-----|
 | A | Player allowlist | [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md) — stops world UI sprawl |
-| B | Studio / blueprint contract | Studio rewrite needs a target |
+| B | Studio / blueprint contract | [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md) — studio rewrite target |
 | C | Region max + cost realism | [`HOSTING_COST.md`](HOSTING_COST.md) |
 | D | Biology depth | Parallel; soak-gated |
 | E | Brand / menus | After A–B so screens have jobs |
@@ -162,6 +163,7 @@ Write these before large UI or AWS spend:
 
 - Execution: [`ROADMAP.md`](ROADMAP.md), [`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)  
 - Player gates: [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)  
+- Studio / blueprints: [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md)  
 - Host / MP / ops: [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md),
   [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md),
   [`PHASE8_OPERATOR.md`](PHASE8_OPERATOR.md)  

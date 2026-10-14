@@ -48,10 +48,10 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig order **A** tighten (this wedge): `WorldTier` on `ServeConfig` +
-Viewer pause/step denied on Shadow/Wild
-([`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)). Then Apple notarize
-(pinned **2026-11-15**), or owner-picked pillar from
+Dig order **A** done (`WorldTier` + [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)).
+Dig order **B**: [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md) (contract)
+→ shared validate helper / Lab `.gvsecrt` path when coding. Then Apple
+notarize (pinned **2026-11-15**), or owner-picked pillar from
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Hosting realism:
 [`HOSTING_COST.md`](HOSTING_COST.md) (compress ViewFrame before public
 AWS).
