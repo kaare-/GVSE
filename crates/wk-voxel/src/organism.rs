@@ -348,6 +348,15 @@ pub struct Atom {
     /// Last sampled pore/leaf moisture frac (land plants; staggered resample).
     #[serde(default)]
     pub moist_frac_cache: f32,
+    /// Last full posed-leaf light sum (Dig D1 harvest-neutral metab skip).
+    #[serde(default)]
+    pub photo_light_cache: f32,
+    /// Tip sky at the tick [`Self::photo_light_cache`] was filled.
+    #[serde(default)]
+    pub photo_tip_sky_cache: f32,
+    /// Photosystem count when the light cache was filled (invalidate on growth).
+    #[serde(default)]
+    pub photo_n_cache: u16,
 }
 
 impl Atom {
@@ -388,6 +397,9 @@ impl Atom {
             sym_water_sent_last: 0,
             sym_sugar_recv_last: 0,
             moist_frac_cache: 0.0,
+            photo_light_cache: 0.0,
+            photo_tip_sky_cache: 0.0,
+            photo_n_cache: 0,
         }
     }
 
@@ -3236,23 +3248,26 @@ fn step_land_plant(
         sun_local,
         is_day,
     );
-    // Single-leaf / near-dark / staggered multi-leaf: tip×count (skip
-    // per-leaf shade walks). Full leaf sum every other tick per plant.
-    let full_leaves = n_photo > 1
-        && tip_sky > 0.02
-        && (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0;
-    let mut light_sum = if !full_leaves {
-        let tip =
-            effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
-        // Tip overestimates shaded lower leaves slightly on skip ticks.
-        let scale = if n_photo > 1 && tip_sky > 0.02 {
-            0.82
-        } else {
-            1.0
-        };
-        tip * n_photo as f32 * scale
+    // Multi-leaf light: full posed sum on a cadence; skip ticks use a cheap
+    // stand-in. Dig D1 (grounded upright): scale the last full sum by tip-sky
+    // ratio — harvest-neutral vs tip×count-always (which starved river tips).
+    // Fallen / stemless / single-leaf keep the older tip×count skip.
+    let stagger = atom.age_ticks.wrapping_add(entity_id as u64);
+    let grounded_upright = grounded && !atom.fallen && !stemless;
+    let cache_ok = grounded_upright
+        && n_photo > 1
+        && atom.photo_n_cache == n_photo as u16
+        && atom.photo_light_cache > 0.0
+        && atom.photo_tip_sky_cache > 1e-5;
+    let full_period = if grounded_upright && n_photo > 1 {
+        4u64
     } else {
-        sum_posed_photo_light_of_cached(
+        2u64
+    };
+    let need_full = !cache_ok || stagger % full_period == 0;
+    let full_leaves = n_photo > 1 && tip_sky > 0.02 && need_full;
+    let mut light_sum = if full_leaves {
+        let sum = sum_posed_photo_light_of_cached(
             canopy,
             posed,
             posed_indices,
@@ -3273,7 +3288,26 @@ fn step_land_plant(
             },
             &atom.genome,
             Some(shade_cache),
-        )
+        );
+        if grounded_upright {
+            atom.photo_light_cache = sum;
+            atom.photo_tip_sky_cache = tip_sky.max(1e-4);
+            atom.photo_n_cache = n_photo as u16;
+        }
+        sum
+    } else if cache_ok && tip_sky > 0.02 {
+        // Preserve last full canopy walk; track day/cloud via tip sky only.
+        atom.photo_light_cache * (tip_sky / atom.photo_tip_sky_cache)
+    } else {
+        let tip =
+            effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
+        // Tip overestimates shaded lower leaves slightly on skip ticks.
+        let scale = if n_photo > 1 && tip_sky > 0.02 {
+            0.82
+        } else {
+            1.0
+        };
+        tip * n_photo as f32 * scale
     };
     // Fallback when pose missed leaves: tip sample × count (pre-pose path).
     if light_sum <= 0.0 && n_photo > 0 {

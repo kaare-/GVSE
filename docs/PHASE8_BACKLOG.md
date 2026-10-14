@@ -48,10 +48,10 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig **A–C** done. ViewFrame **zstd IPC** (`VIEW_SCHEMA` 10) landed —
-remeasure real Compact ratios before trusting $ in
-[`HOSTING_COST.md`](HOSTING_COST.md). Next: dig **D** biology, WAN
-present ≤10 Hz dial, or Apple notarize (pinned **2026-11-15**).
+Dig **A–C** + ViewFrame zstd + WAN 10 Hz done. Dig **D1** land/metab
+harvest-neutral ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md)). Next: Dig D2+
+or Apple notarize (pinned **2026-11-15**). Cost:
+[`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Pinned / later
 
@@ -61,7 +61,7 @@ present ≤10 Hz dial, or Apple notarize (pinned **2026-11-15**).
 | Steam depots | after Apple smoke | same binaries |
 | MAS | later | explicit unlock |
 | E2 tipped grey-log visual | owner play/Xvfb | not a code blocker |
-| Phase 6 hotspot #2 | harvest-neutral design | deferred |
+| Phase 6 hotspot #2 | Dig D1 tip-sky light cache | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Optional FPS headroom | owner ask | Compact/5 km leftovers |
 
 ## Stop and ask owner only if

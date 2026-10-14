@@ -82,12 +82,19 @@ TRACKED −0.01/t, **park=0**. Logs:
 ring-wide seed, **land/metab** (~0.34 ms at 256) remains the largest
 named org bucket.
 
-## Hotspot cut #2 — deferred (2026-10-12)
+## Hotspot cut #2 — Dig D1 revisit (2026-10-14)
 
 Tried tip×count-always for grounded upright (metab **0.34 → 0.20** on
 Compact 256) and stem-integrity every-other-tick. Both regress
 `plant_size_is_limited_by_cost_not_by_the_ceiling` (river tip sample /
-load-tip timing). Code reverted; no life-pass cut #2 landed.
+load-tip timing). Code reverted.
+
+**Dig D1:** grounded upright multi-leaf plants full-sum every **4** ticks;
+skip ticks scale cached sum by **tip-sky ratio** (not tip×count). See
+[`BIOLOGY_DEPTH.md`](../BIOLOGY_DEPTH.md). Re-profile (2026-10-14):
+Compact 256 land/metab **~0.26** ms (was ~0.34); river cost-limit test
++ short org soak park=0 green. Log:
+`/opt/cursor/artifacts/phase6-d1-organisms-compact-baseline.log`.
 
 ## PreferentialRootPath soft-cap (2026-10-12)
 
