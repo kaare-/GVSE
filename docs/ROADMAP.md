@@ -473,6 +473,7 @@ client ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md),
 | 2026-10-14 | Dig D5 drought alloc | Stressed grow-pulse root lean × `alloc_root` gene |
 | 2026-10-14 | Dig D3b litter drip | Corpse settle drips soft litter (half budget) |
 | 2026-10-14 | Dig D5b cold metab | Cold activity throttle × `metabolic_rate` (E46d-safe) |
+| 2026-10-14 | Dig D agent-closed | D1–D5 + D3b/D5b on park-bank; D4 owner visual leftover |
 | 2026-10-13 | Product pillars | Studio / player allowlist / region-shard / ops / ship ([`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)) |
 | 2026-10-13 | Hosting cost sketch | Compact ~115 FPS; strip ~1 MiB×20 Hz; WAN needs compression ([`HOSTING_COST.md`](HOSTING_COST.md)) |
 | 2026-10-13 | World tiers | Lab (offline) · Shadow (BYO mesh) · Wild (official sub) |
