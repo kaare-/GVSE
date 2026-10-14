@@ -906,6 +906,26 @@ impl Host {
                                 self.organisms.atom_cap()
                             ),
                         },
+                        Err(SpawnFail::HabitCap(kind)) => CommandAck {
+                            id,
+                            ok: false,
+                            detail: format!(
+                                "{} habit soft cap {}/{}",
+                                kind.label(),
+                                match kind {
+                                    wk_voxel::HabitKind::Plant => {
+                                        self.organisms.habit_counts().0
+                                    }
+                                    wk_voxel::HabitKind::Fungus => {
+                                        self.organisms.habit_counts().1
+                                    }
+                                    wk_voxel::HabitKind::Atom => {
+                                        self.organisms.habit_counts().2
+                                    }
+                                },
+                                kind.soft_cap()
+                            ),
+                        },
                         Err(e) => CommandAck {
                             id,
                             ok: false,
@@ -1029,6 +1049,20 @@ impl Host {
                     "pop cap {}/{}",
                     self.organisms.living_count(),
                     self.organisms.atom_cap()
+                ),
+            },
+            Err(SpawnFail::HabitCap(kind)) => CommandAck {
+                id,
+                ok: false,
+                detail: format!(
+                    "release {} habit soft cap {}/{}",
+                    kind.label(),
+                    match kind {
+                        wk_voxel::HabitKind::Plant => self.organisms.habit_counts().0,
+                        wk_voxel::HabitKind::Fungus => self.organisms.habit_counts().1,
+                        wk_voxel::HabitKind::Atom => self.organisms.habit_counts().2,
+                    },
+                    kind.soft_cap()
                 ),
             },
             Err(e) => CommandAck {

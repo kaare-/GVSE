@@ -922,6 +922,20 @@ async fn main() {
                                 scene.organisms.atom_cap()
                             );
                         }
+                        Err(wk_voxel::SpawnFail::HabitCap(kind)) => {
+                            let (p, f, a) = scene.organisms.habit_counts();
+                            let n = match kind {
+                                wk_voxel::HabitKind::Plant => p,
+                                wk_voxel::HabitKind::Fungus => f,
+                                wk_voxel::HabitKind::Atom => a,
+                            };
+                            editor.status = format!(
+                                "{} habit soft cap full — {}/{}",
+                                kind.label(),
+                                n,
+                                kind.soft_cap()
+                            );
+                        }
                         Err(wk_voxel::SpawnFail::NoAir) => {
                             editor.status =
                                 "Spawn failed — need an Air cell near the click".into();

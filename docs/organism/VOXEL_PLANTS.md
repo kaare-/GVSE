@@ -30,6 +30,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Seaweed stays on bed holdfast; floats only if holdfast lost/rafting | Done |
 | Crown holdfast ignores seepage; reseats if displaced; no stream tip | Done |
 | Pore-`sat` drink + drought stress | Done |
+| Dig D5 drought↔alloc grow lean | Done (`apply_drought_alloc_stress`) |
 | Spawn on Air above porous solid | Done |
 | Editor brushes + `T` minimal plant + `W` seaweed | Done |
 | Rolling rock squashes canopy under the boulder; deep roots stay | Done |

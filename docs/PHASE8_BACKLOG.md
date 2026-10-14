@@ -48,10 +48,10 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig **A–C** + ViewFrame zstd + WAN 10 Hz + Dig **D1** done. Dig **D2**
-Release ecology path ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md)). Next:
-Dig D3+ or Apple notarize (pinned **2026-11-15**). Cost:
-[`HOSTING_COST.md`](HOSTING_COST.md).
+Dig **A–C** + ViewFrame zstd + WAN 10 Hz + Dig **D1–D3** done. Dig **D5**
+drought↔alloc (D4 grey-log stays owner-only)
+([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md)). Next: Dig D3b/D5b or Apple
+notarize (pinned **2026-11-15**). Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Pinned / later
 
@@ -63,6 +63,8 @@ Dig D3+ or Apple notarize (pinned **2026-11-15**). Cost:
 | E2 tipped grey-log visual | owner play/Xvfb | not a code blocker |
 | Phase 6 hotspot #2 | Dig D1 tip-sky light cache | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Dig D2 Release | Operator `ReleaseBlueprint` | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
+| Dig D3 habit caps | Soft plant/fungus/atom ceilings | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
+| Dig D5 drought alloc | Stressed grow-pulse root lean | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Optional FPS headroom | owner ask | Compact/5 km leftovers |
 
 ## Stop and ask owner only if
