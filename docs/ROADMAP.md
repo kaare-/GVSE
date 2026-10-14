@@ -470,6 +470,7 @@ client ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md),
 | 2026-10-13 | Phase 8 operator spawn | `SpawnOrganism` presets + F2 (`COMMAND_SCHEMA` 7) |
 | 2026-10-14 | Dig D2 Release | `ReleaseBlueprint` + quarantine/cooldown/cap (`COMMAND_SCHEMA` 8) |
 | 2026-10-14 | Dig D3 habit caps | Soft plant/fungus/atom ceilings inside `MAX_ATOMS` |
+| 2026-10-14 | Dig D5 drought alloc | Stressed grow-pulse root lean × `alloc_root` gene |
 | 2026-10-13 | Product pillars | Studio / player allowlist / region-shard / ops / ship ([`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)) |
 | 2026-10-13 | Hosting cost sketch | Compact ~115 FPS; strip ~1 MiB×20 Hz; WAN needs compression ([`HOSTING_COST.md`](HOSTING_COST.md)) |
 | 2026-10-13 | World tiers | Lab (offline) · Shadow (BYO mesh) · Wild (official sub) |

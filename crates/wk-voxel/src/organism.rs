@@ -41,16 +41,16 @@ use crate::humidity::Humidity;
 use crate::streaming::StreamWindow;
 use crate::cell::is_competent_rock;
 use crate::plant::{
-    apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
-    collect_live_stem_world_cells, collect_trunk_world_cells, drink_plant_with_moist,
-    drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    is_anchored, is_epiphyte, is_holdfast_anchored, is_land_plant, paint_leaf_litter,
-    plant_resists_rock_shove, plant_rooted_in_loose, stem_count, leave_dead_roots_in_place,
-    pin_plant_pose, prune_detached_woody_leaves, shed_unproductive_woody_leaves,
-    sync_root_storage, try_epiphyte_reseat, try_grow_plant, try_plant_wind_spore,
-    try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
-    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_GROW_MIN_DAY,
-    PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
+    apply_drought_alloc_stress, apply_genome, collect_live_photo_world_cells,
+    collect_live_root_world_cells, collect_live_stem_world_cells, collect_trunk_world_cells,
+    drink_plant_with_moist, drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot,
+    find_surface_air_slot, is_anchored, is_epiphyte, is_holdfast_anchored, is_land_plant,
+    paint_leaf_litter, plant_resists_rock_shove, plant_rooted_in_loose, stem_count,
+    leave_dead_roots_in_place, pin_plant_pose, prune_detached_woody_leaves,
+    shed_unproductive_woody_leaves, sync_root_storage, try_epiphyte_reseat, try_grow_plant,
+    try_plant_wind_spore, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
+    DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
+    PLANT_GROW_MIN_DAY, PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
     build_canopy_index_posed, canopy_top_y, effective_photo_light_cached, epiphyte_rider_transmit,
@@ -3495,6 +3495,10 @@ fn step_land_plant(
             atom.genome.alloc_leaf = (atom.genome.alloc_leaf + 0.20).min(1.0);
             atom.genome.alloc_stem = 0.0;
         }
+    } else {
+        // Dig D5: drought-stressed grounded plants temporarily lean surplus
+        // toward roots (gene-scaled). Restored with `genome_save` below.
+        apply_drought_alloc_stress(&mut atom.genome, drought, bathing, atom.fallen);
     }
     // Night: no submerged stem-urge and no elongation — dim light used to
     // force trunk growth all night and empty the tank in a river.

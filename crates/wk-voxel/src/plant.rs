@@ -233,6 +233,35 @@ pub fn drought_band(moist_frac: f32) -> DroughtBand {
     }
 }
 
+/// Dig D5: max temporary `alloc_root` add under [`DroughtBand::Stressed`].
+/// Scaled by the plant's own `alloc_root` gene (leaf-heavy barely moves).
+pub const DROUGHT_ALLOC_ROOT_BOOST: f32 = 0.35;
+/// Dig D5: leaf-weight trim factor under drought stress (× gene).
+pub const DROUGHT_ALLOC_LEAF_TRIM: f32 = 0.40;
+
+/// Temporary grow-pulse alloc lean toward roots while drought-stressed.
+///
+/// Caller must restore the saved genome after [`try_grow_plant`]. Hydrated /
+/// Dormant / bathing / fallen paths are no-ops (other urgencies own those).
+pub fn apply_drought_alloc_stress(
+    genome: &mut Genome,
+    drought: DroughtBand,
+    bathing: bool,
+    fallen: bool,
+) {
+    if fallen || bathing || !matches!(drought, DroughtBand::Stressed) {
+        return;
+    }
+    let gene = genome.alloc_root.clamp(0.0, 1.0);
+    if gene <= 1e-6 {
+        return;
+    }
+    let boost = DROUGHT_ALLOC_ROOT_BOOST * gene;
+    genome.alloc_root = (genome.alloc_root + boost).min(1.0);
+    genome.alloc_leaf =
+        (genome.alloc_leaf * (1.0 - DROUGHT_ALLOC_LEAF_TRIM * gene)).max(0.05);
+}
+
 /// Soft useful-root budget: sprout minimum + leaf-driven extras.
 pub fn useful_root_budget(atom: &Atom, caps: &PlantGrowthCaps) -> usize {
     LAND_SPROUT_MIN_ROOTS
@@ -3187,6 +3216,58 @@ mod tests {
         // Free tip cell — don't collide with a template leaf.
         body.push((2, 2, ModuleId::ReproSpore));
         body
+    }
+
+    #[test]
+    fn drought_alloc_boost_gene_scaled_stressed_only() {
+        // Dig D5: Stressed lean raises normalized root weight; Hydrated no-op;
+        // leaf-heavy (low alloc_root) barely moves; root-heavy moves a lot.
+        let mut root_heavy = Genome::default();
+        root_heavy.alloc_stem = 0.2;
+        root_heavy.alloc_leaf = 0.2;
+        root_heavy.alloc_root = 0.8;
+        let (_, _, w_root0) = root_heavy.alloc_weights();
+        apply_drought_alloc_stress(
+            &mut root_heavy,
+            DroughtBand::Stressed,
+            false,
+            false,
+        );
+        let (_, _, w_root1) = root_heavy.alloc_weights();
+        assert!(
+            w_root1 > w_root0 + 0.05,
+            "root-heavy stressed: {w_root0:.3} → {w_root1:.3}"
+        );
+
+        let mut leaf_heavy = Genome::default();
+        leaf_heavy.alloc_stem = 0.2;
+        leaf_heavy.alloc_leaf = 0.75;
+        leaf_heavy.alloc_root = 0.05;
+        let (_, _, w_leaf0) = leaf_heavy.alloc_weights();
+        apply_drought_alloc_stress(
+            &mut leaf_heavy,
+            DroughtBand::Stressed,
+            false,
+            false,
+        );
+        let (_, _, w_leaf1) = leaf_heavy.alloc_weights();
+        assert!(
+            (w_leaf1 - w_leaf0).abs() < 0.04,
+            "leaf-heavy barely moves: {w_leaf0:.3} → {w_leaf1:.3}"
+        );
+
+        let mut hydrated = Genome::default();
+        hydrated.alloc_root = 0.8;
+        hydrated.alloc_leaf = 0.2;
+        hydrated.alloc_stem = 0.2;
+        let before = hydrated;
+        apply_drought_alloc_stress(&mut hydrated, DroughtBand::Hydrated, false, false);
+        assert_eq!(hydrated.alloc_root, before.alloc_root);
+        assert_eq!(hydrated.alloc_leaf, before.alloc_leaf);
+
+        let mut bathing = before;
+        apply_drought_alloc_stress(&mut bathing, DroughtBand::Stressed, true, false);
+        assert_eq!(bathing.alloc_root, before.alloc_root, "bathing skips boost");
     }
 
     #[test]

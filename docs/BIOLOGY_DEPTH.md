@@ -1,6 +1,6 @@
 # Biology depth *(dig D)*
 
-**Status:** D3 in progress (2026-10-14). Product dig order **D** from
+**Status:** D5 in progress (2026-10-14). Product dig order **D** from
 [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Soak-gated; no ship-UI
 work under this dig.
 
@@ -56,7 +56,7 @@ quarantine, cooldown, and a soft living budget.
 - [x] Built-in atom blueprint Release places living organism  
 - [ ] Wild player Release (identity + per-account dials) — later  
 
-## D3 — Population / litter ecology *(this wedge)*
+## D3 — Population / litter ecology *(done)*
 
 Phase 6 already soft-capped litter / residue **maps**. Dig D3 soft-caps
 **living habits** so one bloom (esp. fungi) cannot wallpaper the global
@@ -80,15 +80,43 @@ split. Parked stream-side life counts (same fairness as pop cap).
 - [x] Host / macroquad editor surface `SpawnFail::HabitCap`  
 - [ ] Short organisms-on soak still park=0 / TRACKED flat (CI stack)  
 
+## D4 — E2 tipped grey-log *(owner-only; skipped)*
+
+Pose + `corpse_rgb` already land in sim; accept is 1× studio eyeball
+([`organism/PHASE5_SCOPE.md`](organism/PHASE5_SCOPE.md)). Agent does not
+block — play/Xvfb when Kaare has eyes.
+
+## D5 — Climate×life on existing genes *(this wedge)*
+
+Drought already scales photo / soft root budget. Dig D5 adds a
+**temporary grow-pulse alloc lean** under [`DroughtBand::Stressed`]:
+root-heavy genomes dig harder; leaf-heavy barely move. No new Genome
+fields. Hydrated / Dormant / bathing / fallen paths unchanged (other
+urgencies own those). Genome restored after `try_grow_plant`.
+
+| Dial | Default |
+|------|---------|
+| When | Grounded, not bathing, `DroughtBand::Stressed` |
+| Root boost | `DROUGHT_ALLOC_ROOT_BOOST` × `alloc_root` gene (0.35) |
+| Leaf trim | `DROUGHT_ALLOC_LEAF_TRIM` × gene (0.40) on `alloc_leaf` |
+| Helper | `apply_drought_alloc_stress` |
+
+### Acceptance
+
+- [x] Contract in this file  
+- [x] `drought_alloc_boost_gene_scaled_stressed_only`  
+- [x] Hydrated / bathing no-ops  
+- [ ] Dig D1 river cost-limit still green (CI)  
+
 ## Later Dig D options *(not this PR)*
 
 | Id | Topic |
 |----|--------|
-| D4 | E2 tipped grey-log owner visual |
-| D5 | Climate×life stress on existing genes |
 | D3b | Corpse settle → soft-litter drip (litter turnover follow-on) |
+| D5b | Cold↔`metabolic_rate` Q10 throttle (E46d-safe; no cold death) |
 
 ## Related
 
 - [`organism/PHASE6_SCOPE.md`](organism/PHASE6_SCOPE.md)  
 - [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md) · [`STUDIO_BLUEPRINT.md`](STUDIO_BLUEPRINT.md)  
+- [`organism/GENES.md`](organism/GENES.md) · [`organism/VOXEL_PLANTS.md`](organism/VOXEL_PLANTS.md)  
