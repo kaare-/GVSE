@@ -2124,7 +2124,6 @@ impl OrganismStore {
                 {
                     stats.bump_birth(&child);
                     stats.emergent_fruiting += 1;
-                    n_fungi += 1;
                     self.atoms.push(child);
                 }
                 self.last_pass = pass;
@@ -2140,7 +2139,6 @@ impl OrganismStore {
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
                 stats.bump_birth(&child);
                 stats.emergent_fruiting += 1;
-                n_fungi += 1;
                 self.atoms.push(child);
             }
             pass.post = t0.elapsed();
