@@ -58,7 +58,9 @@ gears**: **Glance** (lite status / postcard — cheap) vs **Presence**
 (real ViewFrame — expensive). See [`HOSTING_COST.md`](HOSTING_COST.md)
 § “10k players”.
 
-**Contract owed:** one-page player allowlist before more world UI.
+**Contract:** [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md) — Lab / Shadow /
+Wild × Viewer / Operator command matrix. Tighten `Host::command_allowed`
+before more world UI.
 
 ### 3. Design studio (creature space)
 
@@ -128,7 +130,7 @@ Moderation / bans if public regions exist.
 
 Write these before large UI or AWS spend:
 
-1. **Player allowlist per tier** — Lab vs Shadow vs Wild cmds  
+1. **Player allowlist per tier** — [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)
 2. **Studio / blueprint schema** — version + validate  
 3. **Region capacity number** — cols × height × target FPS × max peers  
 4. **Identity** — anonymous / Steam / optional email (Wild needs this)  
@@ -140,7 +142,7 @@ Write these before large UI or AWS spend:
 
 | Priority | Topic | Why |
 |----------|--------|-----|
-| A | Player allowlist | Stops world UI sprawl |
+| A | Player allowlist | [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md) — stops world UI sprawl |
 | B | Studio / blueprint contract | Studio rewrite needs a target |
 | C | Region max + cost realism | [`HOSTING_COST.md`](HOSTING_COST.md) |
 | D | Biology depth | Parallel; soak-gated |
@@ -159,6 +161,7 @@ Write these before large UI or AWS spend:
 ## Related docs
 
 - Execution: [`ROADMAP.md`](ROADMAP.md), [`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md)  
+- Player gates: [`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)  
 - Host / MP / ops: [`PHASE8_HOST_SHIP.md`](PHASE8_HOST_SHIP.md),
   [`PHASE8_MULTIPLAYER.md`](PHASE8_MULTIPLAYER.md),
   [`PHASE8_OPERATOR.md`](PHASE8_OPERATOR.md)  
