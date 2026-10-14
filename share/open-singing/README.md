@@ -5,4 +5,4 @@ Both are seed 0. A click is one pMP2 spike. A tone is the TN1A rate. One second 
 - `open-singing-twinkle.wav` — 126.7 s, 44.1 kHz mono. Derrick Coetzee, a cappella, [Twinkle Twinkle Little Star](https://commons.wikimedia.org/wiki/File:Twinkle_Twinkle_Little_Star_-_sung_with_full_lyrics.ogg), CC0.
 - `open-singing-breves.wav` — 212.9 s, 44.1 kHz mono. Magdalen Kadel, [Breves dies hominis](https://commons.wikimedia.org/wiki/File:Breves_dies_hominis.ogg), public domain release by the performer.
 
-The write-up of the test is in the project notes, `docs/song-timescale-open-singing.md`.
+The test note is with the research documents, not in this repository.
