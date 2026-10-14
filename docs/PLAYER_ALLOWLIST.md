@@ -86,10 +86,10 @@ Glance API and Release blueprint are **out of this wedge**.
 ## Acceptance for the tighten PR
 
 - [x] This file linked from product roadmap + Phase 8 backlog  
-- [ ] Wild/guest cannot pause, paint, spawn, save, reset, set sim  
-- [ ] Lab / Operator still can  
-- [ ] Tests: role × tier matrix smoke  
-- [ ] Player HUD copy matches (no F5/F3 affordances in Wild player UI)
+- [x] Wild/guest cannot pause, paint, spawn, save, reset, set sim  
+- [x] Lab / Operator still can  
+- [x] Tests: role × tier matrix smoke  
+- [x] Player HUD copy matches (no F5/F3 affordances in Wild player UI)
 
 ## Related
 

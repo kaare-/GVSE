@@ -48,12 +48,13 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig order **A** from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md):
-[`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md) (design locked) → tighten
-`Host::command_allowed` for Wild / Shadow-guest (deny pause/step). Then
-Apple notarize track (pinned **2026-11-15**), or owner-picked pillar.
-Hosting realism: [`HOSTING_COST.md`](HOSTING_COST.md) (compress
-ViewFrame before public AWS).
+Dig order **A** tighten (this wedge): `WorldTier` on `ServeConfig` +
+Viewer pause/step denied on Shadow/Wild
+([`PLAYER_ALLOWLIST.md`](PLAYER_ALLOWLIST.md)). Then Apple notarize
+(pinned **2026-11-15**), or owner-picked pillar from
+[`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Hosting realism:
+[`HOSTING_COST.md`](HOSTING_COST.md) (compress ViewFrame before public
+AWS).
 
 ## Pinned / later
 

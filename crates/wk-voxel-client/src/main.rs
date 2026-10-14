@@ -1138,7 +1138,7 @@ impl SpikeApp {
                     let hints = if is_operator {
                         "arrows pan · [ ] · Space/N · F2 spawn · F3 paint · F5/F9 · R · Esc · H"
                     } else {
-                        "arrows pan · [ ] width · Space pause · N step · Esc · H hud"
+                        "arrows pan · [ ] width · Esc · H hud"
                     };
                     ui.label(
                         egui::RichText::new(hints)
@@ -1366,13 +1366,19 @@ impl ApplicationHandler for SpikeApp {
                         }
                     }
                     PhysicalKey::Code(KeyCode::Space) => {
+                        // Pause/step: Lab local (= Operator) or Operator role only.
+                        // Wild / Shadow guests are Presence viewers (host also denies).
                         if let Some(b) = self.bridge() {
-                            self.pending
-                                .push(ClientCommand::SetPaused(!b.paused()));
+                            if b.is_operator() {
+                                self.pending
+                                    .push(ClientCommand::SetPaused(!b.paused()));
+                            }
                         }
                     }
                     PhysicalKey::Code(KeyCode::KeyN) => {
-                        self.pending.push(ClientCommand::StepOnce);
+                        if self.bridge().map(|b| b.is_operator()).unwrap_or(false) {
+                            self.pending.push(ClientCommand::StepOnce);
+                        }
                     }
                     PhysicalKey::Code(KeyCode::BracketRight) => {
                         if let Some(b) = self.bridge() {

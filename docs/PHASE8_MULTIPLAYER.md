@@ -22,7 +22,7 @@ after this one closes.
 | Transport | TCP postcard + length prefix (today) | Keep IPC; add auth frame only |
 | Encryption | Optional later (`--tls` / rustls) | Token first; TLS when exposing beyond LAN |
 | Concurrent viewers | **N ≥ 1**, each own `SetCamera` | Real multiplayer, not just reconnect |
-| Mutating cmds | Authenticated **viewer** may pause/step/camera/present; **Save/Load/Reset/Paint/Spawn/SetSimSettings** require role `operator` (stub: host owner / `--allow-ops` token) | Operator client is next wedge; do not open the world to every peer |
+| Mutating cmds | Viewer: camera/present/quit; pause/step only on **Lab** tier. Shadow/Wild viewers are Presence-only for the shared clock. **Save/Load/Reset/Paint/Spawn/SetSimSettings** require Operator | See product player allowlist; `--tier lab\|shadow\|wild` |
 | Discovery | Explicit `--connect host:port` | No mDNS / lobby in this wedge |
 | Loopback | Token **optional** when bind is `127.0.0.1` | Local `--spawn-host` stays zero-friction |
 
@@ -79,14 +79,16 @@ once; N presents may lag independently.
 
 ### Command policy
 
-| Command | Viewer | Operator |
-|---------|--------|----------|
-| `SetCamera` / `SetPresentHints` | ✓ | ✓ |
-| `SetPaused` / `StepOnce` | ✓ (shared clock) | ✓ |
-| `SetSimSettings` | ✗ | ✓ |
-| `Save` / `Load` / `ResetWorld` | ✗ | ✓ |
-| `PaintTerrain` / `SpawnOrganism` | ✗ | ✓ |
-| `Quit` | leaves own session only | same (does **not** tear down host) |
+| Command | Viewer (Lab) | Viewer (Shadow/Wild) | Operator |
+|---------|--------------|----------------------|----------|
+| `SetCamera` / `SetPresentHints` | ✓ | ✓ | ✓ |
+| `SetPaused` / `StepOnce` | ✓ | ✗ (shared clock) | ✓ |
+| `SetSimSettings` | ✗ | ✗ | ✓ |
+| `Save` / `Load` / `ResetWorld` | ✗ | ✗ | ✓ |
+| `PaintTerrain` / `SpawnOrganism` | ✗ | ✗ | ✓ |
+| `Quit` | session only | session only | same (does **not** tear down host) |
+
+`--tier` on `wk-voxel-host` (default Lab on loopback, Shadow on `--lan`).
 
 Host process exit stays CLI / SIGINT / future operator “shutdown” cmd
 (not in this wedge).
@@ -97,6 +99,7 @@ Host process exit stays CLI / SIGINT / future operator “shutdown” cmd
 --token SECRET          require for non-loopback (or always if set)
 --ops-token SECRET      optional; grants Operator role
 --max-peers N           default 4; hard cap ≤ 8 this wedge
+--tier lab|shadow|wild  Viewer pause/step policy (default lab@loopback, shadow@lan)
 --insecure              allow --lan with no token (dev only; loud warn)
 ```
 

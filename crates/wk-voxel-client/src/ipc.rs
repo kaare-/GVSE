@@ -32,6 +32,40 @@ pub enum PeerRole {
     Operator,
 }
 
+/// Product world tier ([`docs/PRODUCT_ROADMAP.md`](../../../docs/PRODUCT_ROADMAP.md)).
+/// Host-side gate for Viewer clock cmds; Lab keeps local sandbox powers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WorldTier {
+    /// Offline / loopback laboratory — Viewer may still pause/step.
+    #[default]
+    Lab,
+    /// Player-hosted shard — guests (Viewer) cannot pause the shared clock.
+    Shadow,
+    /// Official public region — players are Presence viewers only.
+    Wild,
+}
+
+impl WorldTier {
+    pub fn parse_cli(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "lab" => Ok(Self::Lab),
+            "shadow" => Ok(Self::Shadow),
+            "wild" => Ok(Self::Wild),
+            other => Err(format!(
+                "unknown --tier '{other}' (expected lab|shadow|wild)"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lab => "lab",
+            Self::Shadow => "shadow",
+            Self::Wild => "wild",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ClientMsg {
     Hello {
@@ -71,6 +105,8 @@ pub struct ServeConfig {
     pub max_peers: u8,
     /// Bind is loopback — token optional unless `token` is set.
     pub loopback: bool,
+    /// Lab / Shadow / Wild — gates Viewer pause/step (product allowlist).
+    pub world_tier: WorldTier,
 }
 
 impl Default for ServeConfig {
@@ -80,6 +116,7 @@ impl Default for ServeConfig {
             ops_token: None,
             max_peers: DEFAULT_MAX_PEERS,
             loopback: true,
+            world_tier: WorldTier::Lab,
         }
     }
 }
@@ -641,7 +678,7 @@ pub fn serve_peer_shared(
                             let mut h = host.lock().map_err(|_| {
                                 IpcError::Protocol("host lock poisoned".into())
                             })?;
-                            let ack = h.apply_as(role, cmd);
+                            let ack = h.apply_as(role, cfg.world_tier, cmd);
                             let _ = h.take_last_ack();
                             ack
                         };
@@ -665,7 +702,7 @@ pub fn serve_peer_shared(
                             let mut h = host.lock().map_err(|_| {
                                 IpcError::Protocol("host lock poisoned".into())
                             })?;
-                            let ack = h.apply_as(role, cmd);
+                            let ack = h.apply_as(role, cfg.world_tier, cmd);
                             let _ = h.take_last_ack();
                             ack
                         };
@@ -681,7 +718,7 @@ pub fn serve_peer_shared(
                             let mut h = host.lock().map_err(|_| {
                                 IpcError::Protocol("host lock poisoned".into())
                             })?;
-                            let ack = h.apply_as(role, cmd);
+                            let ack = h.apply_as(role, cfg.world_tier, cmd);
                             let _ = h.take_last_ack();
                             ack
                         };
@@ -840,7 +877,7 @@ fn serve_peer_on(
                                 p.focus_y = *focus_y;
                             }
                         }
-                        let ack = host.apply_as(role, cmd);
+                        let ack = host.apply_as(role, cfg.world_tier, cmd);
                         let _ = host.take_last_ack();
                         if let Some(p) = registry.get_mut(session_id) {
                             p.pending_acks.push(ack);
@@ -850,14 +887,14 @@ fn serve_peer_on(
                         if let Some(p) = registry.get_mut(session_id) {
                             p.present = hints.clone();
                         }
-                        let ack = host.apply_as(role, cmd);
+                        let ack = host.apply_as(role, cfg.world_tier, cmd);
                         let _ = host.take_last_ack();
                         if let Some(p) = registry.get_mut(session_id) {
                             p.pending_acks.push(ack);
                         }
                     }
                     _ => {
-                        let ack = host.apply_as(role, cmd);
+                        let ack = host.apply_as(role, cfg.world_tier, cmd);
                         let _ = host.take_last_ack();
                         if let Some(p) = registry.get_mut(session_id) {
                             p.pending_acks.push(ack);
@@ -928,6 +965,7 @@ mod tests {
             ops_token: None,
             max_peers: 4,
             loopback: true,
+            world_tier: Default::default(),
         };
         assert!(cfg.authorize(&None, PeerRole::Viewer).is_err());
         assert!(cfg
@@ -947,6 +985,7 @@ mod tests {
             ops_token: Some("ops".into()),
             max_peers: 4,
             loopback: false,
+            world_tier: Default::default(),
         };
         // Join token alone → Viewer even with Operator hint.
         assert_eq!(
@@ -1043,6 +1082,52 @@ mod tests {
     }
 
     #[test]
+    fn wild_viewer_denied_pause_step() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut host = Host::for_tests();
+            let cfg = ServeConfig {
+                token: Some("t".into()),
+                ops_token: Some("ops".into()),
+                max_peers: 2,
+                loopback: true,
+                world_tier: WorldTier::Wild,
+            };
+            let mut registry = PeerRegistry::new(2);
+            let (stream, _) = listener.accept().unwrap();
+            let _ = serve_peer_on(stream, &mut host, &cfg, &mut registry);
+        });
+
+        let mut remote = RemoteHost::connect_with(
+            addr,
+            &ConnectOpts {
+                token: Some("t".into()),
+                role_hint: PeerRole::Viewer,
+                client_name: Some("v".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(remote.role, PeerRole::Viewer);
+        remote
+            .apply_all([
+                ClientCommand::SetPaused(true),
+                ClientCommand::StepOnce,
+            ])
+            .unwrap();
+        let f = remote.pull().unwrap();
+        assert!(
+            f.command_acks.iter().filter(|a| !a.ok).count() >= 2,
+            "wild viewer pause/step must deny: {:?}",
+            f.command_acks
+        );
+        assert!(!f.paused);
+        remote.apply_all([ClientCommand::Quit]).unwrap();
+        let _ = remote.pull();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn viewer_role_denied_reset() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1053,6 +1138,7 @@ mod tests {
                 ops_token: Some("ops".into()),
                 max_peers: 2,
                 loopback: true,
+                world_tier: Default::default(),
             };
             let mut registry = PeerRegistry::new(2);
             let (stream, _) = listener.accept().unwrap();
