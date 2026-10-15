@@ -97,6 +97,82 @@ pub struct Inspect {
     pub max_age_ticks: u32,
     pub energy_frac: u8,
     pub stress: u8,
+    /// Species cluster of the genotype (`NO_SPECIES` when no cell).
+    pub species: u16,
+    /// Children this organism has released (propagules + broods).
+    pub children: u32,
+}
+
+/// Phase 3 inspect lineage card (`roadmap.md` Phase 3): species, where
+/// it sits in the tree, and who else is alive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineageCard {
+    pub cell: u32,
+    pub org: u32,
+    pub genotype: u32,
+    pub species: u16,
+    pub species_name: String,
+    pub parent_species_name: String,
+    /// Organism divisions since the root organism.
+    pub generation: u32,
+    /// Mutation events between this genotype and its root.
+    pub mutations_since_seed: u16,
+    /// Species on the path from the root (the numeral).
+    pub species_depth: u16,
+    /// Live cells of the same species, this organism excluded.
+    pub kin_alive: u32,
+    /// Live cells of this genotype and everything descended from it.
+    pub descendants_alive: u32,
+    /// Archived species on the ancestor path, this species included.
+    pub archived_relatives: u32,
+    /// Children this organism has released.
+    pub children: u32,
+}
+
+/// What the scoop holds (Phase 3): whole organisms with their records,
+/// litter and grit by offset from the bucket centre, and water in
+/// saturation units. Not part of the save — the shell releases or
+/// discards before saving.
+#[derive(Debug, Clone)]
+pub struct Carried {
+    pub cx: i32,
+    pub cy: i32,
+    pub r: i32,
+    pub orgs: Vec<bio::OrgBundle>,
+    /// `(dx, dy, units, litter code)`.
+    pub litter: Vec<(i16, i16, u8, u8)>,
+    /// `(dx, dy, units)`.
+    pub grit: Vec<(i16, i16, u8)>,
+    pub water: u32,
+}
+
+impl Carried {
+    pub fn empty() -> Self {
+        Self {
+            cx: 0,
+            cy: 0,
+            r: 0,
+            orgs: Vec::new(),
+            litter: Vec::new(),
+            grit: Vec::new(),
+            water: 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.orgs.is_empty() && self.litter.is_empty() && self.grit.is_empty() && self.water == 0
+    }
+
+    pub fn cell_count(&self) -> u32 {
+        self.orgs.iter().map(|b| b.cells.len() as u32).sum()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseError {
+    /// Some organism would land on tissue, a solid or outside the tank.
+    NoRoom,
+    OutOfBounds,
 }
 
 pub struct Tank {
@@ -130,6 +206,8 @@ pub struct Tank {
     lambda_scale_q8: u16,
     /// 2.3.8 once-per-tank milestone detectors.
     milestones: Milestones,
+    /// Lineage roots seeded from the archive: `(genotype, specimen id)`.
+    archive_roots: Vec<(u32, u64)>,
 }
 
 impl Tank {
@@ -173,6 +251,7 @@ impl Tank {
             tissue_marks: Vec::new(),
             milestones: Milestones::default(),
             lambda_scale_q8: 256,
+            archive_roots: Vec::new(),
         };
         tank.rebuild_light();
         Ok(tank)
@@ -480,6 +559,59 @@ impl Tank {
         self.cells.get(id).map(|c| c.genotype)
     }
 
+    pub fn genomes_mut(&mut self) -> &mut GenomeStore {
+        &mut self.genomes
+    }
+
+    /// Spawn a generation-0 seed cell of an interned genotype (archive).
+    pub(crate) fn spawn_root(&mut self, geno: u32, seed_mode: u8, px: u16, py: u16) -> Option<u32> {
+        let id = self.cells.spawn(
+            &mut self.genomes,
+            &mut self.pixels,
+            px,
+            py,
+            geno,
+            seed_mode,
+            0,
+            12 * crate::consts::FP,
+            2,
+            self.tick_count,
+            self.seed,
+        );
+        self.light_dirty = true;
+        id
+    }
+
+    pub(crate) fn note_archive_root(&mut self, genotype: u32, specimen: u64) {
+        if !self.archive_roots.iter().any(|(g, _)| *g == genotype) {
+            self.archive_roots.push((genotype, specimen));
+        }
+    }
+
+    /// The archived specimen a genotype's lineage root was seeded from.
+    pub fn archive_parent_of(&self, genotype: u32) -> Option<u64> {
+        let root = self.genomes.root_of(genotype);
+        self.archive_roots.iter().find(|(g, _)| *g == root).map(|(_, id)| *id)
+    }
+
+    /// Fill every cell of an organism to its store cap (portrait sandbox).
+    pub(crate) fn feed_org_full(&mut self, org: u32) {
+        let ids: Vec<u32> = match self.cells.org(org) {
+            Some(o) => o.slots.iter().map(|s| s.cell).filter(|&c| c != bio::store::NONE).collect(),
+            None => return,
+        };
+        for id in ids {
+            let Some(c) = self.cells.get(id) else {
+                continue;
+            };
+            let cap = self.genomes.coeffs(c.genotype, c.mode).store_cap_fp(c.area());
+            if let Some(c) = self.cells.get_mut(id) {
+                c.energy = cap.max(c.energy);
+                c.stress = 0;
+            }
+        }
+    }
+
     /// Kill one cell directly (harness "bite").
     pub fn kill_cell(&mut self, id: u32) -> bool {
         if self.cells.get(id).is_none() {
@@ -639,6 +771,259 @@ impl Tank {
             }
             bio::fields::add_litter(&mut self.pixels, idx, room as u8, LITTER_SOFT_CODE);
             self.fines[px] = (f - room as f32 / 64.0).max(0.0);
+        }
+    }
+
+    /// Phase 3 scoop: lift everything inside the O of radius `r` pixels
+    /// around pixel `(cx, cy)` — organisms whose seed cell lies inside
+    /// travel whole (glue breaks, division bonds hold), plus the litter,
+    /// grit and water inside the ring. Corpses stay. Nothing is lost:
+    /// the bucket holds it until `release` or `discard`.
+    pub fn scoop_region(&mut self, cx: i32, cy: i32, r: i32) -> Carried {
+        let r = r.max(1);
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        let inside = |x: i32, y: i32| (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r;
+        let mut carried = Carried {
+            cx,
+            cy,
+            r,
+            orgs: Vec::new(),
+            litter: Vec::new(),
+            grit: Vec::new(),
+            water: 0,
+        };
+        let org_ids: Vec<u32> = self
+            .cells
+            .iter_orgs()
+            .filter(|(_, o)| {
+                self.cells
+                    .get(o.seed)
+                    .is_some_and(|c| inside(c.px as i32 + c.w as i32 / 2, c.py as i32 + c.h as i32 / 2))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for org in org_ids {
+            if let Some(b) = self.cells.lift_org(&mut self.pixels, org) {
+                carried.orgs.push(b);
+            }
+        }
+        let vis_h = self.grid.visible_h();
+        for y in (cy - r).max(0)..=(cy + r).min(ph - 1) {
+            for x in (cx - r).max(0)..=(cx + r).min(pw - 1) {
+                if !inside(x, y) {
+                    continue;
+                }
+                let idx = (y * pw + x) as usize;
+                if self.pixels.litter[idx] > 0 {
+                    carried.litter.push((
+                        (x - cx) as i16,
+                        (y - cy) as i16,
+                        self.pixels.litter[idx],
+                        self.pixels.litter_key[idx],
+                    ));
+                    self.pixels.litter[idx] = 0;
+                    self.pixels.litter_key[idx] = 0;
+                }
+                if self.pixels.grit[idx] > 0 {
+                    carried.grit.push(((x - cx) as i16, (y - cy) as i16, self.pixels.grit[idx]));
+                    self.pixels.grit[idx] = 0;
+                }
+            }
+        }
+        // Water: every open physics cell whose centre pixel is inside.
+        let ppc = crate::consts::PX_PER_CELL as i32;
+        for vy_top in ((cy - r) / ppc).max(0)..=((cy + r) / ppc).min(vis_h - 1) {
+            for vx in ((cx - r) / ppc).max(0)..=((cx + r) / ppc).min(self.grid.visible_w() - 1) {
+                if !inside(vx * ppc + 1, vy_top * ppc + 1) {
+                    continue;
+                }
+                let vy = vis_h - 1 - vy_top;
+                let c = self.grid.get_visible(vx, vy);
+                if c.is_open() && c.sat > 0 {
+                    carried.water += c.sat as u32;
+                    let mut dry = c;
+                    dry.sat = 0;
+                    self.grid.set_visible(vx, vy, dry);
+                }
+            }
+        }
+        bio::fields::rescan_tiles(&mut self.pixels);
+        self.light_dirty = true;
+        carried
+    }
+
+    /// Put a bucket down with its centre at pixel `(x, y)`. Every
+    /// organism must fit on free open pixels or nothing moves
+    /// (`Err(ReleaseError::NoRoom)`); litter, grit and water then land
+    /// as near as they can to where they were in the ring.
+    pub fn release(&mut self, carried: Carried, x: i32, y: i32) -> Result<(), (Carried, ReleaseError)> {
+        let dx = x - carried.cx;
+        let dy = y - carried.cy;
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        if x < 0 || y < 0 || x >= pw || y >= ph {
+            return Err((carried, ReleaseError::OutOfBounds));
+        }
+        let vis_h = self.grid.visible_h() as u32;
+        let open = |px: i32, py: i32| -> bool {
+            let (vx, vy) = bio::pixel_to_phys(px as u16, py as u16, vis_h);
+            self.grid.get_visible(vx, vy).is_open()
+        };
+        for b in &carried.orgs {
+            if !self.cells.bundle_fits(&self.pixels, b, dx, dy, &open) {
+                return Err((carried, ReleaseError::NoRoom));
+            }
+        }
+        // Two bodies in one bucket may not overlap each other either.
+        for (i, a) in carried.orgs.iter().enumerate() {
+            for b in carried.orgs.iter().skip(i + 1) {
+                for (_, ca) in &a.cells {
+                    for (_, cb) in &b.cells {
+                        if ca.px < cb.px + cb.w as u16
+                            && cb.px < ca.px + ca.w as u16
+                            && ca.py < cb.py + cb.h as u16
+                            && cb.py < ca.py + ca.h as u16
+                        {
+                            return Err((carried, ReleaseError::NoRoom));
+                        }
+                    }
+                }
+            }
+        }
+        for b in &carried.orgs {
+            self.cells.place_bundle(&mut self.pixels, b, dx, dy);
+        }
+        for &(ox, oy, units, code) in &carried.litter {
+            if let Some(idx) = self.landing_pixel(carried.cx + ox as i32 + dx, carried.cy + oy as i32 + dy) {
+                bio::fields::add_litter(&mut self.pixels, idx, units, code);
+            }
+        }
+        for &(ox, oy, units) in &carried.grit {
+            if let Some(idx) = self.landing_pixel(carried.cx + ox as i32 + dx, carried.cy + oy as i32 + dy) {
+                self.pixels.grit[idx] = self.pixels.grit[idx].saturating_add(units);
+            }
+        }
+        self.pour_water_near(x, y, carried.water);
+        bio::fields::rescan_tiles(&mut self.pixels);
+        self.light_dirty = true;
+        Ok(())
+    }
+
+    /// Throw the bucket away: the organisms die without a corpse and the
+    /// matter leaves the tank (this is the "remove" reading of a scoop).
+    pub fn discard(&mut self, carried: Carried) {
+        for b in &carried.orgs {
+            for (_, c) in &b.cells {
+                self.genomes.on_death(c.genotype);
+            }
+        }
+    }
+
+    /// Remove tool (Phase 3, §2.4 #5): anything under the brush leaves
+    /// the tank — organisms whose cells are hit (whole, no corpse, no
+    /// fragments), corpses, litter and grit. Returns cells removed.
+    pub fn remove_at(&mut self, vx: i32, vy: i32, r: i32) -> u32 {
+        let r = r.max(0);
+        let vis_h = self.grid.visible_h();
+        let mut orgs: Vec<u32> = Vec::new();
+        for (_, c) in self.cells.iter_alive() {
+            let cx = c.px as i32 / 3;
+            let cy = vis_h - 1 - c.py as i32 / 3;
+            let (dx, dy) = (cx - vx, cy - vy);
+            if dx * dx + dy * dy <= r * r && !orgs.contains(&c.org) {
+                orgs.push(c.org);
+            }
+        }
+        let mut removed = 0;
+        for org in orgs {
+            if let Some(b) = self.cells.lift_org(&mut self.pixels, org) {
+                removed += b.cells.len() as u32;
+                for (_, c) in &b.cells {
+                    self.genomes.on_death(c.genotype);
+                }
+            }
+        }
+        let _ = self.clean_at(vx, vy, r);
+        self.light_dirty = true;
+        removed
+    }
+
+    /// The pixel where loose matter put down at `(x, y)` comes to rest:
+    /// the pixel itself when open, else the lowest open pixel of that
+    /// column, else the nearest open pixel anywhere.
+    fn landing_pixel(&self, x: i32, y: i32) -> Option<usize> {
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        let vis_h = self.grid.visible_h() as u32;
+        let open = |px: i32, py: i32| -> bool {
+            px >= 0 && py >= 0 && px < pw && py < ph && {
+                let (vx, vy) = bio::pixel_to_phys(px as u16, py as u16, vis_h);
+                self.grid.get_visible(vx, vy).is_open()
+            }
+        };
+        let x = x.clamp(0, pw - 1);
+        let y = y.clamp(0, ph - 1);
+        if open(x, y) {
+            return Some((y * pw + x) as usize);
+        }
+        if let Some(py) = (0..ph).rev().find(|&py| open(x, py)) {
+            return Some((py * pw + x) as usize);
+        }
+        let mut best: Option<(i32, usize)> = None;
+        for py in 0..ph {
+            for px in 0..pw {
+                if open(px, py) {
+                    let d = (px - x) * (px - x) + (py - y) * (py - y);
+                    if best.is_none_or(|(bd, _)| d < bd) {
+                        best = Some((d, (py * pw + px) as usize));
+                    }
+                }
+            }
+        }
+        best.map(|(_, i)| i)
+    }
+
+    /// Pour `sat` units of water into the open physics cells nearest to
+    /// pixel `(x, y)` (breadth-first), filling each to full.
+    fn pour_water_near(&mut self, x: i32, y: i32, mut sat: u32) {
+        if sat == 0 {
+            return;
+        }
+        let vis_h = self.grid.visible_h();
+        let vis_w = self.grid.visible_w();
+        let (sx, sy) = bio::pixel_to_phys(
+            x.clamp(0, self.pixels.w as i32 - 1) as u16,
+            y.clamp(0, self.pixels.h as i32 - 1) as u16,
+            vis_h as u32,
+        );
+        let mut seen = vec![false; (vis_w * vis_h) as usize];
+        let mut queue = VecDeque::new();
+        queue.push_back((sx, sy));
+        seen[(sy * vis_w + sx) as usize] = true;
+        while let Some((vx, vy)) = queue.pop_front() {
+            let c = self.grid.get_visible(vx, vy);
+            if c.is_open() && c.sat < 255 {
+                let take = (255 - c.sat as u32).min(sat);
+                let mut w = c;
+                w.sat += take as u8;
+                self.grid.set_visible(vx, vy, w);
+                sat -= take;
+                if sat == 0 {
+                    return;
+                }
+            }
+            for (nx, ny) in [(vx - 1, vy), (vx + 1, vy), (vx, vy - 1), (vx, vy + 1)] {
+                if nx < 0 || ny < 0 || nx >= vis_w || ny >= vis_h {
+                    continue;
+                }
+                let i = (ny * vis_w + nx) as usize;
+                if seen[i] {
+                    continue;
+                }
+                seen[i] = true;
+                queue.push_back((nx, ny));
+            }
         }
     }
 
@@ -859,6 +1244,15 @@ impl Tank {
         for ev in &bio.events {
             self.events.push_back(*ev);
         }
+        let mut bio = bio;
+        for sid in self.genomes.drain_new_species() {
+            let e = SimEvent {
+                kind: bio::ev::NEW_SPECIES,
+                arg0: sid as u32,
+            };
+            self.events.push_back(e);
+            bio.events.push(e);
+        }
         for (acc, n) in self.death_causes.iter_mut().zip(bio.death_causes) {
             *acc += n as u64;
         }
@@ -914,6 +1308,7 @@ impl Tank {
         if px >= self.pixels.w || py >= self.pixels.h {
             return Inspect {
                 cell: u32::MAX,
+                species: bio::NO_SPECIES,
                 ..Inspect::default()
             };
         }
@@ -923,6 +1318,7 @@ impl Tank {
         let cell = self.grid.get_visible(vx as i32, vy as i32);
         let owner = self.pixels.owner[(py as usize) * (self.pixels.w as usize) + px as usize];
         let mut rec = Inspect {
+            species: bio::NO_SPECIES,
             hit: true,
             material: cell.material,
             sat: cell.sat,
@@ -952,9 +1348,86 @@ impl Tank {
                 let cap = mc.store_cap_fp(c.area()).max(1);
                 rec.energy_frac = (c.energy.max(0) as i64 * 255 / cap as i64).min(255) as u8;
                 rec.stress = c.stress;
+                rec.species = self.genomes.species_of(c.genotype);
+                rec.children = self.cells.org(c.org).map(|o| o.children).unwrap_or(0);
             }
         }
         rec
+    }
+
+    /// The lineage card of a living cell's organism.
+    pub fn lineage_card(&self, cell: u32) -> Option<LineageCard> {
+        let c = self.cells.get(cell)?;
+        let species = self.genomes.species_of(c.genotype);
+        let rec = self.genomes.species(species);
+        let parent_species_name = rec
+            .and_then(|r| self.genomes.species(r.parent))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let mut archived = 0;
+        let mut cur = species;
+        let mut hops = 0;
+        while let Some(r) = self.genomes.species(cur) {
+            if r.archived {
+                archived += 1;
+            }
+            if r.parent == bio::NO_SPECIES || hops > self.genomes.species_count() {
+                break;
+            }
+            cur = r.parent;
+            hops += 1;
+        }
+        let own = self.cells.org(c.org).map(|o| o.n_alive as u32).unwrap_or(1);
+        Some(LineageCard {
+            cell,
+            org: c.org,
+            genotype: c.genotype,
+            species,
+            species_name: rec.map(|r| r.name.clone()).unwrap_or_default(),
+            parent_species_name,
+            generation: self.cells.org_generation(c.org),
+            mutations_since_seed: self.genomes.get(c.genotype).map(|n| n.depth).unwrap_or(0),
+            species_depth: rec.map(|r| r.depth).unwrap_or(0),
+            kin_alive: self.genomes.species_live_cells(species).saturating_sub(own),
+            descendants_alive: self.genomes.lineage_live_cells(c.genotype),
+            archived_relatives: archived,
+            children: self.cells.org(c.org).map(|o| o.children).unwrap_or(0),
+        })
+    }
+
+    /// Name of a species (`""` when unknown).
+    pub fn species_name(&self, species: u16) -> &str {
+        self.genomes.species(species).map(|s| s.name.as_str()).unwrap_or("")
+    }
+
+    pub fn species_count(&self) -> usize {
+        self.genomes.species_count()
+    }
+
+    pub fn species_parent(&self, species: u16) -> Option<u16> {
+        self.genomes.species(species).map(|s| s.parent).filter(|&p| p != bio::NO_SPECIES)
+    }
+
+    /// Pixel bounding box `(x0, y0, x1, y1)` (inclusive) of a living
+    /// organism's cells and secretions — the inspect tracking rectangle.
+    pub fn org_bbox(&self, org: u32) -> Option<(u16, u16, u16, u16)> {
+        let o = self.cells.org(org)?;
+        let mut bb: Option<(u16, u16, u16, u16)> = None;
+        let mut add = |x0: u16, y0: u16, x1: u16, y1: u16| {
+            bb = Some(match bb {
+                None => (x0, y0, x1, y1),
+                Some(b) => (b.0.min(x0), b.1.min(y0), b.2.max(x1), b.3.max(y1)),
+            });
+        };
+        for s in o.slots.iter().filter(|s| s.cell != bio::store::NONE) {
+            if let Some(c) = self.cells.get(s.cell) {
+                add(c.px, c.py, c.px + c.w as u16 - 1, c.py + c.h as u16 - 1);
+            }
+        }
+        for sec in &o.secretions {
+            add(sec.px, sec.py, sec.px, sec.py);
+        }
+        bb
     }
 
     pub fn write_rgba(&mut self, out: &mut Vec<u8>) {
@@ -1117,6 +1590,9 @@ impl Tank {
             bio_cells: self.cells.raw_cells().to_vec(),
             orgs: self.cells.raw_orgs().to_vec(),
             milestones: self.milestones.clone(),
+            species: self.genomes.species_table().to_vec(),
+            node_species: self.genomes.export_species(),
+            archive_roots: self.archive_roots.clone(),
         };
         postcard::to_allocvec(&blob).map_err(|_| TankError::Postcard)
     }
@@ -1194,6 +1670,8 @@ impl Tank {
         tank.coarse.humidity = blob.humidity;
         // Life: genotypes first (cells index them), then live counts.
         let mut genomes = GenomeStore::import(&blob.genomes);
+        genomes.import_species(blob.species, &blob.node_species);
+        genomes.set_tick(blob.tick_count);
         for c in blob.bio_cells.iter().filter(|c| c.alive) {
             if genomes.get(c.genotype).is_none() {
                 return Err(TankError::Shape);
@@ -1203,6 +1681,7 @@ impl Tank {
         tank.genomes = genomes;
         tank.cells = CellStore::from_raw(blob.bio_cells, blob.orgs);
         tank.milestones = blob.milestones;
+        tank.archive_roots = blob.archive_roots;
         let (vw, vh) = (tank.grid.visible_w(), tank.grid.visible_h());
         for vy in 0..vh {
             for vx in 0..vw {
@@ -1355,8 +1834,8 @@ impl Tank {
                 continue;
             }
             if tool.kind == 9 {
-                // Remove living cell under the brush (thin selection).
-                self.remove_cells_at(tool.x as i32, tool.y as i32, tool.r as i32);
+                // Remove anything under the brush (Phase 3, §2.4 #5).
+                let _ = self.remove_at(tool.x as i32, tool.y as i32, tool.r as i32);
                 continue;
             }
             if tool.kind == 10 {
@@ -1470,6 +1949,11 @@ struct SaveBlob {
     orgs: Vec<bio::OrgRec>,
     #[serde(default)]
     milestones: Milestones,
+    #[serde(default)]
+    species: Vec<bio::SpeciesRec>,
+    #[serde(default)]
+    node_species: Vec<(u32, u16)>,
+    archive_roots: Vec<(u32, u64)>,
 }
 
 fn default_t_base() -> f32 {

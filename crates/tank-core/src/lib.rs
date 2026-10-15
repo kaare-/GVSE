@@ -11,6 +11,7 @@
 //! property table. Randomness is [`hash_u64`]. This crate does not read
 //! the wall clock and does not touch the filesystem.
 
+pub mod archive;
 pub mod bio;
 pub mod cell;
 pub mod clock;
@@ -25,11 +26,12 @@ pub mod tank;
 pub mod telemetry;
 pub mod tools;
 
+pub use archive::{portrait, SpeciesNode, Specimen, SpecimenStats};
 pub use cell::Cell;
 pub use clock::{day_factor, is_day, phase, phase_name};
 pub use font::{glyph_bits, glyph_rows};
 pub use hash::{hash_bytes, hash_u64};
-pub use tank::{Inspect, SimEvent, Tank, TankError, TankInput, ToolEvent};
+pub use tank::{Carried, Inspect, LineageCard, ReleaseError, SimEvent, Tank, TankError, TankInput, ToolEvent};
 pub use telemetry::{format_batch, TelEvent, Telemetry};
 pub use tools::set_fill_level;
 

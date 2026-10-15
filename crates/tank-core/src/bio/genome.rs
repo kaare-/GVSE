@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::bio::profile::{Block, Entry, Mode, ModeCoeffs, SENSOR_LIGHT};
+use crate::bio::species::{self, SpeciesRec, NO_SPECIES};
 use crate::bio::program::{
     rewire_child, rewire_transition, ChildKind, ChildSpec, Detach, Dir, Gate, HeadingRule, Link,
     Scalar, Transition,
@@ -759,6 +760,8 @@ pub struct GenotypeNode {
     /// Mutation events since the root (§c.1 `depth`).
     pub depth: u16,
     pub tombstone: bool,
+    /// Species cluster (`species.rs`), `NO_SPECIES` for tombstones.
+    pub species: u16,
 }
 
 pub const NONE: u32 = u32::MAX;
@@ -768,6 +771,12 @@ pub struct GenomeStore {
     nodes: Vec<GenotypeNode>,
     by_genome: HashMap<Genome, u32>,
     live_nodes: usize,
+    /// Species table (§c.4); entries are never removed.
+    species: Vec<SpeciesRec>,
+    /// Species founded since the last `drain_new_species`.
+    new_species: Vec<u16>,
+    /// Current tick, for `SpeciesRec::first_tick`.
+    now: u64,
 }
 
 impl GenomeStore {
@@ -776,7 +785,98 @@ impl GenomeStore {
             nodes: Vec::new(),
             by_genome: HashMap::new(),
             live_nodes: 0,
+            species: Vec::new(),
+            new_species: Vec::new(),
+            now: 0,
         }
+    }
+
+    pub fn set_tick(&mut self, tick: u64) {
+        self.now = tick;
+    }
+
+    pub fn species(&self, id: u16) -> Option<&SpeciesRec> {
+        self.species.get(id as usize)
+    }
+
+    pub fn species_mut(&mut self, id: u16) -> Option<&mut SpeciesRec> {
+        self.species.get_mut(id as usize)
+    }
+
+    pub fn species_count(&self) -> usize {
+        self.species.len()
+    }
+
+    pub fn species_table(&self) -> &[SpeciesRec] {
+        &self.species
+    }
+
+    /// Species of a genotype (`NO_SPECIES` for unknown ids / tombstones).
+    pub fn species_of(&self, genotype: u32) -> u16 {
+        self.nodes.get(genotype as usize).map(|n| n.species).unwrap_or(NO_SPECIES)
+    }
+
+    /// Species founded since the last call (ids, oldest first).
+    pub fn drain_new_species(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.new_species)
+    }
+
+    /// Live cells across all genotypes of a species.
+    pub fn species_live_cells(&self, species: u16) -> u32 {
+        self.nodes
+            .iter()
+            .filter(|n| !n.tombstone && n.species == species)
+            .map(|n| n.live_cells)
+            .sum()
+    }
+
+    /// Living genotypes of a species.
+    pub fn species_live_genotypes(&self, species: u16) -> u32 {
+        self.nodes
+            .iter()
+            .filter(|n| !n.tombstone && n.species == species && n.live_cells > 0)
+            .count() as u32
+    }
+
+    /// Assign a species to a fresh node (§c.4): the parent's species while
+    /// the structural signature matches and the parametric distance to
+    /// the founder stays within `D`, else a new species under it.
+    fn assign_species(&mut self, id: u32, parent: u32) -> u16 {
+        let genome = self.nodes[id as usize].genome.clone();
+        let sig = species::signature(&genome);
+        let parent_species = self.nodes.get(parent as usize).map(|p| p.species).unwrap_or(NO_SPECIES);
+        if let Some(ps) = self.species.get(parent_species as usize) {
+            if ps.sig == sig && species::param_distance_q8(&genome, &ps.founder_genome) <= species::SPECIES_D_Q8 {
+                return parent_species;
+            }
+        }
+        let (depth, parent_genome) = match self.species.get(parent_species as usize) {
+            Some(ps) => (ps.depth.saturating_add(1), Some(ps.founder_genome.clone())),
+            None => (1, None),
+        };
+        let base = species::species_name(&genome, parent_genome.as_ref(), depth);
+        let same = self
+            .species
+            .iter()
+            .filter(|s| s.parent == parent_species && s.name.starts_with(&base))
+            .count() as u32;
+        let name = species::disambiguate(&base, same + 1);
+        let sid = self.species.len() as u16;
+        if sid == NO_SPECIES {
+            return parent_species;
+        }
+        self.species.push(SpeciesRec {
+            founder: id,
+            founder_genome: genome,
+            parent: parent_species,
+            depth,
+            sig,
+            name,
+            first_tick: self.now,
+            archived: false,
+        });
+        self.new_species.push(sid);
+        sid
     }
 
     pub fn len(&self) -> usize {
@@ -868,11 +968,14 @@ impl GenomeStore {
             folded_nodes: 0,
             depth,
             tombstone: false,
+            species: NO_SPECIES,
         });
         if let Some(p) = self.nodes.get_mut(parent as usize) {
             p.first_child = id;
         }
         self.live_nodes += 1;
+        let sp = self.assign_species(id, parent);
+        self.nodes[id as usize].species = sp;
         id
     }
 
@@ -888,6 +991,38 @@ impl GenomeStore {
     pub fn intern_root(&mut self, genome: Genome) -> u32 {
         let root = self.seed_algae();
         self.intern_child(root, genome)
+    }
+
+    /// Intern a genome seeded from the archive as a true lineage root
+    /// (no parent genotype) whose species continues the archived one:
+    /// same generated name and depth, flagged archived (§c.4 "seeding
+    /// from the archive continues the tree across tanks"). A genome
+    /// already in the table keeps its node.
+    pub fn intern_archive_root(&mut self, genome: Genome, species_name: &str, species_depth: u16) -> u32 {
+        if let Some(&id) = self.by_genome.get(&genome) {
+            return id;
+        }
+        // Make sure the algae root exists first so ids stay stable.
+        self.seed_algae();
+        let id = self.push_node(genome.clone(), NONE, 0);
+        // `push_node` founded a fresh depth-1 species; rename it to the
+        // archived identity (its own founder genome and signature stand).
+        let sp = self.nodes[id as usize].species;
+        if let Some(s) = self.species.get_mut(sp as usize) {
+            if s.founder == id {
+                let base = species_name.to_string();
+                let same = self
+                    .species
+                    .iter()
+                    .filter(|o| o.founder != id && o.name == base)
+                    .count() as u32;
+                let s = &mut self.species[sp as usize];
+                s.name = if same == 0 { base } else { species::disambiguate(&base, same + 1) };
+                s.depth = species_depth.max(1);
+                s.archived = true;
+            }
+        }
+        id
     }
 
     pub fn intern_child(&mut self, parent: u32, genome: Genome) -> u32 {
@@ -1000,6 +1135,7 @@ impl GenomeStore {
                 folded_nodes: 0,
                 depth: 0,
                 tombstone: true,
+                species: NO_SPECIES,
             };
             let _ = i;
             s.nodes.push(tomb);
@@ -1023,6 +1159,7 @@ impl GenomeStore {
                 folded_nodes: 0,
                 depth: *depth,
                 tombstone: false,
+                species: NO_SPECIES,
             };
             s.live_nodes += 1;
         }
@@ -1042,6 +1179,39 @@ impl GenomeStore {
             s.seed_algae();
         }
         s
+    }
+
+    /// Restore the species layer from a save, or rebuild it (ids are
+    /// creation-ordered, so parents come before children).
+    pub fn import_species(&mut self, table: Vec<SpeciesRec>, node_species: &[(u32, u16)]) {
+        self.species = table;
+        for (id, sp) in node_species {
+            if let Some(n) = self.nodes.get_mut(*id as usize) {
+                n.species = *sp;
+            }
+        }
+        for id in 0..self.nodes.len() as u32 {
+            let (tomb, sp, parent) = {
+                let n = &self.nodes[id as usize];
+                (n.tombstone, n.species, n.parent)
+            };
+            if tomb || (sp != NO_SPECIES && (sp as usize) < self.species.len()) {
+                continue;
+            }
+            let sp = self.assign_species(id, parent);
+            self.nodes[id as usize].species = sp;
+        }
+        self.new_species.clear();
+    }
+
+    /// `(genotype, species)` for every non-tombstone node.
+    pub fn export_species(&self) -> Vec<(u32, u16)> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.tombstone)
+            .map(|(i, n)| (i as u32, n.species))
+            .collect()
     }
 }
 

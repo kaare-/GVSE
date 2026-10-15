@@ -1647,3 +1647,366 @@ fn colour_heterotroph_and_glass_detectors_work_on_the_model() {
     ms.run(3 * GLASS_EVERY + GLASS_COOLDOWN, &[], &cells, &genomes, &dirty, &mut out);
     assert_eq!(kinds(&mut out), vec![ev::GLASS], "a cleaned pane re-arms the detector");
 }
+
+/// Phase 3 — the species layer (§c.4): tuning mutations stay in the
+/// founder's species, a structural change or a long parametric drift
+/// founds a new one, names are a pure function of the tree, and the
+/// layer survives a save/load round trip.
+#[test]
+fn species_split_on_structure_or_drift_and_are_named() {
+    use crate::bio::species::{param_distance_q8, signature, SPECIES_D_Q8};
+    use crate::bio::{Block, Entry, Genome, GenomeStore, NO_SPECIES};
+    let mut genomes = GenomeStore::new();
+    let root = genomes.intern_root(Genome::algae());
+    let root_sp = genomes.species_of(root);
+    assert_ne!(root_sp, NO_SPECIES);
+    let root_name = genomes.species(root_sp).unwrap().name.clone();
+    assert!(root_name.starts_with("Vir"), "algae stem is PHOTO ({root_name})");
+    assert_eq!(root, 0, "the seed algae is the root node");
+    assert!(root_name.ends_with(" I"), "the root species is depth 1 ({root_name})");
+
+    // A tuning step: same signature, small distance → same species.
+    let mut tuned = Genome::algae();
+    tuned.modes[0].divide_when.energy_frac = tuned.modes[0].divide_when.energy_frac.wrapping_sub(10);
+    assert_eq!(signature(&tuned), signature(&Genome::algae()));
+    assert!(param_distance_q8(&tuned, &Genome::algae()) < SPECIES_D_Q8);
+    let t = genomes.intern_child(root, tuned.clone());
+    assert_eq!(genomes.species_of(t), root_sp, "a point mutation does not found a species");
+
+    // A structural step: a new block with ≥ 2 units → new species whose
+    // name extends the parent's with the block's syllable.
+    let mut pig = tuned.clone();
+    pig.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
+    assert_ne!(signature(&pig), signature(&tuned));
+    let p = genomes.intern_child(t, pig.clone());
+    let p_sp = genomes.species_of(p);
+    assert_ne!(p_sp, root_sp);
+    let rec = genomes.species(p_sp).unwrap();
+    assert_eq!(rec.parent, root_sp);
+    assert_eq!(rec.depth, 2);
+    assert!(rec.name.contains("ros"), "a red pigment adds its syllable ({})", rec.name);
+    assert!(rec.name.ends_with(" II"), "numeral is the species depth ({})", rec.name);
+
+    // Drift only: same structure, keys walked far → a sibling-named species.
+    let mut drift = tuned.clone();
+    drift.wall_key = 180;
+    drift.glue_key = drift.glue_key.wrapping_add(90);
+    drift.resist_key = drift.resist_key.wrapping_add(90);
+    drift.temp_opt = 200;
+    assert_eq!(signature(&drift), signature(&tuned));
+    assert!(param_distance_q8(&drift, &Genome::algae()) > SPECIES_D_Q8, "{}", param_distance_q8(&drift, &Genome::algae()));
+    let d = genomes.intern_child(t, drift.clone());
+    let d_sp = genomes.species_of(d);
+    assert_ne!(d_sp, root_sp);
+    assert_ne!(d_sp, p_sp);
+    let drec = genomes.species(d_sp).unwrap();
+    assert_eq!(drec.parent, root_sp);
+    assert_eq!(drec.name, format!("{} II", root_name.trim_end_matches(" I")), "pure drift keeps the stem");
+    // A second drifted sibling with the same name gets a letter.
+    let mut drift2 = drift.clone();
+    drift2.temp_opt = 10;
+    drift2.wall_key = 70;
+    let d2 = genomes.intern_child(t, drift2);
+    let d2_sp = genomes.species_of(d2);
+    assert_ne!(d2_sp, d_sp);
+    assert!(genomes.species(d2_sp).unwrap().name.ends_with("II-b"), "{}", genomes.species(d2_sp).unwrap().name);
+    // Children of the drifted species measure against *its* founder.
+    let mut near = drift.clone();
+    near.temp_width = near.temp_width.wrapping_add(3);
+    let n = genomes.intern_child(d, near);
+    assert_eq!(genomes.species_of(n), d_sp);
+
+    // Round trip through a tank save.
+    let mut tank = water_box(61, 24, 24, 20);
+    let id = tank.seed_genome_at(36, 36, pig.clone()).expect("seed");
+    let sp = tank.inspect(36, 36).species;
+    assert_ne!(sp, NO_SPECIES);
+    let card = tank.lineage_card(id).expect("card");
+    assert!(card.species_name.contains("ros"));
+    assert_eq!(card.species_depth, 2, "{card:?}");
+    let parent = tank.species_parent(card.species).expect("parent species");
+    assert_eq!(card.parent_species_name, tank.species_name(parent));
+    assert_eq!(card.generation, 0);
+    assert_eq!(card.mutations_since_seed, 1, "one interning step under the algae root");
+    for _ in 0..200 {
+        tank.tick(&day());
+    }
+    let bytes = tank.save_bytes().unwrap();
+    let loaded = Tank::load_bytes(&bytes).unwrap();
+    assert_eq!(loaded.species_count(), tank.species_count());
+    for s in 0..tank.species_count() as u16 {
+        assert_eq!(loaded.species_name(s), tank.species_name(s));
+    }
+    let after = loaded.lineage_card(id).expect("card after load");
+    assert_eq!(after.species_name, card.species_name);
+    assert_eq!(after.species, card.species);
+}
+
+/// Phase 3 — glass walls: solid to water and grains, light goes through,
+/// paintable by tool, erasable, saved.
+#[test]
+fn glass_wall_holds_water_and_passes_light() {
+    let mut tank = Tank::try_new(5, 12, 12).unwrap();
+    // A glass box on the floor: walls at vx 3 and 8, floor row 0 is bedrock
+    // already; water inside only.
+    for vy in 0..6 {
+        tank.tick(&TankInput {
+            paused: true,
+            tools: vec![
+                ToolEvent { kind: 1, material: Cell::GLASS, x: 3, y: vy, r: 0, variant: 0 },
+                ToolEvent { kind: 1, material: Cell::GLASS, x: 8, y: vy, r: 0, variant: 0 },
+            ],
+            ..TankInput::default()
+        });
+    }
+    assert!(tank.cell_visible(3, 2).is_glass());
+    assert_eq!(tank.inspect(3 * 3 + 1, (12 - 1 - 2) * 3 + 1).material, Cell::GLASS);
+    for vx in 4..8 {
+        for vy in 0..5 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let before: u64 = (4..8).map(|vx| column_sat(&tank, vx)).sum();
+    tick_n(&mut tank, 300);
+    let inside: u64 = (4..8).map(|vx| column_sat(&tank, vx)).sum();
+    let outside: u64 = (0..3).chain(9..12).map(|vx| column_sat(&tank, vx)).sum();
+    assert_eq!(inside, before, "glass holds the water in");
+    assert_eq!(outside, 0, "nothing leaks through glass");
+    // Light under a pane is almost full; under stone it is not.
+    place(&mut tank, 1, 8, Cell::glass());
+    place(&mut tank, 10, 8, Cell::stone());
+    tank.tick(&TankInput { always_day: true, ..TankInput::default() });
+    let under_glass = tank.pixel_light_at(3 + 1, (12 - 1 - 7) * 3 + 1);
+    let under_stone = tank.pixel_light_at(10 * 3 + 1, (12 - 1 - 7) * 3 + 1);
+    assert!(under_glass > 220, "light through glass {under_glass}");
+    assert!(under_stone < under_glass / 2, "stone shades {under_stone} vs glass {under_glass}");
+    // Erase takes it away; the save keeps it.
+    let bytes = tank.save_bytes().unwrap();
+    let loaded = Tank::load_bytes(&bytes).unwrap();
+    assert!(loaded.cell_visible(3, 2).is_glass());
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent { kind: 2, material: 0, x: 3, y: 2, r: 0, variant: 0 }],
+        ..TankInput::default()
+    });
+    assert!(tank.cell_visible(3, 2).is_open());
+}
+
+/// Phase 3 — the scoop lifts a body whole with its litter and water,
+/// release puts it down elsewhere with ids remapped and nothing lost;
+/// a full seat refuses; discard removes it from the live counts.
+#[test]
+fn scoop_carries_a_body_and_release_puts_it_down_intact() {
+    use crate::bio::Genome;
+    let mut tank = water_box(7, 32, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    let seed = tank.seed_genome_at(24, 30, Genome::straw()).expect("seed straw");
+    for _ in 0..400 {
+        tank.tick(&day());
+    }
+    let seed_rec = *tank.cell(seed).expect("seed alive");
+    let (sx, sy) = (seed_rec.px as i32, seed_rec.py as i32);
+    let org = seed_rec.org;
+    let slots_before = tank.org_slot_count(seed);
+    assert!(slots_before >= 2, "straw grew (slots={slots_before})");
+    let cells_before = tank.live_cells();
+    let genotype = tank.genotype_of_cell(seed).unwrap();
+    let live_geno_before = tank.live_cells_of(genotype);
+    let bbox = tank.org_bbox(org).expect("bbox");
+    // A stone block on the left for the no-room case below.
+    for vx in 1..8 {
+        for vy in 6..14 {
+            place(&mut tank, vx, vy, Cell::stone());
+        }
+    }
+    // Litter and water inside the ring.
+    tank.drop_litter(sx as u16, sy as u16 + 3, 40, crate::bio::chem::LITTER_SOFT_CODE);
+    let litter_before = tank.litter_total();
+    let water_before = (0..32).map(|vx| column_sat(&tank, vx)).sum::<u64>();
+    let body_cells = tank.cells().org(org).unwrap().n_alive as usize;
+
+    let carried = tank.scoop_region(sx, sy, 9);
+    assert_eq!(carried.orgs.len(), 1, "one body in the bucket");
+    assert_eq!(carried.cell_count() as usize, body_cells);
+    assert!(carried.water > 0);
+    assert_eq!(tank.live_cells(), cells_before - body_cells);
+    assert_eq!(tank.litter_total(), litter_before - 40, "litter went into the bucket");
+    assert!(tank.cells().org(org).is_none(), "the old organism record is gone");
+    assert_eq!(tank.live_cells_of(genotype), live_geno_before, "carried cells stay counted as alive");
+    // Every pixel of the old body is free again.
+    for py in bbox.1..=bbox.3 {
+        for px in bbox.0..=bbox.2 {
+            assert_eq!(tank.owner_at(px, py), 0, "pixel ({px},{py}) still owned");
+        }
+    }
+
+    // No room: a release into a stone block fails and the bucket comes back.
+    let (carried, err) = tank.release(carried, 4 * 3 + 1, (23 - 10) * 3 + 1).expect_err("stone refuses");
+    assert_eq!(err, crate::tank::ReleaseError::NoRoom);
+    assert_eq!(carried.orgs.len(), 1);
+
+    // Room: 30 px sideways in open water.
+    let shift: i32 = if sx < 48 { 30 } else { -30 };
+    let (tx, ty) = (sx + shift, sy);
+    assert!(tank.release(carried, tx, ty).is_ok());
+    assert_eq!(tank.live_cells(), cells_before);
+    assert_eq!(tank.litter_total(), litter_before, "litter came back out");
+    assert_eq!(
+        (0..32).map(|vx| column_sat(&tank, vx)).sum::<u64>(),
+        water_before,
+        "water is conserved through the bucket"
+    );
+    let moved = tank.inspect(tx as u32, ty as u32);
+    assert_ne!(moved.cell, u32::MAX, "the seed cell sits at the new centre");
+    assert_eq!(moved.genotype, genotype);
+    assert_eq!(moved.org_cells as usize, slots_before as usize, "slots travelled");
+    let nb = tank.org_bbox(moved.org).expect("new bbox");
+    assert_eq!((nb.2 - nb.0, nb.3 - nb.1), (bbox.2 - bbox.0, bbox.3 - bbox.1), "same shape");
+    assert_eq!(nb.0 as i32, bbox.0 as i32 + shift);
+    assert_eq!(tank.live_cells_of(genotype), live_geno_before);
+    // The body keeps living and dividing after the move.
+    for _ in 0..300 {
+        tank.tick(&day());
+    }
+    assert!(tank.live_cells() >= cells_before, "the moved body carries on");
+
+    // Discard: lift again and throw away → live counts drop, no corpse.
+    let seed_now = *tank.cell(moved.cell).expect("moved seed alive");
+    let c = tank.scoop_region(seed_now.px as i32, seed_now.py as i32, 9);
+    let n = c.cell_count();
+    assert!(n >= 1);
+    let live_now = tank.live_cells();
+    tank.discard(c);
+    assert_eq!(tank.corpse_count(), 0);
+    assert_eq!(tank.live_cells(), live_now);
+    assert_eq!(tank.live_cells_of(genotype), tank.live_cells() as u32, "counts settle on discard");
+}
+
+/// Phase 3 — remove takes anything under the brush: the whole body a
+/// cell belongs to, corpses, litter and grit; nothing comes back.
+#[test]
+fn remove_tool_takes_bodies_litter_and_grit_whole() {
+    use crate::bio::Genome;
+    let mut tank = water_box(8, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    let seed = tank.seed_genome_at(36, 30, Genome::straw()).expect("seed");
+    for _ in 0..400 {
+        tank.tick(&day());
+    }
+    let org = tank.inspect(36, 30).org;
+    let body = tank.cells().org(org).unwrap().n_alive;
+    assert!(body >= 2);
+    let tip = tank.cells().org(org).unwrap().slots.iter().map(|s| s.cell).find(|&c| c != seed && c != u32::MAX);
+    let tip = tip.expect("a second cell");
+    let tip_px = tank.cell(tip).unwrap().px as i32 / 3;
+    let tip_vy = tank.visible_size().1 as i32 - 1 - tank.cell(tip).unwrap().py as i32 / 3;
+    tank.drop_litter(36, 33, 20, crate::bio::chem::LITTER_SOFT_CODE);
+    let before = tank.live_cells();
+    let litter = tank.litter_total();
+    // Brush radius 0 on the *tip* cell only: the whole body goes.
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent { kind: 9, material: 0, x: tip_px as u16, y: tip_vy as u16, r: 0, variant: 0 }],
+        ..TankInput::default()
+    });
+    assert_eq!(tank.live_cells(), before - body as usize, "the body left whole");
+    assert_eq!(tank.corpse_count(), 0, "no corpse for a cull");
+    assert!(tank.cells().org(org).is_none());
+    // Litter under a wider brush at the centre goes too.
+    let _ = tank.remove_at(12, 13, 2);
+    assert!(tank.litter_total() < litter, "litter removed");
+}
+
+/// Phase 3 — a portrait is a pure function of the genome and shows the
+/// built body, not a single seed pixel.
+#[test]
+fn portraits_are_deterministic_and_show_the_body() {
+    use crate::archive::portrait;
+    use crate::bio::Genome;
+    let (w, h, px) = portrait(&Genome::algae());
+    assert_eq!((w, h), (1, 1));
+    assert_eq!(px[3], 255, "the algae is one opaque pixel");
+    let (w, h, straw) = portrait(&Genome::straw());
+    let opaque = straw.chunks(4).filter(|p| p[3] == 255).count();
+    assert!(opaque >= 3, "straw portrait has a chain ({w}×{h}, {opaque} px)");
+    assert!(w.max(h) >= 3, "straw is elongated ({w}×{h})");
+    assert_eq!(portrait(&Genome::straw()), (w, h, straw), "same genome, same picture");
+    let (gw, gh, giant) = portrait(&Genome::giant(4));
+    let opaque = giant.chunks(4).filter(|p| p[3] == 255).count();
+    assert!(opaque >= 9, "giant portrait is a grown cell ({gw}×{gh}, {opaque} px)");
+    let (sw, sh, spiny) = portrait(&Genome::spiny());
+    let ivory = spiny.chunks(4).filter(|p| p[..3] == [0xEF, 0xE7, 0xDA]).count();
+    assert!(ivory >= 1, "spiny portrait shows its bone ({sw}×{sh})");
+}
+
+/// Phase 3 — archive a creature, start a new tank from it: the record
+/// round-trips, the species is pinned, and the new tank's lineage
+/// continues the archived species by name and depth with the specimen
+/// as cross-tank ancestor.
+#[test]
+fn archive_specimen_and_seed_a_new_tank_from_it() {
+    use crate::archive::Specimen;
+    use crate::bio::{Block, Entry, Genome, NO_SPECIES};
+    let mut tank = water_box(21, 32, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    // A red straw: one structural step under the algae root → depth 2.
+    let mut g = Genome::straw();
+    g.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
+    let seed = tank.seed_genome_at(48, 30, g.clone()).expect("seed");
+    for _ in 0..300 {
+        tank.tick(&day());
+    }
+    let cell = tank.cell(seed).map(|_| seed).unwrap_or_else(|| tank.cells().live_ids()[0]);
+    let before = tank.lineage_card(cell).unwrap();
+    assert_eq!(before.archived_relatives, 0);
+    let sp = tank.archive_specimen(cell).expect("specimen");
+    assert_eq!(sp.species_name, before.species_name);
+    assert_eq!(sp.display_name, sp.species_name);
+    assert!(sp.lineage.len() >= 2, "{:?}", sp.lineage);
+    assert_eq!(sp.lineage.last().unwrap(), &sp.species_name);
+    assert!(sp.portrait_w >= 1 && sp.portrait.len() == sp.portrait_w as usize * sp.portrait_h as usize * 4);
+    assert!(sp.stats.cells >= 1);
+    assert_eq!(sp.archive_parent, None, "placed by hand, not from the archive");
+    assert_eq!(tank.lineage_card(cell).unwrap().archived_relatives, 1, "species pinned");
+    assert!(tank.species_tree().iter().any(|n| n.id == before.species && n.archived && !n.extinct));
+    let bytes = sp.to_bytes();
+    let back = Specimen::from_bytes(&bytes).expect("decode");
+    assert_eq!(back, sp);
+    assert!(Specimen::from_bytes(&bytes[..bytes.len() / 2]).is_none());
+    assert!(sp.page_text().contains(&sp.species_name));
+
+    // New tank, seeded from the specimen.
+    let mut fresh = water_box(22, 32, 24, 20);
+    let id = fresh.seed_specimen(&sp, 30, 30).expect("seed from archive");
+    let card = fresh.lineage_card(id).unwrap();
+    assert_eq!(card.species_name, sp.species_name, "the species continues by name");
+    assert_eq!(card.species_depth, sp.species_depth, "and by depth");
+    assert_eq!(card.generation, 0);
+    assert_eq!(card.mutations_since_seed, 0, "an archive seed is a lineage root");
+    assert_eq!(card.archived_relatives, 1);
+    assert_eq!(fresh.archive_parent_of(card.genotype), Some(sp.id));
+    assert_ne!(fresh.inspect(30, 30).species, NO_SPECIES);
+    // Its descendants inherit the archive ancestor and the save keeps it.
+    fresh.set_lambda_scale_q8(0);
+    for _ in 0..200 {
+        fresh.tick(&day());
+    }
+    let bytes = fresh.save_bytes().unwrap();
+    let mut loaded = Tank::load_bytes(&bytes).unwrap();
+    let any = loaded.cells().live_ids()[0];
+    let g2 = loaded.genotype_of_cell(any).unwrap();
+    assert_eq!(loaded.archive_parent_of(g2), Some(sp.id));
+    let sp2 = loaded.archive_specimen(any).expect("second specimen");
+    assert_eq!(sp2.archive_parent, Some(sp.id), "cross-tank ancestry travels with the record");
+    assert_ne!(sp2.id, sp.id);
+
+    // "New tank" convenience: n copies in open water on the preset.
+    let mut preset = Tank::preset(5);
+    let placed = preset.seed_specimen_copies(&sp, 4);
+    assert_eq!(placed, 4);
+    let tree = preset.species_tree();
+    let node = tree.iter().find(|n| n.name == sp.species_name).expect("archived species in the tree");
+    assert!(node.archived);
+    assert_eq!(node.live_cells, 4);
+    assert_eq!(node.parent, NO_SPECIES, "an archive seed is a root of this tank's tree");
+}

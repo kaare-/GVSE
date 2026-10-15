@@ -44,7 +44,7 @@ pub const MAX_VISIBLE_W: u32 = 256;
 pub const MAX_VISIBLE_H: u32 = 512;
 pub const MIN_VISIBLE: u32 = 4;
 
-pub const SAVE_VERSION: u32 = 6;
+pub const SAVE_VERSION: u32 = 8;
 
 // ---- biology (cell-language §a, §b, §c) ----
 

@@ -35,6 +35,39 @@ struct PixelLabel: View {
     }
 }
 
+extension GraphicsContext {
+    /// Draw `text` with `tank_glyph` at `origin` (top-left), 6 px advance.
+    func pixelText(_ text: String, at origin: CGPoint, scale: CGFloat, color: Color) {
+        var pen = origin.x
+        for scalar in text.unicodeScalars {
+            let bits = tank_glyph(scalar.value)
+            for row in 0..<7 {
+                let rowBits = UInt32((bits >> (row * 5)) & 0x1F)
+                for col in 0..<5 where (rowBits >> (4 - col)) & 1 == 1 {
+                    let rect = CGRect(
+                        x: pen + CGFloat(col) * scale,
+                        y: origin.y + CGFloat(row) * scale,
+                        width: scale,
+                        height: scale
+                    )
+                    fill(Path(rect), with: .color(color))
+                }
+            }
+            pen += 6 * scale
+        }
+    }
+}
+
+enum Palette {
+    static let paper = Color(red: 0.93, green: 0.89, blue: 0.78)
+    static let dimPaper = Color(red: 0.62, green: 0.6, blue: 0.54)
+    static let highlight = Color(red: 1, green: 0.92, blue: 0.7)
+    static let panel = Color(red: 0.09, green: 0.08, blue: 0.07)
+    static let wall = Color(red: 0.16, green: 0.13, blue: 0.11)
+    static let floor = Color(red: 0.24, green: 0.17, blue: 0.11)
+    static let water = Color(red: 0.4, green: 0.7, blue: 0.9)
+}
+
 /// Flat 9-slice-style panel: 2 px border, solid fill. The slices are
 /// equal because the Phase 0 chrome has no artwork yet.
 struct PixelPanel<Content: View>: View {

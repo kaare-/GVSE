@@ -96,6 +96,11 @@ pub mod ev {
     pub const MS_POISON: u32 = 41;
     pub const MS_SIGNALLING: u32 = 42;
     pub const MS_MOVED: u32 = 43;
+    /// A new species was founded (arg0 = species id); raw stream, every
+    /// founding.
+    pub const NEW_SPECIES: u32 = 22;
+    /// Milestone: a new species, rate-limited (arg0 = species id).
+    pub const MS_NEW_SPECIES: u32 = 44;
 }
 
 /// "Something moved" (§a.6): net cilia displacement over this window.
@@ -119,6 +124,7 @@ pub fn step(
     t_tank: f32,
     lambda_scale_q8: u32,
 ) -> BioStepResult {
+    genomes.set_tick(tick);
     let mut out = BioStepResult {
         events: Vec::new(),
         divisions: 0,
@@ -1060,6 +1066,7 @@ fn metabolise(
     if cell.brood {
         if cell.detach_gate.passes(&scalars) {
             if let Some(new_org) = cells.detach(genomes, id, tick) {
+                cells.note_child(cell.org);
                 out.events.push(SimEvent {
                     kind: ev::BROOD_RELEASED,
                     arg0: new_org,
@@ -1436,6 +1443,9 @@ fn try_divide(
             )
         }
     };
+    if matches!(spec.detach, Detach::Immediate) && daughter.is_some() {
+        cells.note_child(cell.org);
+    }
     let Some(did) = daughter else {
         minerals::give(coarse, ci, m_need);
         return false;

@@ -1,25 +1,37 @@
 import SwiftUI
 
 enum BuildTool: Int, CaseIterable {
-    case sand, rock, erase, pour, drain, fill, undo, remove, feed
+    case sand, rock, glass, erase, pour, drain, fill, undo
+    case look, scoop, remove, clean, feed, calcium, detritus
 
     var label: String {
         switch self {
         case .sand: return "SAND"
         case .rock: return "ROCK"
+        case .glass: return "GLASS"
         case .erase: return "DIG"
         case .pour: return "POUR"
         case .drain: return "DRAIN"
         case .fill: return "FILL"
         case .undo: return "UNDO"
-        case .remove: return "KILL"
-        case .feed: return "FEED"
+        case .look: return "LOOK"
+        case .scoop: return "SCOOP"
+        case .remove: return "TAKE"
+        case .clean: return "CLEAN"
+        case .feed: return "SUGAR"
+        case .calcium: return "LIME"
+        case .detritus: return "MULCH"
         }
     }
 
+    /// Build tools on the first row, the selection loop on the second.
+    static let buildRow: [BuildTool] = [.sand, .rock, .glass, .erase, .pour, .drain, .fill, .undo]
+    static let lifeRow: [BuildTool] = [.look, .scoop, .remove, .clean, .feed, .calcium, .detritus]
+
+    /// Tool event kind (`tank.h`); 0 for tools that are not strokes.
     var kind: UInt8 {
         switch self {
-        case .sand, .rock: return 1
+        case .sand, .rock, .glass: return 1
         case .erase: return 2
         case .pour: return 3
         case .drain: return 4
@@ -27,6 +39,10 @@ enum BuildTool: Int, CaseIterable {
         case .undo: return 6
         case .remove: return 9
         case .feed: return 10
+        case .calcium: return 11
+        case .detritus: return 12
+        case .clean: return 13
+        case .look, .scoop: return 0
         }
     }
 
@@ -34,8 +50,14 @@ enum BuildTool: Int, CaseIterable {
         switch self {
         case .sand: return 2 // Sand
         case .rock: return 1 // Stone
+        case .glass: return UInt8(TANK_GLASS)
         default: return 0
         }
+    }
+
+    /// Feeding tools switch the fingertip flashlight off (hold = pour).
+    var isFeed: Bool {
+        self == .feed || self == .calcium || self == .detritus
     }
 }
 
@@ -48,8 +70,43 @@ struct ToolWheel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            row(BuildTool.buildRow)
+            row(BuildTool.lifeRow)
+            HStack(spacing: 8) {
+                PixelLabel(text: tool == .scoop ? "BUCKET \(brush)" : "BRUSH \(brush)", scale: 2)
+                Button {
+                    brush = max(1, brush - 1)
+                } label: { PixelLabel(text: "-", scale: 3) }
+                .buttonStyle(.plain)
+                Button {
+                    brush = min(12, brush + 1)
+                } label: { PixelLabel(text: "+", scale: 3) }
+                .buttonStyle(.plain)
+                if tool == .sand || tool == .rock {
+                    PixelLabel(text: "TONE \(variant + 1)", scale: 2)
+                    Button {
+                        variant = (variant + 1) % 4
+                    } label: { PixelLabel(text: ">", scale: 3) }
+                    .buttonStyle(.plain)
+                }
+            }
+            if tool == .fill {
+                HStack {
+                    PixelLabel(text: "LEVEL", scale: 2)
+                    Slider(value: $fillLevel, in: 0...1)
+                        .tint(Color(red: 0.4, green: 0.7, blue: 0.9))
+                }
+                .frame(maxWidth: 220)
+            }
+        }
+        .padding(6)
+    }
+
+    /// Rows scroll sideways on narrow phones; the selected tool stays put.
+    private func row(_ tools: [BuildTool]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
-                ForEach(BuildTool.allCases, id: \.rawValue) { t in
+                ForEach(tools, id: \.rawValue) { t in
                     Button {
                         if t == .undo {
                             onUndo()
@@ -70,31 +127,6 @@ struct ToolWheel: View {
                     .buttonStyle(.plain)
                 }
             }
-            HStack(spacing: 8) {
-                PixelLabel(text: "BRUSH \(brush)", scale: 2)
-                Button {
-                    brush = max(1, brush - 1)
-                } label: { PixelLabel(text: "-", scale: 3) }
-                .buttonStyle(.plain)
-                Button {
-                    brush = min(12, brush + 1)
-                } label: { PixelLabel(text: "+", scale: 3) }
-                .buttonStyle(.plain)
-                PixelLabel(text: "TONE \(variant + 1)", scale: 2)
-                Button {
-                    variant = (variant + 1) % 4
-                } label: { PixelLabel(text: ">", scale: 3) }
-                .buttonStyle(.plain)
-            }
-            if tool == .fill {
-                HStack {
-                    PixelLabel(text: "LEVEL", scale: 2)
-                    Slider(value: $fillLevel, in: 0...1)
-                        .tint(Color(red: 0.4, green: 0.7, blue: 0.9))
-                }
-                .frame(maxWidth: 220)
-            }
         }
-        .padding(6)
     }
 }

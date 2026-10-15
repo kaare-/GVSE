@@ -209,6 +209,17 @@ pub struct OrgRec {
     /// Dead bone / shell pixels this body has laid (rigid, no upkeep).
     #[serde(default)]
     pub secretions: Vec<Secretion>,
+    /// Daughter organisms released (propagules and broods), for inspect.
+    #[serde(default)]
+    pub children: u32,
+}
+
+/// One organism lifted out of the tank by the scoop (Phase 3):
+/// its record and `(old id, cell)` pairs with absolute coordinates.
+#[derive(Debug, Clone)]
+pub struct OrgBundle {
+    pub org: OrgRec,
+    pub cells: Vec<(u32, CellRec)>,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +264,13 @@ impl CellStore {
 
     pub fn org(&self, org: u32) -> Option<&OrgRec> {
         self.orgs.get(org as usize).filter(|o| o.alive)
+    }
+
+    /// Count a released daughter organism on `org`.
+    pub fn note_child(&mut self, org: u32) {
+        if let Some(o) = self.orgs.get_mut(org as usize) {
+            o.children = o.children.saturating_add(1);
+        }
     }
 
     pub fn org_mut(&mut self, org: u32) -> Option<&mut OrgRec> {
@@ -375,6 +393,7 @@ impl CellStore {
             body_cost_fp: 0,
             born_tick: tick,
             secretions: Vec::new(),
+            children: 0,
         };
         if let Some(id) = self.org_free.pop() {
             self.orgs[id as usize] = rec;
@@ -1219,6 +1238,138 @@ impl CellStore {
             tick,
             world_seed,
         )
+    }
+
+    /// Lift a whole organism out of the tank (Phase 3 scoop): its cells
+    /// and secretions leave their pixels and the records travel in a
+    /// bundle with absolute coordinates. Glue to other organisms breaks
+    /// (division bonds travel). Genotype live counts are untouched —
+    /// the cells are alive in the bucket; `discard_bundle` settles them.
+    pub fn lift_org(&mut self, pixels: &mut PixelLayer, org_id: u32) -> Option<OrgBundle> {
+        let org = self.org(org_id)?.clone();
+        let ids: Vec<u32> = org.slots.iter().filter(|s| s.cell != NONE).map(|s| s.cell).collect();
+        let mut cells = Vec::with_capacity(ids.len());
+        for &id in &ids {
+            let Some(mut c) = self.cells.get(id as usize).copied().filter(|c| c.alive) else {
+                continue;
+            };
+            release_rect(pixels, c.px, c.py, c.w, c.h, id + OWNER_BIAS);
+            c.glue_to = NONE;
+            c.glue_strength = 0;
+            cells.push((id, c));
+            self.cells[id as usize].alive = false;
+            self.free.push(id);
+            self.live -= 1;
+        }
+        for c in self.cells.iter_mut() {
+            if c.alive && ids.contains(&c.glue_to) {
+                c.glue_to = NONE;
+                c.glue_strength = 0;
+            }
+        }
+        let pw = pixels.w as usize;
+        for s in &org.secretions {
+            let idx = s.py as usize * pw + s.px as usize;
+            if pixels.owner[idx] == secretion_owner(s.kind) {
+                pixels.owner[idx] = EMPTY_OWNER;
+            }
+        }
+        if let Some(o) = self.orgs.get_mut(org_id as usize) {
+            o.alive = false;
+            o.slots = Vec::new();
+            o.secretions = Vec::new();
+            o.n_alive = 0;
+        }
+        self.org_free.push(org_id);
+        Some(OrgBundle { org, cells })
+    }
+
+    /// Whether `bundle` fits at offset `(dx, dy)`: every cell footprint
+    /// and secretion lands in bounds, on an unowned pixel that `open`
+    /// accepts.
+    pub fn bundle_fits(
+        &self,
+        pixels: &PixelLayer,
+        bundle: &OrgBundle,
+        dx: i32,
+        dy: i32,
+        open: &dyn Fn(i32, i32) -> bool,
+    ) -> bool {
+        let pw = pixels.w as i32;
+        let ph = pixels.h as i32;
+        let free = |x: i32, y: i32| -> bool {
+            x >= 0
+                && y >= 0
+                && x < pw
+                && y < ph
+                && pixels.owner[(y * pw + x) as usize] == EMPTY_OWNER
+                && open(x, y)
+        };
+        for (_, c) in &bundle.cells {
+            for yy in 0..c.h as i32 {
+                for xx in 0..c.w as i32 {
+                    if !free(c.px as i32 + dx + xx, c.py as i32 + dy + yy) {
+                        return false;
+                    }
+                }
+            }
+        }
+        bundle
+            .org
+            .secretions
+            .iter()
+            .all(|s| free(s.px as i32 + dx, s.py as i32 + dy))
+    }
+
+    /// Put a lifted organism back at offset `(dx, dy)` under fresh ids
+    /// (check `bundle_fits` first). Returns the new organism id.
+    pub fn place_bundle(&mut self, pixels: &mut PixelLayer, bundle: &OrgBundle, dx: i32, dy: i32) -> u32 {
+        let map: Vec<(u32, u32)> = bundle.cells.iter().map(|(old, _)| (*old, self.alloc_cell())).collect();
+        let remap = |old: u32| map.iter().find(|(o, _)| *o == old).map(|(_, n)| *n).unwrap_or(NONE);
+        let mut org = bundle.org.clone();
+        org.alive = true;
+        org.seed = remap(org.seed);
+        org.origin_x += dx;
+        org.origin_y += dy;
+        org.n_alive = 0;
+        for s in org.slots.iter_mut() {
+            if s.cell != NONE {
+                s.cell = remap(s.cell);
+            }
+        }
+        let org_id = if let Some(id) = self.org_free.pop() {
+            self.orgs[id as usize] = org;
+            id
+        } else {
+            let id = self.orgs.len() as u32;
+            self.orgs.push(org);
+            id
+        };
+        let pw = pixels.w as i32;
+        for (old, c) in &bundle.cells {
+            let new = remap(*old);
+            let mut c = *c;
+            c.px = (c.px as i32 + dx) as u16;
+            c.py = (c.py as i32 + dy) as u16;
+            c.org = org_id;
+            c.parent_cell = if c.parent_cell == NONE { NONE } else { remap(c.parent_cell) };
+            c.alive = true;
+            c.corpse = 0;
+            claim_rect(pixels, c.px, c.py, c.w, c.h, new + OWNER_BIAS);
+            self.cells[new as usize] = c;
+            self.live += 1;
+            if let Some(o) = self.orgs.get_mut(org_id as usize) {
+                o.n_alive += 1;
+            }
+        }
+        if let Some(o) = self.orgs.get_mut(org_id as usize) {
+            for s in o.secretions.iter_mut() {
+                s.px = (s.px as i32 + dx) as u16;
+                s.py = (s.py as i32 + dy) as u16;
+                pixels.owner[(s.py as i32 * pw + s.px as i32) as usize] = secretion_owner(s.kind);
+            }
+        }
+        org_id
     }
 
     /// Raw access for save/load.

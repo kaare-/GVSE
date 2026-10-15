@@ -193,6 +193,10 @@ pub fn rebuild_light(
                 if cell.sat >= WATER_SAT_RENDER {
                     incoming = incoming * 999 / 1000;
                 }
+            } else if cell.is_glass() {
+                // A pane loses ≈ 7 % per physics cell; a holding tank is
+                // not a shadow.
+                incoming = incoming * 250 / 256;
             } else {
                 // 0.45 per physics cell ≈ 0.766 per pixel row.
                 incoming = incoming * 196 / 256;
@@ -293,6 +297,9 @@ pub fn enzyme_band_colour(key: u8) -> [u8; 3] {
 
 fn albedo(cell: Cell) -> [u8; 3] {
     let v = cell.colour_variant() as usize;
+    if cell.is_glass() {
+        return [0xC4, 0xE2, 0xEC];
+    }
     if cell.is_open() {
         if cell.sat < WATER_SAT_RENDER {
             return [0x1b, 0x24, 0x30];

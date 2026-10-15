@@ -3,13 +3,53 @@ import Foundation
 import QuartzCore
 import UIKit
 
+/// What the inspect card shows for the creature under the finger. Numbers
+/// come from `tank_inspect_cell`/`tank_lineage`; the rectangle is refreshed
+/// every frame from `tank_org_bbox` so the card follows the body. Never
+/// the genome.
+struct InspectState: Equatable {
+    var cell: UInt32
+    var org: UInt32
+    var species: UInt16
+    var speciesName: String
+    var parentName: String?
+    var generation: UInt32
+    var orgCells: UInt32
+    var gluedKin: UInt32
+    var ageTicks: UInt32
+    var maxAgeTicks: UInt32
+    var children: UInt32
+    var energyFrac: UInt8
+    var stress: UInt8
+    var lineage: LineageRec
+    /// Tracking rectangle in view points (nil when the body is gone).
+    var rect: CGRect?
+    var alive = true
+
+    static func == (a: InspectState, b: InspectState) -> Bool {
+        a.cell == b.cell && a.org == b.org && a.rect == b.rect && a.alive == b.alive
+            && a.energyFrac == b.energyFrac && a.ageTicks == b.ageTicks
+            && a.children == b.children && a.orgCells == b.orgCells
+    }
+}
+
+/// One species of the tree-of-life view with its name resolved.
+struct SpeciesNode: Identifiable {
+    let rec: SpeciesNodeRec
+    let name: String
+    var id: UInt16 { rec.id }
+    var parent: UInt16? { rec.parent == UInt16(TANK_NO_SPECIES) ? nil : rec.parent }
+}
+
 /// Owns the tank handle, the 30 Hz step, tools, slots, and save/resume.
 /// Backgrounding saves and drops leftover frame time so the sim does
 /// not catch up the wall clock.
 final class TankSession: ObservableObject {
     @Published private(set) var isDay = true
     @Published private(set) var consent = false
-    @Published var tool: BuildTool = .sand
+    @Published var tool: BuildTool = .sand {
+        didSet { if tool != .look && tool != oldValue { inspected = nil } }
+    }
     @Published var brush = 3
     @Published var variant = 0
     @Published var fillLevel = 0.55
@@ -18,8 +58,17 @@ final class TankSession: ObservableObject {
     @Published var magnifierPinned = false
     @Published var magnifierPoint: CGPoint?
     @Published var cameraTiltDegrees: Double = 0
+    @Published private(set) var inspected: InspectState?
+    /// Cells in the scoop bucket; 0 = empty.
+    @Published private(set) var carriedCells = 0
+    /// Short pixel-font toast ("NO ROOM", "ARCHIVED").
+    @Published private(set) var hint: String?
+    @Published private(set) var liveCells: UInt32 = 0
+
+    let archive = ArchiveStore()
 
     private var handle: OpaquePointer?
+    private var carried: OpaquePointer?
     private var link: CADisplayLink?
     private var pump: DisplayPump?
     private weak var metal: TankMetalView?
@@ -30,6 +79,8 @@ final class TankSession: ObservableObject {
     private let motion = CMMotionManager()
     private var lastGravX: Float = 0
     private var lastGravY: Float = -1
+    private var frame = 0
+    private var hintToken = 0
 
     private var docs: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -57,6 +108,7 @@ final class TankSession: ObservableObject {
     deinit {
         link?.invalidate()
         motion.stopDeviceMotionUpdates()
+        dropBucket()
         tank_free(handle)
     }
 
@@ -81,6 +133,9 @@ final class TankSession: ObservableObject {
         self.link = link
     }
 
+    /// The bucket is not part of the save: whatever is carried goes back
+    /// into the tank where it was scooped, or is lost if that no longer
+    /// fits, before the file is written.
     func pauseAndSave() {
         running = false
         accumulator = 0
@@ -88,6 +143,7 @@ final class TankSession: ObservableObject {
         link = nil
         pump = nil
         motion.stopDeviceMotionUpdates()
+        dropBucket()
         saveCurrent()
     }
 
@@ -117,6 +173,7 @@ final class TankSession: ObservableObject {
     }
 
     func selectSlot(_ index: Int) {
+        dropBucket()
         saveCurrent()
         slot = max(0, min(2, index))
         UserDefaults.standard.set(slot, forKey: "activeSlot")
@@ -124,10 +181,47 @@ final class TankSession: ObservableObject {
     }
 
     func newTank() {
+        dropBucket()
+        inspected = nil
         tank_free(handle)
         handle = tank_empty(UInt64(Date().timeIntervalSince1970))
         pendingTools.removeAll()
         saveCurrent()
+    }
+
+    /// Replace the current slot with a fresh half-full tank seeded with a
+    /// few copies of an archived creature. Returns how many were placed.
+    @discardableResult
+    func newTank(from specimen: ArchivedSpecimen, copies: UInt32 = 3) -> UInt32 {
+        dropBucket()
+        inspected = nil
+        tank_free(handle)
+        let fresh = tank_empty(UInt64(Date().timeIntervalSince1970))
+        handle = fresh
+        pendingTools.removeAll()
+        guard let fresh else { return 0 }
+        // Fill to the default level before the first tick so the copies
+        // land in standing water.
+        var w: UInt32 = 0
+        var h: UInt32 = 0
+        _ = tank_pixels(fresh, &w, &h)
+        let cells = max(Int(h) / 3, 1)
+        var fill = ToolEvent(kind: 5, material: 0, x: 0, y: UInt16(Double(cells) * fillLevel), r: 1, variant: 0, _pad: 0)
+        withUnsafePointer(to: &fill) { ptr in
+            var input = TankInput(
+                grav_x: 0, grav_y: -1, paused: 0, always_day: 0, swirl: 0, _pad1: 0,
+                light_slider: 1, t_base: 15, flash_x: 0, flash_y: 0, flash_r: 0,
+                tools: ptr, tool_count: 1
+            )
+            tank_tick(fresh, &input)
+        }
+        let placed = specimen.bytes.withUnsafeBytes { raw -> UInt32 in
+            let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            return tank_seed_specimen_copies(fresh, base, raw.count, copies)
+        }
+        saveCurrent()
+        showHint(placed > 0 ? "\(placed) PLACED" : "NO ROOM")
+        return placed
     }
 
     func undo() {
@@ -143,20 +237,101 @@ final class TankSession: ObservableObject {
         // pixel height / 3 = visible physics height
         let cells = max(Int(h) / 3, 1)
         let level = UInt16(Double(cells) * fillLevel)
-        var tool = ToolEvent(
-            kind: 5,
-            material: 0,
-            x: 0,
-            y: level,
-            r: 1,
-            variant: 0,
-            _pad: 0
-        )
-        pendingTools.append(tool)
-        _ = tool
+        pendingTools.append(ToolEvent(kind: 5, material: 0, x: 0, y: level, r: 1, variant: 0, _pad: 0))
     }
 
+    // MARK: inspect / archive
+
+    func closeInspect() {
+        inspected = nil
+    }
+
+    /// Archive the inspected creature. The species is pinned in the tank
+    /// (continues as a true root when it reappears from the book).
+    func archiveInspected() {
+        guard let handle, let inspected, inspected.alive else { return }
+        let need = tank_specimen(handle, inspected.cell, nil, 0)
+        guard need > 0 else {
+            showHint("GONE")
+            return
+        }
+        var buf = [UInt8](repeating: 0, count: need)
+        let wrote = tank_specimen(handle, inspected.cell, &buf, need)
+        guard wrote == need, archive.add(bytes: Data(buf)) != nil else {
+            showHint("GONE")
+            return
+        }
+        showHint("ARCHIVED")
+        refreshInspect(force: true)
+    }
+
+    /// The whole tree-of-life, roots first, with names.
+    func speciesTree() -> [SpeciesNode] {
+        guard let handle else { return [] }
+        let count = Int(tank_species_tree(handle, nil, 0))
+        guard count > 0 else { return [] }
+        var recs = [SpeciesNodeRec](repeating: SpeciesNodeRec(), count: count)
+        let got = Int(tank_species_tree(handle, &recs, UInt32(count)))
+        return recs.prefix(got).map { SpeciesNode(rec: $0, name: speciesName($0.id)) }
+    }
+
+    func speciesName(_ species: UInt16) -> String {
+        guard let handle, species != UInt16(TANK_NO_SPECIES) else { return "" }
+        let need = tank_species_name(handle, species, nil, 0)
+        var buf = [UInt8](repeating: 0, count: Int(need) + 1)
+        _ = tank_species_name(handle, species, &buf, UInt32(buf.count))
+        return String(decoding: buf.prefix(Int(need)), as: UTF8.self)
+    }
+
+    // MARK: scoop
+
+    /// Throw the bucket's contents away (the "DUMP" button).
+    func discardBucket() {
+        guard let handle, let carried else { return }
+        tank_discard(handle, carried)
+        self.carried = nil
+        carriedCells = 0
+        showHint("DUMPED")
+    }
+
+    /// Put the bucket back where it came from; what no longer fits is lost.
+    private func dropBucket() {
+        guard let carried else { return }
+        if let handle {
+            tank_discard(handle, carried)
+        } else {
+            tank_carried_free(carried)
+        }
+        self.carried = nil
+        carriedCells = 0
+    }
+
+    private func scoop(at point: CGPoint) {
+        guard let handle, carried == nil, let px = pixel(at: point) else { return }
+        let r = Int32(max(brush, 1) * 3)
+        guard let bucket = tank_scoop(handle, Int32(px.x), Int32(px.y), r) else {
+            showHint("EMPTY")
+            return
+        }
+        carried = bucket
+        carriedCells = Int(tank_carried_cells(bucket))
+        inspected = nil
+    }
+
+    private func release(at point: CGPoint) {
+        guard let handle, let carried, let px = pixel(at: point) else { return }
+        if tank_release(handle, carried, Int32(px.x), Int32(px.y)) != 0 {
+            self.carried = nil
+            carriedCells = 0
+        } else {
+            showHint("NO ROOM")
+        }
+    }
+
+    // MARK: persistence
+
     private func loadSlot(_ index: Int) {
+        inspected = nil
         tank_free(handle)
         handle = nil
         let url = saveURL(for: index)
@@ -204,6 +379,8 @@ final class TankSession: ObservableObject {
         }
     }
 
+    // MARK: touch
+
     private func handleTouch(point: CGPoint?, ended: Bool) {
         guard let point else {
             if ended && !magnifierPinned {
@@ -212,7 +389,8 @@ final class TankSession: ObservableObject {
             }
             return
         }
-        if tool == .fill {
+        switch tool {
+        case .fill:
             // Vertical position sets the fill level.
             if let metal {
                 let frac = 1.0 - Double(point.y / max(metal.bounds.height, 1))
@@ -220,18 +398,108 @@ final class TankSession: ObservableObject {
                 applyFillSlider()
             }
             return
+        case .look:
+            magnifierPoint = point
+            metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
+            inspect(at: point, ended: ended)
+            if ended { clearLensSoon() }
+            return
+        case .scoop:
+            // Empty bucket: a tap scoops. Full bucket: a tap releases.
+            if ended {
+                if carried == nil { scoop(at: point) } else { release(at: point) }
+            }
+            magnifierPoint = point
+            metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
+            if ended { clearLensSoon() }
+            return
+        default:
+            break
         }
         magnifierPoint = point
         metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
         queueStroke(at: point)
-        if ended && !magnifierPinned {
-            // Keep the last stroke; clear the lens after a short beat.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                guard let self, !self.magnifierPinned else { return }
-                self.magnifierPoint = nil
-                self.metal?.magnifier = nil
+        if ended { clearLensSoon() }
+    }
+
+    private func clearLensSoon() {
+        guard !magnifierPinned else { return }
+        // Keep the last stroke; clear the lens after a short beat.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, !self.magnifierPinned else { return }
+            self.magnifierPoint = nil
+            self.metal?.magnifier = nil
+        }
+    }
+
+    private func inspect(at point: CGPoint, ended: Bool) {
+        guard let handle, let px = pixel(at: point) else { return }
+        let rec = tank_inspect_cell(handle, UInt32(px.x), UInt32(px.y))
+        if rec.cell == UInt32(TANK_NO_CELL) {
+            // A tap on open water closes the card; a drag keeps the last hit.
+            guard ended else { return }
+            if let r = inspected?.rect, r.insetBy(dx: -24, dy: -24).contains(point) {
+                return
+            }
+            inspected = nil
+            return
+        }
+        apply(rec)
+    }
+
+    private func apply(_ rec: CellInspectRec) {
+        guard let handle else { return }
+        let lineage = tank_lineage(handle, rec.cell)
+        let parent = lineage.parent_species == UInt16(TANK_NO_SPECIES) ? nil : speciesName(lineage.parent_species)
+        inspected = InspectState(
+            cell: rec.cell,
+            org: rec.org,
+            species: rec.species,
+            speciesName: speciesName(rec.species),
+            parentName: parent,
+            generation: rec.generation,
+            orgCells: rec.org_cells,
+            gluedKin: rec.glued_kin,
+            ageTicks: rec.age_ticks,
+            maxAgeTicks: rec.max_age_ticks,
+            children: rec.children,
+            energyFrac: rec.energy_frac,
+            stress: rec.stress,
+            lineage: lineage,
+            rect: viewRect(x0: rec.bbox_x0, y0: rec.bbox_y0, x1: rec.bbox_x1, y1: rec.bbox_y1)
+        )
+    }
+
+    /// Every frame: move the rectangle with the body. Every 10th frame:
+    /// re-read the numbers by finding the body again inside its rectangle.
+    private func refreshInspect(force: Bool = false) {
+        guard let handle, var state = inspected else { return }
+        var x0: UInt16 = 0, y0: UInt16 = 0, x1: UInt16 = 0, y1: UInt16 = 0
+        if tank_org_bbox(handle, state.org, &x0, &y0, &x1, &y1) == 0 {
+            if state.alive {
+                state.alive = false
+                state.rect = nil
+                inspected = state
+                showHint("GONE")
+            }
+            return
+        }
+        state.rect = viewRect(x0: x0, y0: y0, x1: x1, y1: y1)
+        if force || frame % 10 == 0 {
+            var probes = 0
+            search: for py in y0...y1 {
+                for px in x0...x1 {
+                    probes += 1
+                    if probes > 2048 { break search }
+                    let rec = tank_inspect_cell(handle, UInt32(px), UInt32(py))
+                    if rec.cell != UInt32(TANK_NO_CELL) && rec.org == state.org {
+                        apply(rec)
+                        return
+                    }
+                }
             }
         }
+        inspected = state
     }
 
     private func queueStroke(at point: CGPoint) {
@@ -249,8 +517,19 @@ final class TankSession: ObservableObject {
         )
     }
 
-    /// Map a view touch to a visible physics cell (origin bottom-left).
-    private func physicsCell(at point: CGPoint) -> (UInt16, UInt16)? {
+    // MARK: coordinates
+
+    private struct Blit {
+        var w: CGFloat
+        var h: CGFloat
+        var k: CGFloat
+        var ox: CGFloat
+        var oy: CGFloat
+        var scale: CGFloat
+    }
+
+    /// The same letterbox the Metal view uses: integer scale `k`, centred.
+    private func blit() -> Blit? {
         guard let metal, let handle else { return nil }
         var w: UInt32 = 0
         var h: UInt32 = 0
@@ -262,14 +541,34 @@ final class TankSession: ObservableObject {
         let k = max(1, floor(min(drawableW / CGFloat(w), drawableH / CGFloat(h))))
         let tw = CGFloat(w) * k
         let th = CGFloat(h) * k
-        let ox = (drawableW - tw) * 0.5
-        let oy = (drawableH - th) * 0.5
-        let px = (point.x * scale - ox) / k
-        let py = (point.y * scale - oy) / k
-        guard px >= 0, py >= 0, px < CGFloat(w), py < CGFloat(h) else { return nil }
-        let cellX = UInt16(px / 3)
-        let cellYFromTop = UInt16(py / 3)
-        let cellsH = UInt16(h / 3)
+        return Blit(w: CGFloat(w), h: CGFloat(h), k: k, ox: (drawableW - tw) * 0.5, oy: (drawableH - th) * 0.5, scale: scale)
+    }
+
+    /// View point → tank pixel (top-left origin, as `tank_pixels`).
+    private func pixel(at point: CGPoint) -> (x: Int, y: Int)? {
+        guard let b = blit() else { return nil }
+        let px = (point.x * b.scale - b.ox) / b.k
+        let py = (point.y * b.scale - b.oy) / b.k
+        guard px >= 0, py >= 0, px < b.w, py < b.h else { return nil }
+        return (Int(px), Int(py))
+    }
+
+    /// Inclusive pixel box → view rectangle in points.
+    private func viewRect(x0: UInt16, y0: UInt16, x1: UInt16, y1: UInt16) -> CGRect? {
+        guard let b = blit() else { return nil }
+        let left = (CGFloat(x0) * b.k + b.ox) / b.scale
+        let top = (CGFloat(y0) * b.k + b.oy) / b.scale
+        let right = (CGFloat(Int(x1) + 1) * b.k + b.ox) / b.scale
+        let bottom = (CGFloat(Int(y1) + 1) * b.k + b.oy) / b.scale
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
+    }
+
+    /// Map a view touch to a visible physics cell (origin bottom-left).
+    private func physicsCell(at point: CGPoint) -> (UInt16, UInt16)? {
+        guard let b = blit(), let px = pixel(at: point) else { return nil }
+        let cellX = UInt16(px.x / 3)
+        let cellYFromTop = UInt16(px.y / 3)
+        let cellsH = UInt16(Int(b.h) / 3)
         let cellY = cellsH > 0 ? cellsH - 1 - cellYFromTop : 0
         return (cellX, cellY)
     }
@@ -282,6 +581,18 @@ final class TankSession: ObservableObject {
         return (Int32(cell.0), Int32(cell.1), 8)
     }
 
+    private func showHint(_ text: String) {
+        hint = text
+        hintToken += 1
+        let token = hintToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            guard let self, self.hintToken == token else { return }
+            self.hint = nil
+        }
+    }
+
+    // MARK: frame
+
     private func advance(_ dt: CFTimeInterval) {
         guard running, let handle else { return }
         accumulator += dt
@@ -289,7 +600,7 @@ final class TankSession: ObservableObject {
         while accumulator >= step && steps < 4 {
             var tools = pendingTools
             pendingTools.removeAll(keepingCapacity: true)
-            let flash = tool == .feed ? (0, 0, 0) : flashlightCell()
+            let flash = tool.isFeed ? (0, 0, 0) : flashlightCell()
             tools.withUnsafeBufferPointer { buf in
                 var input = TankInput(
                     grav_x: lastGravX,
@@ -314,10 +625,17 @@ final class TankSession: ObservableObject {
         if steps == 4 {
             accumulator = 0
         }
+        frame &+= 1
         var w: UInt32 = 0
         var h: UInt32 = 0
         if let pixels = tank_pixels(handle, &w, &h) {
             metal?.present(pixels: pixels, width: Int(w), height: Int(h))
+        }
+        if steps > 0 {
+            refreshInspect()
+            if frame % 30 == 0 {
+                liveCells = tank_live_cells(handle)
+            }
         }
         let day = tank_is_day(handle) != 0
         if day != isDay {
