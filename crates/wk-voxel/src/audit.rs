@@ -138,7 +138,8 @@ pub fn sat_totals(world: &World) -> SatTotals {
             .map(|&v| v as i64)
             .sum::<i64>();
     let pipe = crate::pipe::pipe_mass_sat(world);
-    let backlog = crate::frozen_backlog::frozen_backlog_total(world);
+    let backlog = crate::frozen_backlog::frozen_backlog_total(world)
+        + crate::seam::seam_backlog_water_total(world);
     SatTotals {
         free_air,
         pore,
@@ -172,7 +173,8 @@ pub fn mineral_total(world: &World) -> i64 {
             .values()
             .map(|&v| v as i64)
             .sum::<i64>()
-        + crate::frozen_backlog::frozen_backlog_dissolved_total(world);
+        + crate::frozen_backlog::frozen_backlog_dissolved_total(world)
+        + crate::seam::seam_backlog_dissolved_total(world);
     solid + load
 }
 
@@ -195,7 +197,8 @@ pub fn sediment_total(world: &World) -> i64 {
             .values()
             .map(|&v| v as i64)
             .sum::<i64>()
-        + crate::frozen_backlog::frozen_backlog_sediment_total(world);
+        + crate::frozen_backlog::frozen_backlog_sediment_total(world)
+        + crate::seam::seam_backlog_sediment_total(world);
     solid + load
 }
 

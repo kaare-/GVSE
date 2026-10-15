@@ -38,6 +38,7 @@ pub mod pore_ice;
 pub mod rules;
 pub mod save;
 pub mod sediment;
+pub mod seam;
 pub mod shade;
 pub mod sim_clock;
 pub mod sim_preset;
@@ -60,6 +61,12 @@ pub use chunk_store::{
 pub use frozen_backlog::{
     absorb_water, apply_frozen_backlog, frozen_backlog_dissolved_total, frozen_backlog_sediment_total,
     frozen_backlog_total, should_absorb_missing, FrozenBacklog,
+};
+pub use seam::{
+    absorb_seam_water, apply_inbound, attach_open_seam, exchange_seam_p0, export_seam_face,
+    seam_backlog_dissolved_total, seam_backlog_sediment_total, seam_backlog_water_total,
+    should_absorb_seam, take_outbound, SeamConfig, SeamSide, SeamState, SeamTransfer,
+    SEAM_FACE_EXPORT_MAX,
 };
 pub use streaming::{
     clear_planned_dirty, filter_plan_to_stream, stream_allows_hx, stream_allows_world_x,

@@ -6,6 +6,7 @@
 
 mod present;
 pub mod ipc;
+pub mod seam_ipc;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -14,16 +15,17 @@ use serde::{Deserialize, Serialize};
 
 use wk_material::MaterialId;
 use wk_voxel::{
-    apply_season_sky_tint, celestial_local_cfg, climate_with_season, day_night_factor_cfg,
-    is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, season_fraction_cfg,
-    cave_humidity_haze_wash, restore_all_from_store, sky_rgb_at_height_phased, sky_rgb_phased,
-    stamp_world, steam_haze_wash, step_world, sync_residency, wake_floating_competent,
-    Blueprint, CarbonBudget, CarbonConfig, Cell, ClimateConfig, CloudConfig, CloudStore,
-    CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap,
-    GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig,
-    PhaseConfig, SimSnapshot, SpawnFail, SteamConfig, StreamWindow, SupportMap,
-    SyncResidencyStats, Temperature, Wind, World, WorldStep, WorldStepConfig, WorldgenParams,
-    CHUNK_CELLS_W, STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
+    apply_season_sky_tint, attach_open_seam, celestial_local_cfg, climate_with_season,
+    day_night_factor_cfg, export_seam_face, is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg,
+    season_fraction_cfg, cave_humidity_haze_wash, restore_all_from_store, sky_rgb_at_height_phased,
+    sky_rgb_phased, stamp_world, steam_haze_wash, step_world, sync_residency,
+    wake_floating_competent, apply_inbound, take_outbound, Blueprint, CarbonBudget, CarbonConfig,
+    Cell, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig,
+    EvapConfig, FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity, KarstConfig,
+    LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SeamSide, SeamTransfer,
+    SimSnapshot, SpawnFail, SteamConfig, StreamWindow, SupportMap, SyncResidencyStats, Temperature,
+    Wind, World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, SEAM_FACE_EXPORT_MAX,
+    STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
 
 /// Bump when [`ViewFrame`] field layout breaks.
@@ -538,6 +540,35 @@ impl Host {
         let mut params = compact_worldgen_params();
         params.seed = seed;
         Self::new(params)
+    }
+
+    /// Dig F1: open one Lab seam face on a non-wrapping strip (clears ring wrap).
+    pub fn enable_lab_seam(&mut self, side: SeamSide) {
+        let width = self.params.width_cols.max(1);
+        self.params.wrap_x = false;
+        attach_open_seam(&mut self.world, width, side);
+    }
+
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
+    pub fn world_tick(&self) -> u64 {
+        self.world.tick
+    }
+
+    /// Export face sat into outbound, then drain for the wire.
+    pub fn drain_seam_outbound(&mut self, side: SeamSide) -> SeamTransfer {
+        export_seam_face(&mut self.world, side, SEAM_FACE_EXPORT_MAX);
+        take_outbound(&mut self.world, side)
+    }
+
+    pub fn apply_seam_inbound(&mut self, side: SeamSide, transfer: SeamTransfer) {
+        apply_inbound(&mut self.world, side, transfer);
     }
 
     pub fn new(params: WorldgenParams) -> Self {
