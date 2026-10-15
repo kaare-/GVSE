@@ -124,6 +124,9 @@ pub struct CellRec {
     pub moved_dx: i8,
     #[serde(default)]
     pub moved_dy: i8,
+    /// Ticks a THERMO cell has held ≥ +3 °C over ambient (Phase 4).
+    #[serde(default)]
+    pub warm: u8,
 }
 
 /// How long a dead cell stays a visible corpse before it crumbles.
@@ -166,6 +169,7 @@ impl CellRec {
             link_avg: [0; crate::consts::MAX_LINKS],
             moved_dx: 0,
             moved_dy: 0,
+            warm: 0,
         }
     }
 

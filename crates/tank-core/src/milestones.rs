@@ -126,6 +126,7 @@ impl Milestones {
                 ev::POISON => self.fire_once(ev::MS_POISON, e.arg0, out),
                 ev::SIGNALLING => self.fire_once(ev::MS_SIGNALLING, e.arg0, out),
                 ev::MOVED => self.fire_once(ev::MS_MOVED, e.arg0, out),
+                ev::WARM_BLOODED => self.fire_once(ev::MS_WARM_BLOODED, e.arg0, out),
                 ev::HETEROTROPH => {
                     // A lineage living on glucose this many generations deep.
                     let deep = cells

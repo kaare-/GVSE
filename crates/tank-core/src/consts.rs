@@ -68,6 +68,21 @@ pub const GLUCOSE_UNIT_FP: i32 = FP / 64;
 /// water for minutes, not forever (K2#8: matter stays in the tank).
 pub const FINES_SETTLE_EVERY: u64 = 30;
 pub const FINES_SETTLE_DIV: f32 = 60.0;
+/// `cloud[x] = exp(−CLOUD_K · fines[x])` (fines in grams; §4).
+pub const CLOUD_K: f32 = 0.004;
+/// Settled fines pile this many pixels up a column before they wait.
+pub const FINES_PILE_PX: usize = 72;
+/// Share of open-water lysis that drifts off as fines (Q8, 10 %).
+pub const LYSIS_FINES_Q8: u32 = 26;
+/// Neighbouring columns share fines (3-tap blur) this often.
+pub const FINES_BLUR_EVERY: u64 = 16;
+/// "Water is cloudy" when the mean cloud factor falls under this, with a
+/// cooldown before it can fire again.
+pub const CLOUDY_MEAN: f32 = 0.6;
+pub const CLOUDY_COOLDOWN: u64 = 5400;
+/// Swirl resuspension: `fines[x] += SWIRL_RESUSPEND · |tilt| · litter_g`
+/// per second (§4), applied every `FINES_SETTLE_EVERY` ticks.
+pub const SWIRL_RESUSPEND: f32 = 0.02;
 
 /// Ticks between pixel growth steps toward the mode shape.
 pub const T_GROW: u16 = 8;
@@ -132,3 +147,40 @@ pub const TISSUE_DAM_PIXELS: u8 = 5;
 /// Light absorbed per PHOTO pixel row (×0.5) and per other tissue (×0.75), Q8.
 pub const TISSUE_PASS_PHOTO_Q8: u32 = 128;
 pub const TISSUE_PASS_OTHER_Q8: u32 = 192;
+
+// ---- Phase 4: thermal cycle (`evolution-system.md` §4), THERMO (§a.7) ----
+
+/// Solar heating at full light: `T_direct = ΔT_light · L` (≈ 25 °C at
+/// midday on the 15 °C default).
+pub const DT_LIGHT_C: f32 = 10.0;
+/// `T_tank = T_base + 0.4·T_direct + 0.6·S`.
+pub const T_DIRECT_WEIGHT: f32 = 0.4;
+pub const T_STORED_WEIGHT: f32 = 0.6;
+/// Stored-heat time constant per material class, as a fraction of the
+/// full tank day (`τ = CYCLE_TICKS · Σ fraction · weight`): air, water,
+/// sand / soil, rock / glass, biomass.
+pub const TAU_AIR: f32 = 0.02;
+pub const TAU_WATER: f32 = 0.08;
+pub const TAU_SAND: f32 = 0.12;
+pub const TAU_ROCK: f32 = 0.20;
+pub const TAU_BIO: f32 = 0.10;
+/// Material fractions are re-counted this often (ticks).
+pub const THERMAL_MASS_EVERY: u64 = 64;
+/// `T_local` is stored in quarter degrees; THERMO may lift a coarse cell
+/// at most this far over ambient (+12 °C).
+pub const T_LOCAL_CAP_Q2: i8 = 48;
+/// A THERMO unit adds one quarter degree to its coarse cell every this
+/// many ticks (+0.75 °C per unit per second, §a.7).
+pub const THERMO_INJECT_EVERY: u64 = 10;
+/// `T_local` leaks toward ambient: every `T_LOCAL_RELAX_EVERY` ticks a
+/// cell loses `max(1, v / T_LOCAL_RELAX_DIV)` (τ ≈ 4 s), and diffuses to
+/// its four neighbours every `T_LOCAL_DIFFUSE_EVERY` ticks.
+pub const T_LOCAL_RELAX_EVERY: u64 = 4;
+pub const T_LOCAL_RELAX_DIV: i16 = 30;
+pub const T_LOCAL_DIFFUSE_EVERY: u64 = 16;
+/// Running THERMO costs 0.04 g per unit per second (§a.7).
+pub const THERMO_COST_FP_TICK_PER_UNIT: i32 = FP * 4 / 100 / TICK_HZ as i32;
+/// "Warm-blooded": a THERMO cell that has held ≥ +3 °C (12 quarter
+/// degrees) over ambient for this many ticks.
+pub const WARM_BLOODED_Q2: i8 = 12;
+pub const WARM_BLOODED_TICKS: u8 = 60;

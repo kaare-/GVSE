@@ -17,6 +17,7 @@ use crate::milestones::{self, Milestones};
 use crate::pixels::{self, CoarseField, PixelLayer};
 use crate::rules;
 use crate::telemetry::{self, TelEvent, Telemetry};
+use crate::thermal;
 use crate::tools::{self, UndoFrame, UNDO_CAP};
 use wk_material::MaterialId;
 
@@ -181,6 +182,11 @@ pub struct Tank {
     t_base: f32,
     light_slider: f32,
     stored_heat: f32,
+    /// Stored-heat time constant (ticks), re-measured every
+    /// `THERMAL_MASS_EVERY` ticks from the material fractions.
+    thermal_tau: f32,
+    /// `T_tank` of the last tick (the thermometer).
+    t_tank: f32,
     always_day: bool,
     swirl: bool,
     grav_x: f32,
@@ -208,6 +214,8 @@ pub struct Tank {
     milestones: Milestones,
     /// Lineage roots seeded from the archive: `(genotype, specimen id)`.
     archive_roots: Vec<(u32, u64)>,
+    /// Last "water is cloudy" announcement (Phase 4).
+    cloudy_last: Option<u64>,
 }
 
 impl Tank {
@@ -230,6 +238,8 @@ impl Tank {
             t_base: crate::consts::T_BASE_DEFAULT,
             light_slider: 1.0,
             stored_heat: 0.0,
+            thermal_tau: 0.0,
+            t_tank: crate::consts::T_BASE_DEFAULT,
             always_day: false,
             swirl: false,
             grav_x: 0.0,
@@ -252,6 +262,7 @@ impl Tank {
             milestones: Milestones::default(),
             lambda_scale_q8: 256,
             archive_roots: Vec::new(),
+            cloudy_last: None,
         };
         tank.rebuild_light();
         Ok(tank)
@@ -329,6 +340,27 @@ impl Tank {
 
     pub fn stored_heat(&self) -> f32 {
         self.stored_heat
+    }
+
+    /// The thermometer: `T_tank` of the last tick, °C.
+    pub fn t_tank(&self) -> f32 {
+        self.t_tank
+    }
+
+    /// Degrees over ambient at a visible physics cell (THERMO halo).
+    pub fn t_local_at(&self, vx: i32, vy: i32) -> f32 {
+        if vx < 0 || vy < 0 || vx >= self.coarse.w as i32 || vy >= self.coarse.h as i32 {
+            return 0.0;
+        }
+        thermal::local_c(
+            &self.coarse,
+            (vy as usize) * self.coarse.w as usize + vx as usize,
+        )
+    }
+
+    /// Material fractions by thermal class (harness / tests).
+    pub fn thermal_mass(&self) -> thermal::ThermalMass {
+        thermal::ThermalMass::measure(&self.grid, self.cells.len())
     }
 
     pub fn always_day(&self) -> bool {
@@ -752,12 +784,22 @@ impl Tank {
             if units < 1.0 {
                 continue;
             }
-            // Lowest open pixel of the column (water above the bed).
+            // Lowest open pixel of the column with room (water above the
+            // bed); a thick fall piles up to `FINES_PILE_PX` deep.
             let mut floor = None;
+            let mut depth = 0usize;
+            let vx = (px / crate::consts::PX_PER_CELL as usize) as i32;
             for py in (0..ph).rev() {
                 let vy = vis_h - 1 - (py / crate::consts::PX_PER_CELL as usize) as i32;
-                if self.grid.get_visible(px as i32, vy).is_open() {
+                if !self.grid.get_visible(vx, vy).is_open() {
+                    continue;
+                }
+                if self.pixels.litter[py * pw + px] < 255 {
                     floor = Some(py);
+                    break;
+                }
+                depth += 1;
+                if depth >= crate::consts::FINES_PILE_PX {
                     break;
                 }
             }
@@ -771,6 +813,128 @@ impl Tank {
             }
             bio::fields::add_litter(&mut self.pixels, idx, room as u8, LITTER_SOFT_CODE);
             self.fines[px] = (f - room as f32 / 64.0).max(0.0);
+        }
+    }
+
+    /// Harness: stir `grams` of fines into pixel column `px` (a bloom
+    /// crash in one call).
+    pub fn add_fines(&mut self, px: usize, grams: f32) {
+        if let Some(f) = self.fines.get_mut(px) {
+            *f += grams.max(0.0);
+        }
+    }
+
+    /// Harness: kill every `n`-th living cell (deterministic, id order),
+    /// leaving corpses — a bloom crash. Returns how many died.
+    pub fn cull(&mut self, every: u32) -> u32 {
+        let every = every.max(1);
+        let ids = self.cells.live_ids();
+        let mut n = 0;
+        for (k, id) in ids.into_iter().enumerate() {
+            if k as u32 % every != 0 {
+                continue;
+            }
+            let Some(c) = self.cells.get(id).copied() else {
+                continue;
+            };
+            let mc = self.genomes.coeffs(c.genotype, c.mode);
+            let structure = mc.birth_fp as i64 * c.area() as i64 * (255 - c.damage as i64) / 255;
+            let corpse = bio::corpse_split(mc, c.area(), structure as i32 + c.energy.max(0));
+            let _ = self.cells.kill(
+                &mut self.genomes,
+                &mut self.pixels,
+                id,
+                false,
+                self.tick_count,
+                Some(corpse),
+            );
+            n += 1;
+        }
+        n
+    }
+
+    /// 3-tap blur across neighbouring columns (no stripes), conservative.
+    fn blur_fines(&mut self) {
+        let n = self.fines.len();
+        if n < 3 || self.fines.iter().all(|&f| f <= 0.0) {
+            return;
+        }
+        let src = self.fines.clone();
+        for x in 0..n {
+            let l = if x > 0 { src[x - 1] } else { src[x] };
+            let r = if x + 1 < n { src[x + 1] } else { src[x] };
+            self.fines[x] = (l + 2.0 * src[x] + r) * 0.25;
+        }
+    }
+
+    /// Gyro swirl stirs the floor litter back up: `0.02 · |tilt| ·
+    /// litter_g` per second per column (§4), litter → fines.
+    fn resuspend_fines(&mut self) {
+        let tilt = self.grav_x.abs().min(1.0);
+        if tilt < 0.05 {
+            return;
+        }
+        let pw = self.pixels.w as usize;
+        let ph = self.pixels.h as usize;
+        let per_sec = crate::consts::SWIRL_RESUSPEND * tilt;
+        let frac =
+            per_sec * crate::consts::FINES_SETTLE_EVERY as f32 / crate::consts::TICK_HZ as f32;
+        let vis_h = self.grid.visible_h();
+        for px in 0..pw {
+            // Soft litter resting on this column's floor.
+            let mut total = 0u32;
+            let mut idxs: Vec<usize> = Vec::new();
+            let vx = (px / crate::consts::PX_PER_CELL as usize) as i32;
+            for py in 0..ph {
+                let idx = py * pw + px;
+                let vy = vis_h - 1 - (py / crate::consts::PX_PER_CELL as usize) as i32;
+                let c = self.grid.get_visible(vx, vy);
+                if c.is_open()
+                    && c.sat > 40
+                    && self.pixels.litter[idx] > 0
+                    && self.pixels.litter_key[idx] < 192
+                {
+                    total += self.pixels.litter[idx] as u32;
+                    idxs.push(idx);
+                }
+            }
+            if total == 0 {
+                continue;
+            }
+            let lift = ((total as f32 * frac).floor() as u32).min(total);
+            if lift == 0 {
+                continue;
+            }
+            let mut left = lift;
+            for idx in idxs {
+                if left == 0 {
+                    break;
+                }
+                let t = (self.pixels.litter[idx] as u32).min(left);
+                self.pixels.litter[idx] -= t as u8;
+                left -= t;
+            }
+            self.fines[px] += (lift - left) as f32 / 64.0;
+        }
+    }
+
+    /// "Water is cloudy" (§12): mean cloud under `CLOUDY_MEAN`, repeatable
+    /// after a cooldown.
+    fn check_cloudy(&mut self) {
+        let mean = self.cloud_mean();
+        if mean < crate::consts::CLOUDY_MEAN {
+            let due = self.cloudy_last.is_none_or(|t| {
+                self.tick_count.saturating_sub(t) >= crate::consts::CLOUDY_COOLDOWN
+            });
+            if due {
+                self.cloudy_last = Some(self.tick_count);
+                self.events.push_back(SimEvent {
+                    kind: bio::ev::CLOUDY,
+                    arg0: ((1.0 - mean) * 255.0) as u32,
+                });
+            }
+        } else if mean > crate::consts::CLOUDY_MEAN + 0.15 {
+            self.cloudy_last = None;
         }
     }
 
@@ -1220,13 +1384,26 @@ impl Tank {
         self.apply_tools(&input.tools);
         self.light_dirty = true;
         self.rebuild_light();
-        // Tank temperature: base + solar heat (flashlight does not heat, K4#7).
+        // Thermal cycle (§4): base + solar heat + stored heat that carries
+        // into the night; the flashlight does not heat (K4#7).
         let day = if self.always_day {
             1.0
         } else {
             crate::clock::day_factor(self.tick_count)
         };
-        let t_tank = self.t_base + 10.0 * self.light_slider.clamp(0.0, 1.0) * day;
+        let t_direct = thermal::t_direct(self.light_slider.clamp(0.0, 1.0) * day);
+        if self.thermal_tau <= 0.0 {
+            // A fresh tank has been sitting in its light all along: the
+            // stored heat starts in equilibrium rather than at zero.
+            self.stored_heat = t_direct;
+        }
+        if self.tick_count % crate::consts::THERMAL_MASS_EVERY == 0 || self.thermal_tau <= 0.0 {
+            self.thermal_tau =
+                thermal::ThermalMass::measure(&self.grid, self.cells.len()).tau_ticks();
+        }
+        self.stored_heat = thermal::relax_stored(self.stored_heat, t_direct, self.thermal_tau);
+        let t_tank = thermal::t_tank(self.t_base, t_direct, self.stored_heat);
+        self.t_tank = t_tank;
         let tilt = if self.swirl { self.grav_x } else { 0.0 };
         self.mark_tissue();
         rules::step(&mut self.grid, self.seed, self.tick_count, tilt);
@@ -1256,14 +1433,30 @@ impl Tank {
         for (acc, n) in self.death_causes.iter_mut().zip(bio.death_causes) {
             *acc += n as u64;
         }
+        thermal::step_local(&mut self.coarse, self.tick_count);
         // 2.3.7: crumbling corpses send 30 % of their soft mass up as fines.
         for (px, units) in bio.fines {
             if let Some(f) = self.fines.get_mut(px as usize) {
                 *f += units as f32 * crate::consts::GLUCOSE_UNIT_FP as f32 / crate::consts::FP as f32;
             }
         }
+        for (px, units) in self.pixels.lysis_fines.drain(..) {
+            if let Some(f) = self.fines.get_mut(px as usize) {
+                *f +=
+                    units as f32 * crate::consts::GLUCOSE_UNIT_FP as f32 / crate::consts::FP as f32;
+            }
+        }
         if self.tick_count % crate::consts::FINES_SETTLE_EVERY == 0 {
+            if self.swirl {
+                self.resuspend_fines();
+            }
             self.settle_fines();
+        }
+        if self.tick_count % crate::consts::FINES_BLUR_EVERY == 3 {
+            self.blur_fines();
+        }
+        if self.tick_count % milestones::GLASS_EVERY == 150 {
+            self.check_cloudy();
         }
         let probe = milestones::Probe {
             film_n: if self.tick_count % milestones::GLASS_EVERY == 0 {
@@ -1430,59 +1623,98 @@ impl Tank {
         bb
     }
 
+    /// `cloud[x] = exp(−k·fines[x])`, Q8 per pixel column (§4 cloudiness).
+    fn cloud_q8(&self) -> Vec<u8> {
+        self.fines
+            .iter()
+            .map(|&f| ((-crate::consts::CLOUD_K * f).exp() * 255.0).clamp(0.0, 255.0) as u8)
+            .collect()
+    }
+
+    /// Mean `cloud[x]` over the water columns (1.0 = clear).
+    pub fn cloud_mean(&self) -> f32 {
+        if self.fines.is_empty() {
+            return 1.0;
+        }
+        let sum: f32 = self
+            .fines
+            .iter()
+            .map(|&f| (-crate::consts::CLOUD_K * f).exp())
+            .sum();
+        sum / self.fines.len() as f32
+    }
+
     pub fn write_rgba(&mut self, out: &mut Vec<u8>) {
         self.rebuild_light();
+        let cloud = self.cloud_q8();
         let cells = &self.cells;
         let genomes = &self.genomes;
         let tick = self.tick_count;
-        pixels::write_rgba(&self.grid, &self.pixels, out, &|owner| {
-            if owner < OWNER_BIAS {
-                return None;
-            }
-            // Dead secretions (§a.4 S1/S2): BONE ivory, SHELL gray-blue.
-            match owner {
-                BONE_OWNER => return Some([0xEF, 0xE7, 0xDA]),
-                SHELL_OWNER => return Some([0x9F, 0xB3, 0xC8]),
-                _ => {}
-            }
-            let id = owner - OWNER_BIAS;
-            let Some(cell) = cells.get(id) else {
-                // A corpse fades from its living colour to gray-brown.
-                let c = cells.corpse(id)?;
-                let live = genomes.coeffs(c.genotype, c.mode).colour;
-                let t = 255 - (c.corpse as u16 * 255 / bio::store::CORPSE_TICKS as u16);
-                let dead = [0x6Bu8, 0x55, 0x45];
-                let mut rgb = [0u8; 3];
-                for k in 0..3 {
-                    rgb[k] = ((live[k] as u16 * (255 - t) + dead[k] as u16 * t) / 255) as u8;
+        pixels::write_rgba(
+            &self.grid,
+            &self.pixels,
+            out,
+            &|owner| {
+                if owner < OWNER_BIAS {
+                    return None;
                 }
-                return Some(rgb);
-            };
-            let mc = genomes.coeffs(cell.genotype, cell.mode);
-            let mut rgb = mc.colour;
-            if cell.flash > 0 {
-                return Some([255, 255, 255]);
-            }
-            // Brightness tracks light received (shaded cells go dull).
-            let cap = mc.store_cap_fp(cell.area()).max(1);
-            let e = (cell.energy.max(0) as i64 * 24 / cap as i64) as u8;
-            rgb[1] = (rgb[1] as u16 + e as u16).min(255) as u8;
-            // Desaturate under stress (pull toward gray).
-            if cell.stress > 32 {
-                let s = cell.stress as u16;
-                let gray = (rgb[0] as u16 + rgb[1] as u16 + rgb[2] as u16) / 3;
-                for c in &mut rgb {
-                    *c = ((*c as u16 * (255 - s) + gray * s) / 255) as u8;
+                // Dead secretions (§a.4 S1/S2): BONE ivory, SHELL gray-blue.
+                match owner {
+                    BONE_OWNER => return Some([0xEF, 0xE7, 0xDA]),
+                    SHELL_OWNER => return Some([0x9F, 0xB3, 0xC8]),
+                    _ => {}
                 }
-            }
-            // Damage: dark stipple (every other pixel of the footprint).
-            if cell.damage > 64 && (cell.px as u64 + cell.py as u64 + tick / 8) % 2 == 0 {
-                for c in &mut rgb {
-                    *c /= 2;
+                let id = owner - OWNER_BIAS;
+                let Some(cell) = cells.get(id) else {
+                    // A corpse fades from its living colour to gray-brown.
+                    let c = cells.corpse(id)?;
+                    let live = genomes.coeffs(c.genotype, c.mode).colour;
+                    let t = 255 - (c.corpse as u16 * 255 / bio::store::CORPSE_TICKS as u16);
+                    let dead = [0x6Bu8, 0x55, 0x45];
+                    let mut rgb = [0u8; 3];
+                    for k in 0..3 {
+                        rgb[k] = ((live[k] as u16 * (255 - t) + dead[k] as u16 * t) / 255) as u8;
+                    }
+                    return Some(rgb);
+                };
+                let mc = genomes.coeffs(cell.genotype, cell.mode);
+                let mut rgb = mc.colour;
+                if cell.flash > 0 {
+                    return Some([255, 255, 255]);
                 }
-            }
-            Some(rgb)
-        });
+                // Brightness tracks light received (shaded cells go dull).
+                let cap = mc.store_cap_fp(cell.area()).max(1);
+                let e = (cell.energy.max(0) as i64 * 24 / cap as i64) as u8;
+                rgb[1] = (rgb[1] as u16 + e as u16).min(255) as u8;
+                // Desaturate under stress (pull toward gray).
+                if cell.stress > 32 {
+                    let s = cell.stress as u16;
+                    let gray = (rgb[0] as u16 + rgb[1] as u16 + rgb[2] as u16) / 3;
+                    for c in &mut rgb {
+                        *c = ((*c as u16 * (255 - s) + gray * s) / 255) as u8;
+                    }
+                }
+                // Damage: dark stipple (every other pixel of the footprint).
+                if cell.damage > 64 && (cell.px as u64 + cell.py as u64 + tick / 8) % 2 == 0 {
+                    for c in &mut rgb {
+                        *c /= 2;
+                    }
+                }
+                // THERMO running: ≤ 15 % toward coral (§a.7 warm tint).
+                if cell.warm > 0 {
+                    let coral = [0xE3u16, 0x6A, 0x50];
+                    for (c, w) in rgb.iter_mut().zip(coral) {
+                        *c = ((*c as u16 * 217 + w * 38) / 255) as u8;
+                    }
+                }
+                Some(rgb)
+            },
+            &pixels::Overlay {
+                cloud_q8: &cloud,
+                t_local: &self.coarse.t_local,
+                coarse_w: self.coarse.w,
+            },
+        );
         // Visible correlates drawn over the footprint colours (§a.5):
         // CILIA fringe (1–2 px trailing the heading, pale pink, never
         // blended; while beating it alternates two frames at ≈ 4 Hz) and
@@ -1692,6 +1924,8 @@ impl Tank {
         }
         tank.light_dirty = true;
         tank.rebuild_light();
+        // A loaded tank keeps its saved heat: τ known ⇒ no re-equilibration.
+        tank.thermal_tau = thermal::ThermalMass::measure(&tank.grid, tank.cells.len()).tau_ticks();
         Ok(tank)
     }
 
@@ -1770,12 +2004,7 @@ impl Tank {
         } else {
             None
         };
-        // cloud[x] = exp(−k·fines[x]) in Q8; fines stay 0 until Phase 4.
-        let cloud: Vec<u8> = self
-            .fines
-            .iter()
-            .map(|&f| ((-0.004 * f).exp() * 255.0).clamp(0.0, 255.0) as u8)
-            .collect();
+        let cloud = self.cloud_q8();
         let cells = &self.cells;
         let genomes = &self.genomes;
         pixels::rebuild_light(

@@ -1136,10 +1136,16 @@ fn corpse_sinks_then_becomes_litter_and_fines() {
     let soft_units = (corpse.energy / crate::consts::GLUCOSE_UNIT_FP) as u64;
     let litter = tank.litter_total();
     let fines_units = soft_units * crate::bio::FINES_SHARE_Q8 as u64 / 256;
-    assert_eq!(litter, soft_units - fines_units, "70 % of the soft mass is litter");
-    let fines_g = tank.fines()[corpse.px as usize];
+    assert!(litter >= soft_units - fines_units, "at least 70 % of the soft mass is litter ({litter})");
+    // The other 30 % went up as fines; some has already settled back
+    // (Phase 4 cloudiness), the rest still hangs in the column.
+    let fines_g: f32 = tank.fines().iter().sum();
+    let settled = (litter - (soft_units - fines_units)) as f32 / 64.0;
     let expect_g = fines_units as f32 / 64.0;
-    assert!((fines_g - expect_g).abs() < 1e-3, "30 % went to fines[x] (got {fines_g}, want {expect_g})");
+    assert!(
+        (fines_g + settled - expect_g).abs() < 0.1,
+        "30 % went to fines (hanging {fines_g} + settled {settled}, want {expect_g})"
+    );
 }
 
 /// 2.3.5 — three detritus classes: digesting soft litter leaves inert
@@ -2009,4 +2015,219 @@ fn archive_specimen_and_seed_a_new_tank_from_it() {
     assert!(node.archived);
     assert_eq!(node.live_cells, 4);
     assert_eq!(node.parent, NO_SPECIES, "an archive seed is a root of this tank's tree");
+}
+
+// ---------------------------------------------------------------- Phase 4
+
+/// 4.1 — the thermal cycle (§4): midday ≈ base + 10, stored heat carries
+/// into the evening and decays with a τ set by the tank's materials, so a
+/// rocky tank cools slower than an airy one.
+#[test]
+fn thermal_cycle_stores_heat_and_rock_cools_slower_than_air() {
+    use crate::consts::{DAY_TICKS, T_BASE_DEFAULT};
+    let mut tank = water_box(3, 16, 32, 12);
+    assert!(
+        (tank.t_tank() - T_BASE_DEFAULT).abs() < 1e-3,
+        "starts at base"
+    );
+    // Midday with always-day: both terms reach +10.
+    for _ in 0..30_000 {
+        tank.tick(&day());
+    }
+    let noon = tank.t_tank();
+    assert!(
+        (noon - (T_BASE_DEFAULT + 10.0)).abs() < 0.5,
+        "midday {noon}"
+    );
+    // Same tank through a real day: the clock starts at noon.
+    let mut airy = water_box(3, 16, 32, 4);
+    let mut rocky = water_box(3, 16, 32, 4);
+    for vx in 0..16 {
+        for vy in 4..28 {
+            place(&mut rocky, vx, vy, Cell::stone());
+        }
+    }
+    assert!(
+        rocky.thermal_mass().tau_ticks() > 2.0 * airy.thermal_mass().tau_ticks(),
+        "rock holds heat longer"
+    );
+    // Mid-afternoon (light ≈ 0.7): both tanks are warm.
+    let dusk = (DAY_TICKS / 2) as u32;
+    tick_n(&mut airy, dusk / 2);
+    tick_n(&mut rocky, dusk / 2);
+    assert!(
+        airy.t_tank() > T_BASE_DEFAULT + 5.0,
+        "afternoon {}",
+        airy.t_tank()
+    );
+    // Dusk: the airy puddle (τ ≈ 1 min) has already shed most of its heat
+    // with the falling sun; the rocky tank (τ ≈ 6 min) carries it on.
+    tick_n(&mut airy, dusk / 2);
+    tick_n(&mut rocky, dusk / 2);
+    let dusk_airy = airy.t_tank();
+    let dusk_rocky = rocky.t_tank();
+    assert!(
+        dusk_rocky > dusk_airy + 1.0,
+        "rock holds heat at dusk ({dusk_rocky} vs {dusk_airy})"
+    );
+    assert!(
+        dusk_rocky > T_BASE_DEFAULT + 2.5,
+        "stored heat at dusk {dusk_rocky}"
+    );
+    // Six minutes into the night: the rocky tank has cooled but is still
+    // the warmer one; the airy tank sits at base + the night-floor light.
+    tick_n(&mut airy, 6 * 60 * 30);
+    tick_n(&mut rocky, 6 * 60 * 30);
+    let night_airy = airy.t_tank();
+    let night_rocky = rocky.t_tank();
+    assert!(
+        night_rocky < dusk_rocky - 1.0,
+        "rocky tank cools ({dusk_rocky} → {night_rocky})"
+    );
+    assert!(
+        night_rocky > night_airy + 0.3,
+        "rock stays warmer ({night_rocky} vs {night_airy})"
+    );
+    assert!(
+        (night_airy - (T_BASE_DEFAULT + 1.0)).abs() < 0.3,
+        "airy puddle at base + floor ({night_airy})"
+    );
+}
+
+/// 4.1 — THERMO (§a.7): a heater cell lifts its coarse cell several
+/// degrees, the halo decays when it stops, costs glucose, and the first
+/// sustained +3 °C fires "warm-blooded".
+#[test]
+fn thermo_cell_warms_its_halo_pays_glucose_and_is_warm_blooded() {
+    use crate::bio::{ev, Genome};
+    let cold = TankInput {
+        always_day: true,
+        t_base: 5.0,
+        ..TankInput::default()
+    };
+    let mut tank = water_box(4, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    // A free cell jitters a pixel a tick and would smear its heat over
+    // many coarse cells; pen the heater in a one-cell rock pocket (a
+    // real heater is an anchored colony).
+    let (mut vx, mut vy) = (12, 10);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            if (dx, dy) != (0, 0) {
+                place(&mut tank, vx + dx, vy + dy, Cell::bedrock());
+            }
+        }
+    }
+    // Control: the same genome in a second pocket, THERMO gated shut.
+    let (cx, cy) = (4, 10);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            if (dx, dy) != (0, 0) {
+                place(&mut tank, cx + dx, cy + dy, Cell::bedrock());
+            }
+        }
+    }
+    let mut shut = Genome::heater();
+    for e in shut.modes[0].entries.iter_mut() {
+        if e.block == crate::bio::Block::Thermo {
+            e.gate = crate::bio::Gate::below(crate::bio::Scalar::TempDev, 0);
+        }
+    }
+    let (hx, hy) = (vx as u16 * 3 + 1, (23 - vy as u16) * 3 + 1);
+    let heater = tank.seed_genome_at(hx, hy, Genome::heater()).expect("seed");
+    let plain = tank
+        .seed_genome_at(cx as u16 * 3 + 1, hy, shut)
+        .expect("seed");
+    for org in [heater, plain] {
+        let o = tank.cell(org).unwrap().org;
+        tank.feed_org_full(o);
+    }
+    let e0 = tank.cell(heater).unwrap().energy;
+    let p0 = tank.cell(plain).unwrap().energy;
+    let mut warm_event = false;
+    let mut peak = 0.0f32;
+    for _ in 0..400 {
+        tank.tick(&cold);
+        // The heat lands in the coarse cell under the heater's anchor
+        // pixel, which may straddle the pocket wall.
+        if let Some(c) = tank.cell(heater) {
+            (vx, vy) = crate::bio::pixel_to_phys(c.px, c.py, 24);
+        }
+        peak = peak.max(tank.t_local_at(vx, vy));
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::WARM_BLOODED || e.kind == ev::MS_WARM_BLOODED {
+                warm_event = true;
+            }
+        }
+    }
+    assert!(peak >= 3.0, "the halo should reach +3 °C (peak {peak})");
+    assert!(warm_event, "warm-blooded fires after 60 ticks over +3 °C");
+    assert!(tank.t_local_at(vx + 6, vy) < 0.5, "the halo is local");
+    let e1 = tank.cell(heater).map(|c| c.energy).unwrap_or(0);
+    let p1 = tank.cell(plain).map(|c| c.energy).unwrap_or(p0);
+    assert!(
+        e0 - e1 > (p0 - p1) + 2 * crate::consts::FP,
+        "heating costs glucose ({} vs {})",
+        e0 - e1,
+        p0 - p1
+    );
+    // Remove the heater: the halo leaks away within a few seconds.
+    let _ = tank.remove_at(vx, vy, 1);
+    tick_n(&mut tank, 240);
+    assert!(
+        tank.t_local_at(vx, vy) < 0.3,
+        "halo decays ({})",
+        tank.t_local_at(vx, vy)
+    );
+}
+
+/// 4.2 — cloudiness (§4): a bloom crash clouds the water (less light,
+/// a milky render, "water is cloudy"), then the fines settle back into
+/// floor litter and the tank clears.
+#[test]
+fn bloom_crash_clouds_the_water_then_it_clears_into_litter() {
+    use crate::bio::ev;
+    let mut tank = water_box(7, 24, 32, 28);
+    let w = tank.visible_size().0 as usize * 3;
+    tick_n(&mut tank, 2);
+    let light_before: u32 = (0..w)
+        .map(|px| tank.pixel_light_at(px as u16, 30) as u32)
+        .sum();
+    let litter_before = tank.litter_total();
+    let grams = 200.0;
+    for px in 0..w {
+        tank.add_fines(px, grams);
+    }
+    tank.tick(&TankInput::default());
+    assert!(tank.cloud_mean() < 0.5, "cloud {}", tank.cloud_mean());
+    let light_after: u32 = (0..w)
+        .map(|px| tank.pixel_light_at(px as u16, 30) as u32)
+        .sum();
+    assert!(
+        light_after < light_before / 2,
+        "cloud halves the light ({light_before} → {light_after})"
+    );
+    let mut cloudy = false;
+    for _ in 0..600 {
+        tank.tick(&TankInput::default());
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::CLOUDY {
+                cloudy = true;
+            }
+        }
+    }
+    assert!(cloudy, "the tank should announce cloudy water");
+    // τ ≈ 60 s: after 6 minutes the water is clear again and the fines
+    // are floor litter.
+    tick_n(&mut tank, 6 * 60 * 30);
+    assert!(tank.cloud_mean() > 0.9, "cleared to {}", tank.cloud_mean());
+    let fines_left: f32 = tank.fines().iter().sum();
+    assert!(
+        fines_left < grams * w as f32 * 0.05,
+        "fines left {fines_left}"
+    );
+    assert!(
+        tank.litter_total() > litter_before,
+        "settled fines are litter"
+    );
 }

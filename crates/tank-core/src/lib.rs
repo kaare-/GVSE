@@ -24,6 +24,7 @@ pub mod pixels;
 pub mod rules;
 pub mod tank;
 pub mod telemetry;
+pub mod thermal;
 pub mod tools;
 
 pub use archive::{portrait, SpeciesNode, Specimen, SpecimenStats};

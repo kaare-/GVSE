@@ -239,6 +239,25 @@ impl Genome {
         g
     }
 
+    /// §a.7 — a self-heating cell: PHOTO 1, STORE 1, THERMO 6 gated on
+    /// `temp_dev ≥ 3 °C` (the halo switches on when the tank is cold or
+    /// hot, off near 22 °C). A photosynthesiser can barely fund it — the
+    /// harness "cold night" scenario feeds it glucose.
+    pub fn heater() -> Self {
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 1));
+        m.push_entry(Entry::new(Block::Store, 1));
+        let mut th = Entry::new(Block::Thermo, 6);
+        th.gate = Gate::above(Scalar::TempDev, 24);
+        m.push_entry(th);
+        m.push_child(ChildSpec::propagule(0, 15));
+        m.divide_when.energy_frac = 200;
+        g.modes.push(m);
+        g
+    }
+
     /// d.4 — saprotroph: PHOTO 1, ENZYME 4 (key 30, width 24, litter
     /// band, contact only), UPTAKE(glucose) 2, the spare unit as STORE;
     /// divides at energy ≥ 0.6. Sinks onto the litter (`buoy` −5).

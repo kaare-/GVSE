@@ -278,7 +278,14 @@ fn hit_living(
     t.damage = t.damage.saturating_add(dmg);
     t.hit |= HIT_ENZYME;
     if units > 0 {
-        add_plain(pixels, Field::Glucose, own, units.min(255) as u8);
+        // A tenth of open-water lysis drifts off as fines (§4 cloudiness).
+        let fines = units * crate::consts::LYSIS_FINES_Q8 / 256;
+        if fines > 0 {
+            pixels
+                .lysis_fines
+                .push(((own % pixels.w as usize) as u16, fines));
+        }
+        add_plain(pixels, Field::Glucose, own, (units - fines).min(255) as u8);
     }
     true
 }

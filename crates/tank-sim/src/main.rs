@@ -67,6 +67,7 @@ fn genome_by_name(name: &str) -> Genome {
         "spiny" => Genome::spiny(),
         "egg" => Genome::egg_layer(),
         "chemo" => Genome::sediment_feeder(),
+        "heater" => Genome::heater(),
         _ => Genome::algae(),
     }
 }
@@ -594,6 +595,7 @@ fn milestone_name(kind: u32) -> Option<&'static str> {
         ev::MS_SIGNALLING => "signalling",
         ev::MS_MOVED => "moved",
         ev::MS_NEW_SPECIES => "new_species",
+        ev::MS_WARM_BLOODED => "warm_blooded",
         _ => return None,
     })
 }

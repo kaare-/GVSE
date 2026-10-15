@@ -15,7 +15,8 @@ use crate::bio::store::{secretion_kind, CellStore, EMPTY_OWNER, NONE, OWNER_BIAS
 use crate::cell::Cell;
 use crate::consts::{
     ACTIVITY_FLOOR_Q8, ALGAE_COST_FP, BIRTH_ENERGY_FP, BOND_SHARE_DIV, FP, GLUCOSE_UNIT_FP,
-    HEAT_DAMAGE_C, LIVE_CAP, MITOSIS_FLOOR_C, PHOTO_YIELD_MFP, TICK_HZ, T_GROW,
+    HEAT_DAMAGE_C, LIVE_CAP, MITOSIS_FLOOR_C, PHOTO_YIELD_MFP, THERMO_COST_FP_TICK_PER_UNIT,
+    THERMO_INJECT_EVERY, TICK_HZ, T_GROW, WARM_BLOODED_Q2, WARM_BLOODED_TICKS,
 };
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_u64;
@@ -101,6 +102,14 @@ pub mod ev {
     pub const NEW_SPECIES: u32 = 22;
     /// Milestone: a new species, rate-limited (arg0 = species id).
     pub const MS_NEW_SPECIES: u32 = 44;
+    /// Raw (Phase 4): a THERMO cell has held ≥ +3 °C over ambient for
+    /// `WARM_BLOODED_TICKS` (arg0 = cell).
+    pub const WARM_BLOODED: u32 = 23;
+    /// Milestone: first warm-blooded body.
+    pub const MS_WARM_BLOODED: u32 = 45;
+    /// Repeatable (Phase 4): the water is cloudy — mean cloud factor under
+    /// `CLOUDY_MEAN` (arg0 = haze 0..255).
+    pub const CLOUDY: u32 = 24;
 }
 
 /// "Something moved" (§a.6): net cilia displacement over this window.
@@ -712,6 +721,10 @@ fn metabolise(
         return;
     };
     let mc = *genomes.coeffs(cell.genotype, cell.mode);
+    // Phase 4: the cell reads `T_tank + T_local` — a THERMO halo speeds
+    // up the warm cell and anything sitting inside it (§a.7).
+    let ci = minerals::idx_of_pixel(coarse, cell.px, cell.py);
+    let t_tank = t_tank + crate::thermal::local_c(coarse, ci);
     let (metab_eff, temp_q, base_age, stress_def, wall_key, glue_key, resist_key, strategy_q8, lambda_m) = {
         let g = genomes.genome(cell.genotype);
         (
@@ -941,6 +954,38 @@ fn metabolise(
         chem::signal_act(pixels, grid, tick, &cell, &mc, &scalars, &mut chem_out);
     }
     energy -= chem_out.cost;
+    // THERMO (§a.7): glucose → heat in the coarse cell, 0.04 g/s per unit,
+    // while the gate holds and the cell can pay.
+    let mut warm = cell.warm;
+    let heating = mc.thermo > 0 && mc.thermo_gate.passes(&scalars) && energy > FP;
+    if heating {
+        energy -= THERMO_COST_FP_TICK_PER_UNIT * mc.thermo as i32;
+        if (tick + id as u64) % THERMO_INJECT_EVERY == 0 {
+            crate::thermal::inject(coarse, ci, mc.thermo);
+        }
+    }
+    if mc.thermo > 0 {
+        // `warm` ≥ 1 while heating or still in a halo (the render's warm
+        // tint); it counts the ticks the halo has held ≥ +3 °C. A gated
+        // heater thermostats on and off, so the count follows the halo,
+        // not the burner; a dip costs four ticks rather than the run.
+        let over_q2 = coarse.t_local.get(ci).copied().unwrap_or(0);
+        if over_q2 >= WARM_BLOODED_Q2 {
+            if warm <= WARM_BLOODED_TICKS {
+                warm += 1;
+                if warm == WARM_BLOODED_TICKS + 1 {
+                    out.events.push(SimEvent {
+                        kind: ev::WARM_BLOODED,
+                        arg0: id,
+                    });
+                }
+            }
+        } else if warm <= WARM_BLOODED_TICKS {
+            warm = warm.saturating_sub(4).max(u8::from(heating));
+        }
+    } else {
+        warm = 0;
+    }
     // Kin signalling: a receptor hears its own kind's signal (rising edge).
     if sig >= SIGNAL_HEARD && cell.sig < SIGNAL_HEARD && mc.signal > 0 {
         out.events.push(SimEvent {
@@ -1020,6 +1065,7 @@ fn metabolise(
         c.flash = c.flash.saturating_sub(1);
         c.sig = sig;
         c.hit = 0;
+        c.warm = warm;
     }
 
     // ---- develop: grow, transition, brood release, divide
@@ -1171,7 +1217,7 @@ fn chemo_feed(grid: &PhysicsGrid, coarse: &mut CoarseField, c: &crate::bio::Cell
 /// Split a dead cell's mass (FP) into soft mass (FP) and bone litter (the
 /// wall minerals, in field units). The glucose the bone band will later
 /// recover from the bone comes out of the soft share so mass is conserved.
-fn corpse_split(mc: &ModeCoeffs, area: i32, mass_fp: i32) -> (i32, u16) {
+pub fn corpse_split(mc: &ModeCoeffs, area: i32, mass_fp: i32) -> (i32, u16) {
     let bone = mc.mineral_px as u32 * area as u32;
     let bone_fp = bone as i32 * minerals::BONE_GLUCOSE_PER_UNIT as i32 * GLUCOSE_UNIT_FP;
     ((mass_fp - bone_fp).max(0), bone.min(u16::MAX as u32) as u16)
