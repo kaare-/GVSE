@@ -44,10 +44,74 @@ pub const MAX_VISIBLE_W: u32 = 256;
 pub const MAX_VISIBLE_H: u32 = 512;
 pub const MIN_VISIBLE: u32 = 4;
 
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
+
+// ---- biology (cell-language §a, §b, §c) ----
 
 /// Protein units per biology pixel (handoff §5).
 pub const P_UNITS: u8 = 8;
 
 /// Phase 2 shape cap (hard cap is 6; Phase 2 uses 4).
 pub const SHAPE_CAP: u8 = 4;
+
+/// Fixed-point energy: `FP` = 1 g of glucose.
+pub const FP: i32 = 1024;
+
+/// Ticks between pixel growth steps toward the mode shape.
+pub const T_GROW: u16 = 8;
+
+/// Structure cost per pixel, g (§a.1).
+pub const STRUCTURE_G_FP: i32 = FP;
+
+/// Structure upkeep per pixel per tick (0.01 g/s).
+pub const STRUCTURE_UPKEEP_FP_TICK: i32 = FP / 100 / TICK_HZ as i32;
+
+/// PHOTO income per unit per tick at full light, milli-fp. Tuned so a 1×1
+/// algae in full light divides every ≈10 s (d.1 pace).
+pub const PHOTO_YIELD_MFP: i64 = 7200;
+
+/// Store capacity: base per pixel plus 2 g per STORE unit (§a.4).
+pub const STORE_BASE_FP: i32 = 12 * FP;
+pub const STORE_PER_UNIT_FP: i32 = 2 * FP;
+
+/// Energy a daughter starts with (bonded parts are topped up by the body).
+pub const BIRTH_ENERGY_FP: i32 = 3 * FP;
+
+/// Metabolic activity floor (Q8): an idle cell burns and ages at ¼ rate.
+pub const ACTIVITY_FLOOR_Q8: i64 = 64;
+
+/// Default `base_age`, seconds; the pace law scales it (§b.6).
+pub const BASE_AGE_S: u8 = 60;
+
+/// Reference body cost for the pace law: the 1×1 algae (6 g).
+pub const ALGAE_COST_FP: i32 = 6 * FP;
+
+/// λ0 per division, milli. §c.2 proposes 0.3, which with the strategy
+/// term puts the seed algae above 0.5 mutations per division and makes
+/// nothing breed true; 0.1 (≈0.19 for the algae at rest) is our default.
+pub const LAMBDA0_MILLI: u32 = 100;
+
+/// Mode-program caps (§e.4).
+pub const MAX_MODES: usize = 16;
+pub const MAX_CHILDREN: usize = 4;
+pub const MAX_TRANSITIONS: usize = 3;
+pub const MAX_ENTRIES: usize = 6;
+
+/// Realised-map slots per organism.
+pub const MAX_SLOTS: usize = 64;
+
+/// Live-cell soft cap (handoff lever).
+pub const LIVE_CAP: usize = 30_000;
+
+/// No mitosis below this tank temperature (°C).
+pub const MITOSIS_FLOOR_C: f32 = 4.0;
+
+/// Heat damage above this tank temperature (°C).
+pub const HEAT_DAMAGE_C: f32 = 38.0;
+
+/// Fraction of bond energy difference moved per tick (1/N).
+pub const BOND_SHARE_DIV: i32 = 8;
+
+/// Light absorbed per PHOTO pixel row (×0.5) and per other tissue (×0.75), Q8.
+pub const TISSUE_PASS_PHOTO_Q8: u32 = 128;
+pub const TISSUE_PASS_OTHER_Q8: u32 = 192;

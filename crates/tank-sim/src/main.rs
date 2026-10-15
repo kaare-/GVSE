@@ -15,7 +15,7 @@ use std::io::{BufWriter, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use tank_core::{day_factor, is_day, phase_name, Tank, TankInput};
+use tank_core::{bio::Genome, day_factor, is_day, phase_name, Cell, Tank, TankInput};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -23,12 +23,154 @@ fn main() -> ExitCode {
         Some("tank") => cmd_tank(args),
         Some("clock") => cmd_clock(args),
         Some("determinism") => cmd_determinism(args),
+        Some("trace") => cmd_trace(args),
+        Some("giant-vs-body") => cmd_giant_vs_body(args),
         _ => {
             eprintln!(
-                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N"
+                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer]\n  tank-sim giant-vs-body --ticks N --seeds N"
             );
             ExitCode::from(2)
         }
+    }
+}
+
+fn water_tank(seed: u64, w: u32, h: u32, water_rows: i32) -> Tank {
+    let mut tank = Tank::try_new(seed, w, h).expect("size");
+    for vy in 0..2 {
+        for vx in 0..w as i32 {
+            tank.place(vx, vy, Cell::sand());
+        }
+    }
+    for vy in 2..water_rows {
+        for vx in 0..w as i32 {
+            tank.place(vx, vy, Cell::water());
+        }
+    }
+    tank
+}
+
+fn genome_by_name(name: &str) -> Genome {
+    match name {
+        "straw" => Genome::straw(),
+        "giant" => Genome::giant(4),
+        "plate16" => Genome::plate16(),
+        "brooder" => Genome::brooder(),
+        "sticky" => Genome::sticky_algae(),
+        "swimmer" => Genome::swimmer(),
+        _ => Genome::algae(),
+    }
+}
+
+/// Population trace for one genome in a 48×64 water tank.
+fn cmd_trace(args: impl Iterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = args.collect();
+    let ticks = flag_u64(args.iter().cloned(), "--ticks").unwrap_or(3000);
+    let seed = flag_u64(args.iter().cloned(), "--seed").unwrap_or(1);
+    let every = flag_u64(args.iter().cloned(), "--every").unwrap_or(300);
+    let name = flag_str(&args, "--genome").unwrap_or_else(|| "algae".into());
+    let verbose = args.iter().any(|a| a == "--verbose");
+    let cycle = args.iter().any(|a| a == "--cycle");
+    let mut tank = water_tank(seed, 48, 64, 50);
+    let g = genome_by_name(&name);
+    let id = tank.seed_genome_at(72, 60, g).expect("seed");
+    let geno = tank.genotype_of_cell(id).unwrap_or(0);
+    let input = TankInput {
+        always_day: !cycle,
+        ..TankInput::default()
+    };
+    println!("tick,cells,orgs,orgs_ge2,genotypes,founder_cells,lineage_cells,max_gen,ms_per_tick");
+    let mut start = Instant::now();
+    for i in 0..ticks {
+        tank.tick(&input);
+        if (i + 1) % every == 0 || i + 1 == ticks {
+            let (orgs, big) = tank.org_counts(2);
+            let ms = start.elapsed().as_secs_f64() * 1000.0 / every as f64;
+            println!(
+                "{},{},{},{},{},{},{},{},{ms:.3}",
+                tank.tick_count(),
+                tank.live_cells(),
+                orgs,
+                big,
+                tank.genotype_count(),
+                tank.live_cells_of(geno),
+                tank.lineage_cells_of(geno),
+                tank.max_generation_of(geno),
+            );
+            if verbose {
+                let col: Vec<String> = (24..48u16)
+                    .map(|py| format!("{}:m{}s{}", py, tank.material_at(72, py), tank.water_sat_at(72, py)))
+                    .collect();
+                println!("  water column x=72 (py:sat) {}", col.join(" "));
+                let dc = tank.death_causes();
+                let mut hist = [0u32; 8];
+                for (_, c) in tank.cells().iter_alive() {
+                    hist[(tank.pixel_light_at(c.px, c.py) / 32) as usize] += 1;
+                }
+                println!(
+                    "  deaths starved={} age={} damage={} shed={}  light histogram (per 32): {:?}",
+                    dc[0], dc[1], dc[2], dc[3], hist
+                );
+                for (id, c) in tank.cells().iter_alive().take(24) {
+                    println!(
+                        "  cell {id} org={} mode={} depth={} pos=({},{}) {}x{} e={:.2}g age={} stress={} light={}",
+                        c.org,
+                        c.mode,
+                        c.depth,
+                        c.px,
+                        c.py,
+                        c.w,
+                        c.h,
+                        c.energy as f32 / tank_core::consts::FP as f32,
+                        c.age,
+                        c.stress,
+                        tank.pixel_light_at(c.px, c.py)
+                    );
+                }
+            }
+            start = Instant::now();
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// 2.2.7 gate: a 4×4 lineage and a 16-cell lineage each persist `ticks`
+/// in ≥ 50 % of seeds (each lineage alone in its own tank).
+fn cmd_giant_vs_body(args: impl Iterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = args.collect();
+    let ticks = flag_u64(args.iter().cloned(), "--ticks").unwrap_or(100_000);
+    let seeds = flag_u64(args.iter().cloned(), "--seeds").unwrap_or(4);
+    let mut ok_all = true;
+    for name in ["giant", "plate16"] {
+        let mut survived = 0;
+        for seed in 1..=seeds {
+            let mut tank = water_tank(seed, 48, 64, 50);
+            let g = genome_by_name(name);
+            let id = tank.seed_genome_at(72, 60, g).expect("seed");
+            let geno = tank.genotype_of_cell(id).unwrap_or(0);
+            let input = TankInput::default();
+            for _ in 0..ticks {
+                tank.tick(&input);
+            }
+            let alive = tank.lineage_cells_of(geno);
+            let (_, big) = tank.org_counts(2);
+            println!(
+                "{name} seed={seed} lineage_cells={alive} founder_cells={} cells={} orgs_ge2={big} gen={}",
+                tank.live_cells_of(geno),
+                tank.live_cells(),
+                tank.max_generation_of(geno)
+            );
+            if alive > 0 {
+                survived += 1;
+            }
+        }
+        let pass = survived * 2 >= seeds;
+        println!("{name}: survived {survived}/{seeds} → {}", if pass { "PASS" } else { "FAIL" });
+        ok_all &= pass;
+    }
+    if ok_all {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

@@ -485,8 +485,8 @@ fn flashlight_boosts_column_light() {
 
 #[test]
 fn mutation_fuzz_stays_valid() {
-    use crate::bio::GenomeV0;
-    let mut g = GenomeV0::algae();
+    use crate::bio::Genome;
+    let mut g = Genome::algae();
     for i in 0..10_000u64 {
         g = g.mutate(0xF1_55, i);
         assert!(g.is_valid(), "invalid after mutation {i}: {g:?}");
@@ -495,8 +495,8 @@ fn mutation_fuzz_stays_valid() {
 
 #[test]
 fn hot_tank_raises_mutation_lambda() {
-    use crate::bio::GenomeV0;
-    let g = GenomeV0::algae();
+    use crate::bio::Genome;
+    let g = Genome::algae();
     let cold = g.lambda_milli(40, 12.0);
     let hot = g.lambda_milli(40, 32.0);
     assert!(hot > cold, "Q10 should raise λ when hot (cold={cold} hot={hot})");
@@ -504,7 +504,7 @@ fn hot_tank_raises_mutation_lambda() {
 
 #[test]
 fn straw_builds_a_bonded_chain() {
-    use crate::bio::GenomeV0;
+    use crate::bio::Genome;
     let mut tank = Tank::try_new(1, 32, 24).unwrap();
     for vx in 0..32 {
         for vy in 0..16 {
@@ -512,7 +512,7 @@ fn straw_builds_a_bonded_chain() {
         }
     }
     let id = tank
-        .seed_genome_at(48, 36, GenomeV0::straw())
+        .seed_genome_at(48, 36, Genome::straw())
         .expect("seed straw");
     for _ in 0..400 {
         tank.tick(&TankInput {
@@ -529,15 +529,15 @@ fn straw_builds_a_bonded_chain() {
 
 #[test]
 fn sticky_algae_form_glue_attachments() {
-    use crate::bio::GenomeV0;
+    use crate::bio::Genome;
     let mut tank = Tank::try_new(2, 24, 24).unwrap();
     for vx in 0..24 {
         for vy in 0..16 {
             place(&mut tank, vx, vy, Cell::water());
         }
     }
-    let g = GenomeV0::sticky_algae();
-    assert!(tank.seed_genome_at(30, 30, g).is_some());
+    let g = Genome::sticky_algae();
+    assert!(tank.seed_genome_at(30, 30, g.clone()).is_some());
     assert!(tank.seed_genome_at(33, 30, g).is_some());
     for _ in 0..200 {
         tank.tick(&TankInput {
@@ -571,14 +571,14 @@ fn enzyme_field_decays_and_blurs() {
 
 #[test]
 fn swimmer_genome_stays_alive() {
-    use crate::bio::GenomeV0;
+    use crate::bio::Genome;
     let mut tank = Tank::try_new(3, 24, 24).unwrap();
     for vx in 0..24 {
         for vy in 0..16 {
             place(&mut tank, vx, vy, Cell::water());
         }
     }
-    assert!(tank.seed_genome_at(36, 30, GenomeV0::swimmer()).is_some());
+    assert!(tank.seed_genome_at(36, 30, Genome::swimmer()).is_some());
     for _ in 0..120 {
         tank.tick(&TankInput {
             always_day: true,

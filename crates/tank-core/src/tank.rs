@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::bio::store::OWNER_BIAS;
-use crate::bio::{self, CellStore, GenomeStore};
+use crate::bio::{self, CellStore, Genome, GenomeStore};
 use crate::cell::Cell;
 use crate::clock::{self, day_factor};
 use crate::consts::{MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H, PRESET_W, SAVE_VERSION};
@@ -67,7 +67,7 @@ pub struct SimEvent {
     pub arg0: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Inspect {
     pub hit: bool,
     pub material: u8,
@@ -77,6 +77,19 @@ pub struct Inspect {
     pub owner: u32,
     pub vx: u32,
     pub vy: u32,
+    /// Living cell under the pixel (`u32::MAX` = none) and its organism.
+    pub cell: u32,
+    pub org: u32,
+    pub genotype: u32,
+    pub mode: u8,
+    pub generation: u32,
+    /// Cells in the organism and kin organisms glued to it (§b.5 inspect).
+    pub org_cells: u32,
+    pub glued_kin: u32,
+    pub age_ticks: u32,
+    pub max_age_ticks: u32,
+    pub energy_frac: u8,
+    pub stress: u8,
 }
 
 pub struct Tank {
@@ -101,6 +114,9 @@ pub struct Tank {
     flash_x: i32,
     flash_y: i32,
     flash_r: i32,
+    light_dirty: bool,
+    /// Cumulative deaths by cause: [starved, old age, damage, shed].
+    death_causes: [u64; 4],
 }
 
 impl Tank {
@@ -138,6 +154,8 @@ impl Tank {
             flash_x: 0,
             flash_y: 0,
             flash_r: 0,
+            light_dirty: true,
+            death_causes: [0; 4],
         };
         tank.rebuild_light();
         Ok(tank)
@@ -153,6 +171,7 @@ impl Tank {
                 tank.grid.set_visible(vx, vy, Cell::sand());
             }
         }
+        tank.light_dirty = true;
         tank.rebuild_light();
         tank
     }
@@ -189,8 +208,9 @@ impl Tank {
         }
         // Seed one algae near the waterline, centre.
         let px = (w as u32 / 2) * 3;
-        let py = ((h - water_top - 2) as u32) * 3;
+        let py = ((h - water_top + 1) as u32) * 3;
         let _ = tank.seed_algae(px as u16, py as u16);
+        tank.light_dirty = true;
         tank.rebuild_light();
         tank
     }
@@ -280,39 +300,74 @@ impl Tank {
     }
 
     pub fn seed_algae(&mut self, px: u16, py: u16) -> Option<u32> {
-        let id = self
-            .cells
-            .seed_algae(&mut self.genomes, &mut self.pixels, px, py, self.seed)?;
+        let id = self.cells.seed_algae(
+            &mut self.genomes,
+            &mut self.pixels,
+            px,
+            py,
+            self.tick_count,
+            self.seed,
+        )?;
         self.events.push_back(SimEvent {
-            kind: 1, // first life / seed
+            kind: bio::ev::SEED,
             arg0: id,
         });
+        self.light_dirty = true;
         Some(id)
     }
 
     /// Seed a cell whose mode targets `shape_w × shape_h` (growth tests).
     pub fn seed_shaped_algae(&mut self, px: u16, py: u16, shape_w: u8, shape_h: u8) -> Option<u32> {
-        use crate::bio::GenomeV0;
-        let mut g = GenomeV0::algae();
-        g.mode.shape_w = shape_w.clamp(1, crate::consts::SHAPE_CAP);
-        g.mode.shape_h = shape_h.clamp(1, crate::consts::SHAPE_CAP);
-        let parent = self.genomes.seed_algae();
-        let geno = self.genomes.intern_child(parent, g);
-        self.cells.spawn(
-            &mut self.genomes,
-            &mut self.pixels,
-            px,
-            py,
-            geno,
-            0,
-            12 * 256,
-            2,
-            self.seed,
-        )
+        let mut g = Genome::algae();
+        let m = &mut g.modes[0];
+        let old = m.capacity();
+        m.shape_w = shape_w.clamp(1, crate::consts::SHAPE_CAP);
+        m.shape_h = shape_h.clamp(1, crate::consts::SHAPE_CAP);
+        let new = m.capacity();
+        m.rescale_units(old, new);
+        self.seed_genome_at(px, py, g)
     }
 
     pub fn cell_size(&self, id: u32) -> Option<(u8, u8)> {
         self.cells.get(id).map(|c| (c.w, c.h))
+    }
+
+    pub fn cell(&self, id: u32) -> Option<&bio::CellRec> {
+        self.cells.get(id)
+    }
+
+    pub fn org_of_cell(&self, id: u32) -> Option<&bio::OrgRec> {
+        self.cells.get(id).and_then(|c| self.cells.org(c.org))
+    }
+
+    pub fn cells(&self) -> &CellStore {
+        &self.cells
+    }
+
+    pub fn genomes(&self) -> &GenomeStore {
+        &self.genomes
+    }
+
+    /// Cumulative deaths by cause: [starved, old age, damage, shed].
+    pub fn death_causes(&self) -> [u64; 4] {
+        self.death_causes
+    }
+
+    /// Material id of the physics cell under a pixel (harness probe).
+    pub fn material_at(&self, px: u16, py: u16) -> u8 {
+        let (vx, vy) = bio::pixel_to_phys(px, py, self.grid.visible_h() as u32);
+        self.grid.get_visible(vx, vy).material
+    }
+
+    /// Water saturation of the physics cell under a pixel (harness probe).
+    pub fn water_sat_at(&self, px: u16, py: u16) -> u8 {
+        let (vx, vy) = bio::pixel_to_phys(px, py, self.grid.visible_h() as u32);
+        let c = self.grid.get_visible(vx, vy);
+        if c.is_air() {
+            c.sat
+        } else {
+            0
+        }
     }
 
     pub fn pixel_light_at(&self, px: u16, py: u16) -> u8 {
@@ -331,25 +386,79 @@ impl Tank {
         self.cells.glue_attachments()
     }
 
-    pub fn seed_genome_at(
-        &mut self,
-        px: u16,
-        py: u16,
-        genome: crate::bio::GenomeV0,
-    ) -> Option<u32> {
-        let parent = self.genomes.seed_algae();
-        let geno = self.genomes.intern_child(parent, genome);
-        self.cells.spawn(
+    /// Living organisms, and how many have at least `min_cells` cells.
+    pub fn org_counts(&self, min_cells: u16) -> (u32, u32) {
+        let mut n = 0;
+        let mut big = 0;
+        for (_, o) in self.cells.iter_orgs() {
+            n += 1;
+            if o.n_alive >= min_cells {
+                big += 1;
+            }
+        }
+        (n, big)
+    }
+
+    /// Highest organism generation alive for a genotype.
+    pub fn max_generation_of(&self, genotype: u32) -> u32 {
+        let mut best = 0;
+        for (_, o) in self.cells.iter_orgs() {
+            if let Some(c) = self.cells.get(o.seed) {
+                if c.genotype == genotype {
+                    best = best.max(o.generation);
+                }
+            }
+        }
+        best
+    }
+
+    /// Live cells of `genotype` and all genotypes descended from it.
+    pub fn lineage_cells_of(&self, genotype: u32) -> u32 {
+        self.genomes.lineage_live_cells(genotype)
+    }
+
+    /// Live cells expressing `genotype`.
+    pub fn live_cells_of(&self, genotype: u32) -> u32 {
+        self.genomes
+            .get(genotype)
+            .map(|n| n.live_cells)
+            .unwrap_or(0)
+    }
+
+    pub fn seed_genome_at(&mut self, px: u16, py: u16, genome: Genome) -> Option<u32> {
+        let seed_mode = genome.seed_mode;
+        let geno = self.genomes.intern_root(genome);
+        let id = self.cells.spawn(
             &mut self.genomes,
             &mut self.pixels,
             px,
             py,
             geno,
+            seed_mode,
             0,
-            12 * 256,
+            12 * crate::consts::FP,
             2,
+            self.tick_count,
             self.seed,
-        )
+        );
+        self.light_dirty = true;
+        id
+    }
+
+    pub fn genotype_of_cell(&self, id: u32) -> Option<u32> {
+        self.cells.get(id).map(|c| c.genotype)
+    }
+
+    /// Kill one cell directly (harness "bite").
+    pub fn kill_cell(&mut self, id: u32) -> bool {
+        if self.cells.get(id).is_none() {
+            return false;
+        }
+        let _ = self
+            .cells
+            .kill(&mut self.genomes, &mut self.pixels, id, false, self.tick_count);
+        self.light_dirty = true;
+        true
     }
 
     /// Clear front-pane film along a stroke (pixel space, top-left origin).
@@ -370,10 +479,16 @@ impl Tank {
             let dx = cx - vx;
             let dy = cy - vy;
             if dx * dx + dy * dy <= r * r {
-                self.cells
-                    .kill(&mut self.genomes, &mut self.pixels, id, false);
+                let _ = self.cells.kill(
+                    &mut self.genomes,
+                    &mut self.pixels,
+                    id,
+                    false,
+                    self.tick_count,
+                );
             }
         }
+        self.light_dirty = true;
     }
 
     pub fn drip_glucose(&mut self, vx: i32, vy: i32, r: i32, amount: u8) {
@@ -409,6 +524,13 @@ impl Tank {
     #[cfg(test)]
     pub(crate) fn place_for_test(&mut self, vx: i32, vy: i32, cell: Cell) {
         self.grid.set_visible(vx, vy, cell);
+        self.light_dirty = true;
+    }
+
+    /// Place a physics cell (harness scenarios).
+    pub fn place(&mut self, vx: i32, vy: i32, cell: Cell) {
+        self.grid.set_visible(vx, vy, cell);
+        self.light_dirty = true;
     }
 
     #[cfg(test)]
@@ -430,10 +552,12 @@ impl Tank {
         self.flash_r = input.flash_r;
         if input.paused {
             self.apply_tools(&input.tools);
+            self.light_dirty = true;
             self.rebuild_light();
             return;
         }
         self.apply_tools(&input.tools);
+        self.light_dirty = true;
         self.rebuild_light();
         // Tank temperature: base + solar heat (flashlight does not heat, K4#7).
         let day = if self.always_day {
@@ -456,20 +580,26 @@ impl Tank {
         for ev in bio.events {
             self.events.push_back(ev);
         }
+        for (acc, n) in self.death_causes.iter_mut().zip(bio.death_causes) {
+            *acc += n as u64;
+        }
         if bio.deaths > 0 && self.cells.is_empty() {
             self.events.push_back(SimEvent {
-                kind: 10, // lifeless
+                kind: bio::ev::LIFELESS,
                 arg0: 0,
             });
         }
         // "glass needs cleaning" when film coverage is high.
-        let film_n = self.pixels.film.iter().filter(|&&f| f > 80).count();
-        if film_n > (self.pixels.len() / 40) && self.tick_count % 300 == 0 {
-            self.events.push_back(SimEvent {
-                kind: 11, // glass dirty
-                arg0: film_n as u32,
-            });
+        if self.tick_count % 300 == 0 {
+            let film_n = self.pixels.film.iter().filter(|&&f| f > 80).count();
+            if film_n > (self.pixels.len() / 40) {
+                self.events.push_back(SimEvent {
+                    kind: bio::ev::GLASS,
+                    arg0: film_n as u32,
+                });
+            }
         }
+        self.light_dirty = true;
         self.tick_count = self.tick_count.wrapping_add(1);
     }
 
@@ -490,14 +620,8 @@ impl Tank {
     pub fn inspect(&self, px: u32, py: u32) -> Inspect {
         if px >= self.pixels.w || py >= self.pixels.h {
             return Inspect {
-                hit: false,
-                material: 0,
-                sat: 0,
-                moisture: 0,
-                variant: 0,
-                owner: 0,
-                vx: 0,
-                vy: 0,
+                cell: u32::MAX,
+                ..Inspect::default()
             };
         }
         let vx = px / crate::consts::PX_PER_CELL;
@@ -505,7 +629,7 @@ impl Tank {
         let vy = self.grid.visible_h() as u32 - 1 - vy_top;
         let cell = self.grid.get_visible(vx as i32, vy as i32);
         let owner = self.pixels.owner[(py as usize) * (self.pixels.w as usize) + px as usize];
-        Inspect {
+        let mut rec = Inspect {
             hit: true,
             material: cell.material,
             sat: cell.sat,
@@ -514,27 +638,52 @@ impl Tank {
             owner,
             vx,
             vy,
+            cell: u32::MAX,
+            ..Inspect::default()
+        };
+        if owner >= OWNER_BIAS {
+            let id = owner - OWNER_BIAS;
+            if let Some(c) = self.cells.get(id) {
+                let mc = self.genomes.coeffs(c.genotype, c.mode);
+                let g = self.genomes.genome(c.genotype);
+                let body = self.cells.org_body_cost_fp(c.org).max(mc.build_fp);
+                rec.cell = id;
+                rec.org = c.org;
+                rec.genotype = c.genotype;
+                rec.mode = c.mode;
+                rec.generation = self.cells.org_generation(c.org);
+                rec.org_cells = self.cells.org_slot_count(c.org) as u32;
+                rec.glued_kin = self.cells.glued_kin(c.org);
+                rec.age_ticks = c.age as u32;
+                rec.max_age_ticks = bio::max_age_ticks(g.base_age, body);
+                let cap = mc.store_cap_fp(c.area()).max(1);
+                rec.energy_frac = (c.energy.max(0) as i64 * 255 / cap as i64).min(255) as u8;
+                rec.stress = c.stress;
+            }
         }
+        rec
     }
 
     pub fn write_rgba(&mut self, out: &mut Vec<u8>) {
         self.rebuild_light();
         let cells = &self.cells;
         let genomes = &self.genomes;
+        let tick = self.tick_count;
         pixels::write_rgba(&self.grid, &self.pixels, out, &|owner| {
             if owner < OWNER_BIAS {
                 return None;
             }
             let id = owner - OWNER_BIAS;
             let cell = cells.get(id)?;
-            if !cell.alive {
-                return None;
+            let mc = genomes.coeffs(cell.genotype, cell.mode);
+            let mut rgb = mc.colour;
+            if cell.flash > 0 {
+                return Some([255, 255, 255]);
             }
-            let g = genomes.genome(cell.genotype);
-            let mut rgb = g.mode.colour(g.metab_eff);
-            // Energy brightens a little so hungry cells read duller.
-            let e = (cell.energy / 256).min(8);
-            rgb[1] = (rgb[1] as u16 + e * 2).min(255) as u8;
+            // Brightness tracks light received (shaded cells go dull).
+            let cap = mc.store_cap_fp(cell.area()).max(1);
+            let e = (cell.energy.max(0) as i64 * 24 / cap as i64) as u8;
+            rgb[1] = (rgb[1] as u16 + e as u16).min(255) as u8;
             // Desaturate under stress (pull toward gray).
             if cell.stress > 32 {
                 let s = cell.stress as u16;
@@ -543,8 +692,44 @@ impl Tank {
                     *c = ((*c as u16 * (255 - s) + gray * s) / 255) as u8;
                 }
             }
+            // Damage: dark stipple (every other pixel of the footprint).
+            if cell.damage > 64 && (cell.px as u64 + cell.py as u64 + tick / 8) % 2 == 0 {
+                for c in &mut rgb {
+                    *c /= 2;
+                }
+            }
             Some(rgb)
         });
+        // CILIA fringe: 1 px trailing the heading, pale pink, never blended.
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        for (_, c) in cells.iter_alive() {
+            let mc = genomes.coeffs(c.genotype, c.mode);
+            if mc.cilia == 0 {
+                continue;
+            }
+            let (dx, dy) = bio::program::heading_delta(c.heading.wrapping_add(4) % 8);
+            let x = c.px as i32 + bio::step::side_offset(dx, c.w);
+            let y = c.py as i32 + bio::step::side_offset(dy, c.h);
+            if x < 0 || y < 0 || x >= pw || y >= ph {
+                continue;
+            }
+            let i = (y * pw + x) as usize;
+            if self.pixels.owner[i] != 0 {
+                continue;
+            }
+            // Two-frame beat at ≈4 Hz while running.
+            let bright = !c.running || (tick / 4) % 2 == 0;
+            let o = i * 4;
+            let (r, g, b) = if bright {
+                (0xF0, 0xA6, 0xC0)
+            } else {
+                (0xD8, 0x90, 0xA8)
+            };
+            out[o] = r;
+            out[o + 1] = g;
+            out[o + 2] = b;
+        }
     }
 
     pub fn pixel_hash(&mut self) -> u64 {
@@ -554,6 +739,7 @@ impl Tank {
     }
 
     pub fn save_bytes(&mut self) -> Result<Vec<u8>, TankError> {
+        self.light_dirty = true;
         self.rebuild_light();
         let blob = SaveBlob {
             version: SAVE_VERSION,
@@ -588,6 +774,9 @@ impl Tank {
             minerals: self.coarse.minerals.clone(),
             t_local: self.coarse.t_local.clone(),
             humidity: self.coarse.humidity.clone(),
+            genomes: self.genomes.export(),
+            bio_cells: self.cells.raw_cells().to_vec(),
+            orgs: self.cells.raw_orgs().to_vec(),
         };
         postcard::to_allocvec(&blob).map_err(|_| TankError::Postcard)
     }
@@ -654,6 +843,18 @@ impl Tank {
         tank.coarse.minerals = blob.minerals;
         tank.coarse.t_local = blob.t_local;
         tank.coarse.humidity = blob.humidity;
+        // Life: genotypes first (cells index them), then live counts.
+        let mut genomes = GenomeStore::import(&blob.genomes);
+        for c in blob.bio_cells.iter().filter(|c| c.alive) {
+            if genomes.get(c.genotype).is_none() {
+                return Err(TankError::Shape);
+            }
+            genomes.on_birth(c.genotype);
+        }
+        tank.genomes = genomes;
+        tank.cells = CellStore::from_raw(blob.bio_cells, blob.orgs);
+        tank.light_dirty = true;
+        tank.rebuild_light();
         Ok(tank)
     }
 
@@ -666,6 +867,10 @@ impl Tank {
     }
 
     fn rebuild_light(&mut self) {
+        if !self.light_dirty {
+            return;
+        }
+        self.light_dirty = false;
         let flash = if self.flash_r > 0 {
             Some(pixels::Flashlight {
                 vx: self.flash_x,
@@ -675,6 +880,14 @@ impl Tank {
         } else {
             None
         };
+        // cloud[x] = exp(−k·fines[x]) in Q8; fines stay 0 until Phase 4.
+        let cloud: Vec<u8> = self
+            .fines
+            .iter()
+            .map(|&f| ((-0.004 * f).exp() * 255.0).clamp(0.0, 255.0) as u8)
+            .collect();
+        let cells = &self.cells;
+        let genomes = &self.genomes;
         pixels::rebuild_light(
             &self.grid,
             &mut self.pixels,
@@ -682,6 +895,16 @@ impl Tank {
             self.always_day,
             self.light_slider,
             flash,
+            &cloud,
+            &|owner| {
+                if owner < OWNER_BIAS {
+                    return 255;
+                }
+                cells
+                    .get(owner - OWNER_BIAS)
+                    .map(|c| genomes.coeffs(c.genotype, c.mode).light_pass_q8)
+                    .unwrap_or(255)
+            },
         );
     }
 
@@ -793,6 +1016,12 @@ struct SaveBlob {
     minerals: Vec<u8>,
     t_local: Vec<i8>,
     humidity: Vec<u8>,
+    #[serde(default)]
+    genomes: Vec<(u32, u32, u16, Genome)>,
+    #[serde(default)]
+    bio_cells: Vec<bio::CellRec>,
+    #[serde(default)]
+    orgs: Vec<bio::OrgRec>,
 }
 
 fn default_t_base() -> f32 {

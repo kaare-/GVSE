@@ -95,6 +95,11 @@ pub struct Flashlight {
     pub boost: u16,
 }
 
+#[allow(clippy::too_many_arguments)]
+/// Column light at pixel resolution. Water loses 0.1 % per pixel row,
+/// solid matter ~55 % per physics cell, and living tissue shades what is
+/// below it (`tissue_pass(owner)` in Q8; PHOTO ≈ ×0.5 per pixel row).
+/// `cloud[x]` (per pixel column, Q8) multiplies the light entering it.
 pub fn rebuild_light(
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
@@ -102,43 +107,51 @@ pub fn rebuild_light(
     always_day: bool,
     light_slider: f32,
     flash: Option<Flashlight>,
+    cloud_q8: &[u8],
+    tissue_pass: &dyn Fn(u32) -> u8,
 ) {
-    let vis_w = grid.visible_w();
     let vis_h = grid.visible_h();
-    let pw = pixels.w as i32;
+    let pw = pixels.w as usize;
+    let ph = pixels.h as usize;
     let df = if always_day { 1.0 } else { day_factor(tick) };
     let slider = light_slider.clamp(0.0, 1.0);
     let mut incident0 = (df * slider * 1000.0).round() as u32;
     incident0 = incident0 * 255 / 1000;
+    // Fixed-point ×256 so the per-row 0.1 % water loss is not rounded away.
+    let incident0 = incident0 * 256;
 
-    for vx in 0..vis_w {
+    for px in 0..pw {
+        let vx = (px / PX_PER_CELL as usize) as i32;
         let mut incoming = incident0;
         if let Some(f) = flash {
             if (vx - f.vx).abs() <= f.radius {
-                incoming = (incoming * f.boost as u32 / 256).min(255);
+                incoming = (incoming * f.boost as u32 / 256).min(255 * 256);
             }
         }
-        for vy_top in 0..vis_h {
-            let gy = 1 + (vis_h - 1 - vy_top);
-            let gx = 1 + vx;
-            let cell = grid.get(gx, gy);
-            let lit = incoming.min(255) as u8;
-            for suby in 0..PX_PER_CELL as i32 {
-                let py = vy_top * PX_PER_CELL as i32 + suby;
-                let row = (py * pw) as usize;
-                for subx in 0..PX_PER_CELL as i32 {
-                    let px = vx * PX_PER_CELL as i32 + subx;
-                    pixels.light[row + px as usize] = lit;
+        if let Some(&c) = cloud_q8.get(px) {
+            incoming = incoming * c as u32 / 255;
+        }
+        let mut last_owner = 0u32;
+        let mut last_pass = 255u32;
+        for py in 0..ph {
+            let vy_top = (py / PX_PER_CELL as usize) as i32;
+            let cell = grid.get_visible(vx, vis_h - 1 - vy_top);
+            let i = py * pw + px;
+            pixels.light[i] = (incoming / 256).min(255) as u8;
+            let owner = pixels.owner[i];
+            if owner != 0 {
+                if owner != last_owner {
+                    last_owner = owner;
+                    last_pass = tissue_pass(owner) as u32;
                 }
-            }
-            if cell.is_air() {
+                incoming = incoming * last_pass / 256;
+            } else if cell.is_air() {
                 if cell.sat >= WATER_SAT_RENDER {
-                    for _ in 0..PX_PER_CELL {
-                        incoming = incoming * 999 / 1000;
-                    }
+                    incoming = incoming * 999 / 1000;
                 }
             } else {
-                incoming = incoming * 45 / 100;
+                // 0.45 per physics cell ≈ 0.766 per pixel row.
+                incoming = incoming * 196 / 256;
             }
         }
     }
