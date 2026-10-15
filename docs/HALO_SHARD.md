@@ -1,7 +1,7 @@
 # Halo / shard handoff *(dig F contract)*
 
-**Status:** F0–F4 Lab→Shadow seam path landed (2026-10-15). Product dig order
-**F** from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Region envelope:
+**Status:** F0–F5 Lab→Shadow→Wild seam path landed (2026-10-15). Product dig
+order **F** from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Region envelope:
 [`REGION_CAPACITY.md`](REGION_CAPACITY.md). Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Intent
@@ -126,7 +126,7 @@ ViewFrames through a relay for seam state.
 |------|------|-------------|
 | **Lab** | F1–F3 | Operator may pause both; Viewer pause policy unchanged per host |
 | **Shadow** | **F4** | LAN UDP discovery + neighbor `region_id` allowlist; scrap hosts may drop seams anytime |
-| **Wild** | After Shadow + compress + allowlist | Official region graph; GDPR on official hosts only |
+| **Wild** | **F5** | Official 1D region graph file (no LAN discover); GDPR on official hosts only |
 
 ## Acceptance gates
 
@@ -179,6 +179,31 @@ Host flags: `--seam-side west|east`, `--seam-listen`, `--seam-peer`,
 `SeamIdentity`, `hello_authorized`. Lab `--seam-peer` / `--seam-listen` still
 work with empty identity + open allowlist.
 
+### F5 — Wild official region graph
+
+- [x] `RegionGraph` text format (`mesh` / `node` / `edge`) + `RegionSeamPlan`  
+- [x] Geographic west opens East face + dials; east opens West face + listens  
+- [x] Middle regions may open **both** faces (`SeamConfig::open_faces`)  
+- [x] Host `--seam-graph PATH` + `--seam-region-id` (Wild; no `--seam-discover`)  
+- [x] Allowlist derived from graph neighbors (CLI `--seam-allow*` still merges)  
+- [ ] Owner three-host chain smoke (optional)  
+- [ ] AWS directory / Steam identity (Dig G — not this wedge)
+
+```text
+# example official-1.graph
+mesh official-1
+node alpha 127.0.0.1:17421
+node beta  127.0.0.1:17422
+node gamma 127.0.0.1:17423
+edge alpha beta
+edge beta gamma
+```
+
+```bash
+wk-voxel-host --dev --tier wild --seam-graph official-1.graph \
+  --seam-region-id beta --seam-token SECRET --bind 127.0.0.1:17420
+```
+
 ## Explicit non-goals *(until unlocked)*
 
 - Seamless continent-scale Wild MMO / interest management across dozens of regions  
@@ -196,7 +221,7 @@ work with empty identity + open allowlist.
 | **F2** | P1 edge field mirror | F1 |
 | **F3** | P2 organism / corpse handoff | F1 (+ biology gates) |
 | **F4** | Shadow discovery + neighbor allowlist | F1 — ✅ |
-| **F5** | Wild official region graph | F4 + hosting/compress |
+| **F5** | Wild official region graph | F4 + hosting/compress — ✅ |
 
 ## Related
 
