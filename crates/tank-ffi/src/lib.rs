@@ -104,6 +104,39 @@ pub extern "C" fn tank_empty(seed: u64) -> *mut TankHandle {
 }
 
 #[no_mangle]
+pub extern "C" fn tank_seed_algae(handle: *mut TankHandle, px: u32, py: u32) -> u32 {
+    let Some(handle) = (unsafe { handle.as_mut() }) else {
+        return u32::MAX;
+    };
+    handle
+        .tank
+        .seed_algae(px as u16, py as u16)
+        .unwrap_or(u32::MAX)
+}
+
+#[no_mangle]
+pub extern "C" fn tank_live_cells(handle: *const TankHandle) -> u32 {
+    unsafe { handle.as_ref() }
+        .map(|h| h.tank.live_cells() as u32)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn tank_swipe_film(
+    handle: *mut TankHandle,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    radius: i32,
+) -> u32 {
+    let Some(handle) = (unsafe { handle.as_mut() }) else {
+        return 0;
+    };
+    handle.tank.swipe_film(x0, y0, x1, y1, radius)
+}
+
+#[no_mangle]
 pub extern "C" fn tank_free(handle: *mut TankHandle) {
     if handle.is_null() {
         return;
@@ -482,6 +515,9 @@ mod tests {
         for name in [
             "tank_new",
             "tank_empty",
+            "tank_seed_algae",
+            "tank_live_cells",
+            "tank_swipe_film",
             "tank_tick",
             "tank_pixels",
             "tank_inspect",

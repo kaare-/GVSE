@@ -11,6 +11,7 @@
 //! property table. Randomness is [`hash_u64`]. This crate does not read
 //! the wall clock and does not touch the filesystem.
 
+pub mod bio;
 pub mod cell;
 pub mod clock;
 pub mod consts;

@@ -350,3 +350,53 @@ fn empty_tank_has_a_thin_sand_bed() {
     assert_eq!(tank.cell_visible(10, 0).id(), MaterialId::Sand);
     assert!(tank.cell_visible(10, 20).is_air());
 }
+
+#[test]
+fn preset_seeds_algae_that_divides() {
+    let mut tank = Tank::preset(11);
+    assert!(tank.live_cells() >= 1, "preset should seed algae");
+    let start = tank.live_cells();
+    // ~90 s at 30 Hz — enough for several divisions under full light.
+    for _ in 0..2_700 {
+        tank.tick(&TankInput {
+            always_day: true,
+            ..TankInput::default()
+        });
+    }
+    assert!(
+        tank.live_cells() > start,
+        "algae should divide (start={start} now={})",
+        tank.live_cells()
+    );
+    assert!(tank.genotype_count() >= 1);
+}
+
+#[test]
+fn swipe_clears_film() {
+    let mut tank = Tank::try_new(1, 16, 16).unwrap();
+    let w = tank.pixel_size().0 as usize;
+    for x in 0..40 {
+        tank.pixels_film_set_for_test(10 * w + x, 200);
+    }
+    let cleared = tank.swipe_film(5, 10, 35, 10, 4);
+    assert!(cleared > 0, "cleared={cleared}");
+}
+
+#[test]
+fn genome_tree_counts_births() {
+    let mut tank = Tank::try_new(1, 32, 32).unwrap();
+    // Fill a water column and seed.
+    for vx in 0..32 {
+        for vy in 0..20 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    assert!(tank.seed_algae(48, 40).is_some());
+    for _ in 0..1_500 {
+        tank.tick(&TankInput {
+            always_day: true,
+            ..TankInput::default()
+        });
+    }
+    assert!(tank.live_cells() >= 1);
+}

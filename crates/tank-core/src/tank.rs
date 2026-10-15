@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
+use crate::bio::store::OWNER_BIAS;
+use crate::bio::{self, CellStore, GenomeStore};
 use crate::cell::Cell;
 use crate::clock::{self, day_factor};
 use crate::consts::{MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H, PRESET_W, SAVE_VERSION};
@@ -87,6 +89,8 @@ pub struct Tank {
     events: VecDeque<SimEvent>,
     telemetry: Telemetry,
     undo: Vec<UndoFrame>,
+    cells: CellStore,
+    genomes: GenomeStore,
 }
 
 impl Tank {
@@ -119,6 +123,8 @@ impl Tank {
             events: VecDeque::new(),
             telemetry: Telemetry::default(),
             undo: Vec::new(),
+            cells: CellStore::new(),
+            genomes: GenomeStore::new(),
         };
         tank.rebuild_light();
         Ok(tank)
@@ -168,6 +174,10 @@ impl Tank {
                 tank.grid.set_visible(cx, vy, Cell::sand());
             }
         }
+        // Seed one algae near the waterline, centre.
+        let px = (w as u32 / 2) * 3;
+        let py = ((h - water_top - 2) as u32) * 3;
+        let _ = tank.seed_algae(px as u16, py as u16);
         tank.rebuild_light();
         tank
     }
@@ -248,9 +258,40 @@ impl Tank {
         self.undo.len()
     }
 
+    pub fn live_cells(&self) -> usize {
+        self.cells.len()
+    }
+
+    pub fn genotype_count(&self) -> usize {
+        self.genomes.len()
+    }
+
+    pub fn seed_algae(&mut self, px: u16, py: u16) -> Option<u32> {
+        let id = self
+            .cells
+            .seed_algae(&mut self.genomes, &mut self.pixels, px, py, self.seed)?;
+        self.events.push_back(SimEvent {
+            kind: 1, // first life / seed
+            arg0: id,
+        });
+        Some(id)
+    }
+
+    /// Clear front-pane film along a stroke (pixel space, top-left origin).
+    pub fn swipe_film(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, radius: i32) -> u32 {
+        bio::swipe_film(&mut self.pixels, x0, y0, x1, y1, radius)
+    }
+
     #[cfg(test)]
     pub(crate) fn place_for_test(&mut self, vx: i32, vy: i32, cell: Cell) {
         self.grid.set_visible(vx, vy, cell);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pixels_film_set_for_test(&mut self, idx: usize, v: u8) {
+        if idx < self.pixels.film.len() {
+            self.pixels.film[idx] = v;
+        }
     }
 
     pub fn tick(&mut self, input: &TankInput) {
@@ -268,6 +309,31 @@ impl Tank {
         self.apply_tools(&input.tools);
         let tilt = if self.swirl { self.grav_x } else { 0.0 };
         rules::step(&mut self.grid, self.seed, self.tick_count, tilt);
+        let bio = bio::step(
+            &mut self.cells,
+            &mut self.genomes,
+            &mut self.grid,
+            &mut self.pixels,
+            self.seed,
+            self.tick_count,
+        );
+        for ev in bio.events {
+            self.events.push_back(ev);
+        }
+        if bio.deaths > 0 && self.cells.is_empty() {
+            self.events.push_back(SimEvent {
+                kind: 10, // lifeless
+                arg0: 0,
+            });
+        }
+        // "glass needs cleaning" when film coverage is high.
+        let film_n = self.pixels.film.iter().filter(|&&f| f > 80).count();
+        if film_n > (self.pixels.len() / 40) && self.tick_count % 300 == 0 {
+            self.events.push_back(SimEvent {
+                kind: 11, // glass dirty
+                arg0: film_n as u32,
+            });
+        }
         self.tick_count = self.tick_count.wrapping_add(1);
     }
 
@@ -317,7 +383,28 @@ impl Tank {
 
     pub fn write_rgba(&mut self, out: &mut Vec<u8>) {
         self.rebuild_light();
-        pixels::write_rgba(&self.grid, &self.pixels, out);
+        let cells = &self.cells;
+        let genomes = &self.genomes;
+        pixels::write_rgba(&self.grid, &self.pixels, out, &|owner| {
+            if owner < OWNER_BIAS {
+                return None;
+            }
+            let id = owner - OWNER_BIAS;
+            let cell = cells.get(id)?;
+            if !cell.alive {
+                return None;
+            }
+            let g = genomes.genome(cell.genotype);
+            // Green PHOTO base; brightness from metab_eff and energy.
+            let base = 0x3Fu16;
+            let bright = (g.metab_eff as u16) * (40 + g.photo as u16 * 8) / 128;
+            let energy = (cell.energy / 256).min(8);
+            Some([
+                (base.saturating_sub(bright / 3)).min(80) as u8,
+                (0xA3u16 + bright + energy * 4).min(255) as u8,
+                (0x4Du16 + bright / 2).min(180) as u8,
+            ])
+        });
     }
 
     pub fn pixel_hash(&mut self) -> u64 {
@@ -449,11 +536,31 @@ impl Tank {
         if tools.is_empty() {
             return;
         }
-        // One undo frame for the whole tool batch of this tick.
         let mut need_push = false;
         for tool in tools {
             if tool.kind == 6 {
                 let _ = self.undo();
+                continue;
+            }
+            if tool.kind == 7 {
+                // Swipe-clean film: (x,y) start, r = radius; end ≈ start for a dab.
+                let _ = self.swipe_film(
+                    tool.x as i32,
+                    tool.y as i32,
+                    tool.x as i32,
+                    tool.y as i32,
+                    tool.r.max(2) as i32,
+                );
+                continue;
+            }
+            if tool.kind == 8 {
+                // Seed algae at a physics cell → pixel centre.
+                let px = tool.x as u32 * 3 + 1;
+                let py_phys = tool.y as u32;
+                let vis_h = self.grid.visible_h() as u32;
+                let py_top = vis_h.saturating_sub(1).saturating_sub(py_phys);
+                let py = py_top * 3 + 1;
+                let _ = self.seed_algae(px as u16, py as u16);
                 continue;
             }
             if !need_push {

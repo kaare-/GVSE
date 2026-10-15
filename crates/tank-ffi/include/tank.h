@@ -64,6 +64,9 @@ typedef struct TelRec {
 TankHandle *tank_new(uint64_t seed, uint32_t w_cells, uint32_t h_cells);
 TankHandle *tank_preset(uint64_t seed);
 TankHandle *tank_empty(uint64_t seed);
+uint32_t tank_seed_algae(TankHandle *handle, uint32_t px, uint32_t py);
+uint32_t tank_live_cells(const TankHandle *handle);
+uint32_t tank_swipe_film(TankHandle *handle, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t radius);
 void tank_free(TankHandle *handle);
 void tank_tick(TankHandle *handle, const TankInput *input);
 uint8_t tank_undo(TankHandle *handle);

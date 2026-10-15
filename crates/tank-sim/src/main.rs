@@ -73,13 +73,15 @@ fn cmd_tank(args: impl Iterator<Item = String>) -> ExitCode {
     }
     let ms = start.elapsed().as_secs_f64() * 1000.0 / ticks.max(1) as f64;
     println!(
-        "seed={seed} tick={} phase={} day_factor={:.4} hash={:016x} ms_per_tick={ms:.3} sat={} sand={}",
+        "seed={seed} tick={} phase={} day_factor={:.4} hash={:016x} ms_per_tick={ms:.3} sat={} sand={} cells={} genotypes={}",
         tank.tick_count(),
         tank.phase_name(),
         tank.day_factor_now(),
         tank.pixel_hash(),
         tank.sat_sum(),
-        tank.count_material(2)
+        tank.count_material(2),
+        tank.live_cells(),
+        tank.genotype_count()
     );
     ExitCode::SUCCESS
 }

@@ -1,0 +1,224 @@
+//! Living cells and organisms. B0: every cell is its own organism.
+#![allow(clippy::too_many_arguments)]
+
+use crate::bio::genome::{GenomeStore, GenomeV0};
+use crate::hash::hash_u64;
+use crate::pixels::PixelLayer;
+
+pub const EMPTY_OWNER: u32 = 0;
+/// Owner ids for living cells start at 1 (index into CellStore + 1).
+pub const OWNER_BIAS: u32 = 1;
+
+#[derive(Debug, Clone, Copy)]
+pub struct CellRec {
+    pub px: u16,
+    pub py: u16,
+    pub genotype: u32,
+    pub org: u32,
+    pub age: u16,
+    pub energy: u16,
+    pub heading: u8,
+    /// Stuck as front-pane film.
+    pub film: bool,
+    pub alive: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OrgRec {
+    pub seed: u32,
+    pub generation: u32,
+    pub alive: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CellStore {
+    cells: Vec<CellRec>,
+    free: Vec<u32>,
+    orgs: Vec<OrgRec>,
+    org_free: Vec<u32>,
+}
+
+impl CellStore {
+    pub fn new() -> Self {
+        Self {
+            cells: Vec::new(),
+            free: Vec::new(),
+            orgs: Vec::new(),
+            org_free: Vec::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.cells.iter().filter(|c| c.alive).count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, id: u32) -> Option<&CellRec> {
+        self.cells.get(id as usize)
+    }
+
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut CellRec> {
+        self.cells.get_mut(id as usize)
+    }
+
+    pub fn iter_alive(&self) -> impl Iterator<Item = (u32, &CellRec)> {
+        self.cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.alive)
+            .map(|(i, c)| (i as u32, c))
+    }
+
+    pub fn spawn(
+        &mut self,
+        genomes: &mut GenomeStore,
+        pixels: &mut PixelLayer,
+        px: u16,
+        py: u16,
+        genotype: u32,
+        generation: u32,
+        energy: u16,
+        heading: u8,
+        seed: u64,
+    ) -> Option<u32> {
+        let idx = (py as usize) * (pixels.w as usize) + px as usize;
+        if idx >= pixels.owner.len() || pixels.owner[idx] != EMPTY_OWNER {
+            return None;
+        }
+        let cell_id = if let Some(id) = self.free.pop() {
+            id
+        } else {
+            let id = self.cells.len() as u32;
+            self.cells.push(CellRec {
+                px,
+                py,
+                genotype,
+                org: 0,
+                age: 0,
+                energy,
+                heading,
+                film: false,
+                alive: false,
+            });
+            id
+        };
+        let org_id = if let Some(id) = self.org_free.pop() {
+            id
+        } else {
+            let id = self.orgs.len() as u32;
+            self.orgs.push(OrgRec {
+                seed: cell_id,
+                generation,
+                alive: false,
+            });
+            id
+        };
+        self.orgs[org_id as usize] = OrgRec {
+            seed: cell_id,
+            generation,
+            alive: true,
+        };
+        let jitter = (hash_u64(seed, cell_id as u64, genotype as u64, 0xC1) % 8) as u8;
+        self.cells[cell_id as usize] = CellRec {
+            px,
+            py,
+            genotype,
+            org: org_id,
+            age: 0,
+            energy,
+            heading: heading.wrapping_add(jitter) % 8,
+            film: false,
+            alive: true,
+        };
+        pixels.owner[idx] = cell_id + OWNER_BIAS;
+        genomes.on_birth(genotype);
+        Some(cell_id)
+    }
+
+    pub fn kill(
+        &mut self,
+        genomes: &mut GenomeStore,
+        pixels: &mut PixelLayer,
+        id: u32,
+        to_film: bool,
+    ) {
+        let Some(cell) = self.cells.get_mut(id as usize) else {
+            return;
+        };
+        if !cell.alive {
+            return;
+        }
+        let (px, py, genotype, org) = (cell.px, cell.py, cell.genotype, cell.org);
+        cell.alive = false;
+        let idx = (py as usize) * (pixels.w as usize) + px as usize;
+        if idx < pixels.owner.len() && pixels.owner[idx] == id + OWNER_BIAS {
+            pixels.owner[idx] = EMPTY_OWNER;
+        }
+        if to_film && idx < pixels.film.len() {
+            pixels.film[idx] = pixels.film[idx].saturating_add(180).min(220);
+        }
+        genomes.on_death(genotype);
+        if let Some(o) = self.orgs.get_mut(org as usize) {
+            o.alive = false;
+            self.org_free.push(org);
+        }
+        self.free.push(id);
+    }
+
+    pub fn move_cell(&mut self, pixels: &mut PixelLayer, id: u32, nx: u16, ny: u16) -> bool {
+        let Some(cell) = self.cells.get(id as usize).copied() else {
+            return false;
+        };
+        if !cell.alive {
+            return false;
+        }
+        let nidx = (ny as usize) * (pixels.w as usize) + nx as usize;
+        if nidx >= pixels.owner.len() || pixels.owner[nidx] != EMPTY_OWNER {
+            return false;
+        }
+        let oidx = (cell.py as usize) * (pixels.w as usize) + cell.px as usize;
+        if oidx < pixels.owner.len() {
+            pixels.owner[oidx] = EMPTY_OWNER;
+        }
+        pixels.owner[nidx] = id + OWNER_BIAS;
+        if let Some(c) = self.cells.get_mut(id as usize) {
+            c.px = nx;
+            c.py = ny;
+        }
+        true
+    }
+
+    pub fn seed_algae(
+        &mut self,
+        genomes: &mut GenomeStore,
+        pixels: &mut PixelLayer,
+        px: u16,
+        py: u16,
+        world_seed: u64,
+    ) -> Option<u32> {
+        let g = genomes.seed_algae();
+        self.spawn(genomes, pixels, px, py, g, 0, 8 * 256, 2, world_seed)
+    }
+
+    pub fn genome_of(&self, genomes: &GenomeStore, id: u32) -> GenomeV0 {
+        self.get(id)
+            .map(|c| genomes.genome(c.genotype))
+            .unwrap_or_else(GenomeV0::algae)
+    }
+
+    pub fn org_generation(&self, org: u32) -> u32 {
+        self.orgs
+            .get(org as usize)
+            .map(|o| o.generation)
+            .unwrap_or(0)
+    }
+}
+
+impl Default for CellStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}

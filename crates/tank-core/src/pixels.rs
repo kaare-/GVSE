@@ -126,7 +126,13 @@ pub fn rebuild_light(
 }
 
 /// RGBA8, row 0 = top of the tank, nearest-neighbour 3×3 blocks.
-pub fn write_rgba(grid: &PhysicsGrid, pixels: &PixelLayer, out: &mut Vec<u8>) {
+/// `bio_rgb` paints living owners: `(owner_id, [r,g,b])` lookup via closure.
+pub fn write_rgba(
+    grid: &PhysicsGrid,
+    pixels: &PixelLayer,
+    out: &mut Vec<u8>,
+    bio_rgb: &dyn Fn(u32) -> Option<[u8; 3]>,
+) {
     let pw = pixels.w as usize;
     let ph = pixels.h as usize;
     out.resize(pw * ph * 4, 0);
@@ -137,8 +143,13 @@ pub fn write_rgba(grid: &PhysicsGrid, pixels: &PixelLayer, out: &mut Vec<u8>) {
             let vy_top = (py as i32) / PX_PER_CELL as i32;
             let vy = vis_h - 1 - vy_top;
             let cell = grid.get_visible(vx, vy);
-            let [mut r, mut g, mut b] = albedo(cell);
             let i = py * pw + px;
+            let owner = pixels.owner[i];
+            let [mut r, mut g, mut b] = if owner != 0 {
+                bio_rgb(owner).unwrap_or(albedo(cell))
+            } else {
+                albedo(cell)
+            };
             let li = pixels.light[i] as u32;
             r = ((r as u32) * li / 255) as u8;
             g = ((g as u32) * li / 255) as u8;
