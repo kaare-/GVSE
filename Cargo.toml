@@ -5,6 +5,10 @@ members = [
     # Active voxel stack.
     "crates/wk-voxel",
     "crates/wk-voxel-app",
+    # MakeAcreature tank (Phase 0+).
+    "crates/tank-core",
+    "crates/tank-ffi",
+    "crates/tank-sim",
 ]
 
 [workspace.package]

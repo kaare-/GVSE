@@ -1,0 +1,12 @@
+[package]
+name = "tank-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI over tank-core for the Swift shell"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tank-core = { path = "../tank-core" }

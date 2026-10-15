@@ -1,0 +1,13 @@
+[package]
+name = "tank-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless MakeAcreature harness"
+
+[[bin]]
+name = "tank-sim"
+path = "src/main.rs"
+
+[dependencies]
+tank-core = { path = "../tank-core" }
