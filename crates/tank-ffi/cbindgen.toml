@@ -1,0 +1,7 @@
+# Regenerate include/tank.h with:
+#   cbindgen -c crates/tank-ffi/cbindgen.toml -o crates/tank-ffi/include/tank.h
+language = "C"
+include_guard = "TANK_H"
+usize_is_size_t = true
+style = "type"
+tab_width = 2

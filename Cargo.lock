@@ -489,6 +489,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "tank-core"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "wk-material",
+]
+
+[[package]]
+name = "tank-ffi"
+version = "0.1.0"
+dependencies = [
+ "tank-core",
+]
+
+[[package]]
+name = "tank-sim"
+version = "0.1.0"
+dependencies = [
+ "tank-core",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

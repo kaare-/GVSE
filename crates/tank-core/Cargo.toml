@@ -1,0 +1,11 @@
+[package]
+name = "tank-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MakeAcreature tank simulation (physics, pixel layer, clock)"
+
+[dependencies]
+wk-material = { path = "../wk-material" }
+serde = { workspace = true }
+postcard = { workspace = true }
