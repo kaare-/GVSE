@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::bio::profile::{Block, Entry, Mode, ModeCoeffs};
+use crate::bio::profile::{Block, Entry, Mode, ModeCoeffs, SENSOR_LIGHT};
 use crate::bio::program::{
-    rewire_child, rewire_transition, ChildKind, ChildSpec, Detach, Dir, Gate, HeadingRule,
+    rewire_child, rewire_transition, ChildKind, ChildSpec, Detach, Dir, Gate, HeadingRule, Link,
     Scalar, Transition,
 };
 use crate::consts::{BASE_AGE_S, LAMBDA0_MILLI, MAX_MODES};
@@ -125,11 +125,33 @@ impl Genome {
         g
     }
 
-    /// Motile 1×1 cell with CILIA (d.6-pre scaffold).
+    /// d.6-pre — phototactic swimmer: PHOTO 3, CILIA 3, SENSOR(light) 2,
+    /// with two intra-cell links into the motor drive: run while the
+    /// light ahead beats the light here (`sense` ≥ 128), tumble when
+    /// touch rises (then run on in the new direction).
     pub fn swimmer() -> Self {
-        let mut g = Self::algae();
+        let mut g = Self::base();
         g.buoy = 0;
-        g.modes[0].push_entry(Entry::new(Block::Cilia, 2));
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 3));
+        m.push_entry(Entry::new(Block::Cilia, 3));
+        m.push_entry(Entry::with_params(Block::Sensor, 2, SENSOR_LIGHT, 0));
+        m.push_link(Link::level(Scalar::Sense, 128, 96));
+        m.push_link(Link::rise(Scalar::Touch, -64));
+        m.push_child(ChildSpec::propagule(0, 15));
+        g.modes.push(m);
+        g
+    }
+
+    /// The same cell without eye or links: cilia on a plain gate (control).
+    pub fn blind_swimmer() -> Self {
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 3));
+        m.push_entry(Entry::new(Block::Cilia, 3));
+        m.push_child(ChildSpec::propagule(0, 15));
+        g.modes.push(m);
         g
     }
 
@@ -521,8 +543,8 @@ impl Genome {
                         ChildKind::from_u8(hash_u64(seed, salt, 9, 0xC2_09) as u8);
                 }
             }
-            // link ops reserved (Phase 5) — treated as point for now
-            _ => next.mutate_header_point(seed, salt),
+            // link op 0.01 — intra-cell links (§a.6); inter-cell links Phase 5
+            _ => next.modes[mi].mutate_link(seed, salt),
         }
         next.repair();
         next

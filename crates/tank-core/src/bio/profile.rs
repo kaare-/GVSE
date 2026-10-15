@@ -3,10 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 use crate::bio::program::{
-    ChildKind, ChildSpec, Detach, Dir, Gate, HeadingRule, Scalar, Transition,
+    ChildKind, ChildSpec, Detach, Dir, Gate, HeadingRule, Link, Scalar, Transition,
 };
 use crate::consts::{
-    FP, MAX_CHILDREN, MAX_ENTRIES, MAX_TRANSITIONS, P_UNITS, SHAPE_CAP, STORE_BASE_FP,
+    FP, MAX_CHILDREN, MAX_ENTRIES, MAX_LINKS, MAX_TRANSITIONS, P_UNITS, SHAPE_CAP, STORE_BASE_FP,
     STORE_PER_UNIT_FP, STRUCTURE_G_FP, STRUCTURE_UPKEEP_FP_TICK, TICK_HZ,
 };
 use crate::hash::hash_u64;
@@ -44,8 +44,8 @@ pub const N_BLOCKS: u8 = 21;
 pub const UPTAKE_GLUCOSE: u8 = 0;
 pub const UPTAKE_MINERAL: u8 = 1;
 pub const UPTAKE_WATER: u8 = 2;
-
-/// SENSOR kinds in `param_a`.
+/// SENSOR kinds (`param_a % 3`): light contrast along the heading, touch,
+/// dissolved-glucose contrast along the heading.
 pub const SENSOR_LIGHT: u8 = 0;
 pub const SENSOR_TOUCH: u8 = 1;
 pub const SENSOR_CHEM: u8 = 2;
@@ -247,6 +247,15 @@ pub struct Mode {
     pub n_transitions: u8,
     pub sacrifice_order: u8,
     pub regrow: bool,
+    /// Intra-cell links into the motor drive (§a.6), ≤ `MAX_LINKS`.
+    #[serde(default = "blank_links")]
+    pub links: [Link; MAX_LINKS],
+    #[serde(default)]
+    pub n_links: u8,
+}
+
+fn blank_links() -> [Link; MAX_LINKS] {
+    [Link::blank(); MAX_LINKS]
 }
 
 impl Mode {
@@ -268,6 +277,34 @@ impl Mode {
             n_transitions: 0,
             sacrifice_order: 0,
             regrow: true,
+            links: [Link::blank(); MAX_LINKS],
+            n_links: 0,
+        }
+    }
+
+    pub fn push_link(&mut self, l: Link) -> bool {
+        if self.n_links as usize >= MAX_LINKS {
+            return false;
+        }
+        self.links[self.n_links as usize] = l;
+        self.n_links += 1;
+        true
+    }
+
+    /// Link op (§c.2): gain, lose or re-weight one intra-cell link.
+    pub fn mutate_link(&mut self, seed: u64, salt: u64) {
+        let roll = hash_u64(seed, salt, 1, 0xB1_40) % 4;
+        if self.n_links == 0 || (roll == 0 && (self.n_links as usize) < MAX_LINKS) {
+            self.push_link(Link::random(seed, salt));
+        } else if roll == 1 {
+            let i = (hash_u64(seed, salt, 2, 0xB1_41) as usize) % self.n_links as usize;
+            let last = self.n_links as usize - 1;
+            self.links[i] = self.links[last];
+            self.links[last] = Link::blank();
+            self.n_links -= 1;
+        } else {
+            let i = (hash_u64(seed, salt, 3, 0xB1_42) as usize) % self.n_links as usize;
+            self.links[i].mutate(seed, salt);
         }
     }
 
@@ -488,6 +525,7 @@ impl Mode {
             && self.n_entries as usize <= MAX_ENTRIES
             && self.n_children as usize <= MAX_CHILDREN
             && self.n_transitions as usize <= MAX_TRANSITIONS
+            && self.n_links as usize <= MAX_LINKS
             && self.used_units() <= self.capacity()
             && (0..self.n_entries as usize).all(|i| self.entries[i].units > 0)
             && (0..self.n_children as usize).all(|i| self.children[i].mode < n_modes)
@@ -678,6 +716,8 @@ pub struct ModeCoeffs {
     pub muscle: u8,
     pub cilia: u8,
     pub cilia_gate: Gate,
+    pub links: [Link; MAX_LINKS],
+    pub n_links: u8,
     pub buoy: u8,
     pub excrete: u8,
     pub thermo: u8,
@@ -737,6 +777,8 @@ impl ModeCoeffs {
             muscle: 0,
             cilia: 0,
             cilia_gate: Gate::always(),
+            links: mode.links,
+            n_links: mode.n_links.min(MAX_LINKS as u8),
             buoy: 0,
             excrete: 0,
             thermo: 0,

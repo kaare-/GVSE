@@ -10,7 +10,7 @@ use crate::bio::fields::{add_plain, step_fields, Field};
 use crate::bio::genome::GenomeStore;
 use crate::bio::minerals;
 use crate::bio::profile::{ModeCoeffs, DIVIDE_AGE_UNIT_TICKS};
-use crate::bio::program::{glue_bond, heading_delta, ChildKind, Detach, Scalars};
+use crate::bio::program::{glue_bond, heading_delta, ChildKind, Detach, Scalar, Scalars};
 use crate::bio::store::{secretion_kind, CellStore, EMPTY_OWNER, NONE, OWNER_BIAS};
 use crate::cell::Cell;
 use crate::consts::{
@@ -70,7 +70,20 @@ pub mod ev {
     pub const HETEROTROPH: u32 = 19;
     /// Digestion turned sand into soil (arg0 = soil cells made this pass).
     pub const FUNGUS: u32 = 20;
+    /// Something moved: a cell or body swam ≥ 3 px on its cilia within
+    /// 60 ticks, not counting buoyancy, drift or jitter (arg0 = cell).
+    pub const MOVED: u32 = 21;
 }
+
+/// "Something moved" (§a.6): net cilia displacement over this window.
+const MOVED_WINDOW: u64 = 60;
+const MOVED_PX: i32 = 3;
+/// A running swimmer tumbles on its own about this often, so a blind cell
+/// still explores.
+const SPONTANEOUS_TUMBLE: u64 = 90;
+/// Thrust units → speed: `px/s = 4·units / perimeter_px` (a 1×1 cell with
+/// one beating unit makes ≈ 1 px/s; a 6×6 needs 6× the units, §a.6).
+const THRUST_PX_S_NUM: u64 = 4;
 
 pub fn step(
     cells: &mut CellStore,
@@ -108,6 +121,7 @@ pub fn step(
     if tick % 4 == 1 {
         drift_bodies(cells, genomes, grid, pixels, world_seed, tick);
     }
+    swim_bodies(cells, genomes, grid, pixels, world_seed, tick);
     form_glue_bonds(cells, genomes, pixels);
     step_corpses(cells, grid, pixels, tick, &mut out);
     rebuild_block(cells, genomes, pixels);
@@ -321,42 +335,26 @@ fn move_free_cell(
     let mut nx = cell.px as i32;
     let mut ny = cell.py as i32;
     // Brownian jitter of one pixel: a free cell cannot jump a 1-px wall.
-    if in_water {
+    // A swimmer's motion is its motor's; it jitters a quarter as much.
+    if in_water && (mc.cilia == 0 || tick % 4 == 0) {
         nx += (h % 3) as i32 - 1;
     }
+    let mut thrust: Option<(i32, i32)> = None;
     if mc.cilia > 0 && in_water {
-        // Run-and-tumble (§a.6): drive from the gate; tumble 90° when it drops.
-        let drive = cell.running;
-        if drive {
+        // Run-and-tumble (§a.6): the drive was set in `metabolise`; a run
+        // moves one pixel along the heading at the thrust speed.
+        if cell.running {
             let (dx, dy) = heading_delta(cell.heading);
-            if h % (TICK_HZ / mc.cilia.max(1) as u64).max(1) == 0 {
+            if h % thrust_period(mc.cilia as u32, 2 * (cell.w as u32 + cell.h as u32)) == 0 {
                 nx += dx;
                 ny += dy;
+                thrust = Some((dx, dy));
             }
         }
-        if h % 17 == 0 {
-            // Light-seeking tumble: pick the brighter of the two 90° turns.
-            let idx = (cell.py as usize) * (pixels.w as usize) + cell.px as usize;
-            let here_l = pixels.light.get(idx).copied().unwrap_or(0);
-            let mut best_h = cell.heading;
-            let mut best_l = here_l;
-            for cand in [cell.heading, cell.heading.wrapping_add(2) % 8, cell.heading.wrapping_add(6) % 8] {
-                let (cx, cy) = heading_delta(cand);
-                let px = cell.px as i32 + cx * 2;
-                let py = cell.py as i32 + cy * 2;
-                if px < 0 || py < 0 || px >= pixels.w as i32 || py >= pixels.h as i32 {
-                    continue;
-                }
-                let li = (py as usize) * (pixels.w as usize) + px as usize;
-                let l = pixels.light.get(li).copied().unwrap_or(0);
-                if l > best_l {
-                    best_l = l;
-                    best_h = cand;
-                }
-            }
+        if (h >> 20) % SPONTANEOUS_TUMBLE == 0 {
             if let Some(c) = cells.get_mut(id) {
-                c.heading = best_h;
-                c.running = true;
+                let side = if (h >> 30) % 2 == 0 { 2 } else { 6 };
+                c.heading = c.heading.wrapping_add(side) % 8;
             }
         }
     } else {
@@ -380,14 +378,150 @@ fn move_free_cell(
     ny = ny.clamp(0, ph - cell.h as i32);
     if nx != cell.px as i32 || ny != cell.py as i32 {
         let moved = cells.move_cell(pixels, id, nx as u16, ny as u16);
+        if moved {
+            if let Some((dx, dy)) = thrust {
+                if let Some(c) = cells.get_mut(id) {
+                    c.moved_dx = c.moved_dx.saturating_add(dx as i8);
+                    c.moved_dy = c.moved_dy.saturating_add(dy as i8);
+                }
+            }
+        }
         // A sinking cell blocked from below slides off diagonally, so free
         // cells never pile up out of the water.
-        if !moved && ny > cell.py as i32 {
+        if !moved && ny > cell.py as i32 && thrust.is_none() {
             let side = if h & 0x100 == 0 { 1 } else { -1 };
             let sx = (cell.px as i32 + side).clamp(0, pw - cell.w as i32);
             let _ = cells.move_cell(pixels, id, sx as u16, ny as u16);
         }
     }
+}
+
+/// Ticks between 1-px thrust steps for `units` beating cilia units on a
+/// body of `perimeter_px` pixels (§a.6 speed law).
+fn thrust_period(units: u32, perimeter_px: u32) -> u64 {
+    if units == 0 {
+        return u64::MAX;
+    }
+    (TICK_HZ * perimeter_px as u64 / (THRUST_PX_S_NUM * units as u64)).max(1)
+}
+
+/// SENSOR (§a.4 #14). Light / chem: contrast between the far end of a ray
+/// along the heading (`8·units` px, stopped by anything occupying a
+/// pixel or by solid matter) and the cell's own footprint, `128 + (far −
+/// here)`; a ray blocked at its first pixel sees nothing (0). Touch:
+/// `touch × 64`.
+fn sensor_read(
+    pixels: &PixelLayer,
+    grid: &PhysicsGrid,
+    c: &crate::bio::CellRec,
+    mc: &ModeCoeffs,
+    here_light: u8,
+    here_glucose: u8,
+    touch: u8,
+) -> u8 {
+    use crate::bio::profile::{SENSOR_CHEM, SENSOR_TOUCH};
+    if mc.sensor_kind == SENSOR_TOUCH {
+        return touch.saturating_mul(64);
+    }
+    let (dx, dy) = heading_delta(c.heading);
+    // First pixel outside the footprint on the heading side, centred.
+    let (mut x, mut y) = if dx != 0 {
+        (c.px as i32 + side_offset(dx, c.w), c.py as i32 + c.h as i32 / 2)
+    } else {
+        (c.px as i32 + c.w as i32 / 2, c.py as i32 + side_offset(dy, c.h))
+    };
+    let pw = pixels.w as i32;
+    let ph = pixels.h as i32;
+    let vis_h = grid.visible_h() as u32;
+    let field = if mc.sensor_kind == SENSOR_CHEM { &pixels.glucose } else { &pixels.light };
+    let here = if mc.sensor_kind == SENSOR_CHEM { here_glucose } else { here_light } as i32;
+    let len = 8 * mc.sensor as i32;
+    let mut far: Option<i32> = None;
+    for _ in 0..len {
+        if x < 0 || y < 0 || x >= pw || y >= ph {
+            break;
+        }
+        let i = (y * pw + x) as usize;
+        if pixels.owner[i] != EMPTY_OWNER {
+            break;
+        }
+        let (vx, vy) = pixel_to_phys(x as u16, y as u16, vis_h);
+        if !grid.get_visible(vx, vy).is_open() {
+            break;
+        }
+        far = Some(field[i] as i32);
+        x += dx;
+        y += dy;
+    }
+    match far {
+        None => 0,
+        Some(f) => (128 + (f - here).clamp(-127, 127)) as u8,
+    }
+}
+
+/// Motor drive (§a.6, Q8): the CILIA gate contributes +1 when it passes;
+/// each intra-cell link adds `weight · input · 4` where input is `scalar −
+/// threshold` (`Level`) or `scalar − running average` (`Rise`). Positive
+/// drive = run.
+fn motor_drive(mc: &ModeCoeffs, s: &Scalars, avg: &mut [u16; crate::consts::MAX_LINKS]) -> i32 {
+    let mut d: i32 = if mc.cilia_gate.passes(s) { 256 } else { 0 };
+    for (l, a) in mc.links.iter().zip(avg.iter_mut()).take(mc.n_links as usize) {
+        let v = s.read(l.scalar) as i32;
+        let v = if l.scalar == Scalar::Touch { (v * 64).min(255) } else { v };
+        let input = if l.rise {
+            let mean = ((*a as i32 + 128) >> 8).min(255);
+            *a = (*a as i32 + ((v << 8) - *a as i32) / 16).clamp(0, 255 << 8) as u16;
+            v - mean
+        } else {
+            v - l.threshold as i32
+        };
+        d += l.weight as i32 * input * 4;
+    }
+    d
+}
+
+/// Where a free body sits.
+struct BodyEnv {
+    /// Some cell is surface film.
+    film: bool,
+    /// Some cell touches solid substrate (holds a drifting body still;
+    /// cilia may still push off it).
+    touching: bool,
+    all_water: bool,
+    sand_above: bool,
+    /// Some cell bears cilia: the body swims and, like a free cilia cell,
+    /// holds station instead of sinking or floating passively.
+    cilia: bool,
+}
+
+fn body_env(cells: &CellStore, genomes: &GenomeStore, grid: &PhysicsGrid, org_id: u32) -> Option<BodyEnv> {
+    let o = cells.org(org_id)?;
+    let mut env = BodyEnv { film: false, touching: false, all_water: true, sand_above: false, cilia: false };
+    for s in o.slots.iter().filter(|s| s.cell != NONE) {
+        let Some(c) = cells.get(s.cell) else {
+            continue;
+        };
+        if c.film {
+            env.film = true;
+            return Some(env);
+        }
+        if near_solid(grid, c.px, c.py) {
+            env.touching = true;
+        }
+        if genomes.coeffs(c.genotype, c.mode).cilia > 0 {
+            env.cilia = true;
+        }
+        let (vx, vy) = pixel_to_phys(c.px, c.py, grid.visible_h() as u32);
+        let here = grid.get_visible(vx, vy);
+        if !(here.is_open() && here.sat > 40) {
+            env.all_water = false;
+        }
+        let above = grid.get_visible(vx, vy + 1);
+        if above.id() == MaterialId::Sand {
+            env.sand_above = true;
+        }
+    }
+    Some(env)
 }
 
 /// Multi-cell bodies: anchored to substrate ⇒ static; else drift as one
@@ -400,7 +534,7 @@ fn drift_bodies(
     world_seed: u64,
     tick: u64,
 ) {
-    let orgs: Vec<(u32, u32, i8)> = cells
+    let orgs: Vec<(u32, i8)> = cells
         .iter_orgs()
         .filter(|(_, o)| o.n_alive >= 2)
         .map(|(id, o)| {
@@ -408,42 +542,24 @@ fn drift_bodies(
                 .get(o.seed)
                 .map(|c| genomes.genome(c.genotype).buoy)
                 .unwrap_or(0);
-            (id, o.seed, g)
+            (id, g)
         })
         .collect();
-    for (org_id, _seed, buoy) in orgs {
-        let Some(o) = cells.org(org_id) else {
+    for (org_id, buoy) in orgs {
+        let Some(env) = body_env(cells, genomes, grid, org_id) else {
             continue;
         };
-        let mut anchored = false;
-        let mut all_water = true;
-        let mut sand_above = false;
-        for s in o.slots.iter().filter(|s| s.cell != NONE) {
-            let Some(c) = cells.get(s.cell) else {
-                continue;
-            };
-            if c.film || near_solid(grid, c.px, c.py) {
-                anchored = true;
-                break;
-            }
-            let (vx, vy) = pixel_to_phys(c.px, c.py, grid.visible_h() as u32);
-            let here = grid.get_visible(vx, vy);
-            if !(here.is_open() && here.sat > 40) {
-                all_water = false;
-            }
-            let above = grid.get_visible(vx, vy + 1);
-            if above.id() == MaterialId::Sand {
-                sand_above = true;
-            }
-        }
-        if anchored {
+        if env.film || env.touching {
             continue;
         }
+        let (all_water, sand_above) = (env.all_water, env.sand_above);
         let h = hash_u64(world_seed, tick, org_id as u64, 0xB2_D1);
         let mut dx = 0;
         let mut dy = 0;
         if sand_above || !all_water {
             dy = 1;
+        } else if env.cilia {
+            // Swimmers hold station; their cilia move them (`swim_bodies`).
         } else if buoy > 0 {
             if h % 8 < (buoy as u64).clamp(0, 7) {
                 dy = -1;
@@ -456,6 +572,94 @@ fn drift_bodies(
         }
         if dx != 0 || dy != 0 {
             let _ = cells.move_org(pixels, org_id, dx, dy);
+        }
+    }
+}
+
+/// Every tick: free bodies in water swim on their cilia (§a.6).
+fn swim_bodies(
+    cells: &mut CellStore,
+    genomes: &GenomeStore,
+    grid: &PhysicsGrid,
+    pixels: &mut PixelLayer,
+    world_seed: u64,
+    tick: u64,
+) {
+    let orgs: Vec<u32> = cells
+        .iter_orgs()
+        .filter(|(_, o)| o.n_alive >= 2)
+        .map(|(id, _)| id)
+        .collect();
+    for org_id in orgs {
+        let Some(env) = body_env(cells, genomes, grid, org_id) else {
+            continue;
+        };
+        if env.film || !env.all_water {
+            continue;
+        }
+        let h = hash_u64(world_seed, tick, org_id as u64, 0xB2_D2);
+        body_thrust(cells, genomes, pixels, org_id, h);
+    }
+}
+
+/// Cilia on a free body (§a.6): every running cilia cell pushes along its
+/// own heading; adjacent running cilia cells beat in phase, thrust ×
+/// `(1 + 0.25·n_adjacent)` capped at ×2. The net vector moves the body
+/// one pixel along its dominant axis at the speed law's rate.
+fn body_thrust(cells: &mut CellStore, genomes: &GenomeStore, pixels: &mut PixelLayer, org_id: u32, h: u64) {
+    let Some(o) = cells.org(org_id) else {
+        return;
+    };
+    let mut beating: Vec<(i32, i32, i32, i32, u8, u32)> = Vec::new();
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for s in o.slots.iter().filter(|s| s.cell != NONE) {
+        let Some(c) = cells.get(s.cell) else {
+            continue;
+        };
+        x0 = x0.min(c.px as i32);
+        y0 = y0.min(c.py as i32);
+        x1 = x1.max(c.px as i32 + c.w as i32);
+        y1 = y1.max(c.py as i32 + c.h as i32);
+        let mc = genomes.coeffs(c.genotype, c.mode);
+        if mc.cilia > 0 && c.running {
+            beating.push((c.px as i32, c.py as i32, c.w as i32, c.h as i32, c.heading, mc.cilia as u32));
+        }
+    }
+    if beating.is_empty() {
+        return;
+    }
+    let (mut tx, mut ty) = (0i64, 0i64);
+    for (i, &(px, py, w, hh, heading, units)) in beating.iter().enumerate() {
+        let n_adj = beating
+            .iter()
+            .enumerate()
+            .filter(|&(j, &(qx, qy, qw, qh, _, _))| {
+                j != i && px <= qx + qw && qx <= px + w && py <= qy + qh && qy <= py + hh
+            })
+            .count() as i64;
+        let bonus_q2 = (4 + n_adj).min(8);
+        let (dx, dy) = heading_delta(heading);
+        tx += dx as i64 * units as i64 * bonus_q2;
+        ty += dy as i64 * units as i64 * bonus_q2;
+    }
+    let (dir, mag_q2) = if tx.abs() >= ty.abs() {
+        ((tx.signum() as i32, 0), tx.abs())
+    } else {
+        ((0, ty.signum() as i32), ty.abs())
+    };
+    let units = (mag_q2 / 4) as u32;
+    if units == 0 || dir == (0, 0) {
+        return;
+    }
+    let perimeter = (2 * ((x1 - x0) + (y1 - y0))).max(4) as u32;
+    if h % thrust_period(units, perimeter) != 0 {
+        return;
+    }
+    let seed = o.seed;
+    if cells.move_org(pixels, org_id, dir.0, dir.1) {
+        if let Some(c) = cells.get_mut(seed) {
+            c.moved_dx = c.moved_dx.saturating_add(dir.0 as i8);
+            c.moved_dy = c.moved_dy.saturating_add(dir.1 as i8);
         }
     }
 }
@@ -500,6 +704,12 @@ fn metabolise(
     let kin = chem::kin_touch(cells, pixels, &cell);
     let sig = if mc.receptor > 0 {
         chem::receptor_read(pixels, &cell, mc.receptor_key)
+    } else {
+        0
+    };
+    let sense = if mc.sensor > 0 {
+        let here_glucose = (glucose_sum / area as u32).min(255) as u8;
+        sensor_read(pixels, grid, &cell, &mc, light_mean, here_glucose, touch)
     } else {
         0
     };
@@ -663,7 +873,7 @@ fn metabolise(
         kin,
         waste,
         temp_dev: ((t_tank - 22.0).abs() * 8.0).min(255.0) as u8,
-        sense: light_mean,
+        sense,
     };
 
     // ---- act
@@ -710,17 +920,34 @@ fn metabolise(
         });
     }
     if mc.cilia > 0 {
-        let drive = mc.cilia_gate.passes(&scalars);
+        let mut avg = cell.link_avg;
+        let drive = motor_drive(&mc, &scalars, &mut avg) > 0;
         if drive {
             energy -= FP / 50 / TICK_HZ as i32 * mc.cilia as i32;
         }
         if let Some(c) = cells.get_mut(id) {
-            if !drive && c.running {
-                // Tumble: rotate 90° to a hash-chosen side.
+            c.link_avg = avg;
+            if !drive {
+                // Tumble: rotate 90° to a hash-chosen side, and keep
+                // turning each tick until some heading gives a drive.
                 let side = if hash_u64(world_seed, tick, id as u64, 0xB3_01) % 2 == 0 { 2 } else { 6 };
                 c.heading = c.heading.wrapping_add(side) % 8;
             }
             c.running = drive;
+        }
+    }
+    // "Something moved": net swim over the window, not drift. A body's
+    // thrust is booked on its seed cell, which may itself bear no cilia.
+    if (tick + id as u64) % MOVED_WINDOW == 0 {
+        if let Some(c) = cells.get_mut(id) {
+            if (c.moved_dx as i32).abs() + (c.moved_dy as i32).abs() >= MOVED_PX {
+                out.events.push(SimEvent {
+                    kind: ev::MOVED,
+                    arg0: id,
+                });
+            }
+            c.moved_dx = 0;
+            c.moved_dy = 0;
         }
     }
 

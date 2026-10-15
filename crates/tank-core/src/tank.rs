@@ -951,35 +951,58 @@ impl Tank {
             }
             Some(rgb)
         });
-        // CILIA fringe: 1 px trailing the heading, pale pink, never blended.
+        // Visible correlates drawn over the footprint colours (§a.5):
+        // CILIA fringe (1–2 px trailing the heading, pale pink, never
+        // blended; while beating it alternates two frames at ≈ 4 Hz) and
+        // the SENSOR(light) pupil (one dark pixel on the heading side).
         let pw = self.pixels.w as i32;
         let ph = self.pixels.h as i32;
+        let put = |out: &mut [u8], i: usize, rgb: [u8; 3], light: u8| {
+            let o = i * 4;
+            for k in 0..3 {
+                out[o + k] = (rgb[k] as u32 * light as u32 / 255) as u8;
+            }
+        };
         for (_, c) in cells.iter_alive() {
             let mc = genomes.coeffs(c.genotype, c.mode);
-            if mc.cilia == 0 {
-                continue;
+            if mc.cilia > 0 {
+                let (bx, by) = bio::program::heading_delta(c.heading.wrapping_add(4) % 8);
+                let beat = c.running && (tick / 4) % 2 == 1;
+                let n = if bx != 0 { c.h } else { c.w } as i32;
+                for k in 0..n {
+                    // Every other pixel trails one further on the beat frame.
+                    let depth = if beat && k % 2 == 1 { 2 } else { 1 };
+                    let (x, y) = if bx != 0 {
+                        (c.px as i32 + bio::step::side_offset(bx, c.w) + bx * (depth - 1), c.py as i32 + k)
+                    } else {
+                        (c.px as i32 + k, c.py as i32 + bio::step::side_offset(by, c.h) + by * (depth - 1))
+                    };
+                    if x < 0 || y < 0 || x >= pw || y >= ph {
+                        continue;
+                    }
+                    let i = (y * pw + x) as usize;
+                    if self.pixels.owner[i] != 0 {
+                        continue;
+                    }
+                    let (vx, vy) = bio::pixel_to_phys(x as u16, y as u16, self.grid.visible_h() as u32);
+                    if !self.grid.get_visible(vx, vy).is_open() {
+                        continue;
+                    }
+                    put(out, i, [0xF0, 0xA6, 0xC0], self.pixels.light[i]);
+                }
             }
-            let (dx, dy) = bio::program::heading_delta(c.heading.wrapping_add(4) % 8);
-            let x = c.px as i32 + bio::step::side_offset(dx, c.w);
-            let y = c.py as i32 + bio::step::side_offset(dy, c.h);
-            if x < 0 || y < 0 || x >= pw || y >= ph {
-                continue;
+            if mc.sensor > 0 && mc.sensor_kind == bio::profile::SENSOR_LIGHT {
+                let (dx, dy) = bio::program::heading_delta(c.heading);
+                let (x, y) = if dx != 0 {
+                    (c.px as i32 + if dx > 0 { c.w as i32 - 1 } else { 0 }, c.py as i32 + c.h as i32 / 2)
+                } else {
+                    (c.px as i32 + c.w as i32 / 2, c.py as i32 + if dy > 0 { c.h as i32 - 1 } else { 0 })
+                };
+                if x >= 0 && y >= 0 && x < pw && y < ph {
+                    let i = (y * pw + x) as usize;
+                    put(out, i, [0x10, 0x14, 0x20], self.pixels.light[i]);
+                }
             }
-            let i = (y * pw + x) as usize;
-            if self.pixels.owner[i] != 0 {
-                continue;
-            }
-            // Two-frame beat at ≈4 Hz while running.
-            let bright = !c.running || (tick / 4) % 2 == 0;
-            let o = i * 4;
-            let (r, g, b) = if bright {
-                (0xF0, 0xA6, 0xC0)
-            } else {
-                (0xD8, 0x90, 0xA8)
-            };
-            out[o] = r;
-            out[o + 1] = g;
-            out[o + 2] = b;
         }
     }
 

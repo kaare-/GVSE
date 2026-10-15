@@ -164,6 +164,84 @@ impl Scalars {
     }
 }
 
+/// One intra-cell link (§a.6): a weighted input to the cell's motor
+/// drive, read from its own scalars. `Level` feeds `scalar − threshold`;
+/// `Rise` feeds the change of the scalar against a short running
+/// average (run while it rises, tumble when it falls). Links between
+/// cells (NERVE) arrive with Phase 5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Link {
+    pub scalar: Scalar,
+    /// Q6 weight: 64 = one scalar unit of input cancels the gate's +1.
+    pub weight: i8,
+    pub threshold: u8,
+    pub rise: bool,
+}
+
+impl Link {
+    pub const fn blank() -> Self {
+        Self {
+            scalar: Scalar::Always,
+            weight: 0,
+            threshold: 0,
+            rise: false,
+        }
+    }
+
+    pub const fn level(scalar: Scalar, threshold: u8, weight: i8) -> Self {
+        Self {
+            scalar,
+            weight,
+            threshold,
+            rise: false,
+        }
+    }
+
+    pub const fn rise(scalar: Scalar, weight: i8) -> Self {
+        Self {
+            scalar,
+            weight,
+            threshold: 0,
+            rise: true,
+        }
+    }
+
+    pub fn random(seed: u64, salt: u64) -> Self {
+        let mut s = Scalar::from_u8(hash_u64(seed, salt, 1, 0xB2_60) as u8);
+        if s == Scalar::Always {
+            s = Scalar::Light;
+        }
+        let mag = 16 + (hash_u64(seed, salt, 2, 0xB2_61) % 96) as i8;
+        let weight = if hash_u64(seed, salt, 3, 0xB2_62) % 2 == 0 { mag } else { -mag };
+        Self {
+            scalar: s,
+            weight,
+            threshold: hash_u64(seed, salt, 4, 0xB2_63) as u8,
+            rise: hash_u64(seed, salt, 5, 0xB264) % 2 == 0,
+        }
+    }
+
+    pub fn mutate(&mut self, seed: u64, salt: u64) {
+        match hash_u64(seed, salt, 1, 0xB2_65) % 4 {
+            0 => {
+                let d = (hash_u64(seed, salt, 2, 0xB2_66) % 33) as i32 - 16;
+                self.weight = (self.weight as i32 + d).clamp(-127, 127) as i8;
+            }
+            1 => {
+                let d = (hash_u64(seed, salt, 3, 0xB2_67) % 33) as i32 - 16;
+                self.threshold = (self.threshold as i32 + d).clamp(0, 255) as u8;
+            }
+            2 => self.rise = !self.rise,
+            _ => {
+                let s = Scalar::from_u8(hash_u64(seed, salt, 4, 0xB2_68) as u8);
+                if s != Scalar::Always {
+                    self.scalar = s;
+                }
+            }
+        }
+    }
+}
+
 /// `(scalar, threshold, above|below)`; `Always` passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Gate {

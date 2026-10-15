@@ -101,6 +101,8 @@ pub const MAX_MODES: usize = 16;
 pub const MAX_CHILDREN: usize = 4;
 pub const MAX_TRANSITIONS: usize = 3;
 pub const MAX_ENTRIES: usize = 6;
+/// Intra-cell links per mode (§a.6).
+pub const MAX_LINKS: usize = 4;
 
 /// Realised-map slots per organism.
 pub const MAX_SLOTS: usize = 64;

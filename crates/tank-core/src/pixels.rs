@@ -158,8 +158,18 @@ pub fn rebuild_light(
         let vx = (px / PX_PER_CELL as usize) as i32;
         let mut incoming = incident0;
         if let Some(f) = flash {
-            if (vx - f.vx).abs() <= f.radius {
-                incoming = (incoming * f.boost as u32 / 256).min(255 * 256);
+            // Full boost inside the cone, fading linearly to ×1 over a
+            // penumbra three radii wide (a soft torch edge — and a light
+            // gradient a phototactic cell can swim up, §a.6).
+            let d = (vx - f.vx).abs();
+            let r = f.radius.max(1);
+            if d <= 4 * r {
+                let boost = if d <= r {
+                    f.boost as u32
+                } else {
+                    256 + (f.boost as u32).saturating_sub(256) * (4 * r - d) as u32 / (3 * r) as u32
+                };
+                incoming = (incoming * boost / 256).min(255 * 256);
             }
         }
         if let Some(&c) = cloud_q8.get(px) {

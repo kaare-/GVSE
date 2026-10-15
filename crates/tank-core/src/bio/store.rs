@@ -115,6 +115,15 @@ pub struct CellRec {
     pub corpse: u8,
     #[serde(default)]
     pub corpse_bone: u16,
+    /// Running averages (Q8) of each intra-cell link's source scalar, for
+    /// `Rise` links (§a.6 run-and-tumble).
+    #[serde(default)]
+    pub link_avg: [u16; crate::consts::MAX_LINKS],
+    /// Net cilia-driven displacement since the last "something moved" check.
+    #[serde(default)]
+    pub moved_dx: i8,
+    #[serde(default)]
+    pub moved_dy: i8,
 }
 
 /// How long a dead cell stays a visible corpse before it crumbles.
@@ -154,6 +163,9 @@ impl CellRec {
             alive: false,
             corpse: 0,
             corpse_bone: 0,
+            link_avg: [0; crate::consts::MAX_LINKS],
+            moved_dx: 0,
+            moved_dy: 0,
         }
     }
 

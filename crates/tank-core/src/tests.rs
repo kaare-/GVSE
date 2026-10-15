@@ -1195,6 +1195,119 @@ fn chemo_cell_lives_on_sediment_in_the_dark() {
     assert!(starved_cells <= 2, "on a barren bed nothing grows in the dark ({starved_cells})");
 }
 
+/// 2.3.6 acceptance (d.6-pre) — a single cell swims toward the
+/// flashlight within a session: the sighted swimmer (SENSOR(light) →
+/// motor drive link, touch → tumble) finds the cone and stays in it; the
+/// blind control (same cilia on a plain gate) wanders.
+#[test]
+fn single_cell_swims_toward_the_flashlight() {
+    use crate::bio::Genome;
+    let cone_x = 26i32;
+    let cone_r = 3i32;
+    let in_cone = |px: u16| -> bool { ((px as i32 / 3) - cone_x).abs() <= cone_r };
+    let run = |seed: u64, sighted: bool| -> (bool, u32, u32) {
+        let mut tank = water_box(seed, 32, 24, 20);
+        tank.set_lambda_scale_q8(0);
+        let g = if sighted { Genome::swimmer() } else { Genome::blind_swimmer() };
+        let id = tank.seed_genome_at(30, 30, g).expect("seed");
+        let input = TankInput {
+            always_day: true,
+            light_slider: 0.4,
+            flash_x: cone_x,
+            flash_y: 10,
+            flash_r: cone_r,
+            ..TankInput::default()
+        };
+        let mut inside = 0u32;
+        let mut moved = 0u32;
+        for _ in 0..3000 {
+            tank.tick(&input);
+            while let Some(ev) = tank.poll_event() {
+                if ev.kind == crate::bio::ev::MOVED && ev.arg0 == id {
+                    moved += 1;
+                }
+            }
+            let Some(c) = tank.cell(id) else {
+                return (false, inside, moved);
+            };
+            if in_cone(c.px) {
+                inside += 1;
+            }
+        }
+        (true, inside, moved)
+    };
+    let mut sighted_total = 0u32;
+    let mut blind_total = 0u32;
+    for seed in [41u64, 42, 43, 44] {
+        let (alive, inside, moved) = run(seed, true);
+        assert!(alive, "the swimmer should live through the session (seed {seed})");
+        assert!(moved > 0, "a swimming cell fires 'something moved' (seed {seed})");
+        assert!(
+            inside >= 1000,
+            "the sighted cell should spend a third of the session in the cone (seed {seed}: {inside} ticks)"
+        );
+        sighted_total += inside;
+        let (_, b_inside, _) = run(seed, false);
+        blind_total += b_inside;
+    }
+    assert!(
+        sighted_total > blind_total * 2,
+        "the eye must make the difference (sighted {sighted_total} vs blind {blind_total} ticks in the cone)"
+    );
+}
+
+/// 2.3.6 — cilia on a free body move the whole body as one (§a.6):
+/// a straw whose tip grows CILIA swims along the tip's heading, stays
+/// intact, and the seed cell fires "something moved".
+#[test]
+fn cilia_body_swims_as_one_and_reports_movement() {
+    use crate::bio::{Block, Entry, Genome};
+    let mut tank = water_box(45, 32, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    let mut g = Genome::straw();
+    g.modes[1].push_entry(Entry::new(Block::Cilia, 3));
+    let id = tank.seed_genome_at(48, 60, g).expect("seed");
+    let mut grown = false;
+    for _ in 0..4000 {
+        tank.tick(&day());
+        if tank.org_slot_count(id) >= 3 {
+            grown = true;
+            break;
+        }
+    }
+    assert!(grown, "the straw should grow its tip");
+    while tank.poll_event().is_some() {}
+    let before = tank.cell(id).expect("seed lives").py;
+    let org = tank.org_of_cell(id).expect("org");
+    let n_before = org.n_alive;
+    let layout = |tank: &Tank| -> Vec<(i32, i32)> {
+        let seed = tank.cell(id).expect("seed lives");
+        tank.org_of_cell(id)
+            .expect("org")
+            .slots
+            .iter()
+            .filter_map(|s| tank.cell(s.cell))
+            .map(|c| (c.px as i32 - seed.px as i32, c.py as i32 - seed.py as i32))
+            .collect()
+    };
+    let shape_before = layout(&tank);
+    assert_eq!(shape_before.len(), 3);
+    let mut moved = 0u32;
+    for _ in 0..400 {
+        tank.tick(&day());
+        while let Some(ev) = tank.poll_event() {
+            if ev.kind == crate::bio::ev::MOVED && ev.arg0 == id {
+                moved += 1;
+            }
+        }
+    }
+    let after = tank.cell(id).expect("seed lives").py;
+    assert!(before - after >= 8, "the body should swim up on its tip's cilia ({before} → {after})");
+    assert_eq!(tank.org_of_cell(id).expect("org").n_alive, n_before, "the body stays whole");
+    assert_eq!(layout(&tank), shape_before, "the body moves as one");
+    assert!(moved > 0, "a swimming body fires 'something moved' on its seed");
+}
+
 /// 2.3.5 acceptance — soil appears under a fungus colony: saprotrophs
 /// digesting litter on a sand bed turn the sand beneath them into `Soil`
 /// (FUNGUS event), and their waste settles into sediment nutrient.
