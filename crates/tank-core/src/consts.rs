@@ -62,6 +62,13 @@ pub const FP: i32 = 1024;
 /// tick; UPTAKE(glucose) multiplies that (§a.2, §a.4).
 pub const GLUCOSE_UNIT_FP: i32 = FP / 64;
 
+/// Suspended fines settle out of the water column: every
+/// `FINES_SETTLE_EVERY` ticks a column loses `1/FINES_SETTLE_DIV` of its
+/// fines to soft litter on its floor (τ ≈ 60 s), so a die-off clouds the
+/// water for minutes, not forever (K2#8: matter stays in the tank).
+pub const FINES_SETTLE_EVERY: u64 = 30;
+pub const FINES_SETTLE_DIV: f32 = 60.0;
+
 /// Ticks between pixel growth steps toward the mode shape.
 pub const T_GROW: u16 = 8;
 
@@ -83,7 +90,7 @@ pub const STORE_PER_UNIT_FP: i32 = 2 * FP;
 pub const BIRTH_ENERGY_FP: i32 = 3 * FP;
 
 /// Metabolic activity floor (Q8): an idle cell burns and ages at ¼ rate.
-pub const ACTIVITY_FLOOR_Q8: i64 = 64;
+pub const ACTIVITY_FLOOR_Q8: i64 = 24;
 
 /// Default `base_age`, seconds; the pace law scales it (§b.6).
 pub const BASE_AGE_S: u8 = 60;

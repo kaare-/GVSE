@@ -604,6 +604,44 @@ impl Tank {
         bio::fields::add_litter(&mut self.pixels, idx, units, code);
     }
 
+    /// Fines settle to the floor of their column as soft litter (2.3.9):
+    /// whole glucose units move; the fraction below a unit stays suspended.
+    fn settle_fines(&mut self) {
+        use crate::bio::chem::LITTER_SOFT_CODE;
+        let pw = self.pixels.w as usize;
+        let ph = self.pixels.h as usize;
+        let vis_h = self.grid.visible_h();
+        for px in 0..pw {
+            let f = self.fines[px];
+            if f <= 0.0 {
+                continue;
+            }
+            let units = (f / crate::consts::FINES_SETTLE_DIV * 64.0).floor().min(255.0);
+            if units < 1.0 {
+                continue;
+            }
+            // Lowest open pixel of the column (water above the bed).
+            let mut floor = None;
+            for py in (0..ph).rev() {
+                let vy = vis_h - 1 - (py / crate::consts::PX_PER_CELL as usize) as i32;
+                if self.grid.get_visible(px as i32, vy).is_open() {
+                    floor = Some(py);
+                    break;
+                }
+            }
+            let Some(py) = floor else {
+                continue;
+            };
+            let idx = py * pw + px;
+            let room = 255u32.saturating_sub(self.pixels.litter[idx] as u32).min(units as u32);
+            if room == 0 {
+                continue;
+            }
+            bio::fields::add_litter(&mut self.pixels, idx, room as u8, LITTER_SOFT_CODE);
+            self.fines[px] = (f - room as f32 / 64.0).max(0.0);
+        }
+    }
+
     /// Total litter mass in units (harness probe).
     pub fn litter_total(&self) -> u64 {
         self.pixels.litter.iter().map(|&l| l as u64).sum()
@@ -829,6 +867,9 @@ impl Tank {
             if let Some(f) = self.fines.get_mut(px as usize) {
                 *f += units as f32 * crate::consts::GLUCOSE_UNIT_FP as f32 / crate::consts::FP as f32;
             }
+        }
+        if self.tick_count % crate::consts::FINES_SETTLE_EVERY == 0 {
+            self.settle_fines();
         }
         let probe = milestones::Probe {
             film_n: if self.tick_count % milestones::GLASS_EVERY == 0 {

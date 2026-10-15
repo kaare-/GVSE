@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         Some("soak") => cmd_soak(args),
         _ => {
             eprintln!(
-                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer|saprotroph|predator|stinger|signaller|spiny|egg|chemo] [--cycle] [--dark] [--verbose] [--litter N] [--lambda-q8 N] [--minerals N]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]\n  tank-sim gates --seeds N --ticks N [--threads N] [--csv path]\n  tank-sim soak --ticks N [--seed N]"
+                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path] [--log N]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer|saprotroph|predator|stinger|signaller|spiny|egg|chemo] [--cycle] [--dark] [--verbose] [--litter N] [--lambda-q8 N] [--minerals N]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]\n  tank-sim gates --seeds N --ticks N [--threads N] [--csv path]\n  tank-sim soak --ticks N [--seed N]"
             );
             ExitCode::from(2)
         }
@@ -250,9 +250,13 @@ fn cmd_tank(args: impl Iterator<Item = String>) -> ExitCode {
     let ticks = flag_u64(args.iter().cloned(), "--ticks").unwrap_or(1000);
     let seed = flag_u64(args.iter().cloned(), "--seed").unwrap_or(1);
     let csv = flag_str(&args, "--csv");
+    let log_every = flag_u64(args.iter().cloned(), "--log").unwrap_or(0);
     let mut tank = Tank::preset(seed);
     let input = TankInput::default();
     let mut csv_file = csv.map(|path| BufWriter::new(File::create(path).expect("csv")));
+    if log_every > 0 {
+        println!("tick,phase,cells,genotypes,bodies,litter,glucose,grit,sediment,minerals,fines_g,starved,aged,damaged,shed,ms");
+    }
     if let Some(file) = csv_file.as_mut() {
         writeln!(file, "tick,phase,day_factor,pixel_hash").ok();
     }
@@ -264,6 +268,29 @@ fn cmd_tank(args: impl Iterator<Item = String>) -> ExitCode {
             if milestone_name(ev.kind).is_some() && !firsts.iter().any(|(k, _)| *k == ev.kind) {
                 firsts.push((ev.kind, tank.tick_count()));
             }
+        }
+        if log_every > 0 && (i + 1) % log_every == 0 {
+            let d = tank.death_causes();
+            let (_, bodies) = tank.org_counts(2);
+            println!(
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3}",
+                tank.tick_count(),
+                tank.phase_name(),
+                tank.live_cells(),
+                tank.genotype_count(),
+                bodies,
+                tank.litter_total(),
+                tank.glucose_total(),
+                tank.grit_total(),
+                tank.sediment_total(),
+                tank.mineral_total(),
+                tank.fines().iter().sum::<f32>() as u64,
+                d[0],
+                d[1],
+                d[2],
+                d[3],
+                start.elapsed().as_secs_f64() * 1000.0 / (i + 1) as f64
+            );
         }
         if let Some(file) = csv_file.as_mut() {
             if i % 30 == 29 || i + 1 == ticks {
