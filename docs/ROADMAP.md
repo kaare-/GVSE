@@ -478,6 +478,7 @@ client ([`PHASE8_BACKLOG.md`](PHASE8_BACKLOG.md),
 | 2026-10-14 | Dig F1 Lab seam | P0 mass seam + `--seam-*` IPC (`SEAM_SCHEMA` 1); pair sat tests |
 | 2026-10-15 | Dig F2 edge fields | `SeamFieldMirror` + edge blend (`SEAM_SCHEMA` 2) |
 | 2026-10-15 | Dig F3 life handoff | Seam organism/corpse parcels + ACK (`SEAM_SCHEMA` 3) |
+| 2026-10-15 | Dig F4 Shadow discovery | Seam allowlist + LAN UDP announce (`SEAM_SCHEMA` 4) |
 | 2026-10-13 | Product pillars | Studio / player allowlist / region-shard / ops / ship ([`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md)) |
 | 2026-10-13 | Hosting cost sketch | Compact ~115 FPS; strip ~1 MiB×20 Hz; WAN needs compression ([`HOSTING_COST.md`](HOSTING_COST.md)) |
 | 2026-10-13 | World tiers | Lab (offline) · Shadow (BYO mesh) · Wild (official sub) |

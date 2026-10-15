@@ -6,6 +6,7 @@
 
 mod present;
 pub mod ipc;
+pub mod seam_discover;
 pub mod seam_ipc;
 
 use std::collections::HashMap;

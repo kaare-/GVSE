@@ -1,7 +1,7 @@
 # Halo / shard handoff *(dig F contract)*
 
-**Status:** F0–F3 Lab seam path landed (2026-10-15). Product dig order **F**
-from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Region envelope:
+**Status:** F0–F4 Lab→Shadow seam path landed (2026-10-15). Product dig order
+**F** from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Region envelope:
 [`REGION_CAPACITY.md`](REGION_CAPACITY.md). Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Intent
@@ -115,9 +115,9 @@ totals (parallel to `frozen_backlog_total`).
 | Framing | New **seam** postcard channel (not ViewFrame, not player commands) |
 | Auth | Shared local token / `--seam-token` (same spirit as peer Hello) |
 | Rate | ≤ product step (20 Hz); coalesce if behind |
-| Discovery | **None** — explicit `--seam-peer host:port` + side (`west`/`east`) |
+| Discovery | Lab: none — explicit `--seam-peer`. Shadow F4: LAN UDP announce |
 
-Shadow discovery / hole-punch / directory = later dig (F4+). Do not hairpin
+Shadow WAN hole-punch / official directory = later (F5+). Do not hairpin
 ViewFrames through a relay for seam state.
 
 ## Tier rollout
@@ -125,7 +125,7 @@ ViewFrames through a relay for seam state.
 | Tier | When | Extra rules |
 |------|------|-------------|
 | **Lab** | F1–F3 | Operator may pause both; Viewer pause policy unchanged per host |
-| **Shadow** | After Lab P0 green | Discovery + safe neighbor allowlist; scrap hosts may drop seams anytime |
+| **Shadow** | **F4** | LAN UDP discovery + neighbor `region_id` allowlist; scrap hosts may drop seams anytime |
 | **Wild** | After Shadow + compress + allowlist | Official region graph; GDPR on official hosts only |
 
 ## Acceptance gates
@@ -164,6 +164,21 @@ Host flags: `--seam-side west|east`, `--seam-listen`, `--seam-peer`,
 - [x] Unit tests: cross once; habit-cap revive  
 - [ ] Owner two-host creature walk (optional)  
 
+### F4 — Shadow discovery + neighbor allowlist
+
+- [x] `SeamAllowlist` (`region_id`) + Hello reject when not listed  
+- [x] `SEAM_SCHEMA` **4** — Hello / HelloAck carry `region_id` + `mesh_id`  
+- [x] LAN UDP `SeamAnnounce` (`SEAM_DISCOVER_SCHEMA` 1); East dials West  
+- [x] Host CLI: `--seam-region-id`, `--seam-mesh-id`, `--seam-allow`,
+  `--seam-allow-file`, `--seam-discover` / `--seam-discover-port`  
+- [x] Shadow + discover requires non-empty allowlist  
+- [ ] Owner two-host LAN smoke (optional)  
+- [ ] WAN hole-punch / directory (explicit non-goal here)
+
+**Landed API:** `seam_discover::{SeamAllowlist,SeamAnnounce,seam_discover_loop}`,
+`SeamIdentity`, `hello_authorized`. Lab `--seam-peer` / `--seam-listen` still
+work with empty identity + open allowlist.
+
 ## Explicit non-goals *(until unlocked)*
 
 - Seamless continent-scale Wild MMO / interest management across dozens of regions  
@@ -180,7 +195,7 @@ Host flags: `--seam-side west|east`, `--seam-listen`, `--seam-peer`,
 | **F1** | Seam IPC + P0 mass exchange (Lab two-host smoke) | F0 |
 | **F2** | P1 edge field mirror | F1 |
 | **F3** | P2 organism / corpse handoff | F1 (+ biology gates) |
-| **F4** | Shadow discovery + neighbor allowlist | F1 |
+| **F4** | Shadow discovery + neighbor allowlist | F1 — ✅ |
 | **F5** | Wild official region graph | F4 + hosting/compress |
 
 ## Related
