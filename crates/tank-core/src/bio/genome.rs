@@ -993,6 +993,38 @@ impl GenomeStore {
         self.intern_child(root, genome)
     }
 
+    /// Intern a genome seeded from the archive as a true lineage root
+    /// (no parent genotype) whose species continues the archived one:
+    /// same generated name and depth, flagged archived (§c.4 "seeding
+    /// from the archive continues the tree across tanks"). A genome
+    /// already in the table keeps its node.
+    pub fn intern_archive_root(&mut self, genome: Genome, species_name: &str, species_depth: u16) -> u32 {
+        if let Some(&id) = self.by_genome.get(&genome) {
+            return id;
+        }
+        // Make sure the algae root exists first so ids stay stable.
+        self.seed_algae();
+        let id = self.push_node(genome.clone(), NONE, 0);
+        // `push_node` founded a fresh depth-1 species; rename it to the
+        // archived identity (its own founder genome and signature stand).
+        let sp = self.nodes[id as usize].species;
+        if let Some(s) = self.species.get_mut(sp as usize) {
+            if s.founder == id {
+                let base = species_name.to_string();
+                let same = self
+                    .species
+                    .iter()
+                    .filter(|o| o.founder != id && o.name == base)
+                    .count() as u32;
+                let s = &mut self.species[sp as usize];
+                s.name = if same == 0 { base } else { species::disambiguate(&base, same + 1) };
+                s.depth = species_depth.max(1);
+                s.archived = true;
+            }
+        }
+        id
+    }
+
     pub fn intern_child(&mut self, parent: u32, genome: Genome) -> u32 {
         if let Some(&id) = self.by_genome.get(&genome) {
             return id;

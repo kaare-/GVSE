@@ -1916,3 +1916,97 @@ fn remove_tool_takes_bodies_litter_and_grit_whole() {
     let _ = tank.remove_at(12, 13, 2);
     assert!(tank.litter_total() < litter, "litter removed");
 }
+
+/// Phase 3 — a portrait is a pure function of the genome and shows the
+/// built body, not a single seed pixel.
+#[test]
+fn portraits_are_deterministic_and_show_the_body() {
+    use crate::archive::portrait;
+    use crate::bio::Genome;
+    let (w, h, px) = portrait(&Genome::algae());
+    assert_eq!((w, h), (1, 1));
+    assert_eq!(px[3], 255, "the algae is one opaque pixel");
+    let (w, h, straw) = portrait(&Genome::straw());
+    let opaque = straw.chunks(4).filter(|p| p[3] == 255).count();
+    assert!(opaque >= 3, "straw portrait has a chain ({w}×{h}, {opaque} px)");
+    assert!(w.max(h) >= 3, "straw is elongated ({w}×{h})");
+    assert_eq!(portrait(&Genome::straw()), (w, h, straw), "same genome, same picture");
+    let (gw, gh, giant) = portrait(&Genome::giant(4));
+    let opaque = giant.chunks(4).filter(|p| p[3] == 255).count();
+    assert!(opaque >= 9, "giant portrait is a grown cell ({gw}×{gh}, {opaque} px)");
+    let (sw, sh, spiny) = portrait(&Genome::spiny());
+    let ivory = spiny.chunks(4).filter(|p| p[..3] == [0xEF, 0xE7, 0xDA]).count();
+    assert!(ivory >= 1, "spiny portrait shows its bone ({sw}×{sh})");
+}
+
+/// Phase 3 — archive a creature, start a new tank from it: the record
+/// round-trips, the species is pinned, and the new tank's lineage
+/// continues the archived species by name and depth with the specimen
+/// as cross-tank ancestor.
+#[test]
+fn archive_specimen_and_seed_a_new_tank_from_it() {
+    use crate::archive::Specimen;
+    use crate::bio::{Block, Entry, Genome, NO_SPECIES};
+    let mut tank = water_box(21, 32, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    // A red straw: one structural step under the algae root → depth 2.
+    let mut g = Genome::straw();
+    g.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
+    let seed = tank.seed_genome_at(48, 30, g.clone()).expect("seed");
+    for _ in 0..300 {
+        tank.tick(&day());
+    }
+    let cell = tank.cell(seed).map(|_| seed).unwrap_or_else(|| tank.cells().live_ids()[0]);
+    let before = tank.lineage_card(cell).unwrap();
+    assert_eq!(before.archived_relatives, 0);
+    let sp = tank.archive_specimen(cell).expect("specimen");
+    assert_eq!(sp.species_name, before.species_name);
+    assert_eq!(sp.display_name, sp.species_name);
+    assert!(sp.lineage.len() >= 2, "{:?}", sp.lineage);
+    assert_eq!(sp.lineage.last().unwrap(), &sp.species_name);
+    assert!(sp.portrait_w >= 1 && sp.portrait.len() == sp.portrait_w as usize * sp.portrait_h as usize * 4);
+    assert!(sp.stats.cells >= 1);
+    assert_eq!(sp.archive_parent, None, "placed by hand, not from the archive");
+    assert_eq!(tank.lineage_card(cell).unwrap().archived_relatives, 1, "species pinned");
+    assert!(tank.species_tree().iter().any(|n| n.id == before.species && n.archived && !n.extinct));
+    let bytes = sp.to_bytes();
+    let back = Specimen::from_bytes(&bytes).expect("decode");
+    assert_eq!(back, sp);
+    assert!(Specimen::from_bytes(&bytes[..bytes.len() / 2]).is_none());
+    assert!(sp.page_text().contains(&sp.species_name));
+
+    // New tank, seeded from the specimen.
+    let mut fresh = water_box(22, 32, 24, 20);
+    let id = fresh.seed_specimen(&sp, 30, 30).expect("seed from archive");
+    let card = fresh.lineage_card(id).unwrap();
+    assert_eq!(card.species_name, sp.species_name, "the species continues by name");
+    assert_eq!(card.species_depth, sp.species_depth, "and by depth");
+    assert_eq!(card.generation, 0);
+    assert_eq!(card.mutations_since_seed, 0, "an archive seed is a lineage root");
+    assert_eq!(card.archived_relatives, 1);
+    assert_eq!(fresh.archive_parent_of(card.genotype), Some(sp.id));
+    assert_ne!(fresh.inspect(30, 30).species, NO_SPECIES);
+    // Its descendants inherit the archive ancestor and the save keeps it.
+    fresh.set_lambda_scale_q8(0);
+    for _ in 0..200 {
+        fresh.tick(&day());
+    }
+    let bytes = fresh.save_bytes().unwrap();
+    let mut loaded = Tank::load_bytes(&bytes).unwrap();
+    let any = loaded.cells().live_ids()[0];
+    let g2 = loaded.genotype_of_cell(any).unwrap();
+    assert_eq!(loaded.archive_parent_of(g2), Some(sp.id));
+    let sp2 = loaded.archive_specimen(any).expect("second specimen");
+    assert_eq!(sp2.archive_parent, Some(sp.id), "cross-tank ancestry travels with the record");
+    assert_ne!(sp2.id, sp.id);
+
+    // "New tank" convenience: n copies in open water on the preset.
+    let mut preset = Tank::preset(5);
+    let placed = preset.seed_specimen_copies(&sp, 4);
+    assert_eq!(placed, 4);
+    let tree = preset.species_tree();
+    let node = tree.iter().find(|n| n.name == sp.species_name).expect("archived species in the tree");
+    assert!(node.archived);
+    assert_eq!(node.live_cells, 4);
+    assert_eq!(node.parent, NO_SPECIES, "an archive seed is a root of this tank's tree");
+}

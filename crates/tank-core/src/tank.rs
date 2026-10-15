@@ -194,6 +194,8 @@ pub struct Tank {
     lambda_scale_q8: u16,
     /// 2.3.8 once-per-tank milestone detectors.
     milestones: Milestones,
+    /// Lineage roots seeded from the archive: `(genotype, specimen id)`.
+    archive_roots: Vec<(u32, u64)>,
 }
 
 impl Tank {
@@ -237,6 +239,7 @@ impl Tank {
             tissue_marks: Vec::new(),
             milestones: Milestones::default(),
             lambda_scale_q8: 256,
+            archive_roots: Vec::new(),
         };
         tank.rebuild_light();
         Ok(tank)
@@ -542,6 +545,59 @@ impl Tank {
 
     pub fn genotype_of_cell(&self, id: u32) -> Option<u32> {
         self.cells.get(id).map(|c| c.genotype)
+    }
+
+    pub fn genomes_mut(&mut self) -> &mut GenomeStore {
+        &mut self.genomes
+    }
+
+    /// Spawn a generation-0 seed cell of an interned genotype (archive).
+    pub(crate) fn spawn_root(&mut self, geno: u32, seed_mode: u8, px: u16, py: u16) -> Option<u32> {
+        let id = self.cells.spawn(
+            &mut self.genomes,
+            &mut self.pixels,
+            px,
+            py,
+            geno,
+            seed_mode,
+            0,
+            12 * crate::consts::FP,
+            2,
+            self.tick_count,
+            self.seed,
+        );
+        self.light_dirty = true;
+        id
+    }
+
+    pub(crate) fn note_archive_root(&mut self, genotype: u32, specimen: u64) {
+        if !self.archive_roots.iter().any(|(g, _)| *g == genotype) {
+            self.archive_roots.push((genotype, specimen));
+        }
+    }
+
+    /// The archived specimen a genotype's lineage root was seeded from.
+    pub fn archive_parent_of(&self, genotype: u32) -> Option<u64> {
+        let root = self.genomes.root_of(genotype);
+        self.archive_roots.iter().find(|(g, _)| *g == root).map(|(_, id)| *id)
+    }
+
+    /// Fill every cell of an organism to its store cap (portrait sandbox).
+    pub(crate) fn feed_org_full(&mut self, org: u32) {
+        let ids: Vec<u32> = match self.cells.org(org) {
+            Some(o) => o.slots.iter().map(|s| s.cell).filter(|&c| c != bio::store::NONE).collect(),
+            None => return,
+        };
+        for id in ids {
+            let Some(c) = self.cells.get(id) else {
+                continue;
+            };
+            let cap = self.genomes.coeffs(c.genotype, c.mode).store_cap_fp(c.area());
+            if let Some(c) = self.cells.get_mut(id) {
+                c.energy = cap.max(c.energy);
+                c.stress = 0;
+            }
+        }
     }
 
     /// Kill one cell directly (harness "bite").
@@ -1524,6 +1580,7 @@ impl Tank {
             milestones: self.milestones.clone(),
             species: self.genomes.species_table().to_vec(),
             node_species: self.genomes.export_species(),
+            archive_roots: self.archive_roots.clone(),
         };
         postcard::to_allocvec(&blob).map_err(|_| TankError::Postcard)
     }
@@ -1612,6 +1669,7 @@ impl Tank {
         tank.genomes = genomes;
         tank.cells = CellStore::from_raw(blob.bio_cells, blob.orgs);
         tank.milestones = blob.milestones;
+        tank.archive_roots = blob.archive_roots;
         let (vw, vh) = (tank.grid.visible_w(), tank.grid.visible_h());
         for vy in 0..vh {
             for vx in 0..vw {
@@ -1883,6 +1941,7 @@ struct SaveBlob {
     species: Vec<bio::SpeciesRec>,
     #[serde(default)]
     node_species: Vec<(u32, u16)>,
+    archive_roots: Vec<(u32, u64)>,
 }
 
 fn default_t_base() -> f32 {
