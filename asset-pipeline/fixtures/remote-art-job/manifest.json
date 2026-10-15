@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "job_id": "local-fixture-fungal-001",
+  "status": "succeeded",
+  "prompt": "pixel art fungal fruiting body, transparent background (fixture only)",
+  "seed": 42,
+  "tags": ["fixture", "fungal", "transparent"],
+  "assets": [
+    {
+      "filename": "fungal-remote.png",
+      "path": "fungal-remote.png",
+      "role": "png",
+      "width": 16,
+      "height": 16
+    }
+  ]
+}

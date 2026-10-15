@@ -24,6 +24,7 @@ notes intended to survive re-reads of the codebase.
 | [`WORLDGEN.md`](WORLDGEN.md) | World topology (ring vs infinite), elevation, streaming, hydro init, wrap rules. |
 | [`STRATA.md`](STRATA.md) | Artistic stratigraphic model: facies belts, 8-layer recipes, pinch-outs. |
 | [`organism/`](organism/) | Organism Kernel freeze docs (petri = `wk-voxel-app`). |
+| [`../asset-pipeline/README.md`](../asset-pipeline/README.md) | Headless Aseprite asset pipeline (Cursor CLI; not loaded by the sim). |
 | [`AGENTS.md`](AGENTS.md) | **Archive** — column scripted grazer. |
 | [`ECOLOGY.md`](ECOLOGY.md) | **Archive** — column `Ecology` bucket. |
 | [`BURROWS.md`](BURROWS.md) | **Archive** — column dig / void API. |

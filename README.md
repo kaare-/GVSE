@@ -26,6 +26,8 @@ Design notes: [`docs/README.md`](docs/README.md) (start with
 `VOXEL_WATER.md`, `VOXEL_FAILURE.md`, `VOXEL_GEOTECH_MAP.md`).
 Peer positioning (games + scientific tools):
 [`docs/COMPARISON.md`](docs/COMPARISON.md).
+Headless pixel-art tooling (Aseprite CLI, optional later ComfyUI import):
+[`asset-pipeline/README.md`](asset-pipeline/README.md).
 
 ## Run
 
