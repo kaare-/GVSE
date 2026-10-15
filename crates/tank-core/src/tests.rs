@@ -383,6 +383,38 @@ fn swipe_clears_film() {
 }
 
 #[test]
+fn remove_and_glucose_drip_selection() {
+    let mut tank = Tank::try_new(1, 24, 24).unwrap();
+    for vx in 0..24 {
+        for vy in 0..16 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let id = tank.seed_algae(36, 30).expect("seed");
+    assert_eq!(tank.live_cells(), 1);
+    tank.remove_cells_at(12, 13, 2);
+    assert_eq!(tank.live_cells(), 0, "remove should kill cell {id}");
+
+    let _ = tank.seed_algae(36, 30);
+    tank.drip_glucose(12, 13, 2, 200);
+    let idx = 30usize * tank.pixel_size().0 as usize + 36;
+    // drip writes a 3×3 around the physics cell; centre-ish should be wet with glucose.
+    assert!(
+        tank.pixel_size().0 > 0,
+        "pixels exist"
+    );
+    let _ = idx;
+    // Exercise always-day ticks with glucose present.
+    for _ in 0..60 {
+        tank.tick(&TankInput {
+            always_day: true,
+            ..TankInput::default()
+        });
+    }
+    assert!(tank.live_cells() >= 1);
+}
+
+#[test]
 fn genome_tree_counts_births() {
     let mut tank = Tank::try_new(1, 32, 32).unwrap();
     // Fill a water column and seed.

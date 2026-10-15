@@ -45,3 +45,9 @@ pub const MAX_VISIBLE_H: u32 = 512;
 pub const MIN_VISIBLE: u32 = 4;
 
 pub const SAVE_VERSION: u32 = 1;
+
+/// Protein units per biology pixel (handoff §5).
+pub const P_UNITS: u8 = 8;
+
+/// Phase 2 shape cap (hard cap is 6; Phase 2 uses 4).
+pub const SHAPE_CAP: u8 = 4;

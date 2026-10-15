@@ -5,43 +5,52 @@
 
 use std::collections::HashMap;
 
+use crate::bio::profile::Mode;
 use crate::hash::hash_u64;
 
-/// Compact B0 genome. Later phases widen this into the mode program.
+/// Compact B0/B1 genome: baseline + one mode (the mode program grows later).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GenomeV0 {
     /// 64..=192; 128 = 1.0 metabolic efficiency.
     pub metab_eff: u8,
-    /// PHOTO units, 0..=8. Seed algae uses 5.
-    pub photo: u8,
     /// Buoyancy bias. Positive floats toward the light.
     pub buoy: i8,
+    pub mode: Mode,
 }
 
 impl GenomeV0 {
     pub fn algae() -> Self {
         Self {
             metab_eff: 128,
-            photo: 5,
             buoy: 20,
+            mode: Mode::algae(),
         }
+    }
+
+    pub fn photo(&self) -> u8 {
+        self.mode.units_of(crate::bio::profile::Block::Photo)
     }
 
     pub fn mutate(self, seed: u64, salt: u64) -> Self {
         let h = hash_u64(seed, salt, self.metab_eff as u64, 0xB0_01);
         let mut next = self;
-        match h % 3 {
+        match h % 4 {
             0 => {
                 let d = (hash_u64(seed, salt, 1, 0xB0_02) % 17) as i32 - 8;
                 next.metab_eff = (self.metab_eff as i32 + d).clamp(64, 192) as u8;
             }
             1 => {
-                let d = (hash_u64(seed, salt, 2, 0xB0_03) % 5) as i32 - 2;
-                next.photo = (self.photo as i32 + d).clamp(1, 8) as u8;
+                next.mode.mutate_units(seed, salt);
             }
-            _ => {
+            2 => {
                 let d = (hash_u64(seed, salt, 3, 0xB0_04) % 21) as i32 - 10;
                 next.buoy = (self.buoy as i32 + d).clamp(-100, 100) as i8;
+            }
+            _ => {
+                // Shape drift toward the Phase 2 cap.
+                let side = 1 + (hash_u64(seed, salt, 4, 0xB0_05) % 4) as u8;
+                next.mode.shape_w = side.min(crate::consts::SHAPE_CAP);
+                next.mode.shape_h = side.min(crate::consts::SHAPE_CAP);
             }
         }
         next

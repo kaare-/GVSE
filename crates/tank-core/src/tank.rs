@@ -282,6 +282,55 @@ impl Tank {
         bio::swipe_film(&mut self.pixels, x0, y0, x1, y1, radius)
     }
 
+    pub fn remove_cells_at(&mut self, vx: i32, vy: i32, r: i32) {
+        let r = r.max(0);
+        let ids: Vec<u32> = self.cells.iter_alive().map(|(id, _)| id).collect();
+        for id in ids {
+            let Some(c) = self.cells.get(id).copied() else {
+                continue;
+            };
+            let cx = c.px as i32 / 3;
+            let cy_top = c.py as i32 / 3;
+            let cy = self.grid.visible_h() - 1 - cy_top;
+            let dx = cx - vx;
+            let dy = cy - vy;
+            if dx * dx + dy * dy <= r * r {
+                self.cells
+                    .kill(&mut self.genomes, &mut self.pixels, id, false);
+            }
+        }
+    }
+
+    pub fn drip_glucose(&mut self, vx: i32, vy: i32, r: i32, amount: u8) {
+        let r = r.max(1);
+        let vis_h = self.grid.visible_h();
+        let pw = self.pixels.w as i32;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy > r * r {
+                    continue;
+                }
+                let x = vx + dx;
+                let y = vy + dy;
+                if x < 0 || y < 0 || x >= self.grid.visible_w() || y >= vis_h {
+                    continue;
+                }
+                let py_top = vis_h - 1 - y;
+                for sy in 0..3 {
+                    for sx in 0..3 {
+                        let px = x * 3 + sx;
+                        let py = py_top * 3 + sy;
+                        let idx = (py * pw + px) as usize;
+                        if idx < self.pixels.glucose.len() {
+                            self.pixels.glucose[idx] =
+                                self.pixels.glucose[idx].saturating_add(amount);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn place_for_test(&mut self, vx: i32, vy: i32, cell: Cell) {
         self.grid.set_visible(vx, vy, cell);
@@ -395,15 +444,11 @@ impl Tank {
                 return None;
             }
             let g = genomes.genome(cell.genotype);
-            // Green PHOTO base; brightness from metab_eff and energy.
-            let base = 0x3Fu16;
-            let bright = (g.metab_eff as u16) * (40 + g.photo as u16 * 8) / 128;
-            let energy = (cell.energy / 256).min(8);
-            Some([
-                (base.saturating_sub(bright / 3)).min(80) as u8,
-                (0xA3u16 + bright + energy * 4).min(255) as u8,
-                (0x4Du16 + bright / 2).min(180) as u8,
-            ])
+            let mut rgb = g.mode.colour(g.metab_eff);
+            // Energy brightens a little so hungry cells read duller.
+            let e = (cell.energy / 256).min(8);
+            rgb[1] = (rgb[1] as u16 + e * 2).min(255) as u8;
+            Some(rgb)
         });
     }
 
@@ -561,6 +606,16 @@ impl Tank {
                 let py_top = vis_h.saturating_sub(1).saturating_sub(py_phys);
                 let py = py_top * 3 + 1;
                 let _ = self.seed_algae(px as u16, py as u16);
+                continue;
+            }
+            if tool.kind == 9 {
+                // Remove living cell under the brush (thin selection).
+                self.remove_cells_at(tool.x as i32, tool.y as i32, tool.r as i32);
+                continue;
+            }
+            if tool.kind == 10 {
+                // Glucose drip into the dissolved field.
+                self.drip_glucose(tool.x as i32, tool.y as i32, tool.r as i32, 180);
                 continue;
             }
             if !need_push {

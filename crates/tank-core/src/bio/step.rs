@@ -15,8 +15,6 @@ use crate::tank::SimEvent;
 const FP: i32 = 256;
 /// PHOTO income per unit at full light, g/s. Tuned so a tank greens in ~2 min.
 const PHOTO_YIELD: i32 = (0.045 * FP as f32) as i32;
-const PHOTO_UPKEEP: i32 = (0.02 * FP as f32) as i32;
-const STRUCT_UPKEEP: i32 = (0.01 * FP as f32) as i32;
 const DIVIDE_COST: i32 = 6 * FP;
 const DIVIDE_ENERGY: i32 = 10 * FP;
 const MIN_AGE_DIVIDE: u16 = 30; // 1 s at 30 Hz
@@ -143,9 +141,21 @@ fn metabolise(
     } else {
         0
     };
+    let glucose = if idx < pixels.glucose.len() {
+        pixels.glucose[idx]
+    } else {
+        0
+    };
     let eff = g.metab_eff as i32;
-    let income = PHOTO_YIELD * g.photo as i32 * light as i32 * eff / (255 * 128);
-    let upkeep = PHOTO_UPKEEP * g.photo as i32 + STRUCT_UPKEEP;
+    let photo = g.photo() as i32;
+    let mut income = PHOTO_YIELD * photo * light as i32 * eff / (255 * 128);
+    // Baseline + UPTAKE(glucose) from the dissolved field.
+    let uptake = g.mode.units_of(crate::bio::profile::Block::UptakeGlucose) as i32;
+    income += (2 + uptake * 4) * glucose as i32 * FP / 255;
+    if glucose > 0 && idx < pixels.glucose.len() {
+        pixels.glucose[idx] = glucose.saturating_sub(1 + uptake as u8);
+    }
+    let upkeep = g.mode.upkeep_fp();
     let energy = cell.energy as i32 + income - upkeep;
     let age = cell.age.saturating_add(1);
 
@@ -185,15 +195,7 @@ fn metabolise(
         && age >= MIN_AGE_DIVIDE
         && cells.len() < LIVE_CAP
         && try_divide(
-            cells,
-            genomes,
-            pixels,
-            world_seed,
-            tick,
-            id,
-            &g,
-            energy,
-            events,
+            cells, genomes, pixels, world_seed, tick, id, &g, energy, events,
         )
     {
         *divisions += 1;

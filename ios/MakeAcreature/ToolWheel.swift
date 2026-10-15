@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum BuildTool: Int, CaseIterable {
-    case sand, rock, erase, pour, drain, fill, undo
+    case sand, rock, erase, pour, drain, fill, undo, remove, feed
 
     var label: String {
         switch self {
@@ -12,6 +12,8 @@ enum BuildTool: Int, CaseIterable {
         case .drain: return "DRAIN"
         case .fill: return "FILL"
         case .undo: return "UNDO"
+        case .remove: return "KILL"
+        case .feed: return "FEED"
         }
     }
 
@@ -23,6 +25,8 @@ enum BuildTool: Int, CaseIterable {
         case .drain: return 4
         case .fill: return 5
         case .undo: return 6
+        case .remove: return 9
+        case .feed: return 10
         }
     }
 
