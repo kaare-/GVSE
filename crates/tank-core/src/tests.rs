@@ -688,6 +688,22 @@ fn straw_breeds_true_for_ten_generations() {
     assert!(tank.live_cells_of(geno) > 0, "the unmutated straw genotype died out");
     let (_, bodies) = tank.org_counts(2);
     assert!(bodies > 0, "no bonded straw bodies alive");
+    // 2.3.8 — the "multicellular" milestone needs a body that breeds
+    // true: it fires once, and only after a raw two-cell event.
+    let mut raw_first = None;
+    let mut milestone = Vec::new();
+    let mut i = 0u32;
+    while let Some(ev) = tank.poll_event() {
+        if ev.kind == crate::bio::ev::MULTICELLULAR && raw_first.is_none() {
+            raw_first = Some(i);
+        }
+        if ev.kind == crate::bio::ev::MS_MULTICELLULAR {
+            milestone.push(i);
+        }
+        i += 1;
+    }
+    assert_eq!(milestone.len(), 1, "multicellular milestone fires exactly once");
+    assert!(raw_first.unwrap() < milestone[0], "a body existed before it bred true");
 }
 
 /// 2.2.2 — bite off a body part: the slot regrows at full cost.
@@ -1481,4 +1497,153 @@ fn shell_wraps_the_egg_and_cracks_when_the_hatchling_grows() {
         .map(|(px, py)| tank.litter_at(px, py) as u64)
         .sum();
     assert!(bone_litter >= crate::bio::minerals::SHELL_M_UNITS as u64, "the cracked shell is bone litter");
+}
+
+/// 2.3.8 — milestones run on the model: "first life", "first division"
+/// and "first death" fire once per tank, survive a save/load round trip
+/// without repeating, and "lifeless" needs an empty tank for
+/// `LIFELESS_TICKS` and re-arms when life returns.
+#[test]
+fn milestones_fire_once_and_survive_save_load() {
+    use crate::bio::ev;
+    use crate::milestones::LIFELESS_TICKS;
+    let mut tank = water_box(51, 24, 24, 20);
+    let mut counts = std::collections::BTreeMap::new();
+    let drain = |tank: &mut Tank, counts: &mut std::collections::BTreeMap<u32, u32>| {
+        while let Some(ev) = tank.poll_event() {
+            *counts.entry(ev.kind).or_insert(0) += 1;
+        }
+    };
+    for _ in 0..30 {
+        tank.tick(&day());
+    }
+    drain(&mut tank, &mut counts);
+    assert_eq!(counts.get(&ev::MS_FIRST_LIFE), None, "an empty tank has no first life");
+    assert_eq!(counts.get(&ev::LIFELESS), None, "a never-lived tank is not 'lifeless'");
+    let id = tank.seed_algae(36, 36).expect("seed");
+    tank.tick(&day());
+    drain(&mut tank, &mut counts);
+    assert_eq!(counts.get(&ev::MS_FIRST_LIFE), Some(&1));
+    let mut t = 0;
+    while !counts.contains_key(&ev::MS_FIRST_DEATH) && t < 20_000 {
+        tank.tick(&day());
+        drain(&mut tank, &mut counts);
+        t += 1;
+    }
+    assert_eq!(counts.get(&ev::MS_FIRST_DIVISION), Some(&1), "first division announced once");
+    assert_eq!(counts.get(&ev::MS_FIRST_DEATH), Some(&1), "first death announced once");
+    assert!(counts.get(&ev::DIVISION).copied().unwrap_or(0) > 1, "the raw stream keeps every division");
+    assert!(tank.milestone_fired(ev::MS_FIRST_LIFE));
+    let _ = id;
+
+    let bytes = tank.save_bytes().unwrap();
+    let mut loaded = Tank::load_bytes(&bytes).unwrap();
+    assert!(loaded.milestone_fired(ev::MS_FIRST_DIVISION), "milestone state is saved");
+    let mut after = std::collections::BTreeMap::new();
+    for _ in 0..600 {
+        loaded.tick(&day());
+    }
+    drain(&mut loaded, &mut after);
+    assert_eq!(after.get(&ev::MS_FIRST_LIFE), None, "no repeat after load");
+    assert_eq!(after.get(&ev::MS_FIRST_DIVISION), None, "no repeat after load");
+    assert_eq!(after.get(&ev::MS_FIRST_DEATH), None, "no repeat after load");
+
+    // Lifeless: only after the tank has been empty for a while.
+    loaded.remove_cells_at(12, 10, 64);
+    assert_eq!(loaded.live_cells(), 0);
+    let mut lifeless = std::collections::BTreeMap::new();
+    for _ in 0..(LIFELESS_TICKS - 2) {
+        loaded.tick(&day());
+    }
+    drain(&mut loaded, &mut lifeless);
+    assert_eq!(lifeless.get(&ev::LIFELESS), None, "not lifeless yet");
+    for _ in 0..4 {
+        loaded.tick(&day());
+    }
+    drain(&mut loaded, &mut lifeless);
+    assert_eq!(lifeless.get(&ev::LIFELESS), Some(&1), "lifeless after LIFELESS_TICKS");
+    for _ in 0..(2 * LIFELESS_TICKS) {
+        loaded.tick(&day());
+    }
+    drain(&mut loaded, &mut lifeless);
+    assert_eq!(lifeless.get(&ev::LIFELESS), Some(&1), "it does not nag while still empty");
+    // Life returns (no second "first life") and goes again: it re-arms.
+    loaded.seed_algae(36, 36).expect("seed");
+    loaded.tick(&day());
+    loaded.remove_cells_at(12, 10, 64);
+    for _ in 0..(LIFELESS_TICKS + 2) {
+        loaded.tick(&day());
+    }
+    drain(&mut loaded, &mut lifeless);
+    assert_eq!(lifeless.get(&ev::MS_FIRST_LIFE), None, "first life is once per tank");
+    assert_eq!(lifeless.get(&ev::LIFELESS), Some(&2), "lifeless repeats after life returned");
+}
+
+/// 2.3.8 — "new colour" compares a living genotype with its lineage
+/// founder on the model (seed-mode colour), steps per lineage and is
+/// rate-limited; "heterotroph" needs three generations; "glass" has a
+/// cooldown and re-arms when the pane is cleaned.
+#[test]
+fn colour_heterotroph_and_glass_detectors_work_on_the_model() {
+    use crate::bio::{ev, Block, CellStore, Entry, Genome, GenomeStore};
+    use crate::milestones::{
+        colour_distance, Milestones, Probe, GLASS_COOLDOWN, GLASS_EVERY, NEW_COLOUR_COOLDOWN, NEW_COLOUR_DIST,
+        SCAN_EVERY,
+    };
+    use crate::pixels::PixelLayer;
+    use std::collections::VecDeque;
+
+    let mut genomes = GenomeStore::new();
+    let mut cells = CellStore::new();
+    let mut pixels = PixelLayer::new(16, 16);
+    let root = genomes.intern_root(Genome::algae());
+    let mut tinted = Genome::algae();
+    tinted.modes[0].push_entry(Entry::with_params(Block::Pigment, 4, 0, 0)); // red hue
+    let child = genomes.intern_child(root, tinted);
+    let dist = colour_distance(&genomes, child, root);
+    assert!(dist >= NEW_COLOUR_DIST, "the pigmented child should read as a new colour ({dist})");
+    let spawn = |cells: &mut CellStore, genomes: &mut GenomeStore, pixels: &mut PixelLayer, geno, px, generation| {
+        cells
+            .spawn(genomes, pixels, px, 8, geno, 0, generation, 12 * crate::consts::FP, 2, 0, 1)
+            .expect("spawn")
+    };
+    spawn(&mut cells, &mut genomes, &mut pixels, root, 2, 0);
+    let mut ms = Milestones::default();
+    let mut out = VecDeque::new();
+    let quiet = Probe { film_n: 0, film_len: 1000 };
+    let kinds = |out: &mut VecDeque<crate::SimEvent>| -> Vec<u32> { out.drain(..).map(|e| e.kind).collect() };
+
+    ms.run(SCAN_EVERY, &[], &cells, &genomes, &quiet, &mut out);
+    assert_eq!(kinds(&mut out), vec![ev::MS_FIRST_LIFE], "the founder alone is no new colour");
+    // The tinted child comes alive: new colour at the next scan.
+    let child_cell = spawn(&mut cells, &mut genomes, &mut pixels, child, 6, 1);
+    ms.run(2 * SCAN_EVERY, &[], &cells, &genomes, &quiet, &mut out);
+    assert_eq!(kinds(&mut out), vec![ev::MS_NEW_COLOUR]);
+    // Same lineage, same drift: rate-limited and stepped, so silent.
+    ms.run(3 * SCAN_EVERY, &[], &cells, &genomes, &quiet, &mut out);
+    ms.run(2 * SCAN_EVERY + NEW_COLOUR_COOLDOWN, &[], &cells, &genomes, &quiet, &mut out);
+    assert!(kinds(&mut out).is_empty(), "no repeat for the same drift");
+
+    // Heterotroph: a glucose-fed cell counts only three generations deep.
+    let shallow = crate::SimEvent { kind: ev::HETEROTROPH, arg0: child_cell };
+    ms.run(1, &[shallow], &cells, &genomes, &quiet, &mut out);
+    assert!(kinds(&mut out).is_empty(), "generation 1 is not a heterotroph lineage yet");
+    let deep_cell = spawn(&mut cells, &mut genomes, &mut pixels, child, 10, 3);
+    let deep = crate::SimEvent { kind: ev::HETEROTROPH, arg0: deep_cell };
+    ms.run(2, &[deep], &cells, &genomes, &quiet, &mut out);
+    ms.run(3, &[deep], &cells, &genomes, &quiet, &mut out);
+    assert_eq!(kinds(&mut out), vec![ev::MS_HETEROTROPH], "once, at generation ≥ 3");
+
+    // Glass: fires on coverage, waits out the cooldown, re-arms when clean.
+    let dirty = Probe { film_n: 100, film_len: 1000 };
+    ms.run(GLASS_EVERY, &[], &cells, &genomes, &dirty, &mut out);
+    assert_eq!(kinds(&mut out), vec![ev::GLASS]);
+    ms.run(2 * GLASS_EVERY, &[], &cells, &genomes, &dirty, &mut out);
+    assert!(kinds(&mut out).is_empty(), "no nagging every check");
+    ms.run(GLASS_EVERY + GLASS_COOLDOWN, &[], &cells, &genomes, &dirty, &mut out);
+    assert_eq!(kinds(&mut out), vec![ev::GLASS], "reminds after the cooldown");
+    let clean = Probe { film_n: 5, film_len: 1000 };
+    ms.run(2 * GLASS_EVERY + GLASS_COOLDOWN, &[], &cells, &genomes, &clean, &mut out);
+    ms.run(3 * GLASS_EVERY + GLASS_COOLDOWN, &[], &cells, &genomes, &dirty, &mut out);
+    assert_eq!(kinds(&mut out), vec![ev::GLASS], "a cleaned pane re-arms the detector");
 }

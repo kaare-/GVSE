@@ -54,6 +54,13 @@ typedef struct InspectRec {
   uint32_t vy;
 } InspectRec;
 
+/* kind: raw stream 1 seed 2 division 3 death 4 mutant 5 two-cell body
+ * 10 lifeless 11 glass needs cleaning 12 brood released 13 shed 14 fragment
+ * 15 regrown 16 predation 17 poison 18 signalling 19 heterotroph 20 fungus
+ * 21 something moved; milestones (once per tank) 32 first life 33 first
+ * division 34 first death 35 new colour (per lineage) 36 multicellular
+ * 37 giant cell 38 fungus 39 heterotroph 40 predation 41 poison
+ * 42 signalling 43 something moved. kind 0 = none. */
 typedef struct EventRec {
   uint32_t kind;
   uint32_t arg0;

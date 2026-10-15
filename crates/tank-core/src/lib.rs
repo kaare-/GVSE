@@ -18,6 +18,7 @@ pub mod consts;
 pub mod font;
 pub mod grid;
 pub mod hash;
+pub mod milestones;
 pub mod pixels;
 pub mod rules;
 pub mod tank;

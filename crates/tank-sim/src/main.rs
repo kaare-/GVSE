@@ -255,8 +255,14 @@ fn cmd_tank(args: impl Iterator<Item = String>) -> ExitCode {
         writeln!(file, "tick,phase,day_factor,pixel_hash").ok();
     }
     let start = Instant::now();
+    let mut firsts: Vec<(u32, u64)> = Vec::new();
     for i in 0..ticks {
         tank.tick(&input);
+        while let Some(ev) = tank.poll_event() {
+            if milestone_name(ev.kind).is_some() && !firsts.iter().any(|(k, _)| *k == ev.kind) {
+                firsts.push((ev.kind, tank.tick_count()));
+            }
+        }
         if let Some(file) = csv_file.as_mut() {
             if i % 30 == 29 || i + 1 == ticks {
                 writeln!(
@@ -283,7 +289,34 @@ fn cmd_tank(args: impl Iterator<Item = String>) -> ExitCode {
         tank.live_cells(),
         tank.genotype_count()
     );
+    let firsts: Vec<String> = firsts
+        .iter()
+        .map(|(k, t)| format!("{}@{t}", milestone_name(*k).unwrap_or("?")))
+        .collect();
+    println!("milestones: {}", if firsts.is_empty() { "-".to_string() } else { firsts.join(" ") });
     ExitCode::SUCCESS
+}
+
+/// Player-facing milestone names (2.3.8), for the harness summary.
+fn milestone_name(kind: u32) -> Option<&'static str> {
+    use tank_core::bio::ev;
+    Some(match kind {
+        ev::LIFELESS => "lifeless",
+        ev::GLASS => "glass",
+        ev::MS_FIRST_LIFE => "first_life",
+        ev::MS_FIRST_DIVISION => "division",
+        ev::MS_FIRST_DEATH => "death",
+        ev::MS_NEW_COLOUR => "new_colour",
+        ev::MS_MULTICELLULAR => "multicellular",
+        ev::MS_GIANT => "giant",
+        ev::MS_FUNGUS => "fungus",
+        ev::MS_HETEROTROPH => "heterotroph",
+        ev::MS_PREDATION => "predation",
+        ev::MS_POISON => "poison",
+        ev::MS_SIGNALLING => "signalling",
+        ev::MS_MOVED => "moved",
+        _ => return None,
+    })
 }
 
 fn cmd_determinism(args: impl Iterator<Item = String>) -> ExitCode {

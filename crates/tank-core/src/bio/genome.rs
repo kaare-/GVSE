@@ -795,6 +795,21 @@ impl GenomeStore {
         self.nodes.get(id as usize)
     }
 
+    /// The lineage founder: the root of `id`'s parent chain (a genotype
+    /// the player placed).
+    pub fn root_of(&self, id: u32) -> u32 {
+        let mut cur = id;
+        let mut hops = 0;
+        while let Some(n) = self.nodes.get(cur as usize) {
+            if n.parent == NONE || hops > self.nodes.len() {
+                break;
+            }
+            cur = n.parent;
+            hops += 1;
+        }
+        cur
+    }
+
     /// Live cells in `root` and every genotype descended from it.
     pub fn lineage_live_cells(&self, root: u32) -> u32 {
         let mut total = 0;

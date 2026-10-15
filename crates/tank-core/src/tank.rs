@@ -13,6 +13,7 @@ use crate::consts::{
 };
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_bytes;
+use crate::milestones::{self, Milestones};
 use crate::pixels::{self, CoarseField, PixelLayer};
 use crate::rules;
 use crate::telemetry::{self, TelEvent, Telemetry};
@@ -127,6 +128,8 @@ pub struct Tank {
     tissue_marks: Vec<(i32, i32)>,
     /// Mutation-rate multiplier (Q8, 256 = ×1); harness lever.
     lambda_scale_q8: u16,
+    /// 2.3.8 once-per-tank milestone detectors.
+    milestones: Milestones,
 }
 
 impl Tank {
@@ -168,6 +171,7 @@ impl Tank {
             light_dirty: true,
             death_causes: [0; 4],
             tissue_marks: Vec::new(),
+            milestones: Milestones::default(),
             lambda_scale_q8: 256,
         };
         tank.rebuild_light();
@@ -805,8 +809,8 @@ impl Tank {
             t_tank,
             self.lambda_scale_q8 as u32,
         );
-        for ev in bio.events {
-            self.events.push_back(ev);
+        for ev in &bio.events {
+            self.events.push_back(*ev);
         }
         for (acc, n) in self.death_causes.iter_mut().zip(bio.death_causes) {
             *acc += n as u64;
@@ -817,22 +821,22 @@ impl Tank {
                 *f += units as f32 * crate::consts::GLUCOSE_UNIT_FP as f32 / crate::consts::FP as f32;
             }
         }
-        if bio.deaths > 0 && self.cells.is_empty() {
-            self.events.push_back(SimEvent {
-                kind: bio::ev::LIFELESS,
-                arg0: 0,
-            });
-        }
-        // "glass needs cleaning" when film coverage is high.
-        if self.tick_count % 300 == 0 {
-            let film_n = self.pixels.film.iter().filter(|&&f| f > 80).count();
-            if film_n > (self.pixels.len() / 40) {
-                self.events.push_back(SimEvent {
-                    kind: bio::ev::GLASS,
-                    arg0: film_n as u32,
-                });
-            }
-        }
+        let probe = milestones::Probe {
+            film_n: if self.tick_count % milestones::GLASS_EVERY == 0 {
+                self.pixels.film.iter().filter(|&&f| f > 80).count()
+            } else {
+                0
+            },
+            film_len: self.pixels.len(),
+        };
+        self.milestones.run(
+            self.tick_count,
+            &bio.events,
+            &self.cells,
+            &self.genomes,
+            &probe,
+            &mut self.events,
+        );
         self.light_dirty = true;
         self.tick_count = self.tick_count.wrapping_add(1);
     }
@@ -844,6 +848,11 @@ impl Tank {
         };
         tools::restore(&mut self.grid, &frame);
         true
+    }
+
+    /// Whether a once-per-tank milestone (`ev::MS_*`) has been announced.
+    pub fn milestone_fired(&self, kind: u32) -> bool {
+        self.milestones.has_fired(kind)
     }
 
     pub fn poll_event(&mut self) -> Option<SimEvent> {
@@ -1057,6 +1066,7 @@ impl Tank {
             genomes: self.genomes.export(),
             bio_cells: self.cells.raw_cells().to_vec(),
             orgs: self.cells.raw_orgs().to_vec(),
+            milestones: self.milestones.clone(),
         };
         postcard::to_allocvec(&blob).map_err(|_| TankError::Postcard)
     }
@@ -1142,6 +1152,7 @@ impl Tank {
         }
         tank.genomes = genomes;
         tank.cells = CellStore::from_raw(blob.bio_cells, blob.orgs);
+        tank.milestones = blob.milestones;
         let (vw, vh) = (tank.grid.visible_w(), tank.grid.visible_h());
         for vy in 0..vh {
             for vx in 0..vw {
@@ -1407,6 +1418,8 @@ struct SaveBlob {
     bio_cells: Vec<bio::CellRec>,
     #[serde(default)]
     orgs: Vec<bio::OrgRec>,
+    #[serde(default)]
+    milestones: Milestones,
 }
 
 fn default_t_base() -> f32 {

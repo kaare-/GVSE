@@ -73,6 +73,29 @@ pub mod ev {
     /// Something moved: a cell or body swam ≥ 3 px on its cilia within
     /// 60 ticks, not counting buoyancy, drift or jitter (arg0 = cell).
     pub const MOVED: u32 = 21;
+
+    // Milestones (2.3.8, `milestones.rs`): the player-facing "firsts",
+    // each once per tank unless noted. Kinds 1–21 above are the raw
+    // stream they are derived from; `LIFELESS` and `GLASS` are the
+    // repeatable milestones and keep their kinds.
+    /// First living cell in the tank (arg0 = cell).
+    pub const MS_FIRST_LIFE: u32 = 32;
+    pub const MS_FIRST_DIVISION: u32 = 33;
+    pub const MS_FIRST_DEATH: u32 = 34;
+    /// A lineage's colour drifted from its founder's (arg0 = genotype);
+    /// repeats per lineage, stepped and rate-limited.
+    pub const MS_NEW_COLOUR: u32 = 35;
+    /// A multicellular body that breeds true (arg0 = organism).
+    pub const MS_MULTICELLULAR: u32 = 36;
+    /// A cell of area ≥ 16 px (arg0 = cell).
+    pub const MS_GIANT: u32 = 37;
+    pub const MS_FUNGUS: u32 = 38;
+    /// A glucose-fed lineage three generations deep (arg0 = cell).
+    pub const MS_HETEROTROPH: u32 = 39;
+    pub const MS_PREDATION: u32 = 40;
+    pub const MS_POISON: u32 = 41;
+    pub const MS_SIGNALLING: u32 = 42;
+    pub const MS_MOVED: u32 = 43;
 }
 
 /// "Something moved" (§a.6): net cilia displacement over this window.
