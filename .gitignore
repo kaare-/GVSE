@@ -5,6 +5,11 @@
 # Local save files
 world_save.bin
 
+# Asset pipeline (Python)
+asset-pipeline/**/__pycache__/
+asset-pipeline/**/*.pyc
+asset-pipeline/.pytest_cache/
+
 # OS / editor
 .DS_Store
 .idea/

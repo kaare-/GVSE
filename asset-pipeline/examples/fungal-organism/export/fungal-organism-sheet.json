@@ -1,0 +1,75 @@
+{
+  "frames": [
+    {
+      "filename": "fungal-organism-0.png",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "w": 16,
+        "h": 16
+      },
+      "duration": 120
+    },
+    {
+      "filename": "fungal-organism-1.png",
+      "frame": {
+        "x": 16,
+        "y": 0,
+        "w": 16,
+        "h": 16
+      },
+      "duration": 120
+    },
+    {
+      "filename": "fungal-organism-2.png",
+      "frame": {
+        "x": 32,
+        "y": 0,
+        "w": 16,
+        "h": 16
+      },
+      "duration": 120
+    },
+    {
+      "filename": "fungal-organism-3.png",
+      "frame": {
+        "x": 48,
+        "y": 0,
+        "w": 16,
+        "h": 16
+      },
+      "duration": 120
+    }
+  ],
+  "meta": {
+    "app": "gvse-art-offline",
+    "image": "fungal-organism-sheet.png",
+    "size": {
+      "w": 64,
+      "h": 16
+    },
+    "frameTags": [
+      {
+        "name": "idle",
+        "from": 0,
+        "to": 3,
+        "direction": "forward"
+      }
+    ],
+    "layers": [
+      {
+        "name": "organism"
+      }
+    ],
+    "gvse": {
+      "spec": "/workspace/asset-pipeline/specs/fungal-organism.json",
+      "transparent_background": true,
+      "provenance": {
+        "kind": "example",
+        "subject": "Animated fruiting-body demo for the headless Aseprite pipeline",
+        "palette_note": "Demo colors loosely echo docs/organism/PALETTE.md Digest/Hypha/ReproSpore; not wired into the engine",
+        "generator": "asset-pipeline/art create --spec specs/fungal-organism.json"
+      }
+    }
+  }
+}
