@@ -316,6 +316,15 @@ impl Tank {
         self.genomes.len()
     }
 
+    /// Live cells per living genotype (harness diversity metrics).
+    pub fn genotype_live_counts(&self) -> Vec<u32> {
+        (0..self.genomes.node_count() as u32)
+            .filter_map(|id| self.genomes.get(id))
+            .filter(|n| n.live_cells > 0 && !n.tombstone)
+            .map(|n| n.live_cells)
+            .collect()
+    }
+
     pub fn seed_algae(&mut self, px: u16, py: u16) -> Option<u32> {
         let id = self.cells.seed_algae(
             &mut self.genomes,
