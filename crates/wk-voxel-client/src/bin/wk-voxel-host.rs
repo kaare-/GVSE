@@ -406,7 +406,6 @@ fn main() {
 
     // Dig F5: resolve official graph into listen/dials/faces/allowlist.
     let mut seam_listen = cli.seam_listen.clone();
-    let mut seam_peer = cli.seam_peer.clone();
     let mut seam_side = cli.seam_side;
     let mut seam_dials: Vec<(SeamSide, String)> = Vec::new();
     let mut open_west = matches!(seam_side, Some(SeamSide::West));
@@ -443,15 +442,13 @@ fn main() {
         open_west = plan.open_west;
         open_east = plan.open_east;
         seam_listen = plan.listen;
-        seam_peer = None;
         seam_dials = plan.dials;
         seam_allow.extend_from(&plan.allowlist);
         // Single-face Lab flags for discover path compatibility.
         seam_side = match (open_west, open_east) {
             (true, false) => Some(SeamSide::West),
             (false, true) => Some(SeamSide::East),
-            (true, true) => None,
-            (false, false) => None,
+            _ => None,
         };
         log::info!(
             "Dig F5 seam graph region={} mesh={} west={} east={} dials={}",
@@ -461,7 +458,7 @@ fn main() {
             open_east,
             seam_dials.len()
         );
-    } else if let Some(peer) = seam_peer.clone() {
+    } else if let Some(peer) = cli.seam_peer.clone() {
         seam_dials.push((seam_side.expect("seam-side"), peer));
     }
 
