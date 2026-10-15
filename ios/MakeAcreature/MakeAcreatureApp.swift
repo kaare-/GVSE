@@ -4,64 +4,36 @@ import SwiftUI
 struct MakeAcreatureApp: App {
     @StateObject private var session = TankSession()
     @Environment(\.scenePhase) private var scenePhase
+    @State private var inRoom = false
+    @State private var showBook = false
+    @State private var showTree = false
 
     var body: some Scene {
         WindowGroup {
-            ZStack(alignment: .top) {
+            ZStack {
                 Color.black.ignoresSafeArea()
-                TankScreen(session: session)
-                    .ignoresSafeArea()
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .top) {
-                        PixelPanel {
-                            PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 3)
-                        }
-                        Spacer()
-                        slotButtons
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 4) {
-                            Button(action: session.toggleConsent) {
-                                PixelLabel(
-                                    text: session.consent ? "STATS ON" : "STATS OFF",
-                                    scale: 2
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            Button(action: session.toggleSwirl) {
-                                PixelLabel(
-                                    text: session.swirl ? "SWIRL ON" : "SWIRL OFF",
-                                    scale: 2
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            Button {
-                                session.magnifierPinned.toggle()
-                            } label: {
-                                PixelLabel(
-                                    text: session.magnifierPinned ? "LENS PIN" : "LENS",
-                                    scale: 2
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    ToolWheel(
-                        tool: $session.tool,
-                        brush: $session.brush,
-                        variant: $session.variant,
-                        fillLevel: $session.fillLevel,
-                        onUndo: session.undo
+                tankScreen
+                    .opacity(inRoom ? 0 : 1)
+                    .allowsHitTesting(!inRoom)
+                if inRoom {
+                    RoomView(
+                        session: session,
+                        onBack: { withAnimation(.easeOut(duration: 0.2)) { inRoom = false } },
+                        onOpenBook: { showBook = true },
+                        onOpenTree: { showTree = true }
                     )
-                    .onChange(of: session.fillLevel) { _ in
-                        if session.tool == .fill {
-                            session.applyFillSlider()
-                        }
-                    }
+                    .transition(.opacity)
+                    .simultaneousGesture(zoomGesture(toRoom: false))
                 }
-                .padding(10)
             }
             .preferredColorScheme(.dark)
             .statusBarHidden(true)
+            .fullScreenCover(isPresented: $showBook) {
+                ArchiveBook(session: session) { showBook = false }
+            }
+            .fullScreenCover(isPresented: $showTree) {
+                TreeScreen(session: session) { showTree = false }
+            }
             .onAppear { session.resume() }
             .onChange(of: scenePhase) { phase in
                 if phase == .active {
@@ -71,6 +43,110 @@ struct MakeAcreatureApp: App {
                 }
             }
         }
+    }
+
+    /// Pinch out past minimum zoom → the room; pinch in → back to the tank.
+    private func zoomGesture(toRoom: Bool) -> some Gesture {
+        MagnificationGesture()
+            .onEnded { value in
+                if toRoom && value < 0.72 {
+                    withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
+                } else if !toRoom && value > 1.35 {
+                    withAnimation(.easeOut(duration: 0.2)) { inRoom = false }
+                }
+            }
+    }
+
+    private var tankScreen: some View {
+        ZStack(alignment: .top) {
+            TankScreen(session: session)
+                .ignoresSafeArea()
+            if let rect = session.inspected?.rect {
+                TrackingBox(rect: rect).ignoresSafeArea()
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top) {
+                    PixelPanel {
+                        PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 3)
+                    }
+                    Spacer()
+                    slotButtons
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Button {
+                            withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
+                        } label: {
+                            PixelLabel(text: "ROOM", scale: 2, color: Palette.highlight)
+                        }
+                        .buttonStyle(.plain)
+                        Button(action: session.toggleConsent) {
+                            PixelLabel(
+                                text: session.consent ? "STATS ON" : "STATS OFF",
+                                scale: 2
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        Button(action: session.toggleSwirl) {
+                            PixelLabel(
+                                text: session.swirl ? "SWIRL ON" : "SWIRL OFF",
+                                scale: 2
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        Button {
+                            session.magnifierPinned.toggle()
+                        } label: {
+                            PixelLabel(
+                                text: session.magnifierPinned ? "LENS PIN" : "LENS",
+                                scale: 2
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                ToolWheel(
+                    tool: $session.tool,
+                    brush: $session.brush,
+                    variant: $session.variant,
+                    fillLevel: $session.fillLevel,
+                    onUndo: session.undo
+                )
+                .onChange(of: session.fillLevel) { _ in
+                    if session.tool == .fill {
+                        session.applyFillSlider()
+                    }
+                }
+                if session.carriedCells > 0 {
+                    HStack(spacing: 8) {
+                        PixelPanel {
+                            PixelLabel(text: "BUCKET \(session.carriedCells) CELLS  TAP TO POUR", scale: 2, color: Palette.highlight)
+                        }
+                        Button(action: session.discardBucket) {
+                            PixelPanel { PixelLabel(text: "DUMP", scale: 2, color: Palette.dimPaper) }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                if let state = session.inspected {
+                    InspectCard(
+                        state: state,
+                        onArchive: session.archiveInspected,
+                        onClose: session.closeInspect
+                    )
+                }
+                Spacer()
+            }
+            .padding(10)
+            if let hint = session.hint {
+                VStack {
+                    Spacer()
+                    HintToast(text: hint)
+                    Spacer().frame(height: 80)
+                }
+                .animation(.easeOut(duration: 0.2), value: hint)
+            }
+        }
+        .simultaneousGesture(zoomGesture(toRoom: true))
     }
 
     private var slotButtons: some View {
@@ -84,14 +160,14 @@ struct MakeAcreatureApp: App {
                             text: "T\(i + 1)",
                             scale: 2,
                             color: session.slot == i
-                                ? Color(red: 1, green: 0.92, blue: 0.7)
+                                ? Palette.highlight
                                 : Color(red: 0.7, green: 0.68, blue: 0.6)
                         )
                     }
                 }
                 .buttonStyle(.plain)
             }
-            Button(action: session.newTank) {
+            Button { session.newTank() } label: {
                 PixelPanel {
                     PixelLabel(text: "NEW", scale: 2)
                 }

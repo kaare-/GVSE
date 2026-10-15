@@ -13,6 +13,11 @@
 		B10000000000000000000004 /* PixelFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* PixelFont.swift */; };
 		B10000000000000000000005 /* TelemetryClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000005 /* TelemetryClient.swift */; };
 		B10000000000000000000009 /* ToolWheel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000009 /* ToolWheel.swift */; };
+		B1000000000000000000000A /* ArchiveStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000A /* ArchiveStore.swift */; };
+		B1000000000000000000000B /* InspectCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000B /* InspectCard.swift */; };
+		B1000000000000000000000C /* TreeOfLifeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000C /* TreeOfLifeView.swift */; };
+		B1000000000000000000000D /* ArchiveBook.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000D /* ArchiveBook.swift */; };
+		B1000000000000000000000E /* RoomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000E /* RoomView.swift */; };
 		B10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -23,6 +28,11 @@
 		F10000000000000000000004 /* PixelFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelFont.swift; sourceTree = "<group>"; };
 		F10000000000000000000005 /* TelemetryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryClient.swift; sourceTree = "<group>"; };
 		F10000000000000000000009 /* ToolWheel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolWheel.swift; sourceTree = "<group>"; };
+		F1000000000000000000000A /* ArchiveStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveStore.swift; sourceTree = "<group>"; };
+		F1000000000000000000000B /* InspectCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectCard.swift; sourceTree = "<group>"; };
+		F1000000000000000000000C /* TreeOfLifeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreeOfLifeView.swift; sourceTree = "<group>"; };
+		F1000000000000000000000D /* ArchiveBook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveBook.swift; sourceTree = "<group>"; };
+		F1000000000000000000000E /* RoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomView.swift; sourceTree = "<group>"; };
 		F10000000000000000000006 /* Tank-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Tank-Bridging-Header.h"; sourceTree = "<group>"; };
 		F10000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F10000000000000000000008 /* MakeAcreature.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MakeAcreature.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -56,6 +66,11 @@
 				F10000000000000000000004 /* PixelFont.swift */,
 				F10000000000000000000005 /* TelemetryClient.swift */,
 				F10000000000000000000009 /* ToolWheel.swift */,
+				F1000000000000000000000A /* ArchiveStore.swift */,
+				F1000000000000000000000B /* InspectCard.swift */,
+				F1000000000000000000000C /* TreeOfLifeView.swift */,
+				F1000000000000000000000D /* ArchiveBook.swift */,
+				F1000000000000000000000E /* RoomView.swift */,
 				F10000000000000000000006 /* Tank-Bridging-Header.h */,
 				F10000000000000000000007 /* Assets.xcassets */,
 			);
@@ -139,6 +154,11 @@
 				B10000000000000000000004 /* PixelFont.swift in Sources */,
 				B10000000000000000000005 /* TelemetryClient.swift in Sources */,
 				B10000000000000000000009 /* ToolWheel.swift in Sources */,
+				B1000000000000000000000A /* ArchiveStore.swift in Sources */,
+				B1000000000000000000000B /* InspectCard.swift in Sources */,
+				B1000000000000000000000C /* TreeOfLifeView.swift in Sources */,
+				B1000000000000000000000D /* ArchiveBook.swift in Sources */,
+				B1000000000000000000000E /* RoomView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
