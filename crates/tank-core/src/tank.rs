@@ -647,6 +647,9 @@ impl Tank {
         tank.pixels.signal_amt = blob.signal_amt;
         tank.pixels.signal_key = blob.signal_key;
         tank.pixels.film = blob.film;
+        tank.pixels.fields_active = tank.pixels.enzyme_amt.iter().any(|&a| a > 0)
+            || tank.pixels.toxin_amt.iter().any(|&a| a > 0)
+            || tank.pixels.signal_amt.iter().any(|&a| a > 0);
         tank.fines = blob.fines;
         tank.coarse.minerals = blob.minerals;
         tank.coarse.t_local = blob.t_local;
