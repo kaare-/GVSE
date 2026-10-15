@@ -147,6 +147,18 @@ pub struct Carried {
 }
 
 impl Carried {
+    pub fn empty() -> Self {
+        Self {
+            cx: 0,
+            cy: 0,
+            r: 0,
+            orgs: Vec::new(),
+            litter: Vec::new(),
+            grit: Vec::new(),
+            water: 0,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.orgs.is_empty() && self.litter.is_empty() && self.grit.is_empty() && self.water == 0
     }
