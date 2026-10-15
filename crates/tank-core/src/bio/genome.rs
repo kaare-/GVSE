@@ -67,6 +67,14 @@ impl GenomeV0 {
         g
     }
 
+    /// Motile cell with CILIA (d.6-pre scaffold).
+    pub fn swimmer() -> Self {
+        let mut g = Self::algae();
+        g.buoy = 0;
+        g.mode = Mode::swimmer();
+        g
+    }
+
     pub fn photo(&self) -> u8 {
         self.mode.units_of(crate::bio::profile::Block::Photo)
     }

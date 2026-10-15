@@ -18,6 +18,8 @@ pub enum Block {
     Pigment = 8,
     Transparent = 9,
     Glue = 10,
+    Enzyme = 11,
+    Cilia = 12,
 }
 
 impl Block {
@@ -33,6 +35,8 @@ impl Block {
             8 => Some(Self::Pigment),
             9 => Some(Self::Transparent),
             10 => Some(Self::Glue),
+            11 => Some(Self::Enzyme),
+            12 => Some(Self::Cilia),
             _ => None,
         }
     }
@@ -50,6 +54,8 @@ impl Block {
             Self::Pigment => 1,
             Self::Transparent => 1,
             Self::Glue => 2,
+            Self::Enzyme => 3,
+            Self::Cilia => 4,
         }
     }
 
@@ -65,6 +71,8 @@ impl Block {
             Self::Pigment => [0xE0, 0x80, 0xC0],
             Self::Transparent => [0xC0, 0xD8, 0xE0],
             Self::Glue => [0x8C, 0x8A, 0x3C],
+            Self::Enzyme => [0x8B, 0x1A, 0x1A],
+            Self::Cilia => [0xF2, 0xC4, 0xCE],
         }
     }
 }
@@ -150,6 +158,20 @@ impl Mode {
         if m.n_entries < 6 {
             m.entries[m.n_entries as usize] = Entry {
                 block: Block::Glue,
+                units: 2,
+            };
+            m.n_entries += 1;
+        }
+        m
+    }
+
+    /// PHOTO + CILIA swimmer scaffold.
+    pub fn swimmer() -> Self {
+        let mut m = Self::algae();
+        m.entries[0].units = 5;
+        if m.n_entries < 6 {
+            m.entries[m.n_entries as usize] = Entry {
+                block: Block::Cilia,
                 units: 2,
             };
             m.n_entries += 1;
@@ -257,7 +279,7 @@ impl Mode {
         if self.n_entries >= 6 {
             return;
         }
-        let kind = 1 + (hash_u64(seed, salt, 3, 0xB1_22) % 10) as u8;
+        let kind = 1 + (hash_u64(seed, salt, 3, 0xB1_22) % 12) as u8;
         let Some(block) = Block::from_u8(kind) else {
             return;
         };

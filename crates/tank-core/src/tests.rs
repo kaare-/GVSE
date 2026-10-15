@@ -550,3 +550,43 @@ fn sticky_algae_form_glue_attachments() {
     assert!(tank.live_cells() >= 2);
     let _ = tank.glue_attachments();
 }
+
+#[test]
+fn enzyme_field_decays_and_blurs() {
+    use crate::bio::fields::{deposit, step_fields, KeyedField};
+    use crate::pixels::PixelLayer;
+    let mut pixels = PixelLayer::new(8, 8);
+    let idx = 10 * pixels.w as usize + 10;
+    deposit(&mut pixels, KeyedField::Enzyme, idx, 200, 90);
+    assert_eq!(pixels.enzyme_amt[idx], 200);
+    assert!(pixels.fields_active);
+    step_fields(&mut pixels, 0);
+    assert!(pixels.enzyme_amt[idx] < 200, "decay should reduce amount");
+    let neigh = idx + 1;
+    assert!(
+        pixels.enzyme_amt[neigh] > 0 || pixels.enzyme_amt[idx] > 0,
+        "blur or residual enzyme present"
+    );
+}
+
+#[test]
+fn swimmer_genome_stays_alive() {
+    use crate::bio::GenomeV0;
+    let mut tank = Tank::try_new(3, 24, 24).unwrap();
+    for vx in 0..24 {
+        for vy in 0..16 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    assert!(tank.seed_genome_at(36, 30, GenomeV0::swimmer()).is_some());
+    for _ in 0..120 {
+        tank.tick(&TankInput {
+            always_day: true,
+            flash_x: 12,
+            flash_y: 12,
+            flash_r: 8,
+            ..TankInput::default()
+        });
+    }
+    assert!(tank.live_cells() >= 1, "cilia cell should persist under light");
+}

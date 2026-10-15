@@ -24,6 +24,8 @@ pub struct PixelLayer {
     pub signal_key: Vec<u8>,
     /// Front-pane film. 0 = clean. Phase 2 swipe-clears it.
     pub film: Vec<u8>,
+    /// True when any keyed field may be non-zero (skip O(n) blur otherwise).
+    pub fields_active: bool,
 }
 
 impl PixelLayer {
@@ -45,6 +47,7 @@ impl PixelLayer {
             signal_amt: vec![0; n],
             signal_key: vec![0; n],
             film: vec![0; n],
+            fields_active: false,
         }
     }
 

@@ -3,6 +3,7 @@
 
 use wk_material::MaterialId;
 
+use crate::bio::fields::{deposit, step_fields, KeyedField};
 use crate::bio::genome::{GenomeStore, GenomeV0};
 use crate::bio::program::{glue_bond, Detach};
 use crate::bio::profile::Block;
@@ -65,6 +66,7 @@ pub fn step(
         );
     }
     form_glue_bonds(cells, genomes, pixels);
+    step_fields(pixels, tick);
     BioStepResult {
         events,
         divisions,
@@ -98,13 +100,45 @@ fn move_cell(
     let solid_below = !below.is_air();
     let in_water = here.is_air() && here.sat > 40;
 
-    // Brownian + buoyancy.
+    // Brownian + buoyancy + CILIA thrust along heading (run-and-tumble lite).
     let h = hash_u64(world_seed, tick, id as u64, 0xB0_01);
     let mut nx = cell.px as i32;
     let mut ny = cell.py as i32;
     let jitter = (h % 5) as i32 - 2;
     nx += jitter;
-    if g.buoy > 0 && in_water {
+    let cilia = g.mode.units_of(Block::Cilia);
+    if cilia > 0 && in_water {
+        let (dx, dy) = crate::bio::program::Dir::Ahead.delta(cell.heading);
+        // ~1 px/s per unit at 30 Hz → step every 30/units ticks.
+        if h % (30 / cilia.max(1) as u64).max(1) == 0 {
+            nx += dx;
+            ny += dy;
+        }
+        // Tumble toward brighter neighbour occasionally.
+        if h % 17 == 0 {
+            let idx = (cell.py as usize) * (pixels.w as usize) + cell.px as usize;
+            let here_l = pixels.light.get(idx).copied().unwrap_or(0);
+            let mut best_h = cell.heading;
+            let mut best_l = here_l;
+            for cand in 0..8u8 {
+                let (cx, cy) = crate::bio::program::Dir::Ahead.delta(cand);
+                let px = cell.px as i32 + cx;
+                let py = cell.py as i32 + cy;
+                if px < 0 || py < 0 || px >= pixels.w as i32 || py >= pixels.h as i32 {
+                    continue;
+                }
+                let li = (py as usize) * (pixels.w as usize) + px as usize;
+                let l = pixels.light.get(li).copied().unwrap_or(0);
+                if l > best_l {
+                    best_l = l;
+                    best_h = cand;
+                }
+            }
+            if let Some(c) = cells.get_mut(id) {
+                c.heading = best_h;
+            }
+        }
+    } else if g.buoy > 0 && in_water {
         // Toward the light (up = decreasing py in pixel space).
         if h % 8 < (g.buoy as u64).clamp(0, 7) {
             ny -= 1;
@@ -201,9 +235,31 @@ fn metabolise(
     let stress = stress_sum.min(255) as u8;
 
     // EXCRETE dumps a little waste into the field.
-    let excrete = g.mode.units_of(crate::bio::profile::Block::Excrete);
+    let excrete = g.mode.units_of(Block::Excrete);
     if excrete > 0 && idx < pixels.waste.len() {
         pixels.waste[idx] = pixels.waste[idx].saturating_add(excrete.min(4));
+    }
+    // ENZYME secrete into the local keyed field (contact lysis lands later).
+    let enzyme = g.mode.units_of(Block::Enzyme);
+    if enzyme > 0 {
+        deposit(
+            pixels,
+            KeyedField::Enzyme,
+            idx,
+            enzyme.min(6),
+            g.glue_key, // reuse key band until wall_key is wired
+        );
+    }
+    // Soft litter under the cell is lysed into glucose when enzyme is present.
+    if enzyme > 0 {
+        let (vx, vy) = pixel_to_phys(cell.px, cell.py, pixels.w, grid.visible_h() as u32);
+        let seat = grid.get_visible(vx, vy);
+        if seat.id() == MaterialId::Organic {
+            grid.set_visible(vx, vy, Cell::air());
+            if idx < pixels.glucose.len() {
+                pixels.glucose[idx] = pixels.glucose[idx].saturating_add(40);
+            }
+        }
     }
 
     if energy <= 0 || age > MAX_AGE || (t_base > 38.0 && heat > 200) {
