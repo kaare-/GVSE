@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use wk_voxel::{SeamSide, SeamTransfer};
+use wk_voxel::{SeamFieldMirror, SeamSide, SeamTransfer};
 
 use crate::ipc::{read_msg, write_msg, IpcError};
 use crate::Host;
 
 /// Schema for [`SeamMsg`] — bump when wire layout breaks.
-pub const SEAM_SCHEMA: u32 = 1;
+/// Dig F2: Exchange carries [`SeamFieldMirror`] (was 1 = P0 mass only).
+pub const SEAM_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SeamMsg {
@@ -33,15 +34,17 @@ pub enum SeamMsg {
         side: SeamSide,
         tick: u64,
     },
-    /// P0 mass exchange (caller already drained their outbound face).
+    /// P0 mass + Dig F2 edge field mirror.
     Exchange {
         tick: u64,
         transfer: SeamTransfer,
+        fields: SeamFieldMirror,
     },
     ExchangeAck {
         tick: u64,
         /// Peer's outbound for us (may be empty).
         transfer: SeamTransfer,
+        fields: SeamFieldMirror,
     },
     Bye,
 }
@@ -75,16 +78,21 @@ pub fn seam_round_trip(
         }
     }
     let outbound = host.drain_seam_outbound(our_side);
+    let fields = host.sample_seam_fields(our_side);
     write_msg(
         stream,
         &SeamMsg::Exchange {
             tick,
             transfer: outbound,
+            fields,
         },
     )?;
     match read_msg::<SeamMsg, _>(stream)? {
-        SeamMsg::ExchangeAck { transfer, .. } => {
+        SeamMsg::ExchangeAck {
+            transfer, fields, ..
+        } => {
             host.apply_seam_inbound(our_side, transfer);
+            host.apply_seam_fields(our_side, fields);
             Ok(())
         }
         other => Err(IpcError::Protocol(format!(
@@ -150,16 +158,23 @@ pub fn serve_seam_round(
     };
     let _ = (peer_side, tick);
     match read_msg::<SeamMsg, _>(stream)? {
-        SeamMsg::Exchange { transfer, tick } => {
+        SeamMsg::Exchange {
+            transfer,
+            fields,
+            tick,
+        } => {
             // Drain first so face export cannot re-absorb water we are about
             // to paint from the peer (same-round ping-pong).
             let outbound = host.drain_seam_outbound(our_side);
+            let our_fields = host.sample_seam_fields(our_side);
             host.apply_seam_inbound(our_side, transfer);
+            host.apply_seam_fields(our_side, fields);
             write_msg(
                 stream,
                 &SeamMsg::ExchangeAck {
                     tick,
                     transfer: outbound,
+                    fields: our_fields,
                 },
             )?;
             Ok(())
@@ -242,7 +257,11 @@ pub fn seam_loop_listen(
 
 /// Postcard round-trip unit helper (no TCP).
 pub fn encode_decode_transfer(t: SeamTransfer) -> SeamTransfer {
-    let msg = SeamMsg::Exchange { tick: 1, transfer: t };
+    let msg = SeamMsg::Exchange {
+        tick: 1,
+        transfer: t,
+        fields: SeamFieldMirror::default(),
+    };
     let bytes = postcard::to_allocvec(&msg).expect("encode");
     match postcard::from_bytes::<SeamMsg>(&bytes).expect("decode") {
         SeamMsg::Exchange { transfer, .. } => transfer,

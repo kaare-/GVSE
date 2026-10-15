@@ -1,9 +1,8 @@
 # Halo / shard handoff *(dig F contract)*
 
-**Status:** F0 design locked; **F1 Lab P0 mass seam** landed (2026-10-14).
-Product dig order **F** from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md).
-Region envelope: [`REGION_CAPACITY.md`](REGION_CAPACITY.md). Cost:
-[`HOSTING_COST.md`](HOSTING_COST.md).
+**Status:** F0–F2 Lab seam path landed (2026-10-15). Product dig order **F**
+from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Region envelope:
+[`REGION_CAPACITY.md`](REGION_CAPACITY.md). Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
 
 ## Intent
 
@@ -150,9 +149,15 @@ ViewFrames through a relay for seam state.
 Host flags: `--seam-side west|east`, `--seam-listen`, `--seam-peer`,
 `--seam-token`.
 
-### F2 / F3
+### F2 — edge field mirror
 
-- [ ] F2: edge field samples stop obvious climate cliffs at the seam  
+- [x] `SeamFieldMirror` (hum / temp / wind_vx) on `SEAM_SCHEMA` 2 Exchange  
+- [x] Soft blend owned edge toward peer mirror (`SEAM_FIELD_BLEND_ALPHA` 0.25)  
+- [x] Unit test: edge temp moves toward peer sample  
+- [ ] Owner two-host feel check (optional)
+
+### F3
+
 - [ ] F3: one organism walks across; no ghost duplicate; habit caps honored  
 
 ## Explicit non-goals *(until unlocked)*

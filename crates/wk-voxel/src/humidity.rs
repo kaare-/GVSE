@@ -257,6 +257,11 @@ impl Humidity {
         self.pack_slab(b)
     }
 
+    /// Dig F2 seam blend / tests: write one tile mass (keeps dense slab in sync).
+    pub fn set_tile_mass(&mut self, hx: i32, hy: i32, v: f32) {
+        self.write_tile(hx, hy, v.max(0.0));
+    }
+
     fn write_tile(&mut self, hx: i32, hy: i32, v: f32) {
         if v > 1e-6 {
             self.cells.insert((hx, hy), v);
