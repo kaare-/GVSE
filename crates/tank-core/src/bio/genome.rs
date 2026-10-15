@@ -28,6 +28,9 @@ pub struct GenomeV0 {
     pub stress_dark: u8,
     pub stress_heat: u8,
     pub stress_cold: u8,
+    /// GLUE key + match width (ring distance).
+    pub glue_key: u8,
+    pub glue_width: u8,
     pub mode: Mode,
 }
 
@@ -45,8 +48,23 @@ impl GenomeV0 {
             stress_dark: 120,
             stress_heat: 160,
             stress_cold: 160,
+            glue_key: 137,
+            glue_width: 16,
             mode: Mode::algae(),
         }
+    }
+
+    pub fn straw() -> Self {
+        let mut g = Self::algae();
+        g.mode = Mode::straw();
+        g.buoy = 0;
+        g
+    }
+
+    pub fn sticky_algae() -> Self {
+        let mut g = Self::algae();
+        g.mode = Mode::sticky_algae();
+        g
     }
 
     pub fn photo(&self) -> u8 {
@@ -78,7 +96,7 @@ impl GenomeV0 {
     pub fn mutate(self, seed: u64, salt: u64) -> Self {
         let h = hash_u64(seed, salt, self.metab_eff as u64, 0xB0_01);
         let mut next = self;
-        match h % 8 {
+        match h % 10 {
             0 => {
                 let d = (hash_u64(seed, salt, 1, 0xB0_02) % 17) as i32 - 8;
                 next.metab_eff = (self.metab_eff as i32 + d).clamp(64, 192) as u8;
@@ -124,6 +142,17 @@ impl GenomeV0 {
                     1 => next.fast = (self.fast as i32 + d).clamp(0, 255) as u8,
                     _ => next.accurate = (self.accurate as i32 + d).clamp(0, 255) as u8,
                 }
+            }
+            7 => {
+                if next.mode.n_children > 0 {
+                    let i = (hash_u64(seed, salt, 11, 0xB2_10) as usize)
+                        % next.mode.n_children as usize;
+                    crate::bio::program::mutate_child(&mut next.mode.children[i], seed, salt);
+                }
+            }
+            8 => {
+                let d = (hash_u64(seed, salt, 12, 0xB2_11) % 7) as i32 - 3;
+                next.glue_key = (self.glue_key as i32 + d).clamp(0, 255) as u8;
             }
             _ => {
                 let which = hash_u64(seed, salt, 9, 0xB1_13) % 4;

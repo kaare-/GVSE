@@ -23,6 +23,17 @@ pub struct CellRec {
     /// 0..=255 composite stress (hunger/dark/heat/cold).
     pub stress: u8,
     pub heading: u8,
+    /// Index into the active child list (which child entry is next).
+    pub child_idx: u8,
+    /// Remaining repeats on the current child entry.
+    pub child_reps: u8,
+    /// Hop count from the organism seed along division bonds.
+    pub depth: u8,
+    /// Division-bond parent cell id (`u32::MAX` = seed).
+    pub parent_cell: u32,
+    /// GLUE attachment to another organism's cell (`u32::MAX` = none).
+    pub glue_to: u32,
+    pub glue_strength: u8,
     /// Stuck as front-pane film.
     pub film: bool,
     pub alive: bool,
@@ -33,6 +44,9 @@ pub struct OrgRec {
     pub seed: u32,
     pub generation: u32,
     pub alive: bool,
+    /// Realised-map slot count (cell ids in `slots`).
+    pub n_slots: u8,
+    pub slots: [u32; 16],
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +122,12 @@ impl CellStore {
                 energy,
                 stress: 0,
                 heading,
+                child_idx: 0,
+                child_reps: 0,
+                depth: 0,
+                parent_cell: u32::MAX,
+                glue_to: u32::MAX,
+                glue_strength: 0,
                 film: false,
                 alive: false,
             });
@@ -121,6 +141,8 @@ impl CellStore {
                 seed: cell_id,
                 generation,
                 alive: false,
+                n_slots: 0,
+                slots: [u32::MAX; 16],
             });
             id
         };
@@ -128,8 +150,20 @@ impl CellStore {
             seed: cell_id,
             generation,
             alive: true,
+            n_slots: 1,
+            slots: {
+                let mut s = [u32::MAX; 16];
+                s[0] = cell_id;
+                s
+            },
         };
         let jitter = (hash_u64(seed, cell_id as u64, genotype as u64, 0xC1) % 8) as u8;
+        let g = genomes.genome(genotype);
+        let first_reps = if g.mode.n_children > 0 {
+            g.mode.children[0].repeat
+        } else {
+            0
+        };
         self.cells[cell_id as usize] = CellRec {
             px,
             py,
@@ -141,12 +175,113 @@ impl CellStore {
             energy,
             stress: 0,
             heading: heading.wrapping_add(jitter) % 8,
+            child_idx: 0,
+            child_reps: first_reps,
+            depth: 0,
+            parent_cell: u32::MAX,
+            glue_to: u32::MAX,
+            glue_strength: 0,
             film: false,
             alive: true,
         };
         claim_rect(pixels, px, py, 1, 1, cell_id + OWNER_BIAS);
         genomes.on_birth(genotype);
         Some(cell_id)
+    }
+
+    /// Spawn a bonded body part into an existing organism.
+    pub fn spawn_bonded(
+        &mut self,
+        genomes: &mut GenomeStore,
+        pixels: &mut PixelLayer,
+        px: u16,
+        py: u16,
+        genotype: u32,
+        org: u32,
+        energy: u16,
+        heading: u8,
+        parent_cell: u32,
+        depth: u8,
+        seed: u64,
+    ) -> Option<u32> {
+        let idx = (py as usize) * (pixels.w as usize) + px as usize;
+        if idx >= pixels.owner.len() || pixels.owner[idx] != EMPTY_OWNER {
+            return None;
+        }
+        let org_rec = self.orgs.get_mut(org as usize)?;
+        if !org_rec.alive || org_rec.n_slots as usize >= org_rec.slots.len() {
+            return None;
+        }
+        let cell_id = if let Some(id) = self.free.pop() {
+            id
+        } else {
+            let id = self.cells.len() as u32;
+            self.cells.push(CellRec {
+                px,
+                py,
+                w: 1,
+                h: 1,
+                genotype,
+                org: 0,
+                age: 0,
+                energy,
+                stress: 0,
+                heading,
+                child_idx: 0,
+                child_reps: 0,
+                depth: 0,
+                parent_cell: u32::MAX,
+                glue_to: u32::MAX,
+                glue_strength: 0,
+                film: false,
+                alive: false,
+            });
+            id
+        };
+        let slot = org_rec.n_slots as usize;
+        org_rec.slots[slot] = cell_id;
+        org_rec.n_slots += 1;
+        let g = genomes.genome(genotype);
+        let first_reps = if g.mode.n_children > 0 {
+            g.mode.children[0].repeat
+        } else {
+            0
+        };
+        self.cells[cell_id as usize] = CellRec {
+            px,
+            py,
+            w: 1,
+            h: 1,
+            genotype,
+            org,
+            age: 0,
+            energy,
+            stress: 0,
+            heading,
+            child_idx: 0,
+            child_reps: first_reps,
+            depth,
+            parent_cell,
+            glue_to: u32::MAX,
+            glue_strength: 0,
+            film: false,
+            alive: true,
+        };
+        let _ = seed;
+        claim_rect(pixels, px, py, 1, 1, cell_id + OWNER_BIAS);
+        genomes.on_birth(genotype);
+        Some(cell_id)
+    }
+
+    pub fn org_slot_count(&self, org: u32) -> u8 {
+        self.orgs.get(org as usize).map(|o| o.n_slots).unwrap_or(0)
+    }
+
+    pub fn glue_attachments(&self) -> u32 {
+        self.cells
+            .iter()
+            .filter(|c| c.alive && c.glue_to != u32::MAX)
+            .count() as u32
     }
 
     pub fn kill(
@@ -172,8 +307,21 @@ impl CellStore {
         }
         genomes.on_death(genotype);
         if let Some(o) = self.orgs.get_mut(org as usize) {
-            o.alive = false;
-            self.org_free.push(org);
+            // Drop this slot from the realised map.
+            let mut write = 0u8;
+            for i in 0..o.n_slots {
+                if o.slots[i as usize] != id {
+                    o.slots[write as usize] = o.slots[i as usize];
+                    write += 1;
+                }
+            }
+            o.n_slots = write;
+            if o.n_slots == 0 {
+                o.alive = false;
+                self.org_free.push(org);
+            } else if o.seed == id {
+                o.seed = o.slots[0];
+            }
         }
         self.free.push(id);
     }

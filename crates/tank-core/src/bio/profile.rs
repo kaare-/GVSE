@@ -1,7 +1,8 @@
-//! B1 protein profiles. A mode carries ≤6 block entries; units sum to
+//! B1/B2 protein profiles. A mode carries ≤6 block entries; units sum to
 //! at most `P · w · h` (P = 8). Coefficients are derived on the fly for
 //! B1; a lazy cache lands when the genotype table gets hot.
 
+use crate::bio::program::{ChildSpec, Detach, Dir, HeadingRule};
 use crate::consts::P_UNITS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -16,6 +17,7 @@ pub enum Block {
     Buoy = 7,
     Pigment = 8,
     Transparent = 9,
+    Glue = 10,
 }
 
 impl Block {
@@ -30,6 +32,7 @@ impl Block {
             7 => Some(Self::Buoy),
             8 => Some(Self::Pigment),
             9 => Some(Self::Transparent),
+            10 => Some(Self::Glue),
             _ => None,
         }
     }
@@ -46,6 +49,7 @@ impl Block {
             Self::Buoy => 2,
             Self::Pigment => 1,
             Self::Transparent => 1,
+            Self::Glue => 2,
         }
     }
 
@@ -60,6 +64,7 @@ impl Block {
             Self::Buoy => [0xF0, 0xF0, 0xF0],
             Self::Pigment => [0xE0, 0x80, 0xC0],
             Self::Transparent => [0xC0, 0xD8, 0xE0],
+            Self::Glue => [0x8C, 0x8A, 0x3C],
         }
     }
 }
@@ -76,23 +81,79 @@ pub struct Mode {
     pub shape_h: u8,
     pub entries: [Entry; 6],
     pub n_entries: u8,
+    pub heading_rule: HeadingRule,
+    pub children: [ChildSpec; 4],
+    pub n_children: u8,
+    pub sacrifice_order: u8,
+    pub regrow: bool,
 }
 
 impl Mode {
-    pub fn algae() -> Self {
-        let mut m = Self {
+    fn blank() -> Self {
+        Self {
             shape_w: 1,
             shape_h: 1,
             entries: [Entry {
                 block: Block::Photo,
                 units: 0,
             }; 6],
-            n_entries: 1,
-        };
+            n_entries: 0,
+            heading_rule: HeadingRule::Inherit,
+            children: [ChildSpec::empty(); 4],
+            n_children: 0,
+            sacrifice_order: 0,
+            regrow: true,
+        }
+    }
+
+    pub fn algae() -> Self {
+        let mut m = Self::blank();
+        m.n_entries = 1;
         m.entries[0] = Entry {
             block: Block::Photo,
             units: 5,
         };
+        // Free-living algae: detach immediately, many repeats.
+        m.n_children = 1;
+        m.children[0] = ChildSpec {
+            dir: Dir::Ahead,
+            mode: 0,
+            bond: 0,
+            repeat: 15,
+            detach: Detach::Immediate,
+        };
+        m
+    }
+
+    /// Short bonded chain (straw scaffold for d.3).
+    pub fn straw() -> Self {
+        let mut m = Self::blank();
+        m.n_entries = 1;
+        m.entries[0] = Entry {
+            block: Block::Photo,
+            units: 5,
+        };
+        m.n_children = 1;
+        m.children[0] = ChildSpec {
+            dir: Dir::Ahead,
+            mode: 0,
+            bond: 180,
+            repeat: 3,
+            detach: Detach::Never,
+        };
+        m
+    }
+
+    /// Algae that also expresses GLUE (colony scaffold for d.2).
+    pub fn sticky_algae() -> Self {
+        let mut m = Self::algae();
+        if m.n_entries < 6 {
+            m.entries[m.n_entries as usize] = Entry {
+                block: Block::Glue,
+                units: 2,
+            };
+            m.n_entries += 1;
+        }
         m
     }
 
@@ -196,7 +257,7 @@ impl Mode {
         if self.n_entries >= 6 {
             return;
         }
-        let kind = 1 + (hash_u64(seed, salt, 3, 0xB1_22) % 9) as u8;
+        let kind = 1 + (hash_u64(seed, salt, 3, 0xB1_22) % 10) as u8;
         let Some(block) = Block::from_u8(kind) else {
             return;
         };

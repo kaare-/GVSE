@@ -1,8 +1,10 @@
 //! Phase 2 biology. B0: free algae cells, interned genomes, glass film.
+//! B1: profiles, growth, stress. B2: mode-program children, GLUE colonies.
 #![allow(clippy::too_many_arguments)]
 
 pub mod genome;
 pub mod profile;
+pub mod program;
 pub mod step;
 pub mod store;
 

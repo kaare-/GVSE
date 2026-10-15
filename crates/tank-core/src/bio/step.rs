@@ -4,7 +4,9 @@
 use wk_material::MaterialId;
 
 use crate::bio::genome::{GenomeStore, GenomeV0};
-use crate::bio::store::CellStore;
+use crate::bio::program::{glue_bond, Detach};
+use crate::bio::profile::Block;
+use crate::bio::store::{CellStore, OWNER_BIAS};
 use crate::cell::Cell;
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_u64;
@@ -62,6 +64,7 @@ pub fn step(
             &mut deaths,
         );
     }
+    form_glue_bonds(cells, genomes, pixels);
     BioStepResult {
         events,
         divisions,
@@ -82,6 +85,10 @@ fn move_cell(
         return;
     };
     if !cell.alive || cell.film {
+        return;
+    }
+    // Body parts stay on the realised map; only free cells drift.
+    if cell.parent_cell != u32::MAX {
         return;
     }
     let g = genomes.genome(cell.genotype);
@@ -273,7 +280,30 @@ fn try_divide(
     let Some(cell) = cells.get(parent).copied() else {
         return false;
     };
-    let (dx, dy) = heading_delta(cell.heading);
+    if parent_g.mode.n_children == 0 {
+        return false;
+    }
+    // Advance past exhausted child entries.
+    let mut child_idx = cell.child_idx;
+    let mut child_reps = cell.child_reps;
+    while child_idx < parent_g.mode.n_children && child_reps == 0 {
+        child_idx += 1;
+        child_reps = parent_g
+            .mode
+            .children
+            .get(child_idx as usize)
+            .map(|c| c.repeat)
+            .unwrap_or(0);
+    }
+    if child_idx >= parent_g.mode.n_children || child_reps == 0 {
+        if let Some(c) = cells.get_mut(parent) {
+            c.child_idx = child_idx;
+            c.child_reps = 0;
+        }
+        return false;
+    }
+    let spec = parent_g.mode.children[child_idx as usize];
+    let (dx, dy) = spec.dir.delta(cell.heading);
     let nx = cell.px as i32 + dx * cell.w as i32;
     let ny = cell.py as i32 + dy * cell.h as i32;
     if nx < 0 || ny < 0 || nx >= pixels.w as i32 || ny >= pixels.h as i32 {
@@ -291,35 +321,67 @@ fn try_divide(
     } else {
         cell.genotype
     };
-    let gen = cells
-        .get(parent)
-        .map(|c| cells.org_generation(c.org))
-        .unwrap_or(0)
-        .saturating_add(1);
-    // Cheap strategy lowers division cost; accurate raises it.
+    let heading = parent_g.mode.heading_rule.apply(cell.heading);
     let cost = DIVIDE_COST * (200 + parent_g.accurate as i32) / (200 + parent_g.cheap as i32);
-    let daughter = cells.spawn(
-        genomes,
-        pixels,
-        nx as u16,
-        ny as u16,
-        geno,
-        gen,
-        (cost / 2) as u16,
-        cell.heading,
-        world_seed,
-    );
-    if daughter.is_none() {
+    let daughter = match spec.detach {
+        Detach::Immediate => {
+            let gen = cells.org_generation(cell.org).saturating_add(1);
+            cells.spawn(
+                genomes,
+                pixels,
+                nx as u16,
+                ny as u16,
+                geno,
+                gen,
+                (cost / 2) as u16,
+                heading,
+                world_seed,
+            )
+        }
+        Detach::Never => cells.spawn_bonded(
+            genomes,
+            pixels,
+            nx as u16,
+            ny as u16,
+            geno,
+            cell.org,
+            (cost / 2) as u16,
+            heading,
+            parent,
+            cell.depth.saturating_add(1),
+            world_seed,
+        ),
+    };
+    let Some(did) = daughter else {
         return false;
-    }
+    };
     if let Some(c) = cells.get_mut(parent) {
         c.energy = (energy - cost).max(0) as u16;
         c.age = 0;
+        let left = child_reps.saturating_sub(1);
+        if left == 0 {
+            c.child_idx = child_idx.saturating_add(1);
+            c.child_reps = parent_g
+                .mode
+                .children
+                .get(c.child_idx as usize)
+                .map(|ch| ch.repeat)
+                .unwrap_or(0);
+        } else {
+            c.child_idx = child_idx;
+            c.child_reps = left;
+        }
     }
     events.push(SimEvent {
         kind: 2, // division
-        arg0: daughter.unwrap(),
+        arg0: did,
     });
+    if matches!(spec.detach, Detach::Never) && cells.org_slot_count(cell.org) == 2 {
+        events.push(SimEvent {
+            kind: 5, // multicellular
+            arg0: cell.org,
+        });
+    }
     if mutate {
         events.push(SimEvent {
             kind: 4, // new colour / mutant
@@ -329,16 +391,69 @@ fn try_divide(
     true
 }
 
-fn heading_delta(h: u8) -> (i32, i32) {
-    match h % 8 {
-        0 => (1, 0),
-        1 => (1, -1),
-        2 => (0, -1),
-        3 => (-1, -1),
-        4 => (-1, 0),
-        5 => (-1, 1),
-        6 => (0, 1),
-        _ => (1, 1),
+/// Adjacent GLUE cells of different organisms form a kin bond (no merge).
+fn form_glue_bonds(cells: &mut CellStore, genomes: &GenomeStore, pixels: &PixelLayer) {
+    let ids: Vec<u32> = cells.iter_alive().map(|(id, _)| id).collect();
+    for &id in &ids {
+        let Some(cell) = cells.get(id).copied() else {
+            continue;
+        };
+        let g = genomes.genome(cell.genotype);
+        let glue_u = g.mode.units_of(Block::Glue);
+        if glue_u == 0 {
+            continue;
+        }
+        if cell.glue_to != u32::MAX {
+            // Keep existing bond if neighbour still alive and adjacent.
+            if let Some(other) = cells.get(cell.glue_to) {
+                if other.alive
+                    && other.org != cell.org
+                    && (other.px as i32 - cell.px as i32).abs() <= 1
+                    && (other.py as i32 - cell.py as i32).abs() <= 1
+                {
+                    continue;
+                }
+            }
+            if let Some(c) = cells.get_mut(id) {
+                c.glue_to = u32::MAX;
+                c.glue_strength = 0;
+            }
+        }
+        for (dx, dy) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
+            let nx = cell.px as i32 + dx;
+            let ny = cell.py as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= pixels.w as i32 || ny >= pixels.h as i32 {
+                continue;
+            }
+            let idx = (ny as usize) * (pixels.w as usize) + nx as usize;
+            let owner = pixels.owner[idx];
+            if owner < OWNER_BIAS {
+                continue;
+            }
+            let oid = owner - OWNER_BIAS;
+            if oid == id {
+                continue;
+            }
+            let Some(other) = cells.get(oid).copied() else {
+                continue;
+            };
+            if !other.alive || other.org == cell.org {
+                continue;
+            }
+            let og = genomes.genome(other.genotype);
+            if og.mode.units_of(Block::Glue) == 0 {
+                continue;
+            }
+            let strength = glue_bond(g.glue_key, og.glue_key, g.glue_width, glue_u.saturating_mul(40));
+            if strength == 0 {
+                continue;
+            }
+            if let Some(c) = cells.get_mut(id) {
+                c.glue_to = oid;
+                c.glue_strength = strength;
+            }
+            break;
+        }
     }
 }
 

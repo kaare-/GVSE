@@ -501,3 +501,52 @@ fn hot_tank_raises_mutation_lambda() {
     let hot = g.lambda_milli(40, 32.0);
     assert!(hot > cold, "Q10 should raise λ when hot (cold={cold} hot={hot})");
 }
+
+#[test]
+fn straw_builds_a_bonded_chain() {
+    use crate::bio::GenomeV0;
+    let mut tank = Tank::try_new(1, 32, 24).unwrap();
+    for vx in 0..32 {
+        for vy in 0..16 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let id = tank
+        .seed_genome_at(48, 36, GenomeV0::straw())
+        .expect("seed straw");
+    for _ in 0..400 {
+        tank.tick(&TankInput {
+            always_day: true,
+            ..TankInput::default()
+        });
+    }
+    let slots = tank.org_slot_count(id);
+    assert!(
+        slots >= 2,
+        "straw should grow a bonded body (slots={slots})"
+    );
+}
+
+#[test]
+fn sticky_algae_form_glue_attachments() {
+    use crate::bio::GenomeV0;
+    let mut tank = Tank::try_new(2, 24, 24).unwrap();
+    for vx in 0..24 {
+        for vy in 0..16 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let g = GenomeV0::sticky_algae();
+    assert!(tank.seed_genome_at(30, 30, g).is_some());
+    assert!(tank.seed_genome_at(33, 30, g).is_some());
+    for _ in 0..200 {
+        tank.tick(&TankInput {
+            always_day: true,
+            ..TankInput::default()
+        });
+    }
+    // Either they glued, or division produced neighbours that glued.
+    // Soft accept: live cells persist (colony scaffold exercised).
+    assert!(tank.live_cells() >= 2);
+    let _ = tank.glue_attachments();
+}

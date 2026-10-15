@@ -320,6 +320,38 @@ impl Tank {
         self.pixels.light.get(idx).copied().unwrap_or(0)
     }
 
+    pub fn org_slot_count(&self, cell_id: u32) -> u8 {
+        self.cells
+            .get(cell_id)
+            .map(|c| self.cells.org_slot_count(c.org))
+            .unwrap_or(0)
+    }
+
+    pub fn glue_attachments(&self) -> u32 {
+        self.cells.glue_attachments()
+    }
+
+    pub fn seed_genome_at(
+        &mut self,
+        px: u16,
+        py: u16,
+        genome: crate::bio::GenomeV0,
+    ) -> Option<u32> {
+        let parent = self.genomes.seed_algae();
+        let geno = self.genomes.intern_child(parent, genome);
+        self.cells.spawn(
+            &mut self.genomes,
+            &mut self.pixels,
+            px,
+            py,
+            geno,
+            0,
+            12 * 256,
+            2,
+            self.seed,
+        )
+    }
+
     /// Clear front-pane film along a stroke (pixel space, top-left origin).
     pub fn swipe_film(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, radius: i32) -> u32 {
         bio::swipe_film(&mut self.pixels, x0, y0, x1, y1, radius)
