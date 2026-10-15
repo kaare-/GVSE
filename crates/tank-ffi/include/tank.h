@@ -15,12 +15,13 @@ typedef struct TankHandle TankHandle;
 typedef struct Carried Carried;
 
 typedef struct ToolEvent {
-  uint8_t kind;
+  uint8_t kind;      /* 1 paint 2 erase 3 pour 4 drain 5 fill 6 undo */
   uint8_t material;
   uint16_t x;
   uint16_t y;
   uint16_t r;
-  uint16_t _pad;
+  uint8_t variant;   /* colour 0..3 */
+  uint8_t _pad;
 } ToolEvent;
 
 typedef struct TankInput {
@@ -28,7 +29,7 @@ typedef struct TankInput {
   float grav_y;
   uint8_t paused;
   uint8_t always_day;
-  uint8_t _pad0;
+  uint8_t swirl;     /* 0 = ignore tilt (default) */
   uint8_t _pad1;
   float light_slider;
   float t_base;
@@ -40,7 +41,11 @@ typedef struct InspectRec {
   uint8_t hit;
   uint8_t material;
   uint8_t sat;
-  uint8_t _pad;
+  uint8_t moisture;
+  uint8_t variant;
+  uint8_t _pad0;
+  uint8_t _pad1;
+  uint8_t _pad2;
   uint32_t owner;
   uint32_t vx;
   uint32_t vy;
@@ -58,8 +63,11 @@ typedef struct TelRec {
 
 TankHandle *tank_new(uint64_t seed, uint32_t w_cells, uint32_t h_cells);
 TankHandle *tank_preset(uint64_t seed);
+TankHandle *tank_empty(uint64_t seed);
 void tank_free(TankHandle *handle);
 void tank_tick(TankHandle *handle, const TankInput *input);
+uint8_t tank_undo(TankHandle *handle);
+uint32_t tank_undo_depth(const TankHandle *handle);
 const uint8_t *tank_pixels(TankHandle *handle, uint32_t *w, uint32_t *h);
 uint64_t tank_pixel_hash(TankHandle *handle);
 InspectRec tank_inspect(TankHandle *handle, uint32_t px, uint32_t py);

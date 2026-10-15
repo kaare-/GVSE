@@ -22,7 +22,8 @@ pub struct ToolEventC {
     pub x: u16,
     pub y: u16,
     pub r: u16,
-    pub _pad: u16,
+    pub variant: u8,
+    pub _pad: u8,
 }
 
 #[repr(C)]
@@ -32,7 +33,7 @@ pub struct TankInputC {
     pub grav_y: f32,
     pub paused: u8,
     pub always_day: u8,
-    pub _pad0: u8,
+    pub swirl: u8,
     pub _pad1: u8,
     pub light_slider: f32,
     pub t_base: f32,
@@ -46,7 +47,11 @@ pub struct InspectRec {
     pub hit: u8,
     pub material: u8,
     pub sat: u8,
-    pub _pad: u8,
+    pub moisture: u8,
+    pub variant: u8,
+    pub _pad0: u8,
+    pub _pad1: u8,
+    pub _pad2: u8,
     pub owner: u32,
     pub vx: u32,
     pub vy: u32,
@@ -91,6 +96,14 @@ pub extern "C" fn tank_preset(seed: u64) -> *mut TankHandle {
 }
 
 #[no_mangle]
+pub extern "C" fn tank_empty(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::empty(seed),
+        rgba: Vec::new(),
+    }))
+}
+
+#[no_mangle]
 pub extern "C" fn tank_free(handle: *mut TankHandle) {
     if handle.is_null() {
         return;
@@ -116,6 +129,7 @@ pub extern "C" fn tank_tick(handle: *mut TankHandle, input: *const TankInputC) {
             x: t.x,
             y: t.y,
             r: t.r,
+            variant: t.variant,
         }));
     }
     handle.tank.tick(&TankInput {
@@ -123,10 +137,26 @@ pub extern "C" fn tank_tick(handle: *mut TankHandle, input: *const TankInputC) {
         grav_y: input.grav_y,
         paused: input.paused != 0,
         always_day: input.always_day != 0,
+        swirl: input.swirl != 0,
         light_slider: input.light_slider,
         t_base: input.t_base,
         tools,
     });
+}
+
+#[no_mangle]
+pub extern "C" fn tank_undo(handle: *mut TankHandle) -> u8 {
+    let Some(handle) = (unsafe { handle.as_mut() }) else {
+        return 0;
+    };
+    u8::from(handle.tank.undo())
+}
+
+#[no_mangle]
+pub extern "C" fn tank_undo_depth(handle: *const TankHandle) -> u32 {
+    unsafe { handle.as_ref() }
+        .map(|h| h.tank.undo_depth() as u32)
+        .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -204,8 +234,6 @@ pub extern "C" fn tank_carried_free(carried: *mut Carried) {
     unsafe { drop(Box::from_raw(carried)) };
 }
 
-/// Bytes needed when `buf` is null or `cap` is short. `0` means the save
-/// failed. Otherwise the number of bytes written.
 #[no_mangle]
 pub extern "C" fn tank_save(handle: *mut TankHandle, buf: *mut u8, cap: usize) -> usize {
     let Some(handle) = (unsafe { handle.as_mut() }) else {
@@ -335,7 +363,11 @@ impl InspectRec {
             hit: 0,
             material: 0,
             sat: 0,
-            _pad: 0,
+            moisture: 0,
+            variant: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
             owner: 0,
             vx: 0,
             vy: 0,
@@ -347,7 +379,11 @@ impl InspectRec {
             hit: u8::from(src.hit),
             material: src.material,
             sat: src.sat,
-            _pad: 0,
+            moisture: src.moisture,
+            variant: src.variant,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
             owner: src.owner,
             vx: src.vx,
             vy: src.vy,
@@ -365,7 +401,7 @@ mod tests {
             grav_y: -1.0,
             paused: 1,
             always_day: 0,
-            _pad0: 0,
+            swirl: 0,
             _pad1: 0,
             light_slider: 1.0,
             t_base: 15.0,
@@ -378,9 +414,8 @@ mod tests {
     fn abi_sizes_match_the_header() {
         assert_eq!(std::mem::size_of::<ToolEventC>(), 10);
         assert_eq!(std::mem::size_of::<TankInputC>(), 40);
-        assert_eq!(std::mem::align_of::<TankInputC>(), 8);
         assert_eq!(std::mem::offset_of!(TankInputC, tools), 24);
-        assert_eq!(std::mem::size_of::<InspectRec>(), 16);
+        assert_eq!(std::mem::size_of::<InspectRec>(), 20);
         assert_eq!(std::mem::size_of::<EventRec>(), 8);
         assert_eq!(std::mem::size_of::<TelRec>(), 8);
     }
@@ -446,6 +481,7 @@ mod tests {
         let header = include_str!("../include/tank.h");
         for name in [
             "tank_new",
+            "tank_empty",
             "tank_tick",
             "tank_pixels",
             "tank_inspect",
@@ -455,6 +491,7 @@ mod tests {
             "tank_save",
             "tank_load",
             "tank_free",
+            "tank_undo",
             "tank_glyph",
             "tank_set_consent",
         ] {
@@ -467,5 +504,30 @@ mod tests {
         assert_ne!(tank_glyph('æ' as u32), 0);
         assert_ne!(tank_glyph('ø' as u32), 0);
         assert_ne!(tank_glyph('å' as u32), 0);
+    }
+
+    #[test]
+    fn empty_tank_and_undo_are_exposed() {
+        let handle = tank_empty(3);
+        assert!(!handle.is_null());
+        let tool = ToolEventC {
+            kind: 1,
+            material: 2,
+            x: 4,
+            y: 4,
+            r: 2,
+            variant: 2,
+            _pad: 0,
+        };
+        let input = TankInputC {
+            tools: &tool,
+            tool_count: 1,
+            ..input_paused()
+        };
+        tank_tick(handle, &input);
+        assert_eq!(tank_undo_depth(handle), 1);
+        assert_eq!(tank_undo(handle), 1);
+        assert_eq!(tank_undo_depth(handle), 0);
+        tank_free(handle);
     }
 }

@@ -30,7 +30,7 @@ pub fn fall(grid: &mut PhysicsGrid, active: &ActiveRect) {
     }
 }
 
-pub fn repose(grid: &mut PhysicsGrid, active: &ActiveRect, seed: u64, tick: u64) {
+pub fn repose(grid: &mut PhysicsGrid, active: &ActiveRect, seed: u64, tick: u64, tilt_x: f32) {
     for y in active.y0..=active.y1 {
         for x in active.x0..=active.x1 {
             let cell = grid.get(x, y);
@@ -44,7 +44,13 @@ pub fn repose(grid: &mut PhysicsGrid, active: &ActiveRect, seed: u64, tick: u64)
             let right = can_slide(grid, x, y, 1, active);
             let dx = match (left, right) {
                 (true, true) => {
-                    if hash_u64(seed, x as u64, y as u64, tick) & 1 == 0 {
+                    if tilt_x.abs() > 0.08 {
+                        if tilt_x > 0.0 {
+                            1
+                        } else {
+                            -1
+                        }
+                    } else if hash_u64(seed, x as u64, y as u64, tick) & 1 == 0 {
                         -1
                     } else {
                         1

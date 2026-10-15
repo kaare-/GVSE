@@ -77,15 +77,62 @@ impl Cell {
         self.is_air() && self.sat >= STANDING_AIR_SAT
     }
 
-    /// Low 2 bits: render-only palette index for sand and rock.
+    /// Low 2 bits: render-only palette index for sand and rock (0..=3).
     #[inline]
     pub fn colour_variant(self) -> u8 {
         self.flags & 0b0000_0011
     }
+
+    #[inline]
+    pub fn set_colour_variant(&mut self, variant: u8) {
+        self.flags = (self.flags & !0b0000_0011) | (variant & 0b0000_0011);
+    }
+
+    /// Rock surface film (0..=255) stored in `pad`. Sand uses `sat`.
+    #[inline]
+    pub fn rock_film(self) -> u8 {
+        if self.is_rock() {
+            self.pad
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    pub fn set_rock_film(&mut self, film: u8) {
+        if self.is_rock() {
+            self.pad = film;
+        }
+    }
+
+    #[inline]
+    pub fn is_rock(self) -> bool {
+        matches!(
+            self.id(),
+            MaterialId::Stone
+                | MaterialId::Limestone
+                | MaterialId::Sandstone
+                | MaterialId::Conglomerate
+                | MaterialId::Flowstone
+                | MaterialId::LooseRock
+                | MaterialId::LooseLimestone
+        )
+    }
+
+    /// Visible wetness for damp/dry rendering: pore sat for sand, film for rock.
+    #[inline]
+    pub fn moisture(self) -> u8 {
+        if self.is_rock() {
+            self.pad.max(self.sat)
+        } else {
+            self.sat
+        }
+    }
 }
 
-/// Grains that fall and slump. Competent rock is static (Phase 1.7:
-/// rocks never move; no competent-fall solver).
+/// Grains that fall and slump. Player rocks are static (Phase 1.7):
+/// Stone and the other competent rocks never move. LooseRock is kept
+/// as static cobble in the tank so sand can pile against it.
 pub fn is_mobile_grain(id: MaterialId) -> bool {
     matches!(
         id,
@@ -94,8 +141,6 @@ pub fn is_mobile_grain(id: MaterialId) -> bool {
             | MaterialId::Clay
             | MaterialId::Bentonite
             | MaterialId::Soil
-            | MaterialId::LooseRock
-            | MaterialId::LooseLimestone
             | MaterialId::Organic
             | MaterialId::Snow
     )

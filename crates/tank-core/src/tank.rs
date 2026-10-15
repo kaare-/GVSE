@@ -3,7 +3,6 @@
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
-use wk_material::MaterialId;
 
 use crate::cell::Cell;
 use crate::clock::{self, day_factor};
@@ -13,6 +12,9 @@ use crate::hash::hash_bytes;
 use crate::pixels::{self, CoarseField, PixelLayer};
 use crate::rules;
 use crate::telemetry::{self, TelEvent, Telemetry};
+use crate::tools::{self, UndoFrame, UNDO_CAP};
+
+pub use crate::tools::ToolEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TankError {
@@ -22,23 +24,14 @@ pub enum TankError {
     Postcard,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ToolEvent {
-    /// 1 paint material, 2 erase to air, 3 pour water.
-    pub kind: u8,
-    pub material: u8,
-    /// Visible physics cell, origin at the bottom-left of the interior.
-    pub x: u16,
-    pub y: u16,
-    pub r: u16,
-}
-
 #[derive(Debug, Clone)]
 pub struct TankInput {
     pub grav_x: f32,
     pub grav_y: f32,
     pub paused: bool,
     pub always_day: bool,
+    /// When false (default), gyro tilt is ignored. Phase 1.5.
+    pub swirl: bool,
     pub light_slider: f32,
     pub t_base: f32,
     pub tools: Vec<ToolEvent>,
@@ -51,6 +44,7 @@ impl Default for TankInput {
             grav_y: -1.0,
             paused: false,
             always_day: false,
+            swirl: false,
             light_slider: 1.0,
             t_base: crate::consts::T_BASE_DEFAULT,
             tools: Vec::new(),
@@ -69,6 +63,8 @@ pub struct Inspect {
     pub hit: bool,
     pub material: u8,
     pub sat: u8,
+    pub moisture: u8,
+    pub variant: u8,
     pub owner: u32,
     pub vx: u32,
     pub vy: u32,
@@ -81,6 +77,7 @@ pub struct Tank {
     light_slider: f32,
     stored_heat: f32,
     always_day: bool,
+    swirl: bool,
     grav_x: f32,
     grav_y: f32,
     grid: PhysicsGrid,
@@ -89,6 +86,7 @@ pub struct Tank {
     fines: Vec<f32>,
     events: VecDeque<SimEvent>,
     telemetry: Telemetry,
+    undo: Vec<UndoFrame>,
 }
 
 impl Tank {
@@ -111,6 +109,7 @@ impl Tank {
             light_slider: 1.0,
             stored_heat: 0.0,
             always_day: false,
+            swirl: false,
             grav_x: 0.0,
             grav_y: -1.0,
             grid,
@@ -119,14 +118,27 @@ impl Tank {
             fines,
             events: VecDeque::new(),
             telemetry: Telemetry::default(),
+            undo: Vec::new(),
         };
         tank.rebuild_light();
         Ok(tank)
     }
 
-    /// Phone preset: bedrock frame outside the picture, a sand bed,
-    /// water to a bit over half, one static stone, and a sand column
-    /// that collapses on the first ticks.
+    /// Empty tank with a thin sand bed — the "new tank" starting point.
+    pub fn empty(seed: u64) -> Self {
+        let mut tank = Self::try_new(seed, PRESET_W, PRESET_H).expect("preset size");
+        let w = tank.grid.visible_w();
+        let bed = 4;
+        for vy in 0..bed {
+            for vx in 0..w {
+                tank.grid.set_visible(vx, vy, Cell::sand());
+            }
+        }
+        tank.rebuild_light();
+        tank
+    }
+
+    /// Phone preset: sand bed, water, one static stone, a sand column.
     pub fn preset(seed: u64) -> Self {
         let mut tank = Self::try_new(seed, PRESET_W, PRESET_H).expect("preset size");
         let w = tank.grid.visible_w();
@@ -145,7 +157,9 @@ impl Tank {
         }
         let stone_y = sand_top + 4;
         if stone_y < h {
-            tank.grid.set_visible(16, stone_y, Cell::stone());
+            let mut stone = Cell::stone();
+            stone.set_colour_variant(0);
+            tank.grid.set_visible(16, stone_y, stone);
         }
         let cx = w / 2;
         for dy in 0..24 {
@@ -180,6 +194,10 @@ impl Tank {
 
     pub fn always_day(&self) -> bool {
         self.always_day
+    }
+
+    pub fn swirl(&self) -> bool {
+        self.swirl
     }
 
     pub fn gravity(&self) -> (f32, f32) {
@@ -226,6 +244,10 @@ impl Tank {
         self.grid.get_visible(vx, vy)
     }
 
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn place_for_test(&mut self, vx: i32, vy: i32, cell: Cell) {
         self.grid.set_visible(vx, vy, cell);
@@ -235,22 +257,27 @@ impl Tank {
         self.t_base = input.t_base;
         self.light_slider = input.light_slider.clamp(0.0, 1.0);
         self.always_day = input.always_day;
+        self.swirl = input.swirl;
         self.grav_x = input.grav_x;
         self.grav_y = input.grav_y;
         if input.paused {
+            self.apply_tools(&input.tools);
             self.rebuild_light();
             return;
         }
         self.apply_tools(&input.tools);
-        // grav_y is stored for the Phase 1 tilt spike. This core always
-        // steps downward; the value is part of the save so a host can
-        // round-trip the last input.
-        rules::step(&mut self.grid, self.seed, self.tick_count);
+        let tilt = if self.swirl { self.grav_x } else { 0.0 };
+        rules::step(&mut self.grid, self.seed, self.tick_count, tilt);
         self.tick_count = self.tick_count.wrapping_add(1);
-        // Incident light is a pure function of the grid and the clock.
-        // It is rebuilt in `write_rgba` / `save_bytes` (and on a paused
-        // tick, so a slider change shows up) rather than on every step,
-        // which keeps the 128×256 physics tick inside its budget.
+    }
+
+    /// Restore the previous build snapshot. Returns false when empty.
+    pub fn undo(&mut self) -> bool {
+        let Some(frame) = self.undo.pop() else {
+            return false;
+        };
+        tools::restore(&mut self.grid, &frame);
+        true
     }
 
     pub fn poll_event(&mut self) -> Option<SimEvent> {
@@ -264,6 +291,8 @@ impl Tank {
                 hit: false,
                 material: 0,
                 sat: 0,
+                moisture: 0,
+                variant: 0,
                 owner: 0,
                 vx: 0,
                 vy: 0,
@@ -278,6 +307,8 @@ impl Tank {
             hit: true,
             material: cell.material,
             sat: cell.sat,
+            moisture: cell.moisture(),
+            variant: cell.colour_variant(),
             owner,
             vx,
             vy,
@@ -307,6 +338,7 @@ impl Tank {
             light_slider: self.light_slider,
             stored_heat: self.stored_heat,
             always_day: self.always_day,
+            swirl: self.swirl,
             grav_x: self.grav_x,
             grav_y: self.grav_y,
             cells: self.grid.cells().to_vec(),
@@ -372,11 +404,10 @@ impl Tank {
         tank.light_slider = blob.light_slider;
         tank.stored_heat = blob.stored_heat;
         tank.always_day = blob.always_day;
+        tank.swirl = blob.swirl;
         tank.grav_x = blob.grav_x;
         tank.grav_y = blob.grav_y;
         tank.grid.cells_mut().copy_from_slice(&blob.cells);
-        // The frame is part of the blob. Re-assert bedrock so a corrupt
-        // interior save cannot delete the tank walls.
         reinforce_border(&mut tank.grid);
         tank.pixels.owner = blob.owner;
         tank.pixels.light = blob.light;
@@ -415,42 +446,24 @@ impl Tank {
     }
 
     fn apply_tools(&mut self, tools: &[ToolEvent]) {
+        if tools.is_empty() {
+            return;
+        }
+        // One undo frame for the whole tool batch of this tick.
+        let mut need_push = false;
         for tool in tools {
-            let r = tool.r.max(1) as i32;
-            let cx = tool.x as i32;
-            let cy = tool.y as i32;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    if dx * dx + dy * dy > r * r {
-                        continue;
-                    }
-                    let vx = cx + dx;
-                    let vy = cy + dy;
-                    if vx < 0
-                        || vy < 0
-                        || vx >= self.grid.visible_w()
-                        || vy >= self.grid.visible_h()
-                    {
-                        continue;
-                    }
-                    match tool.kind {
-                        1 => {
-                            let id = MaterialId::from_u8(tool.material).unwrap_or(MaterialId::Sand);
-                            if id == MaterialId::Bedrock {
-                                continue;
-                            }
-                            let mut cell = Cell::solid(id);
-                            if id == MaterialId::Air {
-                                cell = Cell::air();
-                            }
-                            self.grid.set_visible(vx, vy, cell);
-                        }
-                        2 => self.grid.set_visible(vx, vy, Cell::air()),
-                        3 => self.grid.set_visible(vx, vy, Cell::water()),
-                        _ => {}
-                    }
-                }
+            if tool.kind == 6 {
+                let _ = self.undo();
+                continue;
             }
+            if !need_push {
+                self.undo.push(tools::capture(&self.grid));
+                if self.undo.len() > UNDO_CAP {
+                    self.undo.remove(0);
+                }
+                need_push = true;
+            }
+            let _ = tools::apply_one(&mut self.grid, tool);
         }
     }
 }
@@ -484,6 +497,8 @@ struct SaveBlob {
     stored_heat: f32,
     #[serde(default)]
     always_day: bool,
+    #[serde(default)]
+    swirl: bool,
     #[serde(default)]
     grav_x: f32,
     #[serde(default = "default_grav_y")]

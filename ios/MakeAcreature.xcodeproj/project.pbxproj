@@ -12,6 +12,7 @@
 		B10000000000000000000003 /* TankMetalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* TankMetalView.swift */; };
 		B10000000000000000000004 /* PixelFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* PixelFont.swift */; };
 		B10000000000000000000005 /* TelemetryClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000005 /* TelemetryClient.swift */; };
+		B10000000000000000000009 /* ToolWheel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000009 /* ToolWheel.swift */; };
 		B10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -21,6 +22,7 @@
 		F10000000000000000000003 /* TankMetalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TankMetalView.swift; sourceTree = "<group>"; };
 		F10000000000000000000004 /* PixelFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelFont.swift; sourceTree = "<group>"; };
 		F10000000000000000000005 /* TelemetryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryClient.swift; sourceTree = "<group>"; };
+		F10000000000000000000009 /* ToolWheel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolWheel.swift; sourceTree = "<group>"; };
 		F10000000000000000000006 /* Tank-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Tank-Bridging-Header.h"; sourceTree = "<group>"; };
 		F10000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F10000000000000000000008 /* MakeAcreature.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MakeAcreature.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -53,6 +55,7 @@
 				F10000000000000000000003 /* TankMetalView.swift */,
 				F10000000000000000000004 /* PixelFont.swift */,
 				F10000000000000000000005 /* TelemetryClient.swift */,
+				F10000000000000000000009 /* ToolWheel.swift */,
 				F10000000000000000000006 /* Tank-Bridging-Header.h */,
 				F10000000000000000000007 /* Assets.xcassets */,
 			);
@@ -135,6 +138,7 @@
 				B10000000000000000000003 /* TankMetalView.swift in Sources */,
 				B10000000000000000000004 /* PixelFont.swift in Sources */,
 				B10000000000000000000005 /* TelemetryClient.swift in Sources */,
+				B10000000000000000000009 /* ToolWheel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

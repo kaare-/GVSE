@@ -82,8 +82,6 @@ impl CoarseField {
 }
 
 /// Incident light, top-down. Water loses 0.1 % per pixel of depth.
-/// An opaque cell shades everything below it; the cell itself keeps
-/// the light that arrived at its top.
 pub fn rebuild_light(
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
@@ -147,8 +145,6 @@ pub fn write_rgba(grid: &PhysicsGrid, pixels: &PixelLayer, out: &mut Vec<u8>) {
             b = ((b as u32) * li / 255) as u8;
             let film = pixels.film[i];
             if film > 0 {
-                // Pale green scum. Empty in Phase 0; the mix is here so
-                // the composite path is the one Phase 2 will use.
                 let t = film as u32;
                 r = ((r as u32 * (255 - t) + 150 * t) / 255) as u8;
                 g = ((g as u32 * (255 - t) + 190 * t) / 255) as u8;
@@ -164,7 +160,7 @@ pub fn write_rgba(grid: &PhysicsGrid, pixels: &PixelLayer, out: &mut Vec<u8>) {
 }
 
 fn albedo(cell: Cell) -> [u8; 3] {
-    let v = cell.colour_variant() as i32;
+    let v = cell.colour_variant() as usize;
     if cell.is_air() {
         if cell.sat < WATER_SAT_RENDER {
             return [0x1b, 0x24, 0x30];
@@ -172,15 +168,47 @@ fn albedo(cell: Cell) -> [u8; 3] {
         let t = cell.sat as i32;
         return [mix(0x16, 0x4c, t), mix(0x32, 0x93, t), mix(0x4f, 0xd4, t)];
     }
-    let (dry, wet): ([u8; 3], [u8; 3]) = match cell.id() {
-        wk_material::MaterialId::Sand => ([0xc6, 0xa3, 0x6a], [0x7a, 0x62, 0x40]),
+    let (dry, wet) = palette(cell, v);
+    let t = cell.moisture() as i32;
+    [
+        mix(dry[0], wet[0], t),
+        mix(dry[1], wet[1], t),
+        mix(dry[2], wet[2], t),
+    ]
+}
+
+fn palette(cell: Cell, variant: usize) -> ([u8; 3], [u8; 3]) {
+    match cell.id() {
+        wk_material::MaterialId::Sand => {
+            const SAND: [([u8; 3], [u8; 3]); 4] = [
+                ([0xc6, 0xa3, 0x6a], [0x7a, 0x62, 0x40]), // warm
+                ([0xd4, 0xc2, 0x8a], [0x8a, 0x78, 0x50]), // pale
+                ([0xb0, 0x7a, 0x4a], [0x6e, 0x4c, 0x30]), // red
+                ([0x9c, 0x90, 0x70], [0x5e, 0x56, 0x42]), // gray
+            ];
+            SAND[variant.min(3)]
+        }
         wk_material::MaterialId::Stone
         | wk_material::MaterialId::Limestone
         | wk_material::MaterialId::Sandstone
         | wk_material::MaterialId::Conglomerate
-        | wk_material::MaterialId::Flowstone => ([0x7d, 0x7a, 0x74], [0x5c, 0x5a, 0x56]),
+        | wk_material::MaterialId::Flowstone => {
+            const ROCK: [([u8; 3], [u8; 3]); 4] = [
+                ([0x7d, 0x7a, 0x74], [0x5c, 0x5a, 0x56]), // gray
+                ([0x8a, 0x7a, 0x68], [0x64, 0x56, 0x48]), // brown
+                ([0x6e, 0x78, 0x7a], [0x4e, 0x56, 0x58]), // blue-gray
+                ([0x90, 0x88, 0x80], [0x68, 0x62, 0x5c]), // pale
+            ];
+            ROCK[variant.min(3)]
+        }
         wk_material::MaterialId::Gravel | wk_material::MaterialId::LooseRock => {
-            ([0x9a, 0x91, 0x86], [0x6e, 0x68, 0x60])
+            const COBBLE: [([u8; 3], [u8; 3]); 4] = [
+                ([0x9a, 0x91, 0x86], [0x6e, 0x68, 0x60]),
+                ([0xa8, 0x98, 0x80], [0x78, 0x6a, 0x58]),
+                ([0x88, 0x8a, 0x90], [0x5e, 0x60, 0x66]),
+                ([0xb0, 0xa8, 0x9c], [0x7a, 0x74, 0x6a]),
+            ];
+            COBBLE[variant.min(3)]
         }
         wk_material::MaterialId::Soil | wk_material::MaterialId::Organic => {
             ([0x6b, 0x4f, 0x32], [0x4a, 0x36, 0x22])
@@ -190,19 +218,7 @@ fn albedo(cell: Cell) -> [u8; 3] {
         }
         wk_material::MaterialId::Bedrock => ([0x2a, 0x24, 0x1c], [0x2a, 0x24, 0x1c]),
         _ => ([0x88, 0x80, 0x78], [0x60, 0x5a, 0x54]),
-    };
-    let t = cell.sat as i32;
-    let mut rgb = [
-        mix(dry[0], wet[0], t),
-        mix(dry[1], wet[1], t),
-        mix(dry[2], wet[2], t),
-    ];
-    if v > 0 {
-        for c in &mut rgb {
-            *c = c.saturating_sub((v * 10) as u8);
-        }
     }
-    rgb
 }
 
 fn mix(a: u8, b: u8, t: i32) -> u8 {

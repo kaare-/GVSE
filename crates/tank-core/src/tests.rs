@@ -160,6 +160,7 @@ fn same_seed_and_input_match_after_save() {
         x: 4,
         y: 12,
         r: 2,
+        variant: 0,
     });
     for _ in 0..40 {
         tank.tick(&input);
@@ -185,6 +186,7 @@ fn same_seed_and_input_match_after_save() {
         x: 4,
         y: 12,
         r: 2,
+        variant: 0,
     });
     for _ in 0..40 {
         again.tick(&input);
@@ -230,4 +232,121 @@ fn always_day_holds_noon_light_at_midnight() {
     tank.tick(&input);
     assert!(tank.is_day_now());
     assert!((tank.day_factor_now() - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn fill_level_pour_drain_and_undo() {
+    let mut tank = Tank::try_new(1, 12, 16).unwrap();
+    let mut input = TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 5,
+            material: 0,
+            x: 0,
+            y: 8,
+            r: 1,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    };
+    tank.tick(&input);
+    assert!(tank.cell_visible(3, 4).is_standing_water());
+    assert!(tank.cell_visible(3, 10).is_air() && tank.cell_visible(3, 10).sat == 0);
+    assert_eq!(tank.undo_depth(), 1);
+
+    input.tools = vec![ToolEvent {
+        kind: 4,
+        material: 0,
+        x: 3,
+        y: 4,
+        r: 2,
+        variant: 0,
+    }];
+    tank.tick(&input);
+    assert_eq!(tank.cell_visible(3, 4).sat, 0);
+
+    input.tools = vec![ToolEvent {
+        kind: 6,
+        material: 0,
+        x: 0,
+        y: 0,
+        r: 1,
+        variant: 0,
+    }];
+    tank.tick(&input);
+    assert!(tank.cell_visible(3, 4).is_standing_water());
+}
+
+#[test]
+fn colour_variants_are_saved() {
+    let mut tank = Tank::try_new(1, 8, 8).unwrap();
+    let input = TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 1,
+            material: MaterialId::Sand as u8,
+            x: 2,
+            y: 2,
+            r: 1,
+            variant: 3,
+        }],
+        ..TankInput::default()
+    };
+    tank.tick(&input);
+    assert_eq!(tank.cell_visible(2, 2).colour_variant(), 3);
+    let bytes = tank.save_bytes().unwrap();
+    let loaded = Tank::load_bytes(&bytes).unwrap();
+    assert_eq!(loaded.cell_visible(2, 2).colour_variant(), 3);
+}
+
+#[test]
+fn rock_film_wets_from_a_puddle() {
+    let mut tank = Tank::try_new(1, 8, 8).unwrap();
+    place(&mut tank, 2, 0, Cell::stone());
+    place(&mut tank, 3, 0, Cell::water());
+    tick_n(&mut tank, 20);
+    assert!(
+        tank.cell_visible(2, 0).rock_film() > 0,
+        "stone next to water stayed dry"
+    );
+}
+
+#[test]
+fn swirl_tilt_moves_water_downhill() {
+    let mut tank = Tank::try_new(1, 16, 12).unwrap();
+    for vx in 0..8 {
+        for vy in 0..6 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let input = TankInput {
+        swirl: true,
+        grav_x: 0.6,
+        ..TankInput::default()
+    };
+    for _ in 0..80 {
+        tank.tick(&input);
+    }
+    let left: u64 = (0..8).map(|x| column_sat(&tank, x)).sum();
+    let right: u64 = (8..16).map(|x| column_sat(&tank, x)).sum();
+    assert!(
+        right > left,
+        "tilt should push water to the right (left={left} right={right})"
+    );
+}
+
+#[test]
+fn loose_rock_stays_put() {
+    let mut tank = Tank::try_new(1, 8, 12).unwrap();
+    place(&mut tank, 3, 8, Cell::solid(MaterialId::LooseRock));
+    tick_n(&mut tank, 40);
+    assert_eq!(tank.cell_visible(3, 8).id(), MaterialId::LooseRock);
+}
+
+#[test]
+fn empty_tank_has_a_thin_sand_bed() {
+    let tank = Tank::empty(7);
+    assert_eq!(tank.visible_size(), (PRESET_W, PRESET_H));
+    assert_eq!(tank.cell_visible(10, 0).id(), MaterialId::Sand);
+    assert!(tank.cell_visible(10, 20).is_air());
 }
