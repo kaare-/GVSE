@@ -121,6 +121,8 @@ pub struct Tank {
     death_causes: [u64; 4],
     /// Physics cells currently flagged as hard tissue (visible coords).
     tissue_marks: Vec<(i32, i32)>,
+    /// Mutation-rate multiplier (Q8, 256 = ×1); harness lever.
+    lambda_scale_q8: u16,
 }
 
 impl Tank {
@@ -161,6 +163,7 @@ impl Tank {
             light_dirty: true,
             death_causes: [0; 4],
             tissue_marks: Vec::new(),
+            lambda_scale_q8: 256,
         };
         tank.rebuild_light();
         Ok(tank)
@@ -353,6 +356,11 @@ impl Tank {
         &self.genomes
     }
 
+    /// Scale every genome's mutation rate (Q8; 0 = breed true, 256 = ×1).
+    pub fn set_lambda_scale_q8(&mut self, q8: u16) {
+        self.lambda_scale_q8 = q8;
+    }
+
     /// Cumulative deaths by cause: [starved, old age, damage, shed].
     pub fn death_causes(&self) -> [u64; 4] {
         self.death_causes
@@ -516,14 +524,42 @@ impl Tank {
                         let px = x * 3 + sx;
                         let py = py_top * 3 + sy;
                         let idx = (py * pw + px) as usize;
-                        if idx < self.pixels.glucose.len() {
-                            self.pixels.glucose[idx] =
-                                self.pixels.glucose[idx].saturating_add(amount);
-                        }
+                        bio::fields::add_plain(
+                            &mut self.pixels,
+                            bio::fields::Field::Glucose,
+                            idx,
+                            amount,
+                        );
                     }
                 }
             }
         }
+    }
+
+    /// Drop soft litter (or bone with `code ≥ 192`) at a pixel: `units` of
+    /// `GLUCOSE_UNIT_FP` (1/64 g). Feed hook for the harness and the player.
+    pub fn drop_litter(&mut self, px: u16, py: u16, units: u8, code: u8) {
+        if px as u32 >= self.pixels.w || py as u32 >= self.pixels.h {
+            return;
+        }
+        let idx = (py as usize) * (self.pixels.w as usize) + px as usize;
+        bio::fields::add_litter(&mut self.pixels, idx, units, code);
+    }
+
+    /// Total litter mass in units (harness probe).
+    pub fn litter_total(&self) -> u64 {
+        self.pixels.litter.iter().map(|&l| l as u64).sum()
+    }
+
+    /// Total dissolved glucose in units (harness probe).
+    pub fn glucose_total(&self) -> u64 {
+        self.pixels.glucose.iter().map(|&g| g as u64).sum()
+    }
+
+    /// Litter units at a pixel.
+    pub fn litter_at(&self, px: u16, py: u16) -> u8 {
+        let idx = (py as usize) * (self.pixels.w as usize) + px as usize;
+        self.pixels.litter.get(idx).copied().unwrap_or(0)
     }
 
     /// Test rig: a full-size 3×3 cell pinned to the pane (film) so it
@@ -548,6 +584,14 @@ impl Tank {
         }
         self.light_dirty = true;
         id
+    }
+
+    /// Test rig: pin a cell to the pane (film) so it cannot drift.
+    #[cfg(test)]
+    pub(crate) fn pin_cell_for_test(&mut self, id: u32) {
+        if let Some(c) = self.cells.get_mut(id) {
+            c.film = true;
+        }
     }
 
     #[cfg(test)]
@@ -606,6 +650,7 @@ impl Tank {
             self.seed,
             self.tick_count,
             t_tank,
+            self.lambda_scale_q8 as u32,
         );
         for ev in bio.events {
             self.events.push_back(ev);
@@ -784,6 +829,7 @@ impl Tank {
             swirl: self.swirl,
             grav_x: self.grav_x,
             grav_y: self.grav_y,
+            lambda_scale_q8: self.lambda_scale_q8,
             cells: self.grid.cells().to_vec(),
             pix_w: self.pixels.w,
             pix_h: self.pixels.h,
@@ -797,6 +843,8 @@ impl Tank {
             toxin_key: self.pixels.toxin_key.clone(),
             signal_amt: self.pixels.signal_amt.clone(),
             signal_key: self.pixels.signal_key.clone(),
+            litter: self.pixels.litter.clone(),
+            litter_key: self.pixels.litter_key.clone(),
             film: self.pixels.film.clone(),
             fines: self.fines.clone(),
             coarse_w: self.coarse.w,
@@ -835,6 +883,8 @@ impl Tank {
             || blob.toxin_key.len() != n
             || blob.signal_amt.len() != n
             || blob.signal_key.len() != n
+            || blob.litter.len() != n
+            || blob.litter_key.len() != n
             || blob.film.len() != n
             || blob.fines.len() != tank.pixels.w as usize
             || blob.coarse_w != tank.coarse.w
@@ -853,6 +903,7 @@ impl Tank {
         tank.swirl = blob.swirl;
         tank.grav_x = blob.grav_x;
         tank.grav_y = blob.grav_y;
+        tank.lambda_scale_q8 = blob.lambda_scale_q8;
         tank.grid.cells_mut().copy_from_slice(&blob.cells);
         reinforce_border(&mut tank.grid);
         tank.pixels.owner = blob.owner;
@@ -865,10 +916,10 @@ impl Tank {
         tank.pixels.toxin_key = blob.toxin_key;
         tank.pixels.signal_amt = blob.signal_amt;
         tank.pixels.signal_key = blob.signal_key;
+        tank.pixels.litter = blob.litter;
+        tank.pixels.litter_key = blob.litter_key;
         tank.pixels.film = blob.film;
-        tank.pixels.fields_active = tank.pixels.enzyme_amt.iter().any(|&a| a > 0)
-            || tank.pixels.toxin_amt.iter().any(|&a| a > 0)
-            || tank.pixels.signal_amt.iter().any(|&a| a > 0);
+        bio::fields::rescan_tiles(&mut tank.pixels);
         tank.fines = blob.fines;
         tank.coarse.minerals = blob.minerals;
         tank.coarse.t_local = blob.t_local;
@@ -1078,6 +1129,8 @@ struct SaveBlob {
     grav_x: f32,
     #[serde(default = "default_grav_y")]
     grav_y: f32,
+    #[serde(default = "default_lambda_scale")]
+    lambda_scale_q8: u16,
     cells: Vec<Cell>,
     pix_w: u32,
     pix_h: u32,
@@ -1091,6 +1144,8 @@ struct SaveBlob {
     toxin_key: Vec<u8>,
     signal_amt: Vec<u8>,
     signal_key: Vec<u8>,
+    litter: Vec<u8>,
+    litter_key: Vec<u8>,
     film: Vec<u8>,
     fines: Vec<f32>,
     coarse_w: u32,
@@ -1112,6 +1167,10 @@ fn default_t_base() -> f32 {
 
 fn default_slider() -> f32 {
     1.0
+}
+
+fn default_lambda_scale() -> u16 {
+    256
 }
 
 fn default_grav_y() -> f32 {

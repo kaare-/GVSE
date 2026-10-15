@@ -663,6 +663,9 @@ fn hard_plate_dams_water_and_soft_plate_does_not() {
 fn straw_breeds_true_for_ten_generations() {
     use crate::bio::Genome;
     let mut tank = water_box(7, 48, 40, 32);
+    // Mutation off so the pace of the unmutated program is what is
+    // measured, not its luck against its own mutants.
+    tank.set_lambda_scale_q8(0);
     let id = tank.seed_genome_at(72, 60, Genome::straw()).expect("seed");
     let geno = tank.genotype_of_cell(id).unwrap();
     let mut best_gen = 0;
@@ -675,6 +678,11 @@ fn straw_breeds_true_for_ten_generations() {
             }
         }
     }
+    assert_eq!(
+        tank.live_cells_of(geno) as usize,
+        tank.live_cells(),
+        "no mutants expected at λ = 0"
+    );
     assert!(best_gen >= 10, "straw reached generation {best_gen} < 10");
     assert!(tank.live_cells_of(geno) > 0, "the unmutated straw genotype died out");
     let (_, bodies) = tank.org_counts(2);
@@ -855,4 +863,216 @@ fn chamber_holds_enzyme_and_open_water_does_not() {
         per_px >= 3 * per_px_open,
         "a chamber must beat broadcasting by a wide margin ({per_px} vs {per_px_open})"
     );
+}
+
+fn dark() -> TankInput {
+    TankInput {
+        always_day: true,
+        light_slider: 0.0,
+        ..TankInput::default()
+    }
+}
+
+/// 2.3.2 / d.4 — a saprotroph lives on litter: in the dark, with soft
+/// litter on the floor, the lineage digests it (litter falls, glucose
+/// appears, divisions happen); with no litter it only spends its seed store.
+#[test]
+fn saprotroph_lives_on_litter_in_the_dark() {
+    use crate::bio::chem::LITTER_SOFT_CODE;
+    use crate::bio::Genome;
+    let run = |litter: bool| -> (u64, usize, u32) {
+        let mut tank = water_box(13, 32, 24, 20);
+        tank.set_lambda_scale_q8(0);
+        let (pw, ph) = tank.pixel_size();
+        if litter {
+            for px in 0..pw as u16 {
+                tank.drop_litter(px, (ph - 1) as u16, 255, LITTER_SOFT_CODE);
+            }
+        }
+        let start = tank.litter_total();
+        let id = tank.seed_genome_at(48, 40, Genome::saprotroph()).expect("seed");
+        let geno = tank.genotype_of_cell(id).unwrap();
+        let mut divisions = 0u32;
+        for _ in 0..6000 {
+            tank.tick(&dark());
+            while let Some(ev) = tank.poll_event() {
+                if ev.kind == crate::bio::ev::DIVISION {
+                    divisions += 1;
+                }
+            }
+        }
+        (start - tank.litter_total(), tank.live_cells_of(geno) as usize, divisions)
+    };
+    let (eaten, fed_cells, fed_divisions) = run(true);
+    let (_, starved_cells, starved_divisions) = run(false);
+    assert!(eaten > 2000, "litter should be digested (eaten {eaten} units)");
+    assert!(
+        fed_divisions >= 4 && fed_cells >= 4,
+        "fed saprotrophs should multiply (divisions {fed_divisions}, cells {fed_cells})"
+    );
+    assert!(
+        fed_divisions > starved_divisions + 2,
+        "litter must make the difference ({fed_divisions} vs {starved_divisions})"
+    );
+    assert!(starved_cells <= 2, "without litter nothing grows in the dark ({starved_cells})");
+}
+
+/// 2.3.2 / d.7 — the chamber predator grows its hard U; an algae whose
+/// `wall_key` matches the lining enzyme is lysed inside the cavity (its
+/// structure becomes glucose), while the same algae in open water lives.
+#[test]
+fn chamber_predator_lyses_prey_in_its_cavity() {
+    use crate::bio::Genome;
+    let mut tank = water_box(17, 32, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank.seed_genome_at(48, 60, Genome::chamber_predator()).expect("seed");
+    let geno = tank.genotype_of_cell(id).unwrap();
+    let org = tank.cells().get(id).unwrap().org;
+    let mut formed = false;
+    for _ in 0..4000 {
+        tank.tick(&day());
+        if tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 7 {
+            formed = true;
+            break;
+        }
+    }
+    assert!(formed, "the U never finished (cells {})", tank.live_cells_of(geno));
+    let base = tank
+        .cells()
+        .iter_alive()
+        .find(|(_, c)| c.org == org && c.mode == 0)
+        .map(|(_, c)| (c.px, c.py))
+        .expect("base cell");
+    let cavity = (base.0, base.1 - 1);
+    assert_eq!(tank.inspect(cavity.0 as u32, cavity.1 as u32).owner, 0, "cavity is open water");
+    assert!(
+        tank.cells()
+            .iter_alive()
+            .filter(|(_, c)| c.org == org)
+            .all(|(_, c)| c.damage == 0),
+        "the lining must not digest itself"
+    );
+    let mut prey_g = Genome::algae();
+    prey_g.wall_key = 110;
+    prey_g.buoy = -20;
+    tank.set_lambda_scale_q8(0);
+    let prey = tank.seed_genome_at(cavity.0, cavity.1, prey_g.clone()).expect("prey in cavity");
+    let control = tank.seed_genome_at(6, 40, prey_g).expect("control prey");
+    let mut predation = false;
+    let mut died_at = None;
+    for t in 0..900 {
+        tank.tick(&day());
+        while let Some(ev) = tank.poll_event() {
+            if ev.kind == crate::bio::ev::PREDATION && ev.arg0 == prey {
+                predation = true;
+            }
+        }
+        if tank.cell_size(prey).is_none() {
+            died_at = Some(t);
+            break;
+        }
+    }
+    assert!(died_at.is_some(), "prey in the cavity should be lysed within 30 s");
+    assert!(predation, "a PREDATION event should name the prey");
+    assert!(tank.cell_size(control).is_some(), "the control prey in open water lives");
+    assert!(tank.live_cells_of(geno) >= 7, "the predator body survives the meal");
+}
+
+/// 2.3.3 — NEEDLE + TOXIN: a stinger facing an unresisted algae kills it
+/// (POISON event); the same stinger facing kin with its `resist_key` does not.
+#[test]
+fn needle_toxin_kills_unresisted_prey_and_spares_resistant_kin() {
+    use crate::bio::Genome;
+    let run = |resist_key: u8| -> (bool, bool) {
+        let mut tank = water_box(19, 16, 16, 16);
+        tank.set_lambda_scale_q8(0);
+        // Stinger heads up; its target sits on the pixel above it.
+        let stinger = tank.seed_genome_at(24, 30, Genome::stinger()).expect("stinger");
+        let mut prey_g = Genome::algae();
+        prey_g.resist_key = resist_key;
+        let prey = tank.seed_genome_at(24, 29, prey_g).expect("prey");
+        tank.pin_cell_for_test(stinger);
+        tank.pin_cell_for_test(prey);
+        let mut poison = false;
+        for _ in 0..300 {
+            tank.tick(&day());
+            while let Some(ev) = tank.poll_event() {
+                if ev.kind == crate::bio::ev::POISON && ev.arg0 == prey {
+                    poison = true;
+                }
+            }
+            if tank.cell_size(prey).is_none() {
+                break;
+            }
+        }
+        assert!(tank.cell_size(stinger).is_some(), "the stinger is immune to its own venom");
+        (tank.cell_size(prey).is_none(), poison)
+    };
+    let (dead, poison) = run(40);
+    assert!(dead && poison, "unresisted prey should be poisoned (dead {dead}, event {poison})");
+    let (dead_kin, _) = run(200);
+    assert!(!dead_kin, "a resistant target shrugs the venom off");
+}
+
+/// 2.3.3 — SIGNAL / RECEPTOR: kin a few pixels apart hear each other
+/// (`sig` rises on the listener, SIGNALLING event fires).
+#[test]
+fn kin_hear_each_others_signal() {
+    use crate::bio::Genome;
+    let mut tank = water_box(23, 16, 16, 16);
+    tank.set_lambda_scale_q8(0);
+    let a = tank.seed_genome_at(20, 30, Genome::signaller()).expect("a");
+    let b = tank.seed_genome_at(24, 30, Genome::signaller()).expect("b");
+    let mut heard = false;
+    for _ in 0..120 {
+        tank.tick(&day());
+        while let Some(ev) = tank.poll_event() {
+            if ev.kind == crate::bio::ev::SIGNALLING && (ev.arg0 == a || ev.arg0 == b) {
+                heard = true;
+            }
+        }
+    }
+    assert!(heard, "no SIGNALLING event between kin");
+    let sig = tank.cells().get(a).map(|c| c.sig).unwrap_or(0).max(tank.cells().get(b).map(|c| c.sig).unwrap_or(0));
+    assert!(sig > 0, "a receptor should read its kin's signal");
+    // A deaf algae next to them reads nothing.
+    let deaf = tank.seed_genome_at(28, 30, Genome::algae()).expect("deaf");
+    for _ in 0..30 {
+        tank.tick(&day());
+    }
+    assert_eq!(tank.cells().get(deaf).map(|c| c.sig), Some(0));
+}
+
+/// 2.3.2 — a corpse in water becomes litter that settles to the floor and
+/// keeps its mass until something digests it.
+#[test]
+fn corpses_become_litter_that_settles() {
+    use crate::bio::Genome;
+    let mut tank = water_box(29, 16, 16, 16);
+    tank.set_lambda_scale_q8(0);
+    // A heat-killed algae: run hot so it dies of damage quickly.
+    let id = tank.seed_genome_at(24, 20, Genome::algae()).expect("seed");
+    let hot = TankInput {
+        always_day: true,
+        t_base: 45.0,
+        ..TankInput::default()
+    };
+    let mut died = false;
+    for _ in 0..3000 {
+        tank.tick(&hot);
+        if tank.cell_size(id).is_none() {
+            died = true;
+            break;
+        }
+    }
+    assert!(died, "the algae should die in a hot tank");
+    let total = tank.litter_total();
+    assert!(total >= 200, "a 6 g corpse leaves ≥ 200 units of litter (got {total})");
+    for _ in 0..600 {
+        tank.tick(&hot);
+    }
+    assert_eq!(tank.litter_total(), total, "litter mass is conserved");
+    let (pw, ph) = tank.pixel_size();
+    let floor: u64 = (0..pw as u16).map(|px| tank.litter_at(px, (ph - 1) as u16) as u64).sum();
+    assert_eq!(floor, total, "all litter settled onto the floor row");
 }

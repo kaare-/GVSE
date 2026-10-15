@@ -5,15 +5,16 @@
 
 use wk_material::MaterialId;
 
-use crate::bio::fields::{add_plain, deposit, step_fields, Field, KeyedField};
+use crate::bio::chem::{self, HIT_ENZYME, HIT_TOXIN};
+use crate::bio::fields::{add_plain, step_fields, Field};
 use crate::bio::genome::GenomeStore;
 use crate::bio::profile::{ModeCoeffs, DIVIDE_AGE_UNIT_TICKS};
 use crate::bio::program::{glue_bond, heading_delta, ChildKind, Detach, Scalars};
 use crate::bio::store::{CellStore, NONE, OWNER_BIAS};
 use crate::cell::Cell;
 use crate::consts::{
-    ACTIVITY_FLOOR_Q8, ALGAE_COST_FP, BIRTH_ENERGY_FP, BOND_SHARE_DIV, FP, HEAT_DAMAGE_C, LIVE_CAP,
-    MITOSIS_FLOOR_C, PHOTO_YIELD_MFP, TICK_HZ, T_GROW,
+    ACTIVITY_FLOOR_Q8, ALGAE_COST_FP, BIRTH_ENERGY_FP, BOND_SHARE_DIV, FP, GLUCOSE_UNIT_FP,
+    HEAT_DAMAGE_C, LIVE_CAP, MITOSIS_FLOOR_C, PHOTO_YIELD_MFP, TICK_HZ, T_GROW,
 };
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_u64;
@@ -21,10 +22,11 @@ use crate::pixels::PixelLayer;
 use crate::tank::SimEvent;
 
 const FILM_STUCK_AGE: u16 = 45;
-/// Baseline glucose uptake per tick per unit of field (milli-fp per 255).
-const BASE_UPTAKE_MFP: i64 = 600;
-/// Lysis of a soft-litter seat yields this much dissolved glucose.
+/// Lysis of a soft-litter *seat* (dry-air Organic cell) yields this much
+/// dissolved glucose; in water the dead leave pixel litter instead.
 const LITTER_GLUCOSE: u8 = 40;
+/// Minimum received signal that counts as "heard" for the signalling event.
+const SIGNAL_HEARD: u8 = 16;
 
 pub struct BioStepResult {
     pub events: Vec<SimEvent>,
@@ -47,6 +49,14 @@ pub mod ev {
     pub const SHED: u32 = 13;
     pub const FRAGMENT: u32 = 14;
     pub const REGROWN: u32 = 15;
+    /// A living cell was killed by another organism's enzyme (arg0 = victim).
+    pub const PREDATION: u32 = 16;
+    /// A living cell was killed by toxin (arg0 = victim).
+    pub const POISON: u32 = 17;
+    /// A RECEPTOR cell heard a signal of its own kind (arg0 = listener).
+    pub const SIGNALLING: u32 = 18;
+    /// A cell lives mainly on dissolved glucose, not light (arg0 = cell).
+    pub const HETEROTROPH: u32 = 19;
 }
 
 pub fn step(
@@ -57,6 +67,7 @@ pub fn step(
     world_seed: u64,
     tick: u64,
     t_tank: f32,
+    lambda_scale_q8: u32,
 ) -> BioStepResult {
     let mut out = BioStepResult {
         events: Vec::new(),
@@ -71,7 +82,7 @@ pub fn step(
         }
         move_free_cell(cells, genomes, grid, pixels, world_seed, tick, id);
         metabolise(
-            cells, genomes, grid, pixels, world_seed, tick, id, t_tank, &mut out,
+            cells, genomes, grid, pixels, world_seed, tick, id, t_tank, lambda_scale_q8, &mut out,
         );
     }
     share_bond_energy(cells, genomes);
@@ -196,16 +207,25 @@ fn move_free_cell(
     let g = genomes.genome(cell.genotype);
     let buoy = g.buoy;
     let mc = *genomes.coeffs(cell.genotype, cell.mode);
-    let (vx, vy) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
+    let vis_h = grid.visible_h() as u32;
+    let (vx, vy) = pixel_to_phys(cell.px, cell.py, vis_h);
     let here = grid.get_visible(vx, vy);
-    let below = grid.get_visible(vx, vy - 1);
+    // The physics cell under the footprint's bottom pixel row, so a cell
+    // settles onto the floor pixel rather than the top of the floor cell.
+    let below = if (cell.py + cell.h as u16) as u32 >= pixels.h {
+        Cell::bedrock()
+    } else {
+        let (bx, by) = pixel_to_phys(cell.px, cell.py + cell.h as u16, vis_h);
+        grid.get_visible(bx, by)
+    };
     let in_water = here.is_open() && here.sat > 40;
 
     let h = hash_u64(world_seed, tick, id as u64, 0xB0_01);
     let mut nx = cell.px as i32;
     let mut ny = cell.py as i32;
+    // Brownian jitter of one pixel: a free cell cannot jump a 1-px wall.
     if in_water {
-        nx += (h % 5) as i32 - 2;
+        nx += (h % 3) as i32 - 1;
     }
     if mc.cilia > 0 && in_water {
         // Run-and-tumble (§a.6): drive from the gate; tumble 90° when it drops.
@@ -354,13 +374,14 @@ fn metabolise(
     tick: u64,
     id: u32,
     t_tank: f32,
+    lambda_scale_q8: u32,
     out: &mut BioStepResult,
 ) {
     let Some(cell) = cells.get(id).copied() else {
         return;
     };
     let mc = *genomes.coeffs(cell.genotype, cell.mode);
-    let (metab_eff, temp_q, base_age, stress_def, wall_key, glue_key, strategy_q8, lambda_m) = {
+    let (metab_eff, temp_q, base_age, stress_def, wall_key, glue_key, resist_key, strategy_q8, lambda_m) = {
         let g = genomes.genome(cell.genotype);
         (
             g.metab_eff as i64,
@@ -369,38 +390,73 @@ fn metabolise(
             g.stress,
             g.wall_key,
             g.glue_key,
+            g.resist_key,
             g.division_cost_q8(),
-            g.lambda_milli(cell.stress, t_tank),
+            g.lambda_milli(cell.stress, t_tank) * lambda_scale_q8 / 256,
         )
     };
     let area = cell.area();
     let idx = (cell.py as usize) * (pixels.w as usize) + cell.px as usize;
     let (light_sum, touch, glucose_sum) = sense(pixels, grid, cell.px, cell.py, cell.w, cell.h);
     let light_mean = (light_sum / area as u32) as u8;
+    let kin = chem::kin_touch(cells, pixels, &cell);
+    let sig = if mc.receptor > 0 {
+        chem::receptor_read(pixels, &cell, mc.receptor_key)
+    } else {
+        0
+    };
 
     // ---- feed
     // Yield × eff(T) × metab_eff; upkeep and ageing × Q10 rate ÷ metab_eff
     // (§4: all rates scale with temperature, lifespan ∝ 1/rate).
     let eff_q = metab_eff * temp_q / 255; // ≈128 = ×1
     let q10_q8 = q10_q8(t_tank);
-    let mut income: i64 = 0;
+    let mut photo_income: i64 = 0;
     if mc.photo > 0 {
-        income += PHOTO_YIELD_MFP * mc.photo as i64 * light_sum as i64 / (area as i64 * 255 * 1000);
+        photo_income = PHOTO_YIELD_MFP * mc.photo as i64 * light_sum as i64 / (area as i64 * 255 * 1000);
     }
-    // Baseline + UPTAKE(glucose) from the dissolved field under the cell.
-    let uptake_mult = 1 + 4 * mc.uptake_glucose as i64;
+    // Baseline uptake drinks one unit per pixel per tick from the dissolved
+    // field under the cell; UPTAKE(glucose) is 4× baseline per unit (§a.4).
+    let mut glucose_income: i64 = 0;
+    let store_cap = mc.store_cap_fp(area);
     if glucose_sum > 0 {
-        income += BASE_UPTAKE_MFP * uptake_mult * glucose_sum as i64 / (255 * 1000);
-        let take = 1 + mc.uptake_glucose;
+        let take = (1 + 3 * mc.uptake_glucose as u32).min(255) as u8;
+        // Only what the store can hold is taken; the rest stays dissolved.
+        let mut room = ((store_cap - cell.energy).max(0) / GLUCOSE_UNIT_FP) as u32;
         let pw = pixels.w as usize;
-        for dy in 0..cell.h as usize {
+        let mut got = 0u32;
+        'px: for dy in 0..cell.h as usize {
             for dx in 0..cell.w as usize {
+                if room == 0 {
+                    break 'px;
+                }
                 let i = (cell.py as usize + dy) * pw + cell.px as usize + dx;
-                pixels.glucose[i] = pixels.glucose[i].saturating_sub(take);
+                let t = (pixels.glucose[i].min(take) as u32).min(room) as u8;
+                pixels.glucose[i] -= t;
+                got += t as u32;
+                room -= t as u32;
             }
         }
+        glucose_income = got as i64 * GLUCOSE_UNIT_FP as i64;
     }
-    income = income * eff_q / 128;
+    let income = (photo_income + glucose_income) * eff_q / 128;
+    if glucose_income > photo_income && glucose_income > 0 && (tick + id as u64) % 128 == 0 {
+        out.events.push(SimEvent {
+            kind: ev::HETEROTROPH,
+            arg0: id,
+        });
+    }
+    // Secreted enzyme / toxin lying on the cell (§b.3 field path).
+    let exposure = chem::field_exposure(
+        pixels,
+        world_seed,
+        tick,
+        id,
+        &cell,
+        wall_key,
+        resist_key,
+        mc.birth_fp * area,
+    );
 
     // ---- maintain
     // Activity (Q8): a photosynthesiser's metabolic rate tracks its light,
@@ -422,9 +478,18 @@ fn metabolise(
     let upkeep =
         (mc.upkeep_fp_tick(area) as i64 * 128 / metab_eff.max(32) * act_q8 / 256) as i32;
     let mut energy = cell.energy + income as i32 - upkeep;
-    let store_cap = mc.store_cap_fp(area);
     if energy > store_cap {
         energy = store_cap;
+    }
+    let mut hit = cell.hit;
+    if exposure.lysed_units > 0 {
+        add_plain(pixels, Field::Glucose, idx, exposure.lysed_units.min(255) as u8);
+    }
+    if exposure.enzyme_damage > 0 {
+        hit |= HIT_ENZYME;
+    }
+    if exposure.toxin_damage > 0 {
+        hit |= HIT_TOXIN;
     }
     let acc = cell.age_acc as u16 + act_q8 as u16;
     let age_acc = (acc & 0xFF) as u8;
@@ -432,7 +497,10 @@ fn metabolise(
     let body_cost = cells.org_body_cost_fp(cell.org).max(mc.build_fp);
     let max_age = max_age_ticks(base_age, body_cost);
 
-    let mut damage = cell.damage;
+    let mut damage = cell
+        .damage
+        .saturating_add(exposure.enzyme_damage)
+        .saturating_add(exposure.toxin_damage);
     let mut waste = cell.waste;
     if acc >> 8 == 1 && age % 16 == 0 {
         if mc.excrete == 0 {
@@ -483,8 +551,8 @@ fn metabolise(
         light: light_mean,
         touch,
         depth: cell.depth,
-        sig: cell.sig,
-        kin: 0,
+        sig,
+        kin,
         waste,
         temp_dev: ((t_tank - 22.0).abs() * 8.0).min(255.0) as u8,
         sense: light_mean,
@@ -502,12 +570,12 @@ fn metabolise(
             waste -= push;
         }
     }
+    let mut chem_out = chem::ChemOut::default();
     if mc.enzyme > 0 && mc.enzyme_gate.passes(&scalars) {
-        if mc.enzyme_secrete {
-            deposit(pixels, KeyedField::Enzyme, idx, mc.enzyme.saturating_mul(8), mc.enzyme_key);
-            energy -= FP / 500 * mc.enzyme as i32;
-        }
-        // Contact lysis of a soft-litter seat (litter band 0–63).
+        chem::enzyme_act(
+            cells, genomes, pixels, grid, world_seed, tick, id, &cell, &mc, &mut chem_out,
+        );
+        // Contact lysis of a dry soft-litter seat (litter band 0–63).
         if mc.enzyme_key < 64 {
             let (vx, vy) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
             let seat = grid.get_visible(vx, vy);
@@ -517,7 +585,22 @@ fn metabolise(
             }
         }
     }
-    let _ = wall_key;
+    if (mc.toxin > 0 || mc.needle > 0) && mc.toxin_gate.passes(&scalars) {
+        chem::toxin_act(
+            cells, genomes, pixels, grid, world_seed, tick, id, &cell, &mc, &mut chem_out,
+        );
+    }
+    if mc.signal > 0 && mc.signal_gate.passes(&scalars) {
+        chem::signal_act(pixels, grid, tick, &cell, &mc, &scalars, &mut chem_out);
+    }
+    energy -= chem_out.cost;
+    // Kin signalling: a receptor hears its own kind's signal (rising edge).
+    if sig >= SIGNAL_HEARD && cell.sig < SIGNAL_HEARD && mc.signal > 0 {
+        out.events.push(SimEvent {
+            kind: ev::SIGNALLING,
+            arg0: id,
+        });
+    }
     if mc.cilia > 0 {
         let drive = mc.cilia_gate.passes(&scalars);
         if drive {
@@ -543,6 +626,22 @@ fn metabolise(
             2
         };
         out.death_causes[cause] += 1;
+        if cause == 2 {
+            if hit & HIT_TOXIN != 0 {
+                out.events.push(SimEvent {
+                    kind: ev::POISON,
+                    arg0: id,
+                });
+            } else if hit & HIT_ENZYME != 0 {
+                out.events.push(SimEvent {
+                    kind: ev::PREDATION,
+                    arg0: id,
+                });
+            }
+        }
+        if let Some(c) = cells.get_mut(id) {
+            c.energy = energy.max(0);
+        }
         die(cells, genomes, grid, pixels, id, age, tick, out);
         return;
     }
@@ -555,7 +654,8 @@ fn metabolise(
         c.damage = damage;
         c.waste = waste;
         c.flash = c.flash.saturating_sub(1);
-        c.sig = 0;
+        c.sig = sig;
+        c.hit = 0;
     }
 
     // ---- develop: grow, transition, brood release, divide
@@ -627,10 +727,17 @@ fn die(
         return;
     };
     let (vx, vy) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
-    // Soft litter: only replace nearly-dry air so free water is conserved.
+    // In dry air the corpse becomes an Organic seat; in water (free water
+    // is conserved) its mass becomes pixel litter for the saprotrophs.
     let seat = grid.get_visible(vx, vy);
     if seat.is_open() && seat.sat < 40 {
         grid.set_visible(vx, vy, Cell::solid(MaterialId::Organic));
+    } else {
+        // Structure not already lysed away (damage 255 = all of it) + store.
+        let mc = genomes.coeffs(cell.genotype, cell.mode);
+        let structure = mc.birth_fp as i64 * cell.area() as i64 * (255 - cell.damage as i64) / 255;
+        let mass = structure as i32 + cell.energy.max(0);
+        chem::deposit_corpse(pixels, &cell, (mass / GLUCOSE_UNIT_FP) as u32, mc.is_hard);
     }
     let to_film = cell.film || age > FILM_STUCK_AGE && near_solid(grid, cell.px, cell.py);
     let fragments = cells.kill(genomes, pixels, id, to_film, tick);
@@ -836,13 +943,12 @@ fn try_divide(
     } else {
         genotype
     };
-    // Daughter heading: she faces the way she was placed, turned by her
-    // own mode's rule (Inherit ⇒ Ahead children keep the parent's heading,
-    // side children face away from the parent).
+    // Daughter heading: her mode's `heading_rule` relative to the parent's
+    // heading (§b.4 item 3), whatever side she was placed on — so one side
+    // mode grows both walls of a U (d.7) and flipping a rule mirrors a subtree.
     let heading = {
         let g = genomes.genome(genotype);
-        let placed = spec.dir.heading(cell.heading);
-        g.mode(spec.mode).heading_rule.apply(placed)
+        g.mode(spec.mode).heading_rule.apply(cell.heading)
     };
     let daughter = match spec.detach {
         Detach::Immediate => {
@@ -1057,10 +1163,15 @@ fn shed(
         let Some((vid, _, _, parent)) = victim else {
             continue;
         };
-        let refund = cells
-            .get(vid)
-            .map(|c| genomes.coeffs(c.genotype, c.mode).birth_fp / 2)
-            .unwrap_or(0);
+        let Some(v) = cells.get(vid).copied() else {
+            continue;
+        };
+        let vmc = genomes.coeffs(v.genotype, v.mode);
+        let refund = vmc.birth_fp / 2;
+        // The other half of the structure, and her store, fall as litter.
+        let mass = vmc.birth_fp * v.area() - refund + v.energy.max(0);
+        let hard = vmc.is_hard;
+        chem::deposit_corpse(pixels, &v, (mass / GLUCOSE_UNIT_FP) as u32, hard);
         let _ = cells.kill(genomes, pixels, vid, false, tick);
         out.deaths += 1;
         out.death_causes[3] += 1;

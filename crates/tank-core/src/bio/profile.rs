@@ -662,7 +662,10 @@ pub struct ModeCoeffs {
     pub glue: u8,
     pub toxin: u8,
     pub toxin_key: u8,
+    pub toxin_gate: Gate,
     pub needle: u8,
+    /// NEEDLE sharpness 0..=255 (punctures walls with `wall_h < needle_s`).
+    pub needle_s: u8,
     pub signal: u8,
     pub signal_key: u8,
     pub signal_source: Scalar,
@@ -717,7 +720,9 @@ impl ModeCoeffs {
             glue: 0,
             toxin: 0,
             toxin_key: 0,
+            toxin_gate: Gate::always(),
             needle: 0,
+            needle_s: 0,
             signal: 0,
             signal_key: 0,
             signal_source: Scalar::Always,
@@ -781,8 +786,12 @@ impl ModeCoeffs {
                 Block::Toxin => {
                     c.toxin = c.toxin.saturating_add(eff);
                     c.toxin_key = e.param_a;
+                    c.toxin_gate = e.gate;
                 }
-                Block::Needle => c.needle = c.needle.saturating_add(eff),
+                Block::Needle => {
+                    c.needle = c.needle.saturating_add(eff);
+                    c.needle_s = c.needle_s.max(e.param_a);
+                }
                 Block::Signal => {
                     c.signal = c.signal.saturating_add(eff);
                     c.signal_key = e.param_a;

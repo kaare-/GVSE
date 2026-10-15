@@ -44,7 +44,7 @@ pub const MAX_VISIBLE_W: u32 = 256;
 pub const MAX_VISIBLE_H: u32 = 512;
 pub const MIN_VISIBLE: u32 = 4;
 
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 
 // ---- biology (cell-language §a, §b, §c) ----
 
@@ -56,6 +56,11 @@ pub const SHAPE_CAP: u8 = 4;
 
 /// Fixed-point energy: `FP` = 1 g of glucose.
 pub const FP: i32 = 1024;
+
+/// One unit of the dissolved-glucose and soft-litter pixel fields (1/64 g,
+/// so a pixel holds ≤ 4 g). Baseline uptake drinks one unit per pixel per
+/// tick; UPTAKE(glucose) multiplies that (§a.2, §a.4).
+pub const GLUCOSE_UNIT_FP: i32 = FP / 64;
 
 /// Ticks between pixel growth steps toward the mode shape.
 pub const T_GROW: u16 = 8;

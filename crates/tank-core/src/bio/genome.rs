@@ -8,7 +8,8 @@ use std::collections::HashMap;
 
 use crate::bio::profile::{Block, Entry, Mode, ModeCoeffs};
 use crate::bio::program::{
-    rewire_child, rewire_transition, ChildKind, ChildSpec, Dir, Gate, Scalar, Transition,
+    rewire_child, rewire_transition, ChildKind, ChildSpec, Dir, Gate, HeadingRule, Scalar,
+    Transition,
 };
 use crate::consts::{BASE_AGE_S, LAMBDA0_MILLI, MAX_MODES};
 use crate::hash::hash_u64;
@@ -166,6 +167,8 @@ impl Genome {
         let mut rib_a = Mode::blank();
         rib_a.push_entry(Entry::new(Block::Photo, 5));
         rib_a.push_child(ChildSpec::part(Dir::Ahead, 3, 180, 1));
+        // Ribs turn to face the side they were placed on and grow outward.
+        rib_a.heading_rule = HeadingRule::TurnRight;
         rib_a.sacrifice_order = 2;
         let mut tip = Mode::blank();
         tip.push_entry(Entry::new(Block::Photo, 4));
@@ -210,6 +213,106 @@ impl Genome {
         lining.divide_when.energy_frac = 200;
         g.modes.push(base);
         g.modes.push(lining);
+        g
+    }
+
+    /// d.4 — saprotroph: PHOTO 1, ENZYME 4 (key 30, width 24, litter
+    /// band, contact only), UPTAKE(glucose) 2, the spare unit as STORE;
+    /// divides at energy ≥ 0.6. Sinks onto the litter (`buoy` −5).
+    pub fn saprotroph() -> Self {
+        let mut g = Self::base();
+        g.buoy = -5;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 1));
+        m.push_entry(Entry::with_params(Block::Enzyme, 4, 30, 24));
+        m.push_entry(Entry::with_params(
+            Block::Uptake,
+            2,
+            crate::bio::profile::UPTAKE_GLUCOSE,
+            0,
+        ));
+        m.push_entry(Entry::new(Block::Store, 1));
+        m.divide_when.energy_frac = 153;
+        m.push_child(ChildSpec::propagule(0, 15));
+        g.modes.push(m);
+        g
+    }
+
+    /// d.7 — mouth-cavity predator: a hard-walled U. Mode 0 (base) grows a
+    /// side-wall chain (mode 1) on each side; the lining secretes a
+    /// living-wall enzyme (key 120, width 24) gated on touch; chains end in
+    /// a lip mode (2) at depth 3. Walls are `h 0.6`, so the cavity holds
+    /// its enzyme (§b.3). MUSCLE lips and the touch link arrive in 2.3.6.
+    pub fn chamber_predator() -> Self {
+        let mut g = Self::base();
+        g.buoy = 0;
+        g.wall_key = 170;
+        // A 7-cell hard body needs a minute to build (pace law §b.6).
+        g.base_age = 150;
+        let mut base = Mode::blank();
+        base.push_entry(Entry::with_params(Block::Wall, 2, 153, 0));
+        base.push_entry(Entry::new(Block::Photo, 4));
+        base.push_entry(Entry::new(Block::Store, 2));
+        base.push_child(ChildSpec::part(Dir::Left, 1, 220, 1));
+        base.push_child(ChildSpec::part(Dir::Right, 1, 220, 1));
+        let mut wall = Mode::blank();
+        wall.push_entry(Entry::with_params(Block::Wall, 2, 153, 0));
+        wall.push_entry(Entry::new(Block::Photo, 3));
+        let mut enz = Entry::with_params(Block::Enzyme, 2, 120, 24 | 0x80);
+        enz.gate = Gate::above(Scalar::Touch, 1);
+        wall.push_entry(enz);
+        wall.push_entry(Entry::new(Block::Store, 1));
+        wall.push_child(ChildSpec::part(Dir::Ahead, 1, 220, 1));
+        wall.push_transition(Transition {
+            gate: Gate::above(Scalar::Depth, 3),
+            mode: 2,
+        });
+        wall.sacrifice_order = 1;
+        // Lips: the body's propagules leave from the opening.
+        let mut lip = Mode::blank();
+        lip.push_entry(Entry::with_params(Block::Wall, 1, 153, 0));
+        lip.push_entry(Entry::new(Block::Photo, 4));
+        lip.push_entry(Entry::with_params(
+            Block::Uptake,
+            2,
+            crate::bio::profile::UPTAKE_GLUCOSE,
+            0,
+        ));
+        lip.push_child(ChildSpec::propagule(0, 15));
+        lip.divide_when.energy_frac = 230;
+        lip.sacrifice_order = 2;
+        g.modes.push(base);
+        g.modes.push(wall);
+        g.modes.push(lip);
+        g
+    }
+
+    /// Stinger: algae with TOXIN 2 (key 200) and NEEDLE 1 (sharpness 200),
+    /// resistant to its own venom (`resist_key` 200).
+    pub fn stinger() -> Self {
+        let mut g = Self::base();
+        g.resist_key = 200;
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 4));
+        m.push_entry(Entry::with_params(Block::Toxin, 2, 200, 0));
+        m.push_entry(Entry::with_params(Block::Needle, 1, 200, 0));
+        m.push_child(ChildSpec::propagule(0, 15));
+        g.modes.push(m);
+        g
+    }
+
+    /// Signaller: algae that emits SIGNAL 2 (key 90, source Always) and
+    /// listens with RECEPTOR 1 (key 90) — kin hear each other.
+    pub fn signaller() -> Self {
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 4));
+        m.push_entry(Entry::with_params(Block::Signal, 2, 90, Scalar::Always as u8));
+        m.push_entry(Entry::with_params(Block::Receptor, 1, 90, 0));
+        m.push_child(ChildSpec::propagule(0, 15));
+        g.modes.push(m);
         g
     }
 

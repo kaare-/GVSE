@@ -22,6 +22,11 @@ pub struct PixelLayer {
     pub toxin_key: Vec<u8>,
     pub signal_amt: Vec<u8>,
     pub signal_key: Vec<u8>,
+    /// Soft litter: dead soft mass in `GLUCOSE_UNIT_FP` units, with its
+    /// substrate code (`bio::chem::LITTER_*_CODE`) — what litter-band and
+    /// bone-band enzymes digest. Settles under gravity.
+    pub litter: Vec<u8>,
+    pub litter_key: Vec<u8>,
     /// Front-pane film. 0 = clean. Phase 2 swipe-clears it.
     pub film: Vec<u8>,
     /// Diffusion barrier mask: hard living tissue, bone, shell (rebuilt
@@ -53,6 +58,8 @@ impl PixelLayer {
             toxin_key: vec![0; n],
             signal_amt: vec![0; n],
             signal_key: vec![0; n],
+            litter: vec![0; n],
+            litter_key: vec![0; n],
             film: vec![0; n],
             block: vec![0; n],
             tiles_w: w.div_ceil(crate::bio::fields::TILE as u32),
@@ -201,6 +208,19 @@ pub fn write_rgba(
             r = ((r as u32) * li / 255) as u8;
             g = ((g as u32) * li / 255) as u8;
             b = ((b as u32) * li / 255) as u8;
+            // Litter: brown speck (bone band ivory) scaled by mass.
+            let litter = pixels.litter[i];
+            if owner == 0 && litter > 0 {
+                let c = if pixels.litter_key[i] >= 192 {
+                    [0xC9, 0xC2, 0xB6]
+                } else {
+                    [0x6B, 0x4F, 0x32]
+                };
+                let t = (litter as u32 * 3).min(255) * 3 / 4;
+                r = ((r as u32 * (255 - t) + c[0] as u32 * li / 255 * t) / 255) as u8;
+                g = ((g as u32 * (255 - t) + c[1] as u32 * li / 255 * t) / 255) as u8;
+                b = ((b as u32 * (255 - t) + c[2] as u32 * li / 255 * t) / 255) as u8;
+            }
             // Keyed-field haze on open pixels, in key-band colours (§a.4).
             if owner == 0 && pixels.fields_active {
                 let hazes = [

@@ -58,6 +58,10 @@ fn genome_by_name(name: &str) -> Genome {
         "brooder" => Genome::brooder(),
         "sticky" => Genome::sticky_algae(),
         "swimmer" => Genome::swimmer(),
+        "saprotroph" => Genome::saprotroph(),
+        "predator" => Genome::chamber_predator(),
+        "stinger" => Genome::stinger(),
+        "signaller" => Genome::signaller(),
         _ => Genome::algae(),
     }
 }
@@ -71,15 +75,26 @@ fn cmd_trace(args: impl Iterator<Item = String>) -> ExitCode {
     let name = flag_str(&args, "--genome").unwrap_or_else(|| "algae".into());
     let verbose = args.iter().any(|a| a == "--verbose");
     let cycle = args.iter().any(|a| a == "--cycle");
+    let dark = args.iter().any(|a| a == "--dark");
+    let litter = flag_u64(args.iter().cloned(), "--litter").unwrap_or(0);
+    let lambda = flag_u64(args.iter().cloned(), "--lambda-q8").unwrap_or(256);
     let mut tank = water_tank(seed, 48, 64, 50);
+    tank.set_lambda_scale_q8(lambda as u16);
     let g = genome_by_name(&name);
     let id = tank.seed_genome_at(72, 60, g).expect("seed");
     let geno = tank.genotype_of_cell(id).unwrap_or(0);
+    // `--litter N`: N pixels of full soft litter on the floor under the seed.
+    for k in 0..litter as u16 {
+        let px = 60 + (k % 24);
+        let py = 60 + 3 + k / 24;
+        tank.drop_litter(px, py, 255, tank_core::bio::chem::LITTER_SOFT_CODE);
+    }
     let input = TankInput {
         always_day: !cycle,
+        light_slider: if dark { 0.0 } else { 1.0 },
         ..TankInput::default()
     };
-    println!("tick,cells,orgs,orgs_ge2,genotypes,founder_cells,lineage_cells,max_gen,ms_per_tick");
+    println!("tick,cells,orgs,orgs_ge2,genotypes,founder_cells,lineage_cells,max_gen,litter,glucose,ms_per_tick");
     let mut start = Instant::now();
     for i in 0..ticks {
         tank.tick(&input);
@@ -87,7 +102,7 @@ fn cmd_trace(args: impl Iterator<Item = String>) -> ExitCode {
             let (orgs, big) = tank.org_counts(2);
             let ms = start.elapsed().as_secs_f64() * 1000.0 / every as f64;
             println!(
-                "{},{},{},{},{},{},{},{},{ms:.3}",
+                "{},{},{},{},{},{},{},{},{},{},{ms:.3}",
                 tank.tick_count(),
                 tank.live_cells(),
                 orgs,
@@ -96,6 +111,8 @@ fn cmd_trace(args: impl Iterator<Item = String>) -> ExitCode {
                 tank.live_cells_of(geno),
                 tank.lineage_cells_of(geno),
                 tank.max_generation_of(geno),
+                tank.litter_total(),
+                tank.glucose_total(),
             );
             if verbose {
                 let col: Vec<String> = (24..48u16)

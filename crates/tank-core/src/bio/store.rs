@@ -57,6 +57,8 @@ pub struct CellRec {
     pub detach_gate: Gate,
     /// Received signal amplitude this tick.
     pub sig: u8,
+    /// Chemistry hits taken since the cell last ran (`chem::HIT_*`).
+    pub hit: u8,
     /// Ticks of white division flash left.
     pub flash: u8,
     /// Cilia drive state (running vs tumbling).
@@ -93,6 +95,7 @@ impl CellRec {
             brood: false,
             detach_gate: Gate::always(),
             sig: 0,
+            hit: 0,
             flash: 0,
             running: true,
             film: false,
@@ -265,13 +268,18 @@ impl CellStore {
         let cell_id = self.alloc_cell();
         let org_id = self.alloc_org(cell_id, generation, px as i32, py as i32, tick);
         // Bodies grow on the 4 cardinal headings (daughters stay
-        // edge-adjacent); a new organism turns ±90° at random.
-        let jitter = (hash_u64(seed, cell_id as u64, genotype as u64, 0xC1) % 3) as u8;
+        // edge-adjacent); a propagule turns ±90° at random so clones
+        // spread. A placed seed (generation 0) heads exactly as asked
+        // (§b.4 item 1: "heading up").
         let heading = heading & 6;
-        let heading = match jitter {
-            0 => heading.wrapping_add(6) % 8,
-            1 => heading,
-            _ => heading.wrapping_add(2) % 8,
+        let heading = if generation == 0 {
+            heading
+        } else {
+            match (hash_u64(seed, cell_id as u64, genotype as u64, 0xC1) % 3) as u8 {
+                0 => heading.wrapping_add(6) % 8,
+                1 => heading,
+                _ => heading.wrapping_add(2) % 8,
+            }
         };
         let reps = Self::first_reps(genomes, genotype, mode);
         let build = genomes.coeffs(genotype, mode).build_fp;
