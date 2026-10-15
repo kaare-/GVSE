@@ -566,12 +566,13 @@ fn sticky_algae_form_glue_attachments() {
 fn enzyme_field_decays_and_blurs() {
     use crate::bio::fields::{deposit, step_fields, KeyedField};
     use crate::pixels::PixelLayer;
+    let grid = water_grid(8, 8);
     let mut pixels = PixelLayer::new(8, 8);
     let idx = 10 * pixels.w as usize + 10;
     deposit(&mut pixels, KeyedField::Enzyme, idx, 200, 90);
     assert_eq!(pixels.enzyme_amt[idx], 200);
     assert!(pixels.fields_active);
-    step_fields(&mut pixels, 0);
+    step_fields(&mut pixels, &grid, 0);
     assert!(pixels.enzyme_amt[idx] < 200, "decay should reduce amount");
     let neigh = idx + 1;
     assert!(
@@ -766,4 +767,92 @@ fn save_round_trip_with_life_stays_deterministic() {
     }
     assert_eq!(loaded.live_cells(), tank.live_cells());
     assert_eq!(loaded.pixel_hash(), tank.pixel_hash(), "diverged after load");
+}
+
+fn water_grid(w: u32, h: u32) -> crate::grid::PhysicsGrid {
+    let mut grid = crate::grid::PhysicsGrid::new(w, h);
+    for vx in 0..w as i32 {
+        for vy in 0..h as i32 {
+            grid.set_visible(vx, vy, Cell::water());
+        }
+    }
+    grid
+}
+
+/// 2.3.1 — §b.3 chamber arithmetic: six lining cells secreting 32/tick
+/// into a walled 9-px cavity settle near 85 per pixel, while one cell
+/// broadcasting 32/tick into open water leaves only a few per pixel.
+#[test]
+fn chamber_holds_enzyme_and_open_water_does_not() {
+    use crate::bio::fields::{deposit, step_fields, KeyedField};
+    use crate::pixels::PixelLayer;
+    let grid = water_grid(16, 16);
+    let pw = 48usize;
+    // Open-water plume: one emitter at (10, 10).
+    let mut open = PixelLayer::new(16, 16);
+    let src = 10 * pw + 10;
+    for t in 0..200u64 {
+        deposit(&mut open, KeyedField::Enzyme, src, 32, 90);
+        step_fields(&mut open, &grid, t);
+    }
+    let total_open: u32 = open.enzyme_amt.iter().map(|&a| a as u32).sum();
+    let nonzero = open.enzyme_amt.iter().filter(|&&a| a > 0).count() as u32;
+    let per_px_open = total_open / nonzero.max(1);
+    assert!(
+        (60..=170).contains(&total_open),
+        "open plume total should be ≈128 continuous, ≥60 quantised (got {total_open})"
+    );
+    assert!(per_px_open <= 20, "open plume stays thin (got {per_px_open}/px)");
+
+    // Chamber: 3×3 cavity at (20..23, 20..23) ringed by blocked pixels.
+    let mut cham = PixelLayer::new(16, 16);
+    for y in 19..24usize {
+        for x in 19..24usize {
+            let ring = x == 19 || x == 23 || y == 19 || y == 23;
+            if ring {
+                cham.block[y * pw + x] = 1;
+            }
+        }
+    }
+    // Six lining cells each emit 32 into the cavity edge pixels.
+    let seats = [
+        20 * pw + 20,
+        20 * pw + 22,
+        22 * pw + 20,
+        22 * pw + 22,
+        21 * pw + 20,
+        21 * pw + 22,
+    ];
+    for t in 0..200u64 {
+        for &s in &seats {
+            deposit(&mut cham, KeyedField::Enzyme, s, 32, 90);
+        }
+        step_fields(&mut cham, &grid, t);
+    }
+    let mut inside = 0u32;
+    for y in 20..23usize {
+        for x in 20..23usize {
+            inside += cham.enzyme_amt[y * pw + x] as u32;
+        }
+    }
+    let outside: u32 = cham
+        .enzyme_amt
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let (x, y) = (i % pw, i / pw);
+            !(19..24).contains(&x) || !(19..24).contains(&y)
+        })
+        .map(|(_, &a)| a as u32)
+        .sum();
+    assert_eq!(outside, 0, "walls must block diffusion");
+    let per_px = inside / 9;
+    assert!(
+        (60..=110).contains(&per_px),
+        "chamber should hold ≈85/px (got {per_px}, total {inside})"
+    );
+    assert!(
+        per_px >= 3 * per_px_open,
+        "a chamber must beat broadcasting by a wide margin ({per_px} vs {per_px_open})"
+    );
 }

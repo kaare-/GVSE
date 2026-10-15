@@ -24,6 +24,13 @@ pub struct PixelLayer {
     pub signal_key: Vec<u8>,
     /// Front-pane film. 0 = clean. Phase 2 swipe-clears it.
     pub film: Vec<u8>,
+    /// Diffusion barrier mask: hard living tissue, bone, shell (rebuilt
+    /// every tick from the cell store; not saved).
+    pub block: Vec<u8>,
+    /// Field activity bits per 16×16 tile (`bio::fields::Field::bit`).
+    pub tiles_w: u32,
+    pub tiles_h: u32,
+    pub tile_active: Vec<u8>,
     /// True when any keyed field may be non-zero (skip O(n) blur otherwise).
     pub fields_active: bool,
 }
@@ -47,6 +54,14 @@ impl PixelLayer {
             signal_amt: vec![0; n],
             signal_key: vec![0; n],
             film: vec![0; n],
+            block: vec![0; n],
+            tiles_w: w.div_ceil(crate::bio::fields::TILE as u32),
+            tiles_h: h.div_ceil(crate::bio::fields::TILE as u32),
+            tile_active: vec![
+                0;
+                (w.div_ceil(crate::bio::fields::TILE as u32)
+                    * h.div_ceil(crate::bio::fields::TILE as u32)) as usize
+            ],
             fields_active: false,
         }
     }
@@ -186,6 +201,22 @@ pub fn write_rgba(
             r = ((r as u32) * li / 255) as u8;
             g = ((g as u32) * li / 255) as u8;
             b = ((b as u32) * li / 255) as u8;
+            // Keyed-field haze on open pixels, in key-band colours (§a.4).
+            if owner == 0 && pixels.fields_active {
+                let hazes = [
+                    (pixels.enzyme_amt[i], enzyme_band_colour(pixels.enzyme_key[i])),
+                    (pixels.toxin_amt[i], [0x7B, 0x3F, 0xA0]),
+                    (pixels.signal_amt[i], [0x3B, 0xBF, 0xD3]),
+                ];
+                for (amt, c) in hazes {
+                    if amt > 4 {
+                        let t = (amt as u32).min(255) / 2; // ≤ 50 % tint
+                        r = ((r as u32 * (255 - t) + c[0] as u32 * t) / 255) as u8;
+                        g = ((g as u32 * (255 - t) + c[1] as u32 * t) / 255) as u8;
+                        b = ((b as u32 * (255 - t) + c[2] as u32 * t) / 255) as u8;
+                    }
+                }
+            }
             let film = pixels.film[i];
             if film > 0 {
                 let t = film as u32;
@@ -199,6 +230,16 @@ pub fn write_rgba(
             out[o + 2] = b;
             out[o + 3] = 255;
         }
+    }
+}
+
+/// ENZYME key bands (§a.4): litter 0–63 cream, living wall 64–191 dark
+/// red, bone 192–255 ivory-grey.
+pub fn enzyme_band_colour(key: u8) -> [u8; 3] {
+    match key {
+        0..=63 => [0xE8, 0xDC, 0xB8],
+        64..=191 => [0x8B, 0x1A, 0x1A],
+        _ => [0xC9, 0xC4, 0xB4],
     }
 }
 

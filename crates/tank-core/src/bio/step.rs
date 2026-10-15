@@ -5,7 +5,7 @@
 
 use wk_material::MaterialId;
 
-use crate::bio::fields::{deposit, step_fields, KeyedField};
+use crate::bio::fields::{add_plain, deposit, step_fields, Field, KeyedField};
 use crate::bio::genome::GenomeStore;
 use crate::bio::profile::{ModeCoeffs, DIVIDE_AGE_UNIT_TICKS};
 use crate::bio::program::{glue_bond, heading_delta, ChildKind, Detach, Scalars};
@@ -82,7 +82,7 @@ pub fn step(
         drift_bodies(cells, genomes, grid, pixels, world_seed, tick);
     }
     form_glue_bonds(cells, genomes, pixels);
-    step_fields(pixels, tick);
+    step_fields(pixels, grid, tick);
     out
 }
 
@@ -498,7 +498,7 @@ fn metabolise(
         if x >= 0 && y >= 0 && x < pixels.w as i32 && y < pixels.h as i32 {
             let j = (y as usize) * (pixels.w as usize) + x as usize;
             let push = mc.excrete.min(waste);
-            pixels.waste[j] = pixels.waste[j].saturating_add(push);
+            add_plain(pixels, Field::Waste, j, push);
             waste -= push;
         }
     }
@@ -513,7 +513,7 @@ fn metabolise(
             let seat = grid.get_visible(vx, vy);
             if seat.id() == MaterialId::Organic {
                 grid.set_visible(vx, vy, Cell::air());
-                pixels.glucose[idx] = pixels.glucose[idx].saturating_add(LITTER_GLUCOSE);
+                add_plain(pixels, Field::Glucose, idx, LITTER_GLUCOSE);
             }
         }
     }
