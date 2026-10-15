@@ -12,6 +12,7 @@
 //! See [`docs/PHASE8_HOST_SHIP.md`], [`docs/PHASE8_MULTIPLAYER.md`].
 
 use std::env;
+use std::fs;
 use std::io::Write;
 use std::net::TcpListener;
 use std::sync::mpsc;
@@ -24,7 +25,11 @@ use wk_voxel_client::ipc::{
     serve_peer_shared, PeerRegistry, ServeConfig, WorldTier, DEFAULT_HOST_ADDR,
     DEFAULT_MAX_PEERS, LAN_HOST_ADDR, MAX_PEERS_CAP,
 };
-use wk_voxel_client::seam_ipc::{seam_loop_dial, seam_loop_listen};
+use wk_voxel_client::seam_discover::{
+    seam_discover_loop, SeamAllowlist, SeamAnnounce, DEFAULT_SEAM_DISCOVER_PORT,
+    SEAM_DISCOVER_PERIOD,
+};
+use wk_voxel_client::seam_ipc::{seam_loop_dial, seam_loop_listen, SeamIdentity};
 use wk_voxel_client::{Host, COMMAND_SCHEMA, VIEW_SCHEMA};
 
 struct HostCli {
@@ -46,6 +51,14 @@ struct HostCli {
     /// Dig F1: dial peer seam each product step.
     seam_peer: Option<String>,
     seam_token: Option<String>,
+    /// Dig F4 — this host's region id (allowlist key).
+    seam_region_id: Option<String>,
+    /// Dig F4 — shared mesh name for discovery / Hello match.
+    seam_mesh_id: Option<String>,
+    /// Dig F4 — allowed peer region ids.
+    seam_allow: SeamAllowlist,
+    /// Dig F4 — UDP discover port; None = off.
+    seam_discover: Option<u16>,
 }
 
 fn parse_seam_side(s: &str) -> Result<SeamSide, String> {
@@ -75,6 +88,10 @@ fn parse_cli() -> HostCli {
     let mut seam_listen = None;
     let mut seam_peer = None;
     let mut seam_token = env_token("WK_VOXEL_SEAM_TOKEN");
+    let mut seam_region_id = env_token("WK_VOXEL_SEAM_REGION");
+    let mut seam_mesh_id = env_token("WK_VOXEL_SEAM_MESH");
+    let mut seam_allow = SeamAllowlist::new();
+    let mut seam_discover: Option<u16> = None;
     let mut args = env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -159,6 +176,50 @@ fn parse_cli() -> HostCli {
                     std::process::exit(2);
                 }));
             }
+            "--seam-region-id" => {
+                seam_region_id = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-region-id requires NAME");
+                    std::process::exit(2);
+                }));
+            }
+            "--seam-mesh-id" => {
+                seam_mesh_id = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-mesh-id requires NAME");
+                    std::process::exit(2);
+                }));
+            }
+            "--seam-allow" => {
+                let id = args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-allow requires REGION_ID");
+                    std::process::exit(2);
+                });
+                seam_allow.allow(id);
+            }
+            "--seam-allow-file" => {
+                let path = args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-allow-file requires PATH");
+                    std::process::exit(2);
+                });
+                let text = fs::read_to_string(&path).unwrap_or_else(|e| {
+                    eprintln!("--seam-allow-file {path}: {e}");
+                    std::process::exit(2);
+                });
+                seam_allow.extend_from(&SeamAllowlist::from_lines(&text));
+            }
+            "--seam-discover" => {
+                seam_discover = Some(DEFAULT_SEAM_DISCOVER_PORT);
+            }
+            "--seam-discover-port" => {
+                let raw = args.next().unwrap_or_else(|| {
+                    eprintln!("--seam-discover-port requires PORT");
+                    std::process::exit(2);
+                });
+                let port: u16 = raw.parse().unwrap_or_else(|_| {
+                    eprintln!("--seam-discover-port: invalid port '{raw}'");
+                    std::process::exit(2);
+                });
+                seam_discover = Some(port);
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "wk-voxel-host [options]\n\
@@ -177,6 +238,12 @@ fn parse_cli() -> HostCli {
                        --seam-listen HOST:PORT  accept seam dials\n\
                        --seam-peer HOST:PORT    dial peer seam (~20 Hz)\n\
                        --seam-token SECRET      seam auth (env WK_VOXEL_SEAM_TOKEN)\n\
+                       --seam-region-id NAME    Dig F4 region id (env WK_VOXEL_SEAM_REGION)\n\
+                       --seam-mesh-id NAME      Dig F4 mesh name (env WK_VOXEL_SEAM_MESH)\n\
+                       --seam-allow REGION_ID   Dig F4 allowlisted peer (repeatable)\n\
+                       --seam-allow-file PATH   Dig F4 allowlist file (one id / line)\n\
+                       --seam-discover          Dig F4 LAN UDP announce (port {DEFAULT_SEAM_DISCOVER_PORT})\n\
+                       --seam-discover-port N   Dig F4 UDP port (implies discover)\n\
                      \n\
                      Schemas: VIEW_SCHEMA={VIEW_SCHEMA} COMMAND_SCHEMA={COMMAND_SCHEMA}\n\
                      See docs/PHASE8_HOST_SHIP.md, docs/HALO_SHARD.md"
@@ -199,13 +266,31 @@ fn parse_cli() -> HostCli {
     if once {
         max_peers = 1;
     }
-    if (seam_listen.is_some() || seam_peer.is_some()) && seam_side.is_none() {
-        eprintln!("wk-voxel-host: --seam-listen/--seam-peer require --seam-side");
+    let seam_any = seam_listen.is_some() || seam_peer.is_some() || seam_discover.is_some();
+    if seam_any && seam_side.is_none() {
+        eprintln!("wk-voxel-host: seam flags require --seam-side");
         std::process::exit(2);
     }
     if seam_listen.is_some() && seam_peer.is_some() {
         eprintln!("wk-voxel-host: use only one of --seam-listen / --seam-peer");
         std::process::exit(2);
+    }
+    if seam_discover.is_some() {
+        if seam_mesh_id.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+            eprintln!("wk-voxel-host: --seam-discover requires --seam-mesh-id");
+            std::process::exit(2);
+        }
+        if seam_region_id.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+            eprintln!("wk-voxel-host: --seam-discover requires --seam-region-id");
+            std::process::exit(2);
+        }
+        if seam_listen.is_none() && seam_peer.is_none() {
+            // West must listen; East may discover-dial without a fixed peer.
+            if matches!(seam_side, Some(SeamSide::West)) {
+                eprintln!("wk-voxel-host: west --seam-discover requires --seam-listen");
+                std::process::exit(2);
+            }
+        }
     }
     HostCli {
         bind,
@@ -222,6 +307,10 @@ fn parse_cli() -> HostCli {
         seam_listen,
         seam_peer,
         seam_token,
+        seam_region_id,
+        seam_mesh_id,
+        seam_allow,
+        seam_discover,
     }
 }
 
@@ -293,28 +382,96 @@ fn main() {
     });
     log::info!("world_tier={}", world_tier.as_str());
 
+    if matches!(world_tier, WorldTier::Shadow)
+        && cli.seam_discover.is_some()
+        && cli.seam_allow.is_empty()
+    {
+        eprintln!(
+            "wk-voxel-host: Shadow --seam-discover requires --seam-allow / --seam-allow-file"
+        );
+        std::process::exit(2);
+    }
+
+    let identity = SeamIdentity {
+        region_id: cli.seam_region_id.clone().unwrap_or_default(),
+        mesh_id: cli.seam_mesh_id.clone().unwrap_or_default(),
+    };
+    if !identity.region_id.is_empty() || !identity.mesh_id.is_empty() {
+        log::info!(
+            "seam identity region={} mesh={}",
+            identity.region_id,
+            identity.mesh_id
+        );
+    }
+    if !cli.seam_allow.is_empty() {
+        log::info!("seam allowlist {} peer(s)", cli.seam_allow.len());
+    }
+
     let host = Arc::new(Mutex::new(host));
+    // Bind seam listen before discover announce so `:0` resolves to a real port.
+    let mut seam_advertise: Option<String> = None;
     if let Some(addr) = cli.seam_listen.clone() {
         let side = cli.seam_side.expect("seam-side");
+        let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
+            eprintln!("seam-listen {addr}: {e}");
+            std::process::exit(1);
+        });
+        let local = listener.local_addr().expect("seam local");
+        seam_advertise = Some(local.to_string());
+        log::info!("seam listening on {local} side={side:?}");
         let h = host.clone();
         let tok = cli.seam_token.clone();
+        let id = identity.clone();
+        let allow = cli.seam_allow.clone();
         thread::spawn(move || {
-            let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
-                eprintln!("seam-listen {addr}: {e}");
-                std::process::exit(1);
-            });
-            log::info!("seam listening on {addr} side={side:?}");
-            seam_loop_listen(listener, h, tok, side);
+            seam_loop_listen(listener, h, tok, side, id, allow);
         });
     } else if let Some(peer) = cli.seam_peer.clone() {
         let side = cli.seam_side.expect("seam-side");
         let h = host.clone();
         let tok = cli.seam_token.clone();
+        let id = identity.clone();
+        let allow = cli.seam_allow.clone();
         thread::spawn(move || {
             log::info!("seam dialing {peer} side={side:?}");
-            seam_loop_dial(peer, h, tok, side, Duration::from_millis(50));
+            seam_loop_dial(
+                peer,
+                h,
+                tok,
+                side,
+                id,
+                allow,
+                Duration::from_millis(50),
+            );
         });
     }
+
+    if let Some(discover_port) = cli.seam_discover {
+        let side = cli.seam_side.expect("seam-side");
+        let seam_addr = seam_advertise.unwrap_or_default();
+        let announce = SeamAnnounce::new(
+            identity.mesh_id.clone(),
+            identity.region_id.clone(),
+            side,
+            seam_addr,
+        );
+        let h = host.clone();
+        let tok = cli.seam_token.clone();
+        let id = identity.clone();
+        let allow = cli.seam_allow.clone();
+        thread::spawn(move || {
+            seam_discover_loop(
+                announce,
+                allow,
+                discover_port,
+                h,
+                id,
+                tok,
+                SEAM_DISCOVER_PERIOD,
+            );
+        });
+    }
+
     let registry = Arc::new(Mutex::new(PeerRegistry::new(cli.max_peers)));
     let cfg = Arc::new(ServeConfig {
         token: cli.token.clone(),
