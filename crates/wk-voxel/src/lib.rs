@@ -39,6 +39,7 @@ pub mod rules;
 pub mod save;
 pub mod sediment;
 pub mod seam;
+pub mod seam_life;
 pub mod shade;
 pub mod sim_clock;
 pub mod sim_preset;
@@ -68,6 +69,11 @@ pub use seam::{
     seam_backlog_sediment_total, seam_backlog_water_total, should_absorb_seam, take_outbound,
     SeamConfig, SeamFieldMirror, SeamSide, SeamState, SeamTransfer, SEAM_FACE_EXPORT_MAX,
     SEAM_FIELD_BLEND_ALPHA,
+};
+pub use seam_life::{
+    ack_life_ids, apply_life_inbound, exchange_seam_life, export_life_at_seam, stash_pending_acks,
+    take_life_outbound, take_pending_acks, tick_life_in_flight, SeamLifeKind, SeamLifeParcel,
+    SeamLifeState, SEAM_LIFE_IN_FLIGHT_TIMEOUT, SEAM_LIFE_MAX_PER_EXCHANGE,
 };
 pub use streaming::{
     clear_planned_dirty, filter_plan_to_stream, stream_allows_hx, stream_allows_world_x,

@@ -9,16 +9,16 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use wk_voxel::{SeamFieldMirror, SeamSide, SeamTransfer};
+use wk_voxel::{SeamFieldMirror, SeamLifeParcel, SeamSide, SeamTransfer};
 
 use crate::ipc::{read_msg, write_msg, IpcError};
 use crate::Host;
 
 /// Schema for [`SeamMsg`] — bump when wire layout breaks.
-/// Dig F2: Exchange carries [`SeamFieldMirror`] (was 1 = P0 mass only).
-pub const SEAM_SCHEMA: u32 = 2;
+/// Dig F3: Exchange carries life parcels + ACK ids (was 2 = mass + fields).
+pub const SEAM_SCHEMA: u32 = 3;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SeamMsg {
     Hello {
         schema: u32,
@@ -34,17 +34,22 @@ pub enum SeamMsg {
         side: SeamSide,
         tick: u64,
     },
-    /// P0 mass + Dig F2 edge field mirror.
+    /// P0 mass + Dig F2 fields + Dig F3 life.
     Exchange {
         tick: u64,
         transfer: SeamTransfer,
         fields: SeamFieldMirror,
+        life: Vec<SeamLifeParcel>,
+        /// Ids from peer life we successfully applied (clear their in-flight).
+        ack_life_ids: Vec<u64>,
     },
     ExchangeAck {
         tick: u64,
         /// Peer's outbound for us (may be empty).
         transfer: SeamTransfer,
         fields: SeamFieldMirror,
+        life: Vec<SeamLifeParcel>,
+        ack_life_ids: Vec<u64>,
     },
     Bye,
 }
@@ -79,20 +84,31 @@ pub fn seam_round_trip(
     }
     let outbound = host.drain_seam_outbound(our_side);
     let fields = host.sample_seam_fields(our_side);
+    let life = host.drain_seam_life(our_side);
+    let ack_life_ids = host.take_seam_life_acks(our_side);
     write_msg(
         stream,
         &SeamMsg::Exchange {
             tick,
             transfer: outbound,
             fields,
+            life,
+            ack_life_ids,
         },
     )?;
     match read_msg::<SeamMsg, _>(stream)? {
         SeamMsg::ExchangeAck {
-            transfer, fields, ..
+            transfer,
+            fields,
+            life,
+            ack_life_ids,
+            ..
         } => {
             host.apply_seam_inbound(our_side, transfer);
             host.apply_seam_fields(our_side, fields);
+            host.ack_seam_life(our_side, &ack_life_ids);
+            let acked = host.apply_seam_life(our_side, life);
+            host.stash_seam_life_acks(our_side, acked);
             Ok(())
         }
         other => Err(IpcError::Protocol(format!(
@@ -161,20 +177,27 @@ pub fn serve_seam_round(
         SeamMsg::Exchange {
             transfer,
             fields,
+            life,
+            ack_life_ids,
             tick,
         } => {
             // Drain first so face export cannot re-absorb water we are about
             // to paint from the peer (same-round ping-pong).
             let outbound = host.drain_seam_outbound(our_side);
             let our_fields = host.sample_seam_fields(our_side);
+            let our_life = host.drain_seam_life(our_side);
+            host.ack_seam_life(our_side, &ack_life_ids);
             host.apply_seam_inbound(our_side, transfer);
             host.apply_seam_fields(our_side, fields);
+            let applied = host.apply_seam_life(our_side, life);
             write_msg(
                 stream,
                 &SeamMsg::ExchangeAck {
                     tick,
                     transfer: outbound,
                     fields: our_fields,
+                    life: our_life,
+                    ack_life_ids: applied,
                 },
             )?;
             Ok(())
@@ -261,6 +284,8 @@ pub fn encode_decode_transfer(t: SeamTransfer) -> SeamTransfer {
         tick: 1,
         transfer: t,
         fields: SeamFieldMirror::default(),
+        life: Vec::new(),
+        ack_life_ids: Vec::new(),
     };
     let bytes = postcard::to_allocvec(&msg).expect("encode");
     match postcard::from_bytes::<SeamMsg>(&bytes).expect("decode") {
