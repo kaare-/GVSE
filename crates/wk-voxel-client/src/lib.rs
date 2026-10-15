@@ -15,16 +15,17 @@ use serde::{Deserialize, Serialize};
 
 use wk_material::MaterialId;
 use wk_voxel::{
-    apply_season_sky_tint, attach_open_seam, celestial_local_cfg, climate_with_season,
+    apply_field_mirror, apply_inbound, apply_season_sky_tint, attach_open_seam,
+    blend_edge_toward_mirror, cave_humidity_haze_wash, celestial_local_cfg, climate_with_season,
     day_night_factor_cfg, export_seam_face, is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg,
-    season_fraction_cfg, cave_humidity_haze_wash, restore_all_from_store, sky_rgb_at_height_phased,
-    sky_rgb_phased, stamp_world, steam_haze_wash, step_world, sync_residency,
-    wake_floating_competent, apply_inbound, take_outbound, Blueprint, CarbonBudget, CarbonConfig,
-    Cell, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig,
-    EvapConfig, FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity, KarstConfig,
-    LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SeamSide, SeamTransfer,
-    SimSnapshot, SpawnFail, SteamConfig, StreamWindow, SupportMap, SyncResidencyStats, Temperature,
-    Wind, World, WorldStep, WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, SEAM_FACE_EXPORT_MAX,
+    restore_all_from_store, sample_edge_fields, season_fraction_cfg, sky_rgb_at_height_phased,
+    sky_rgb_phased, stamp_world, steam_haze_wash, step_world, sync_residency, take_outbound,
+    wake_floating_competent, Blueprint, CarbonBudget, CarbonConfig, Cell, ClimateConfig,
+    CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
+    FungiConfig, GeotechMap, GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore,
+    PerfConfig, PhaseConfig, SeamFieldMirror, SeamSide, SeamTransfer, SimSnapshot, SpawnFail,
+    SteamConfig, StreamWindow, SupportMap, SyncResidencyStats, Temperature, Wind, World, WorldStep,
+    WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, SEAM_FACE_EXPORT_MAX, SEAM_FIELD_BLEND_ALPHA,
     STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
 
@@ -567,8 +568,32 @@ impl Host {
         take_outbound(&mut self.world, side)
     }
 
+    /// Dig F2: sample owned-edge climate for the peer.
+    pub fn sample_seam_fields(&self, side: SeamSide) -> SeamFieldMirror {
+        let wind_vx = self.wind.effective_vx(self.world.tick);
+        sample_edge_fields(
+            &self.world,
+            &self.humidity,
+            &self.temperature,
+            wind_vx,
+            side,
+        )
+    }
+
     pub fn apply_seam_inbound(&mut self, side: SeamSide, transfer: SeamTransfer) {
         apply_inbound(&mut self.world, side, transfer);
+    }
+
+    /// Dig F2: store peer edge climate and soft-blend our face toward it.
+    pub fn apply_seam_fields(&mut self, side: SeamSide, fields: SeamFieldMirror) {
+        apply_field_mirror(&mut self.world, side, fields);
+        blend_edge_toward_mirror(
+            &self.world,
+            &mut self.humidity,
+            &mut self.temperature,
+            side,
+            SEAM_FIELD_BLEND_ALPHA,
+        );
     }
 
     pub fn new(params: WorldgenParams) -> Self {

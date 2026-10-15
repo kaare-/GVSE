@@ -1,10 +1,13 @@
-//! Dig F1 — Lab inter-process seam P0 mass (water + sediment + dissolved).
+//! Dig F1/F2 — Lab inter-process seam (P0 mass + P1 edge field mirror).
 //!
 //! See [`docs/HALO_SHARD.md`]. One host owns each column; mass that would
 //! leave an open west/east face is booked here (absorbing edge). A live
 //! neighbor drains outbound via [`take_outbound`] and paints inbound with
 //! [`apply_inbound`]. Missing neighbor → backlog stays (same spirit as
 //! [`crate::frozen_backlog`]).
+//!
+//! Dig F2 carries a coarse humidity / temperature / wind sample of the
+//! owned edge so the peer can blend its face and avoid climate cliffs.
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -12,8 +15,10 @@ use wk_material::MaterialId;
 use crate::cell::{Cell, Sat};
 use crate::chunk::CHUNK_CELLS_H;
 use crate::grid::World;
+use crate::humidity::Humidity;
 use crate::mineral::{add_dissolved, dissolved_at, take_dissolved};
 use crate::sediment::{add_suspended, suspended_at, take_suspended};
+use crate::temperature::Temperature;
 
 /// Which vertical face of the owned strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -86,14 +91,34 @@ impl SeamTransfer {
     }
 }
 
+/// Dig F2 — coarse edge climate sample (not mass; not saved).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SeamFieldMirror {
+    pub hum_mean: f32,
+    pub temp_c: f32,
+    /// Peer climate horizontal wind (tiles/tick); 0 when unknown.
+    pub wind_vx: f32,
+    pub source_tick: u64,
+}
+
+impl SeamFieldMirror {
+    pub fn is_default(self) -> bool {
+        self == Self::default()
+    }
+}
+
 /// Per-world seam bookkeeping (not saved).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SeamState {
     pub config: Option<SeamConfig>,
     pub out_west: SeamTransfer,
     pub out_east: SeamTransfer,
     pub in_west: SeamTransfer,
     pub in_east: SeamTransfer,
+    /// Last mirror received from the west neighbor (Dig F2).
+    pub mirror_west: Option<SeamFieldMirror>,
+    /// Last mirror received from the east neighbor (Dig F2).
+    pub mirror_east: Option<SeamFieldMirror>,
     /// Neighbor silent ticks (Lab default absorb after 60 — host may bump).
     pub silent_ticks: u32,
 }
@@ -354,6 +379,118 @@ pub fn attach_open_seam(world: &mut World, width: i32, side: SeamSide) {
     world.seam.config = Some(SeamConfig::open_side(width, side));
 }
 
+fn edge_x_for(cfg: SeamConfig, side: SeamSide) -> i32 {
+    match side {
+        SeamSide::West => cfg.x_min,
+        SeamSide::East => cfg.x_max - 1,
+    }
+}
+
+/// Sample owned-edge humidity / temperature for the peer (Dig F2).
+pub fn sample_edge_fields(
+    world: &World,
+    humidity: &Humidity,
+    temperature: &Temperature,
+    wind_vx: f32,
+    side: SeamSide,
+) -> SeamFieldMirror {
+    let Some(cfg) = world.seam.config else {
+        return SeamFieldMirror::default();
+    };
+    let open = match side {
+        SeamSide::West => cfg.open_west,
+        SeamSide::East => cfg.open_east,
+    };
+    if !open {
+        return SeamFieldMirror::default();
+    }
+    let edge_x = edge_x_for(cfg, side);
+    let y0 = 0;
+    let y1 = 8 * CHUNK_CELLS_H as i32;
+    let mut hum_sum = 0.0f32;
+    let mut temp_sum = 0.0f32;
+    let mut n = 0u32;
+    // Stride 4 — coarse column mean, cheap on Compact.
+    let mut gy = y0;
+    while gy < y1 {
+        if world.get_cell(edge_x, gy).is_some() {
+            hum_sum += humidity.at_cell(edge_x, gy);
+            temp_sum += temperature.at_cell(edge_x, gy);
+            n += 1;
+        }
+        gy += 4;
+    }
+    if n == 0 {
+        return SeamFieldMirror {
+            wind_vx,
+            source_tick: world.tick,
+            ..SeamFieldMirror::default()
+        };
+    }
+    let inv = 1.0 / n as f32;
+    SeamFieldMirror {
+        hum_mean: hum_sum * inv,
+        temp_c: temp_sum * inv,
+        wind_vx,
+        source_tick: world.tick,
+    }
+}
+
+/// Store the neighbor's edge climate sample.
+pub fn apply_field_mirror(world: &mut World, side: SeamSide, mirror: SeamFieldMirror) {
+    match side {
+        SeamSide::West => world.seam.mirror_west = Some(mirror),
+        SeamSide::East => world.seam.mirror_east = Some(mirror),
+    }
+    world.seam.silent_ticks = 0;
+}
+
+/// Soft-blend the owned edge column toward the neighbor mirror (Dig F2).
+///
+/// `alpha` in 0..1 — Lab default **0.25** per exchange. Does not move mass.
+pub fn blend_edge_toward_mirror(
+    world: &World,
+    humidity: &mut Humidity,
+    temperature: &mut Temperature,
+    side: SeamSide,
+    alpha: f32,
+) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        return;
+    }
+    let Some(cfg) = world.seam.config else {
+        return;
+    };
+    let mirror = match side {
+        SeamSide::West => world.seam.mirror_west,
+        SeamSide::East => world.seam.mirror_east,
+    };
+    let Some(m) = mirror else {
+        return;
+    };
+    let edge_x = edge_x_for(cfg, side);
+    let y0 = 0;
+    let y1 = 8 * CHUNK_CELLS_H as i32;
+    let mut gy = y0;
+    while gy < y1 {
+        if world.get_cell(edge_x, gy).is_some() {
+            let h = humidity.at_cell(edge_x, gy);
+            let t = temperature.at_cell(edge_x, gy);
+            let h2 = h + (m.hum_mean - h) * alpha;
+            let t2 = t + (m.temp_c - t) * alpha;
+            let (hx, hy) = humidity.tile_of(edge_x, gy);
+            humidity.set_tile_mass(hx, hy, h2);
+            let (tx, ty) = temperature.tile_of(edge_x, gy);
+            temperature.set_tile_c(tx, ty, t2);
+        }
+        gy += 4;
+    }
+}
+
+/// Lab default blend strength per seam exchange.
+pub const SEAM_FIELD_BLEND_ALPHA: f32 = 0.25;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +570,41 @@ mod tests {
         let sed0 = sediment_total(&west) + sediment_total(&east);
         exchange_seam_p0(&mut west, &mut east);
         assert_eq!(sediment_total(&west) + sediment_total(&east), sed0);
+    }
+
+    #[test]
+    fn field_mirror_blend_moves_edge_temp() {
+        let (mut west, mut east) = slab_pair();
+        let w = CHUNK_CELLS_W as i32;
+        let mut hum_w = Humidity::with_world_bounds(4, 0, 0, w, 64);
+        let mut temp_w =
+            Temperature::with_world_bounds(4, 0, 0, w, 64, 1, w, 32, false);
+        let mut hum_e = Humidity::with_world_bounds(4, 0, 0, w, 64);
+        let mut temp_e =
+            Temperature::with_world_bounds(4, 0, 0, w, 64, 2, w, 32, false);
+        // Cold west edge; paint east edge hot across the sample band.
+        let (hx, hy) = temp_w.tile_of(w - 1, 1);
+        temp_w.set_tile_c(hx, hy, 0.0);
+        for gy in (0..64).step_by(4) {
+            let (hx, hy) = temp_e.tile_of(0, gy);
+            temp_e.set_tile_c(hx, hy, 40.0);
+        }
+        let mirror = sample_edge_fields(&east, &hum_e, &temp_e, 0.1, SeamSide::West);
+        assert!(
+            mirror.temp_c > 30.0,
+            "hot east sample expected, got {}",
+            mirror.temp_c
+        );
+        apply_field_mirror(&mut west, SeamSide::East, mirror);
+        let before = temp_w.at_cell(w - 1, 1);
+        blend_edge_toward_mirror(
+            &west,
+            &mut hum_w,
+            &mut temp_w,
+            SeamSide::East,
+            SEAM_FIELD_BLEND_ALPHA,
+        );
+        let after = temp_w.at_cell(w - 1, 1);
+        assert!(after > before, "edge should warm toward peer mirror");
     }
 }
