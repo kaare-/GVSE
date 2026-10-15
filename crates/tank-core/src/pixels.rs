@@ -145,7 +145,7 @@ pub fn rebuild_light(
                     last_pass = tissue_pass(owner) as u32;
                 }
                 incoming = incoming * last_pass / 256;
-            } else if cell.is_air() {
+            } else if cell.is_open() {
                 if cell.sat >= WATER_SAT_RENDER {
                     incoming = incoming * 999 / 1000;
                 }
@@ -204,7 +204,7 @@ pub fn write_rgba(
 
 fn albedo(cell: Cell) -> [u8; 3] {
     let v = cell.colour_variant() as usize;
-    if cell.is_air() {
+    if cell.is_open() {
         if cell.sat < WATER_SAT_RENDER {
             return [0x1b, 0x24, 0x30];
         }

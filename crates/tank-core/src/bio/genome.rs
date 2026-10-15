@@ -56,7 +56,7 @@ pub const WALL_KEY_MIN: u8 = 64;
 pub const WALL_KEY_MAX: u8 = 191;
 
 impl Genome {
-    fn base() -> Self {
+    pub(crate) fn base() -> Self {
         Self {
             metab_eff: 128,
             buoy: 20,
@@ -119,7 +119,8 @@ impl Genome {
     /// d.2 — algae that also expresses GLUE 1 (key 137, strength 60).
     pub fn sticky_algae() -> Self {
         let mut g = Self::algae();
-        g.modes[0].push_entry(Entry::with_params(Block::Glue, 1, 137, 60));
+        // 2 units: the first unit of every block entry is overhead (§a.1).
+        g.modes[0].push_entry(Entry::with_params(Block::Glue, 2, 137, 60));
         g
     }
 

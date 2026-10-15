@@ -112,6 +112,9 @@ pub const HEAT_DAMAGE_C: f32 = 38.0;
 /// Fraction of bond energy difference moved per tick (1/N).
 pub const BOND_SHARE_DIV: i32 = 8;
 
+/// Hard living pixels (of 9) that turn a physics cell solid to flow (§b.3).
+pub const TISSUE_DAM_PIXELS: u8 = 5;
+
 /// Light absorbed per PHOTO pixel row (×0.5) and per other tissue (×0.75), Q8.
 pub const TISSUE_PASS_PHOTO_Q8: u32 = 128;
 pub const TISSUE_PASS_OTHER_Q8: u32 = 192;

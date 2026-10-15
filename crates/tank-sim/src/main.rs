@@ -25,9 +25,10 @@ fn main() -> ExitCode {
         Some("determinism") => cmd_determinism(args),
         Some("trace") => cmd_trace(args),
         Some("giant-vs-body") => cmd_giant_vs_body(args),
+        Some("fuzz") => cmd_fuzz(args),
         _ => {
             eprintln!(
-                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer]\n  tank-sim giant-vs-body --ticks N --seeds N"
+                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]"
             );
             ExitCode::from(2)
         }
@@ -172,6 +173,35 @@ fn cmd_giant_vs_body(args: impl Iterator<Item = String>) -> ExitCode {
     } else {
         ExitCode::from(1)
     }
+}
+
+/// 2.1.5 / 2.2.6 gate: N chained mutations from every preset genome never
+/// produce an invalid genome.
+fn cmd_fuzz(args: impl Iterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = args.collect();
+    let n = flag_u64(args.iter().cloned(), "--n").unwrap_or(1_000_000);
+    let seed = flag_u64(args.iter().cloned(), "--seed").unwrap_or(0xF1_55);
+    let names = ["algae", "straw", "giant", "plate16", "brooder", "sticky", "swimmer"];
+    let per = n / names.len() as u64;
+    let start = Instant::now();
+    let mut ops = 0u64;
+    for (k, name) in names.iter().enumerate() {
+        let mut g = genome_by_name(name);
+        for i in 0..per {
+            g = g.mutate(seed ^ (k as u64) << 32, i);
+            ops += 1;
+            if !g.is_valid() {
+                println!("INVALID after {i} mutations of {name}: {g:?}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    println!(
+        "fuzz: {ops} mutations across {} genomes valid in {:.1}s → PASS",
+        names.len(),
+        start.elapsed().as_secs_f64()
+    );
+    ExitCode::SUCCESS
 }
 
 fn cmd_clock(args: impl Iterator<Item = String>) -> ExitCode {

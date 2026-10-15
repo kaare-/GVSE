@@ -545,10 +545,21 @@ fn sticky_algae_form_glue_attachments() {
             ..TankInput::default()
         });
     }
-    // Either they glued, or division produced neighbours that glued.
-    // Soft accept: live cells persist (colony scaffold exercised).
+    // d.2: a colony forms — kin glue to each other while every cell stays
+    // its own organism — and inspect names the attachment count.
     assert!(tank.live_cells() >= 2);
-    let _ = tank.glue_attachments();
+    let glued = tank.glue_attachments();
+    assert!(glued > 0, "sticky algae never glued to kin");
+    let (orgs, bodies) = tank.org_counts(2);
+    assert!(orgs >= 2 && bodies == 0, "glue must not merge organisms (orgs={orgs} bodies={bodies})");
+    let attached = tank
+        .cells()
+        .iter_alive()
+        .find(|(_, c)| c.glue_to != crate::bio::store::NONE)
+        .map(|(_, c)| (c.px, c.py))
+        .expect("an attached cell");
+    let info = tank.inspect(attached.0 as u32, attached.1 as u32);
+    assert!(info.glued_kin > 0, "inspect should report attached kin");
 }
 
 #[test]
@@ -589,4 +600,170 @@ fn swimmer_genome_stays_alive() {
         });
     }
     assert!(tank.live_cells() >= 1, "cilia cell should persist under light");
+}
+
+fn day() -> TankInput {
+    TankInput {
+        always_day: true,
+        ..TankInput::default()
+    }
+}
+
+fn water_box(seed: u64, w: u32, h: u32, water_rows: i32) -> Tank {
+    let mut tank = Tank::try_new(seed, w, h).unwrap();
+    for vx in 0..w as i32 {
+        for vy in 0..water_rows {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    tank
+}
+
+/// 2.2.4 — a physics cell that is ≥ 5/9 hard living pixels is solid to
+/// flow; a soft plate dams nothing.
+#[test]
+fn hard_plate_dams_water_and_soft_plate_does_not() {
+    for hard in [true, false] {
+        let mut tank = Tank::try_new(3, 9, 12).unwrap();
+        // Shelf at vy 4 with a one-cell hole at vx 4; dry pocket below.
+        for vx in 0..9 {
+            if vx != 4 {
+                place(&mut tank, vx, 4, Cell::bedrock());
+            }
+        }
+        for vx in 0..9 {
+            for vy in 5..10 {
+                place(&mut tank, vx, vy, Cell::water());
+            }
+        }
+        // Plate exactly over the hole cell (vx 4, vy 4): pixel (12, (11-4)*3).
+        let id = tank.seed_fixed_plate_for_test(12, 21, hard);
+        assert_eq!(tank.cell_size(id), Some((3, 3)));
+        for _ in 0..200 {
+            tank.tick(&day());
+        }
+        let pocket: u64 = (0..9)
+            .flat_map(|vx| (0..4).map(move |vy| (vx, vy)))
+            .map(|(vx, vy)| tank.cell_visible(vx, vy).sat as u64)
+            .sum();
+        if hard {
+            assert!(tank.cell_visible(4, 4).is_tissue(), "hard plate marks tissue");
+            assert_eq!(pocket, 0, "hard plate should dam the hole (pocket sat {pocket})");
+        } else {
+            assert!(!tank.cell_visible(4, 4).is_tissue());
+            assert!(pocket > 0, "soft plate must not dam");
+        }
+    }
+}
+
+/// 2.2.1 / d.3 — the straw breeds true: after many generations a lineage
+/// of unmutated straws is still building bonded chains.
+#[test]
+fn straw_breeds_true_for_ten_generations() {
+    use crate::bio::Genome;
+    let mut tank = water_box(7, 48, 40, 32);
+    let id = tank.seed_genome_at(72, 60, Genome::straw()).expect("seed");
+    let geno = tank.genotype_of_cell(id).unwrap();
+    let mut best_gen = 0;
+    for _ in 0..30_000 {
+        tank.tick(&day());
+        if tank.tick_count() % 500 == 0 {
+            best_gen = best_gen.max(tank.max_generation_of(geno));
+            if best_gen >= 10 {
+                break;
+            }
+        }
+    }
+    assert!(best_gen >= 10, "straw reached generation {best_gen} < 10");
+    assert!(tank.live_cells_of(geno) > 0, "the unmutated straw genotype died out");
+    let (_, bodies) = tank.org_counts(2);
+    assert!(bodies > 0, "no bonded straw bodies alive");
+}
+
+/// 2.2.2 — bite off a body part: the slot regrows at full cost.
+#[test]
+fn bitten_tail_regrows_into_its_slot() {
+    use crate::bio::Genome;
+    let mut tank = water_box(5, 24, 24, 16);
+    let mut g = Genome::straw();
+    for m in g.modes.iter_mut() {
+        m.regrow = true;
+    }
+    let id = tank.seed_genome_at(36, 36, g).expect("seed");
+    for _ in 0..600 {
+        tank.tick(&day());
+        if tank.org_slot_count(id) >= 3 {
+            break;
+        }
+    }
+    assert!(tank.org_slot_count(id) >= 3, "straw did not build its body");
+    let org = tank.org_of_cell(id).expect("org").clone();
+    // Bite the deepest living slot.
+    let tail = org
+        .slots
+        .iter()
+        .filter(|s| s.cell != crate::bio::store::NONE && s.cell != id)
+        .max_by_key(|s| tank.cell(s.cell).map(|c| c.depth).unwrap_or(0))
+        .map(|s| s.cell)
+        .expect("tail");
+    assert!(tank.kill_cell(tail));
+    let before = tank.org_slot_count(id);
+    let mut regrown = false;
+    for _ in 0..3000 {
+        tank.tick(&day());
+        if tank.org_slot_count(id) > before {
+            regrown = true;
+            break;
+        }
+    }
+    assert!(regrown, "dead slot never regrew (slots stayed {before})");
+}
+
+/// 2.2.5 / d.8 — brood: a bonded daughter waits on her detach gate and is
+/// then released as her own organism.
+#[test]
+fn brooder_releases_young_when_the_gate_passes() {
+    use crate::bio::Genome;
+    let mut tank = water_box(9, 32, 32, 24);
+    let id = tank.seed_genome_at(48, 48, Genome::brooder()).expect("seed");
+    let geno = tank.genotype_of_cell(id).unwrap();
+    let mut released = false;
+    for _ in 0..20_000 {
+        tank.tick(&day());
+        while let Some(ev) = tank.poll_event() {
+            if ev.kind == crate::bio::ev::BROOD_RELEASED {
+                released = true;
+            }
+        }
+        if released {
+            break;
+        }
+    }
+    assert!(released, "no brood was ever released");
+    assert!(tank.lineage_cells_of(geno) > 0);
+}
+
+/// Save/load with living bodies: the loaded tank continues tick-for-tick
+/// identical to the original (pixel hash after 300 more ticks).
+#[test]
+fn save_round_trip_with_life_stays_deterministic() {
+    use crate::bio::Genome;
+    let mut tank = water_box(11, 32, 32, 24);
+    tank.seed_genome_at(48, 48, Genome::plate16()).expect("seed");
+    tank.seed_genome_at(20, 60, Genome::algae()).expect("seed");
+    tank.seed_genome_at(70, 40, Genome::sticky_algae()).expect("seed");
+    for _ in 0..1500 {
+        tank.tick(&day());
+    }
+    assert!(tank.live_cells() > 3, "need living cells for the round trip");
+    let bytes = tank.save_bytes().unwrap();
+    let mut loaded = Tank::load_bytes(&bytes).unwrap();
+    assert_eq!(loaded.pixel_hash(), tank.pixel_hash());
+    assert_eq!(loaded.live_cells(), tank.live_cells());
+    for _ in 0..300 {
+        tank.tick(&day());
+        loaded.tick(&day());
+    }
+    assert_eq!(loaded.live_cells(), tank.live_cells());
+    assert_eq!(loaded.pixel_hash(), tank.pixel_hash(), "diverged after load");
 }

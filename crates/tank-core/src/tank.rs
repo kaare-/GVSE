@@ -8,7 +8,9 @@ use crate::bio::store::OWNER_BIAS;
 use crate::bio::{self, CellStore, Genome, GenomeStore};
 use crate::cell::Cell;
 use crate::clock::{self, day_factor};
-use crate::consts::{MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H, PRESET_W, SAVE_VERSION};
+use crate::consts::{
+    MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H, PRESET_W, SAVE_VERSION, TISSUE_DAM_PIXELS,
+};
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_bytes;
 use crate::pixels::{self, CoarseField, PixelLayer};
@@ -117,6 +119,8 @@ pub struct Tank {
     light_dirty: bool,
     /// Cumulative deaths by cause: [starved, old age, damage, shed].
     death_causes: [u64; 4],
+    /// Physics cells currently flagged as hard tissue (visible coords).
+    tissue_marks: Vec<(i32, i32)>,
 }
 
 impl Tank {
@@ -156,6 +160,7 @@ impl Tank {
             flash_r: 0,
             light_dirty: true,
             death_causes: [0; 4],
+            tissue_marks: Vec::new(),
         };
         tank.rebuild_light();
         Ok(tank)
@@ -363,7 +368,7 @@ impl Tank {
     pub fn water_sat_at(&self, px: u16, py: u16) -> u8 {
         let (vx, vy) = bio::pixel_to_phys(px, py, self.grid.visible_h() as u32);
         let c = self.grid.get_visible(vx, vy);
-        if c.is_air() {
+        if c.is_open() {
             c.sat
         } else {
             0
@@ -521,6 +526,30 @@ impl Tank {
         }
     }
 
+    /// Test rig: a full-size 3×3 cell pinned to the pane (film) so it
+    /// cannot drift; `hard` gives it a WALL h 0.9 (dam rule).
+    #[cfg(test)]
+    pub(crate) fn seed_fixed_plate_for_test(&mut self, px: u16, py: u16, hard: bool) -> u32 {
+        use crate::bio::{Block, Entry, Mode};
+        let mut g = Genome::base();
+        let mut m = Mode::blank();
+        m.shape_w = 3;
+        m.shape_h = 3;
+        m.push_entry(Entry::new(Block::Photo, 2));
+        if hard {
+            m.push_entry(Entry::with_params(Block::Wall, 2, 230, 0));
+        }
+        g.modes.push(m);
+        let id = self.seed_genome_at(px, py, g).expect("seed plate");
+        while self.cells.try_grow(&mut self.pixels, id, 3, 3) {}
+        if let Some(c) = self.cells.get_mut(id) {
+            c.film = true;
+            c.energy = 24 * crate::consts::FP;
+        }
+        self.light_dirty = true;
+        id
+    }
+
     #[cfg(test)]
     pub(crate) fn place_for_test(&mut self, vx: i32, vy: i32, cell: Cell) {
         self.grid.set_visible(vx, vy, cell);
@@ -567,6 +596,7 @@ impl Tank {
         };
         let t_tank = self.t_base + 10.0 * self.light_slider.clamp(0.0, 1.0) * day;
         let tilt = if self.swirl { self.grav_x } else { 0.0 };
+        self.mark_tissue();
         rules::step(&mut self.grid, self.seed, self.tick_count, tilt);
         let bio = bio::step(
             &mut self.cells,
@@ -853,6 +883,14 @@ impl Tank {
         }
         tank.genomes = genomes;
         tank.cells = CellStore::from_raw(blob.bio_cells, blob.orgs);
+        let (vw, vh) = (tank.grid.visible_w(), tank.grid.visible_h());
+        for vy in 0..vh {
+            for vx in 0..vw {
+                if tank.grid.get_visible(vx, vy).is_tissue() {
+                    tank.tissue_marks.push((vx, vy));
+                }
+            }
+        }
         tank.light_dirty = true;
         tank.rebuild_light();
         Ok(tank)
@@ -864,6 +902,50 @@ impl Tank {
 
     pub fn format_telemetry(&self, events: &[TelEvent], anon: &str) -> String {
         telemetry::format_batch(events, anon)
+    }
+
+    /// Solid-to-flow rule (§b.3): a physics cell whose 3×3 pixels hold
+    /// ≥ 5 pixels of hard-walled living tissue is a solid for water and
+    /// grains this tick. Soft tissue dams nothing.
+    fn mark_tissue(&mut self) {
+        for &(vx, vy) in &self.tissue_marks {
+            let mut c = self.grid.get_visible(vx, vy);
+            c.flags &= !Cell::TISSUE;
+            self.grid.set_visible(vx, vy, c);
+        }
+        self.tissue_marks.clear();
+        let vis_h = self.grid.visible_h() as u32;
+        // (vx, vy) → hard pixel count; cells are visited in id order so the
+        // result is deterministic.
+        let mut counts: Vec<((i32, i32), u8)> = Vec::new();
+        for (_, c) in self.cells.iter_alive() {
+            if !self.genomes.coeffs(c.genotype, c.mode).is_hard {
+                continue;
+            }
+            for dy in 0..c.h as i32 {
+                for dx in 0..c.w as i32 {
+                    let px = c.px as i32 + dx;
+                    let py = c.py as i32 + dy;
+                    let (vx, vy) = bio::pixel_to_phys(px as u16, py as u16, vis_h);
+                    match counts.iter_mut().find(|(k, _)| *k == (vx, vy)) {
+                        Some((_, n)) => *n += 1,
+                        None => counts.push(((vx, vy), 1)),
+                    }
+                }
+            }
+        }
+        for ((vx, vy), n) in counts {
+            if n < TISSUE_DAM_PIXELS {
+                continue;
+            }
+            let mut c = self.grid.get_visible(vx, vy);
+            if !c.is_open() {
+                continue;
+            }
+            c.flags |= Cell::TISSUE;
+            self.grid.set_visible(vx, vy, c);
+            self.tissue_marks.push((vx, vy));
+        }
     }
 
     fn rebuild_light(&mut self) {

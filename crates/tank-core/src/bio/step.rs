@@ -99,13 +99,13 @@ fn near_solid(grid: &PhysicsGrid, px: u16, py: u16) -> bool {
     let (vx, vy) = pixel_to_phys(px, py, grid.visible_h() as u32);
     for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
         let n = grid.get_visible(vx + dx, vy + dy);
-        if !n.is_air() {
+        if !n.is_open() {
             return true;
         }
     }
     let here = grid.get_visible(vx, vy);
     let above = grid.get_visible(vx, vy + 1);
-    here.is_air() && here.sat > 100 && above.is_air() && above.sat < 40
+    here.is_open() && here.sat > 100 && above.is_open() && above.sat < 40
 }
 
 /// Integer `log2(x / 256)` in Q8 for x ≥ 256 (0 below).
@@ -185,6 +185,10 @@ fn move_free_cell(
     if cell.film || cell.parent_cell != NONE {
         return;
     }
+    // A GLUE attachment holds the cell in its colony (bonds carry force).
+    if cell.glue_to != NONE {
+        return;
+    }
     // Multi-cell bodies drift as a unit in `drift_bodies`.
     if cells.org_slot_count(cell.org) > 1 {
         return;
@@ -195,7 +199,7 @@ fn move_free_cell(
     let (vx, vy) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
     let here = grid.get_visible(vx, vy);
     let below = grid.get_visible(vx, vy - 1);
-    let in_water = here.is_air() && here.sat > 40;
+    let in_water = here.is_open() && here.sat > 40;
 
     let h = hash_u64(world_seed, tick, id as u64, 0xB0_01);
     let mut nx = cell.px as i32;
@@ -249,7 +253,7 @@ fn move_free_cell(
             ny += 1;
         }
     }
-    let solid_below = !below.is_air();
+    let solid_below = !below.is_open();
     if solid_below && ny > cell.py as i32 {
         ny = cell.py as i32;
     }
@@ -307,7 +311,7 @@ fn drift_bodies(
             }
             let (vx, vy) = pixel_to_phys(c.px, c.py, grid.visible_h() as u32);
             let here = grid.get_visible(vx, vy);
-            if !(here.is_air() && here.sat > 40) {
+            if !(here.is_open() && here.sat > 40) {
                 all_water = false;
             }
             let above = grid.get_visible(vx, vy + 1);
@@ -625,7 +629,7 @@ fn die(
     let (vx, vy) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
     // Soft litter: only replace nearly-dry air so free water is conserved.
     let seat = grid.get_visible(vx, vy);
-    if seat.is_air() && seat.sat < 40 {
+    if seat.is_open() && seat.sat < 40 {
         grid.set_visible(vx, vy, Cell::solid(MaterialId::Organic));
     }
     let to_film = cell.film || age > FILM_STUCK_AGE && near_solid(grid, cell.px, cell.py);
@@ -777,7 +781,7 @@ fn try_divide(
         }
         let (vx, vy) = pixel_to_phys(nx as u16, ny as u16, vis_h);
         let seat = grid.get_visible(vx, vy);
-        seat.is_air() && seat.sat > 40
+        seat.is_open() && seat.sat > 40
     };
     let (dx, dy) = spec.dir.delta(cell.heading);
     let mut nx = cell.px as i32 + side_offset(dx, cell.w);

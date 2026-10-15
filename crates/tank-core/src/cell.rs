@@ -67,9 +67,26 @@ impl Cell {
         MaterialId::from_u8(self.material).unwrap_or(MaterialId::Air)
     }
 
+    /// `flags` bit 7: the cell is at least 5/9 hard living tissue and
+    /// behaves as a solid toward water and grains (§b.3 dam rule).
+    pub const TISSUE: u8 = 0b1000_0000;
+
+    /// Fluid seat for the physics rules: air/water that is not dammed by
+    /// hard tissue.
     #[inline]
     pub fn is_air(self) -> bool {
+        self.material == MaterialId::Air as u8 && self.flags & Self::TISSUE == 0
+    }
+
+    /// Air or water regardless of tissue damming — what living cells see.
+    #[inline]
+    pub fn is_open(self) -> bool {
         self.material == MaterialId::Air as u8
+    }
+
+    #[inline]
+    pub fn is_tissue(self) -> bool {
+        self.flags & Self::TISSUE != 0
     }
 
     #[inline]
