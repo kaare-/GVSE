@@ -5,7 +5,9 @@
 //! that is not the retired humidity-bank overlay.
 
 use macroquad::prelude::*;
-use wk_voxel::{BudgetLedger, BudgetProbe, Humidity, LandscapeBodyStore, World};
+use wk_voxel::{
+    snow_mint_probe_snapshot, BudgetLedger, BudgetProbe, Humidity, LandscapeBodyStore, World,
+};
 
 const LINE_H: f32 = 15.0;
 const PAD: f32 = 8.0;
@@ -127,9 +129,19 @@ impl BudgetHud {
         let rate_w = d.d_tracked / dt;
         let rate_m = d.d_min_total as f64 / dt;
         let p = BudgetProbe::snapshot();
+        let flake = snow_mint_probe_snapshot();
         let probe_w = format!(
-            "swap:{:+} park:{:+} rej:{:+} clamp:{:+}",
-            p.water_swap, p.water_park, p.water_hum_rej, p.water_clamp
+            "swap:{:+} snow:{:+} oth:{:+} park:{:+} rej:{:+} clamp:{:+}",
+            p.water_swap,
+            p.water_swap_snow,
+            p.water_swap_other,
+            p.water_park,
+            p.water_hum_rej,
+            p.water_clamp
+        );
+        let probe_flake = format!(
+            "flake seated={} paid={:.0} under={:.0}",
+            flake.seated, flake.paid, flake.under
         );
         let probe_m = format!(
             "bare:{:+} credit:{:+} clip:{:+}",
@@ -188,11 +200,13 @@ impl BudgetHud {
             ),
             format!("rate    W {rate_w:+.2}/t   M {rate_m:+.2}/t"),
             format!("probe-W {probe_w}"),
+            format!("probe-W {probe_flake}"),
             format!("probe-M {probe_m}"),
             format!("read   {flags}"),
             format!("cheats {cheats}"),
             "TRACKED leftover = mint/cull/OOB (or uncredited sink)".into(),
-            "W: swap=mat-change sat  park=dropped orphan  clamp=H OOB".into(),
+            "W: swap=mat-change sat (snow/oth split)  park=orphan  clamp=H OOB".into(),
+            "W: flake under=unpaid Snow seat (should stay 0)".into(),
             "M: bare=set_cell outside ledger APIs  credit=widen/scour".into(),
             "body=in-flight landscape slab (off-grid rock + sat)".into(),
             "SOAK=free→pore  EVAP=cell→hum  RAIN=hum→free/ice".into(),

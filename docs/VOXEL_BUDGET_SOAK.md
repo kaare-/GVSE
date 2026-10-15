@@ -311,3 +311,34 @@ warm=40, period=60; wall ~56 min):
 
 Phase 0 rate eps still met (`|rate W|` and `|rate M|` &lt; 0.5/t) with
 snow precip on after the Ice/Snow roof-collapse exclusion.
+
+### Play GUI UNEXPL-W ~+240/t with geyser (2026-10-15)
+
+Long-running macroquad (`B` overlay, night, drizzle on, boiler at
+~100 °C `expand=96`):
+
+| Signal | Value |
+|--------|-------|
+| rate W | **+240.87/t** (`UNEXPL-W`) |
+| Δfree / Δhum / Δsnow | +259k / +58k / +46k over 1320t |
+| Δpipe | +653 (≪ free) |
+| probe-W | **swap:+317875** park/rej/clamp **0** |
+
+**Not** a pipe-book runaway (pipe Δ tiny; pipe unit soaks stay
+mass-flat). Signature is material-change overlay water (`swap`) matching
+TRACKED while humidity also rises — unpaid Snow/Ice seating or another
+mat-change sat invent, not mouth→H alone (that is store-to-store).
+
+Headless `short_budget_soak` still uses crate `SteamConfig` (**pipe
+off**). Repro play geysers with:
+
+```bash
+GVSE_SOAK_PIPE=1 GVSE_SOAK_TICKS=5000 \
+  cargo test -p wk-voxel --test budget_soak --release short_budget_soak -- --nocapture
+```
+
+**Fix kept:** flake path pays humidity *before* seating Snow
+(`try_snow_from_parcel`). Seat-then-take left unpaid flakes when
+`take_around` under-delivered after peek — thaw yield 255 with partial
+H debit → TRACKED mint / swap. B overlay now splits `swap` into
+`snow`/`oth` and prints `flake … under=` (should stay 0).

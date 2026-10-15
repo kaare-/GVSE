@@ -204,13 +204,38 @@ fn try_snow_from_parcel(
     if column_has_airborne_snow(world, gx, gy) {
         return 0.0;
     }
-    let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, FLAKE_MASS);
-    if snowed <= 0.0 {
+    // Pay *before* seating. The old seat-then-take order left an unpaid
+    // Snow cell whenever `take_around` under-delivered after a successful
+    // peek (shared parcel drained by an earlier surplus hit, float dust).
+    // An unpaid flake banks full thaw yield → TRACKED mint / probe-W swap.
+    let paid = humidity.take_around(gx, gy, FLAKE_MASS);
+    if paid + 1e-3 < FLAKE_MASS {
+        refund_humidity(humidity, gx, gy, paid);
         return 0.0;
     }
-    let paid = humidity.take_around(gx, gy, snowed);
+    let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, FLAKE_MASS);
+    if snowed <= 0.0 {
+        refund_humidity(humidity, gx, gy, paid);
+        return 0.0;
+    }
     snow_mint_probe_note(snowed, paid);
     paid
+}
+
+/// Put `mass` back onto the local humidity tile after an aborted flake pay.
+fn refund_humidity(humidity: &mut crate::humidity::Humidity, gx: i32, gy: i32, mass: f32) {
+    if mass <= 1e-3 {
+        return;
+    }
+    let accepted = humidity.try_add(gx, gy, mass);
+    let left = mass - accepted;
+    if left <= 1e-3 {
+        return;
+    }
+    // Soft cap refused the rest — force onto the centre tile so abort
+    // paths stay mass-flat (parcel was already drained).
+    let (hx, hy) = humidity.tile_of(gx, gy);
+    humidity.set_tile_mass(hx, hy, humidity.at_tile(hx, hy) + left);
 }
 
 /// Turn vapour the local air can no longer hold into precip.
@@ -956,6 +981,56 @@ mod tests {
             cell.sat.0,
             u8::MAX,
             "flake banks full thaw yield (not free-water sat)"
+        );
+    }
+
+    #[test]
+    fn short_parcel_does_not_seat_unpaid_snow() {
+        // Pay-before-seat: a parcel that cannot fund a full flake must not
+        // leave Snow(255) in the world (thaw would mint the shortfall).
+        use crate::budget::BudgetSnap;
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(12);
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..40 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut h = Humidity::new(4);
+        // Centre tile only — well under one flake, so peek fails / take aborts.
+        h.cells.insert((1, 8), 200.0);
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -20.0;
+        }
+        temp.rebuild_row_means();
+        let before = BudgetSnap::capture(&w, &h).tracked();
+        let hum0 = h.total_mass();
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, None);
+        let snow = (0..16).any(|x| {
+            (1..40).any(|y| {
+                w.get_cell(x, y)
+                    .is_some_and(|c| c.material == MaterialId::Snow)
+            })
+        });
+        assert!(!snow, "short parcel must not seat an unpaid flake");
+        assert!(
+            (h.total_mass() - hum0).abs() < 1e-2,
+            "aborted pay must refund humidity (Δ={})",
+            h.total_mass() - hum0
+        );
+        assert!(
+            (BudgetSnap::capture(&w, &h).tracked() - before).abs() < 1.0,
+            "TRACKED must stay flat when the flake is refused"
         );
     }
 

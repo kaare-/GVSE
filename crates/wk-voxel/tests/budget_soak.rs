@@ -18,6 +18,9 @@
 //! - `GVSE_BUDGET_WARM` — ticks before the mark (default 40)
 //! - `GVSE_SOAK_ORGANISMS` — seed N land plants and step with `organisms_on`
 //!   (default 0 = Phase 0 organisms-off). Phase 5 E2 closeout uses >0.
+//! - `GVSE_SOAK_PIPE=1` — play-like steam pipe (`enable_pipe`, leftover field
+//!   off). Default soak keeps crate `SteamConfig` (pipe off) so Phase 0
+//!   TRACKED gates stay comparable; long GUI soaks with geysers need this.
 //! - `GVSE_SOAK_OFF` — comma list: `evap`, `cond`, `steam`, `leftover`, `cadence`,
 //!   `karst`, `competent`, `phase`, `cull`, `failure`, `snow`, `surplus`,
 //!   `diffuse` (α=0), `orphan` (evap crest-film 8× off),
@@ -53,6 +56,13 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(default)
+}
+
+fn env_flag(key: &str) -> bool {
+    matches!(
+        std::env::var(key).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 struct SoakScene {
@@ -334,6 +344,13 @@ fn run_soak_with_plants(
         phase.enable_slush = false;
     }
     let mut steam = SteamConfig::default();
+    // Play default: pipe on, leftover field off. Headless Phase 0 soaks keep
+    // the crate default (pipe off) unless GVSE_SOAK_PIPE=1 — otherwise a
+    // geyser mint would be invisible to the TRACKED gate.
+    if env_flag("GVSE_SOAK_PIPE") {
+        steam.enable_pipe = true;
+        steam.enable_leftover_field = false;
+    }
     if soak_off("steam") {
         steam.enabled = false;
         steam.enable_pipe = false;

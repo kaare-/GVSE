@@ -253,6 +253,7 @@ impl BudgetLedger {
         self.mark = Some(s);
         self.now = Some(s);
         probe_reset();
+        crate::rules::snow_mint_probe_reset();
         probe_set_on(true);
     }
 
@@ -261,6 +262,7 @@ impl BudgetLedger {
         self.now = None;
         probe_set_on(false);
         probe_reset();
+        crate::rules::snow_mint_probe_reset();
     }
 
     pub fn remake_mark(&mut self) {
