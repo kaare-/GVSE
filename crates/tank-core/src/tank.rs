@@ -13,6 +13,7 @@ use crate::consts::{
 };
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_bytes;
+use crate::humidity;
 use crate::milestones::{self, Milestones};
 use crate::pixels::{self, CoarseField, PixelLayer};
 use crate::rules;
@@ -216,6 +217,11 @@ pub struct Tank {
     archive_roots: Vec<(u32, u64)>,
     /// Last "water is cloudy" announcement (Phase 4).
     cloudy_last: Option<u64>,
+    /// The humidity field has run at least once (a fresh or loaded tank
+    /// primes it on its first tick).
+    humidity_primed: bool,
+    /// Water lost to evaporation, in sat units (telemetry / tests).
+    evaporated_sat: u64,
 }
 
 impl Tank {
@@ -263,6 +269,8 @@ impl Tank {
             lambda_scale_q8: 256,
             archive_roots: Vec::new(),
             cloudy_last: None,
+            humidity_primed: false,
+            evaporated_sat: 0,
         };
         tank.rebuild_light();
         Ok(tank)
@@ -356,6 +364,20 @@ impl Tank {
             &self.coarse,
             (vy as usize) * self.coarse.w as usize + vx as usize,
         )
+    }
+
+    /// Air-side humidity at a visible physics cell (0..=255; water reads
+    /// 255, solids their own moisture).
+    pub fn humidity_at(&self, vx: i32, vy: i32) -> u8 {
+        if vx < 0 || vy < 0 || vx >= self.coarse.w as i32 || vy >= self.coarse.h as i32 {
+            return 0;
+        }
+        (self.coarse.humidity[(vy as usize) * self.coarse.w as usize + vx as usize] >> 8) as u8
+    }
+
+    /// Sat units lost to evaporation so far.
+    pub fn evaporated_sat(&self) -> u64 {
+        self.evaporated_sat
     }
 
     /// Material fractions by thermal class (harness / tests).
@@ -1407,6 +1429,15 @@ impl Tank {
         let tilt = if self.swirl { self.grav_x } else { 0.0 };
         self.mark_tissue();
         rules::step(&mut self.grid, self.seed, self.tick_count, tilt);
+        // Humidity, dew and the slow evaporation of the surface (4.3).
+        let night = !self.always_day && !crate::clock::is_day(self.tick_count);
+        if self.tick_count % crate::consts::HUMIDITY_EVERY == 0 || !self.humidity_primed {
+            humidity::step(&mut self.grid, &mut self.coarse, self.tick_count, t_tank, night);
+            self.humidity_primed = true;
+        }
+        if self.tick_count % crate::consts::EVAP_EVERY == crate::consts::EVAP_EVERY - 1 {
+            self.evaporated_sat += humidity::evaporate(&mut self.grid, &self.coarse) as u64;
+        }
         let bio = bio::step(
             &mut self.cells,
             &mut self.genomes,
@@ -1817,7 +1848,7 @@ impl Tank {
             sediment: self.coarse.sediment.clone(),
             digested: self.coarse.digested.clone(),
             t_local: self.coarse.t_local.clone(),
-            humidity: self.coarse.humidity.clone(),
+            humidity: self.coarse.humidity.iter().map(|&h| (h >> 8) as u8).collect(),
             genomes: self.genomes.export(),
             bio_cells: self.cells.raw_cells().to_vec(),
             orgs: self.cells.raw_orgs().to_vec(),
@@ -1899,7 +1930,7 @@ impl Tank {
         tank.coarse.sediment = blob.sediment;
         tank.coarse.digested = blob.digested;
         tank.coarse.t_local = blob.t_local;
-        tank.coarse.humidity = blob.humidity;
+        tank.coarse.humidity = blob.humidity.iter().map(|&h| (h as u16) << 8).collect();
         // Life: genotypes first (cells index them), then live counts.
         let mut genomes = GenomeStore::import(&blob.genomes);
         genomes.import_species(blob.species, &blob.node_species);

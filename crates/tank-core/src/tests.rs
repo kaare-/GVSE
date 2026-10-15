@@ -1776,7 +1776,14 @@ fn glass_wall_holds_water_and_passes_light() {
     tick_n(&mut tank, 300);
     let inside: u64 = (4..8).map(|vx| column_sat(&tank, vx)).sum();
     let outside: u64 = (0..3).chain(9..12).map(|vx| column_sat(&tank, vx)).sum();
-    assert_eq!(inside, before, "glass holds the water in");
+    // Phase 4 evaporation still ticks under a lid (very slow, water only);
+    // the wall's job is that nothing leaves the basin sideways.
+    assert_eq!(
+        inside + tank.evaporated_sat(),
+        before,
+        "glass holds the water in (inside {inside} + evaporated {})",
+        tank.evaporated_sat()
+    );
     assert_eq!(outside, 0, "nothing leaks through glass");
     // Light under a pane is almost full; under stone it is not.
     place(&mut tank, 1, 8, Cell::glass());
@@ -2231,3 +2238,88 @@ fn bloom_crash_clouds_the_water_then_it_clears_into_litter() {
         "settled fines are litter"
     );
 }
+
+/// 4.3 — humidity (K2#5): the air over a half-filled tank is humid near
+/// the water and drier up high; at night humid air condenses as dew on
+/// the glass and damp rock, which dries off again by day.
+#[test]
+fn humidity_rises_over_water_and_dew_forms_on_glass_at_night() {
+    use crate::consts::{DAY_TICKS, DEW_H, MOIST_SAT};
+    let mut tank = water_box(9, 24, 24, 10);
+    // A glass pane and a stone block on the air side.
+    for vy in 10..24 {
+        place(&mut tank, 20, vy, Cell::glass());
+    }
+    for vy in 12..15 {
+        place(&mut tank, 4, vy, Cell::stone());
+    }
+    for _ in 0..1200 {
+        tank.tick(&day());
+    }
+    let low = tank.humidity_at(10, 10);
+    let high = tank.humidity_at(10, 22);
+    assert!(low >= 150, "air over the water is humid ({low})");
+    assert!(high < low, "humidity falls off with height ({high} vs {low})");
+    assert_eq!(tank.humidity_at(10, 3), 255, "water reads saturated");
+    assert_eq!(tank.cell_visible(20, 15).pad, 0, "no dew by day");
+    let dry_rock = tank.cell_visible(4, 13).rock_film();
+    // Into the night.
+    let input = TankInput::default();
+    while crate::clock::is_day(tank.tick_count()) {
+        tank.tick(&input);
+    }
+    tick_n(&mut tank, 600);
+    assert!(tank.tick_count() < DAY_TICKS + 1000);
+    let night_low = tank.humidity_at(10, 10);
+    assert!(night_low >= DEW_H, "cool night air saturates ({night_low})");
+    let dew = tank.cell_visible(20, 11).pad;
+    assert!(dew > 0, "dew on the glass at night");
+    let wet_rock = tank.cell_visible(4, 12).rock_film();
+    assert!(wet_rock > dry_rock, "damp rock at night ({dry_rock} → {wet_rock})");
+    assert!(wet_rock >= MOIST_SAT || dew >= MOIST_SAT, "condensation moistens a surface");
+    // Daylight dries the pane.
+    for _ in 0..1200 {
+        tank.tick(&day());
+    }
+    assert!(tank.cell_visible(20, 20).pad < dew.max(1), "dew fades by day");
+}
+
+/// 4.3 — evaporation (K2#8): the free surface loses water very slowly
+/// (water only, nothing else leaves), and the top-up tool pours pure
+/// water back onto every surface.
+#[test]
+fn evaporation_lowers_the_surface_slowly_and_top_up_restores_it() {
+    use crate::consts::EVAP_EVERY;
+    let mut tank = water_box(10, 24, 24, 12);
+    tank.drop_litter(30, 60, 20, crate::bio::chem::LITTER_SOFT_CODE);
+    let litter = tank.litter_total();
+    let total = |t: &Tank| (0..24).map(|vx| column_sat(t, vx)).sum::<u64>();
+    let before = total(&tank);
+    for _ in 0..(EVAP_EVERY as u32 * 6) {
+        tank.tick(&day());
+    }
+    let after = total(&tank);
+    let lost = tank.evaporated_sat();
+    assert!(lost > 0, "the surface evaporates");
+    assert_eq!(before - after, lost, "only evaporation removes water ({before} → {after})");
+    assert!(lost <= 6 * 24, "very slow: at most one sat per column per period ({lost})");
+    assert_eq!(tank.litter_total(), litter, "nothing but water leaves");
+    // Top up: one row of pure water on every surface.
+    let topup = TankInput {
+        tools: vec![crate::tools::ToolEvent {
+            kind: 14,
+            material: 0,
+            x: 0,
+            y: 0,
+            r: 1,
+            variant: 0,
+        }],
+        ..day()
+    };
+    tank.tick(&topup);
+    let topped = total(&tank);
+    assert!(topped > before, "top-up raises the waterline ({before} → {topped})");
+    assert!(tank.cell_visible(5, 12).sat > 0, "the row above the old surface holds water");
+    assert!(tank.cell_visible(5, 14).sat == 0, "air above the new surface stays dry");
+}
+

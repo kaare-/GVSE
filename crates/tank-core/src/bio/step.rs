@@ -725,6 +725,7 @@ fn metabolise(
     // up the warm cell and anything sitting inside it (§a.7).
     let ci = minerals::idx_of_pixel(coarse, cell.px, cell.py);
     let t_tank = t_tank + crate::thermal::local_c(coarse, ci);
+    let humidity = coarse.humidity.get(ci).map_or(0, |&h| (h >> 8) as u8);
     let (metab_eff, temp_q, base_age, stress_def, wall_key, glue_key, resist_key, strategy_q8, lambda_m) = {
         let g = genomes.genome(cell.genotype);
         (
@@ -916,6 +917,8 @@ fn metabolise(
         waste,
         temp_dev: ((t_tank - 22.0).abs() * 8.0).min(255.0) as u8,
         sense,
+        humidity,
+        hydration: cell.hydration,
     };
 
     // ---- act

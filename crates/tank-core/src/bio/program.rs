@@ -102,9 +102,14 @@ pub enum Scalar {
     Waste = 10,
     TempDev = 11,
     Sense = 12,
+    /// Air-side humidity of the cell's physics cell (Phase 4; water 255).
+    Humidity = 13,
+    /// The cell's own water column, conducted along division bonds
+    /// (`cell-language.md` §h.1; Phase 4).
+    Hydration = 14,
 }
 
-pub const N_SCALARS: u8 = 13;
+pub const N_SCALARS: u8 = 15;
 
 impl Scalar {
     pub fn from_u8(v: u8) -> Self {
@@ -121,7 +126,9 @@ impl Scalar {
             9 => Self::Kin,
             10 => Self::Waste,
             11 => Self::TempDev,
-            _ => Self::Sense,
+            12 => Self::Sense,
+            13 => Self::Humidity,
+            _ => Self::Hydration,
         }
     }
 }
@@ -142,6 +149,8 @@ pub struct Scalars {
     pub waste: u8,
     pub temp_dev: u8,
     pub sense: u8,
+    pub humidity: u8,
+    pub hydration: u8,
 }
 
 impl Scalars {
@@ -160,6 +169,8 @@ impl Scalars {
             Scalar::Waste => self.waste,
             Scalar::TempDev => self.temp_dev,
             Scalar::Sense => self.sense,
+            Scalar::Humidity => self.humidity,
+            Scalar::Hydration => self.hydration,
         }
     }
 }

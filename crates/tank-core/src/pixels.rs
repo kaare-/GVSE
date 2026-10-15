@@ -98,7 +98,9 @@ pub struct CoarseField {
     pub h: u32,
     pub minerals: Vec<u8>,
     pub t_local: Vec<i8>,
-    pub humidity: Vec<u8>,
+    /// Air-side humidity in Q8 (`>> 8` is the 0..=255 value a cell reads);
+    /// the extra precision keeps the slow leak and diffusion unbiased.
+    pub humidity: Vec<u16>,
     /// Sediment nutrient (§a.3): waste that settled into sand / soil;
     /// CHEMO's food.
     pub sediment: Vec<u8>,
@@ -338,7 +340,9 @@ pub fn enzyme_band_colour(key: u8) -> [u8; 3] {
 fn albedo(cell: Cell) -> [u8; 3] {
     let v = cell.colour_variant() as usize;
     if cell.is_glass() {
-        return [0xC4, 0xE2, 0xEC];
+        // Night dew fogs the pane toward white (Phase 4 condensation).
+        let t = (cell.pad as i32) / 2;
+        return [mix(0xC4, 0xF2, t), mix(0xE2, 0xF6, t), mix(0xEC, 0xFA, t)];
     }
     if cell.is_open() {
         if cell.sat < WATER_SAT_RENDER {

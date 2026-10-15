@@ -127,6 +127,14 @@ pub struct CellRec {
     /// Ticks a THERMO cell has held ≥ +3 °C over ambient (Phase 4).
     #[serde(default)]
     pub warm: u8,
+    /// The cell's water column (`cell-language.md` §h.1): 255 submerged,
+    /// sourced from moist substrate, conducted along division bonds.
+    #[serde(default = "hydration_default")]
+    pub hydration: u8,
+}
+
+fn hydration_default() -> u8 {
+    255
 }
 
 /// How long a dead cell stays a visible corpse before it crumbles.
@@ -170,6 +178,7 @@ impl CellRec {
             moved_dx: 0,
             moved_dy: 0,
             warm: 0,
+            hydration: 255,
         }
     }
 

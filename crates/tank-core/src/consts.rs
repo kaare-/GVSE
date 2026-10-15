@@ -184,3 +184,33 @@ pub const THERMO_COST_FP_TICK_PER_UNIT: i32 = FP * 4 / 100 / TICK_HZ as i32;
 /// degrees) over ambient for this many ticks.
 pub const WARM_BLOODED_Q2: i8 = 12;
 pub const WARM_BLOODED_TICKS: u8 = 60;
+
+// ---- Phase 4: humidity, evaporation, condensation (K2#5, K2#8) ----
+
+/// The air-side humidity field updates this often (ticks).
+pub const HUMIDITY_EVERY: u64 = 8;
+/// Humidity an air cell over free water is driven toward by day at
+/// 15 °C, plus `HUMIDITY_PER_C` per degree (warm water evaporates more).
+pub const HUMIDITY_EVAP_BASE: f32 = 176.0;
+pub const HUMIDITY_PER_C: f32 = 4.0;
+/// A substrate cell counts as moist (habitability, humidity source) from
+/// this `sat` / film (≈ 0.3 of full).
+pub const MOIST_SAT: u8 = 80;
+/// Each update an air cell leaks `h / HUMIDITY_LEAK_DIV` (the lid is not
+/// perfectly tight), so humidity falls off gently with distance from
+/// water instead of saturating the whole air side.
+pub const HUMIDITY_LEAK_DIV: u16 = 1024;
+/// Night: humid air (≥ this) condenses on glass, rock and sand it touches,
+/// depositing `DEW_GAIN` per update and losing half of that itself
+/// (a pane fogs over in ≈ 15 min of night).
+pub const DEW_H: u8 = 200;
+pub const DEW_GAIN: u8 = 4;
+/// Glass dew fades by this much per update when the air beside it is dry.
+pub const DEW_FADE: u8 = 2;
+/// Evaporation (K2#8, very slow; water only): every `EVAP_EVERY` ticks the
+/// free surface of each column loses `EVAP_SAT_STEP` sat unless the air
+/// above is saturated (≥ `EVAP_STOP_H`). 255 sat / 10 s ≈ 42 min per
+/// physics row — the waterline drops visibly over hours.
+pub const EVAP_EVERY: u64 = 300;
+pub const EVAP_SAT_STEP: u8 = 1;
+pub const EVAP_STOP_H: u8 = 250;
