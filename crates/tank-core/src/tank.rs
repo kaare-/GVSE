@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bio::store::OWNER_BIAS;
+use crate::bio::store::{secretion_kind, BONE_OWNER, OWNER_BIAS, SHELL_OWNER};
 use crate::bio::{self, CellStore, Genome, GenomeStore};
 use crate::cell::Cell;
 use crate::clock::{self, day_factor};
@@ -136,7 +136,8 @@ impl Tank {
         }
         let grid = PhysicsGrid::new(visible_w, visible_h);
         let pixels = PixelLayer::new(visible_w, visible_h);
-        let coarse = CoarseField::new(visible_w, visible_h);
+        let mut coarse = CoarseField::new(visible_w, visible_h);
+        coarse.minerals.fill(bio::minerals::MINERAL_DEFAULT);
         let fines = vec![0.0; pixels.w as usize];
         let mut tank = Self {
             seed,
@@ -562,6 +563,67 @@ impl Tank {
         self.pixels.litter.get(idx).copied().unwrap_or(0)
     }
 
+    /// Calcium feed (K2#1): raise the dissolved-mineral field by `amount`
+    /// field units (`bio::minerals::MINERAL_Q` per m) in the water within
+    /// `r` physics cells of `(vx, vy)`.
+    pub fn add_calcium(&mut self, vx: i32, vy: i32, r: i32, amount: u8) {
+        let r = r.max(1);
+        let w = self.grid.visible_w();
+        let h = self.grid.visible_h();
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy > r * r {
+                    continue;
+                }
+                let (x, y) = (vx + dx, vy + dy);
+                if x < 0 || y < 0 || x >= w || y >= h {
+                    continue;
+                }
+                let c = self.grid.get_visible(x, y);
+                if !(c.is_open() && c.sat > 40) {
+                    continue;
+                }
+                let i = (y as usize) * (w as usize) + x as usize;
+                self.coarse.minerals[i] = self.coarse.minerals[i].saturating_add(amount);
+            }
+        }
+    }
+
+    /// Set the whole mineral field (harness / tests: `0` = mineral-free water).
+    pub fn set_minerals_all(&mut self, units: u8) {
+        self.coarse.minerals.fill(units);
+    }
+
+    /// Total dissolved minerals in field units.
+    pub fn mineral_total(&self) -> u64 {
+        bio::minerals::total(&self.coarse)
+    }
+
+    /// Mineral field units in the physics cell under a pixel.
+    pub fn minerals_at_pixel(&self, px: u16, py: u16) -> u8 {
+        self.coarse.minerals[bio::minerals::idx_of_pixel(&self.coarse, px, py)]
+    }
+
+    /// Dead secretion pixels: `(bone, shell)` counts.
+    pub fn secretion_counts(&self) -> (u32, u32) {
+        let mut bone = 0;
+        let mut shell = 0;
+        for &o in &self.pixels.owner {
+            if o == BONE_OWNER {
+                bone += 1;
+            } else if o == SHELL_OWNER {
+                shell += 1;
+            }
+        }
+        (bone, shell)
+    }
+
+    /// Owner value at a pixel (`BONE_OWNER` / `SHELL_OWNER` for secretions).
+    pub fn owner_at(&self, px: u16, py: u16) -> u32 {
+        let idx = (py as usize) * (self.pixels.w as usize) + px as usize;
+        self.pixels.owner.get(idx).copied().unwrap_or(0)
+    }
+
     /// Test rig: a full-size 3×3 cell pinned to the pane (film) so it
     /// cannot drift; `hard` gives it a WALL h 0.9 (dam rule).
     #[cfg(test)]
@@ -647,6 +709,7 @@ impl Tank {
             &mut self.genomes,
             &mut self.grid,
             &mut self.pixels,
+            &mut self.coarse,
             self.seed,
             self.tick_count,
             t_tank,
@@ -747,6 +810,12 @@ impl Tank {
         pixels::write_rgba(&self.grid, &self.pixels, out, &|owner| {
             if owner < OWNER_BIAS {
                 return None;
+            }
+            // Dead secretions (§a.4 S1/S2): BONE ivory, SHELL gray-blue.
+            match owner {
+                BONE_OWNER => return Some([0xEF, 0xE7, 0xDA]),
+                SHELL_OWNER => return Some([0x9F, 0xB3, 0xC8]),
+                _ => {}
             }
             let id = owner - OWNER_BIAS;
             let cell = cells.get(id)?;
@@ -985,6 +1054,15 @@ impl Tank {
                 }
             }
         }
+        for (_, o) in self.cells.iter_orgs() {
+            for sec in &o.secretions {
+                let (vx, vy) = bio::pixel_to_phys(sec.px, sec.py, vis_h);
+                match counts.iter_mut().find(|(k, _)| *k == (vx, vy)) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push(((vx, vy), 1)),
+                }
+            }
+        }
         for ((vx, vy), n) in counts {
             if n < TISSUE_DAM_PIXELS {
                 continue;
@@ -1033,6 +1111,9 @@ impl Tank {
                 if owner < OWNER_BIAS {
                     return 255;
                 }
+                if secretion_kind(owner).is_some() {
+                    return crate::consts::TISSUE_PASS_OTHER_Q8 as u8 / 2;
+                }
                 cells
                     .get(owner - OWNER_BIAS)
                     .map(|c| genomes.coeffs(c.genotype, c.mode).light_pass_q8)
@@ -1080,6 +1161,25 @@ impl Tank {
             if tool.kind == 10 {
                 // Glucose drip into the dissolved field.
                 self.drip_glucose(tool.x as i32, tool.y as i32, tool.r as i32, 180);
+                continue;
+            }
+            if tool.kind == 11 {
+                // Calcium feed: raise the local mineral field (K2#1).
+                self.add_calcium(tool.x as i32, tool.y as i32, tool.r as i32, 96);
+                continue;
+            }
+            if tool.kind == 12 {
+                // Detritus feed: a pinch of soft litter at the brush centre.
+                let vis_h = self.grid.visible_h() as u32;
+                let py_top = vis_h.saturating_sub(1).saturating_sub(tool.y as u32);
+                for sx in 0..3u16 {
+                    self.drop_litter(
+                        (tool.x as u32 * 3) as u16 + sx,
+                        (py_top * 3 + 1) as u16,
+                        128,
+                        bio::chem::LITTER_SOFT_CODE,
+                    );
+                }
                 continue;
             }
             if !need_push {

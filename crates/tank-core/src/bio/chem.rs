@@ -14,16 +14,21 @@ use crate::bio::fields::{add_litter, add_plain, deposit, open_idx, tile_of, Fiel
 use crate::bio::genome::GenomeStore;
 use crate::bio::profile::ModeCoeffs;
 use crate::bio::program::{heading_delta, keyed_potency_q8, ring_match_q8, Scalars};
-use crate::bio::store::{CellRec, CellStore, OWNER_BIAS};
+use crate::bio::minerals::{self, BONE_GLUCOSE_PER_UNIT};
+use crate::bio::store::{secretion_kind, secretion_units, CellRec, CellStore, OWNER_BIAS};
 use crate::consts::{FP, GLUCOSE_UNIT_FP, SHAPE_CAP, TICK_HZ};
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_u64;
-use crate::pixels::PixelLayer;
+use crate::pixels::{CoarseField, PixelLayer};
 
 /// Substrate codes (§b.3 key table): soft litter sits in the litter band
 /// 0–63, bone and shell in 192–255.
 pub const LITTER_SOFT_CODE: u8 = 32;
 pub const LITTER_BONE_CODE: u8 = 220;
+/// Accumulated Q8 contact damage that breaks one bone / shell pixel
+/// (hardness 1: 16× a bare cell pixel). Applied statelessly as a per-tick
+/// break chance of `potency / BONE_BREAK_Q8`.
+pub const BONE_BREAK_Q8: u32 = 4096;
 
 /// `CellRec::hit` flags: what damaged the cell since it last ran.
 pub const HIT_ENZYME: u8 = 1;
@@ -275,20 +280,47 @@ fn hit_living(
     true
 }
 
-/// Digest litter at `j` with `pot`; glucose appears at `own`.
-fn lyse_litter_px(pixels: &mut PixelLayer, j: usize, own: usize, pot: u32, h: u64) {
+/// Digest litter at `j` with `pot`; glucose appears at `own`. Bone litter
+/// (code ≥ 192) returns its minerals to the physics cell under `j` and a
+/// little glucose from the organic matrix.
+fn lyse_litter_px(pixels: &mut PixelLayer, coarse: &mut CoarseField, j: usize, own: usize, pot: u32, h: u64) {
     let l = pixels.litter[j];
     if l == 0 || pot == 0 {
         return;
     }
-    let take = frac_round(pot * 2, h)
-        .min(l as u32)
-        .min(255 - pixels.glucose[own] as u32) as u8;
+    let room = 255 - pixels.glucose[own] as u32;
+    let bone = pixels.litter_key[j] >= 192;
+    let mut take = frac_round(pot * 2, h).min(l as u32);
+    if bone {
+        take = take.min(room / BONE_GLUCOSE_PER_UNIT as u32);
+    } else {
+        take = take.min(room);
+    }
     if take == 0 {
         return;
     }
-    pixels.litter[j] -= take;
-    add_plain(pixels, Field::Glucose, own, take);
+    pixels.litter[j] -= take as u8;
+    if bone {
+        let pw = pixels.w as usize;
+        let ci = minerals::idx_of_pixel(coarse, (j % pw) as u16, (j / pw) as u16);
+        minerals::give(coarse, ci, take);
+        add_plain(pixels, Field::Glucose, own, (take * BONE_GLUCOSE_PER_UNIT as u32).min(255) as u8);
+    } else {
+        add_plain(pixels, Field::Glucose, own, take as u8);
+    }
+}
+
+/// Contact enzyme on a dead bone / shell pixel: a stateless break chance
+/// per tick; the broken pixel falls as bone litter where it stood.
+fn hit_secretion(cells: &mut CellStore, pixels: &mut PixelLayer, j: usize, pot: u32, h: u64) {
+    if pot == 0 || (h % BONE_BREAK_Q8 as u64) >= pot as u64 {
+        return;
+    }
+    let pw = pixels.w as usize;
+    let (x, y) = ((j % pw) as u16, (j / pw) as u16);
+    if let Some(kind) = cells.remove_secretion_at(pixels, x, y) {
+        add_litter(pixels, j, secretion_units(kind), LITTER_BONE_CODE);
+    }
 }
 
 fn litter_potency(mc: &ModeCoeffs, code: u8) -> u32 {
@@ -301,6 +333,7 @@ pub fn enzyme_act(
     cells: &mut CellStore,
     genomes: &GenomeStore,
     pixels: &mut PixelLayer,
+    coarse: &mut CoarseField,
     grid: &PhysicsGrid,
     world_seed: u64,
     tick: u64,
@@ -313,7 +346,9 @@ pub fn enzyme_act(
     for (k, &(j, own)) in r.iter().take(n).enumerate() {
         let h = hash_u64(world_seed, tick, id as u64 ^ ((k as u64) << 40), 0xC4_01);
         let owner = pixels.owner[j];
-        if owner >= OWNER_BIAS {
+        if secretion_kind(owner).is_some() {
+            hit_secretion(cells, pixels, j, litter_potency(mc, LITTER_BONE_CODE), h);
+        } else if owner >= OWNER_BIAS {
             let tid = owner - OWNER_BIAS;
             let Some(t) = cells.get(tid).copied() else {
                 continue;
@@ -330,7 +365,7 @@ pub fn enzyme_act(
         }
         if pixels.litter[j] > 0 {
             let pot = litter_potency(mc, pixels.litter_key[j]);
-            lyse_litter_px(pixels, j, own, pot, h >> 16);
+            lyse_litter_px(pixels, coarse, j, own, pot, h >> 16);
         }
     }
     // Sitting on litter is contact too.
@@ -341,7 +376,7 @@ pub fn enzyme_act(
             if pixels.litter[i] > 0 {
                 let pot = litter_potency(mc, pixels.litter_key[i]);
                 let h = hash_u64(world_seed, tick, id as u64 ^ ((i as u64) << 32), 0xC4_02);
-                lyse_litter_px(pixels, i, i, pot, h);
+                lyse_litter_px(pixels, coarse, i, i, pot, h);
             }
         }
     }
@@ -447,10 +482,18 @@ pub fn signal_act(
     out.cost += secretion_cost(mc.signal, tick) / 2;
 }
 
-/// A dead cell's soft mass becomes litter on its footprint, spilling onto
-/// the unowned ring when a pixel is full. Hard-walled cells leave bone.
-pub fn deposit_corpse(pixels: &mut PixelLayer, c: &CellRec, mut units: u32, hard: bool) {
-    let code = if hard { LITTER_BONE_CODE } else { LITTER_SOFT_CODE };
+/// A dead cell's soft mass becomes soft litter on its footprint, spilling
+/// onto the unowned ring when a pixel is full; the minerals of its walls
+/// become bone litter the same way (§a.3 detritus classes).
+pub fn deposit_corpse(pixels: &mut PixelLayer, c: &CellRec, soft_units: u32, bone_units: u32) {
+    deposit_litter(pixels, c, soft_units, LITTER_SOFT_CODE);
+    deposit_litter(pixels, c, bone_units, LITTER_BONE_CODE);
+}
+
+fn deposit_litter(pixels: &mut PixelLayer, c: &CellRec, mut units: u32, code: u8) {
+    if units == 0 {
+        return;
+    }
     let pw = pixels.w as usize;
     let put = |pixels: &mut PixelLayer, i: usize, units: &mut u32| {
         if *units == 0 {

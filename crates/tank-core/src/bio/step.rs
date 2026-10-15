@@ -8,9 +8,10 @@ use wk_material::MaterialId;
 use crate::bio::chem::{self, HIT_ENZYME, HIT_TOXIN};
 use crate::bio::fields::{add_plain, step_fields, Field};
 use crate::bio::genome::GenomeStore;
+use crate::bio::minerals;
 use crate::bio::profile::{ModeCoeffs, DIVIDE_AGE_UNIT_TICKS};
 use crate::bio::program::{glue_bond, heading_delta, ChildKind, Detach, Scalars};
-use crate::bio::store::{CellStore, NONE, OWNER_BIAS};
+use crate::bio::store::{secretion_kind, CellStore, EMPTY_OWNER, NONE, OWNER_BIAS};
 use crate::cell::Cell;
 use crate::consts::{
     ACTIVITY_FLOOR_Q8, ALGAE_COST_FP, BIRTH_ENERGY_FP, BOND_SHARE_DIV, FP, GLUCOSE_UNIT_FP,
@@ -18,7 +19,7 @@ use crate::consts::{
 };
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_u64;
-use crate::pixels::PixelLayer;
+use crate::pixels::{CoarseField, PixelLayer};
 use crate::tank::SimEvent;
 
 const FILM_STUCK_AGE: u16 = 45;
@@ -64,6 +65,7 @@ pub fn step(
     genomes: &mut GenomeStore,
     grid: &mut PhysicsGrid,
     pixels: &mut PixelLayer,
+    coarse: &mut CoarseField,
     world_seed: u64,
     tick: u64,
     t_tank: f32,
@@ -82,7 +84,8 @@ pub fn step(
         }
         move_free_cell(cells, genomes, grid, pixels, world_seed, tick, id);
         metabolise(
-            cells, genomes, grid, pixels, world_seed, tick, id, t_tank, lambda_scale_q8, &mut out,
+            cells, genomes, grid, pixels, coarse, world_seed, tick, id, t_tank, lambda_scale_q8,
+            &mut out,
         );
     }
     share_bond_energy(cells, genomes);
@@ -93,8 +96,32 @@ pub fn step(
         drift_bodies(cells, genomes, grid, pixels, world_seed, tick);
     }
     form_glue_bonds(cells, genomes, pixels);
-    step_fields(pixels, grid, tick);
+    rebuild_block(cells, genomes, pixels);
+    step_fields(pixels, grid, coarse, tick);
+    minerals::diffuse(coarse, grid, tick);
     out
+}
+
+/// Diffusion barrier mask (§b.3): hard living tissue (`h > 0.5`) and dead
+/// bone / shell pixels. Rebuilt every tick so it never goes stale.
+fn rebuild_block(cells: &CellStore, genomes: &GenomeStore, pixels: &mut PixelLayer) {
+    pixels.block.fill(0);
+    let pw = pixels.w as usize;
+    for (_, c) in cells.iter_alive() {
+        if !genomes.coeffs(c.genotype, c.mode).is_hard {
+            continue;
+        }
+        for dy in 0..c.h as usize {
+            for dx in 0..c.w as usize {
+                pixels.block[(c.py as usize + dy) * pw + c.px as usize + dx] = 1;
+            }
+        }
+    }
+    for (_, o) in cells.iter_orgs() {
+        for sec in &o.secretions {
+            pixels.block[(sec.py as usize) * pw + sec.px as usize] = 1;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -370,6 +397,7 @@ fn metabolise(
     genomes: &mut GenomeStore,
     grid: &mut PhysicsGrid,
     pixels: &mut PixelLayer,
+    coarse: &mut CoarseField,
     world_seed: u64,
     tick: u64,
     id: u32,
@@ -573,7 +601,7 @@ fn metabolise(
     let mut chem_out = chem::ChemOut::default();
     if mc.enzyme > 0 && mc.enzyme_gate.passes(&scalars) {
         chem::enzyme_act(
-            cells, genomes, pixels, grid, world_seed, tick, id, &cell, &mc, &mut chem_out,
+            cells, genomes, pixels, coarse, grid, world_seed, tick, id, &cell, &mc, &mut chem_out,
         );
         // Contact lysis of a dry soft-litter seat (litter band 0–63).
         if mc.enzyme_key < 64 {
@@ -661,9 +689,27 @@ fn metabolise(
     // ---- develop: grow, transition, brood release, divide
     if age % T_GROW == 0 && (cell.w < mc.shape_w || cell.h < mc.shape_h) {
         let cost = mc.birth_fp * strategy_q8 as i32 / 256;
-        if energy > cost + FP && cells.try_grow(pixels, id, mc.shape_w, mc.shape_h) {
-            if let Some(c) = cells.get_mut(id) {
-                c.energy -= cost;
+        if energy > cost + FP {
+            // The step adds a column (h px) or a row (w px); hard walls pay
+            // minerals per new pixel and wait when the water has none.
+            let (nw, nh) = if cell.w < mc.shape_w {
+                (cell.w + 1, cell.h)
+            } else {
+                (cell.w, cell.h + 1)
+            };
+            let new_px = (nw as u32 * nh as u32) - (cell.w as u32 * cell.h as u32);
+            let need = mc.mineral_px as u32 * new_px;
+            let ci = minerals::idx_of_pixel(coarse, cell.px, cell.py);
+            if minerals::available(coarse, ci) >= need {
+                if cells.blocked_by_foreign_shell(pixels, cell.org, cell.px, cell.py, nw, nh, id + OWNER_BIAS) {
+                    cells.crack_shells(pixels, cell.org, cell.px, cell.py, nw, nh);
+                }
+                if cells.try_grow(pixels, id, mc.shape_w, mc.shape_h) {
+                    minerals::take(coarse, ci, need);
+                    if let Some(c) = cells.get_mut(id) {
+                        c.energy -= cost;
+                    }
+                }
             }
         }
     }
@@ -677,7 +723,7 @@ fn metabolise(
         pixels.film[idx] = 40;
     }
 
-    if tick % 4 == (id as u64 % 4) && try_transition(cells, genomes, pixels, id, &scalars) {
+    if tick % 4 == (id as u64 % 4) && try_transition(cells, genomes, pixels, coarse, id, &scalars) {
         return;
     }
 
@@ -705,8 +751,8 @@ fn metabolise(
         && t_tank >= MITOSIS_FLOOR_C
         && cells.len() < LIVE_CAP
         && try_divide(
-            cells, genomes, grid, pixels, world_seed, tick, id, &mc, strategy_q8, lambda_m,
-            glue_key, out,
+            cells, genomes, grid, pixels, coarse, world_seed, tick, id, &mc, strategy_q8,
+            lambda_m, glue_key, out,
         )
     {
         out.divisions += 1;
@@ -737,7 +783,8 @@ fn die(
         let mc = genomes.coeffs(cell.genotype, cell.mode);
         let structure = mc.birth_fp as i64 * cell.area() as i64 * (255 - cell.damage as i64) / 255;
         let mass = structure as i32 + cell.energy.max(0);
-        chem::deposit_corpse(pixels, &cell, (mass / GLUCOSE_UNIT_FP) as u32, mc.is_hard);
+        let (soft, bone) = corpse_split(mc, cell.area(), (mass / GLUCOSE_UNIT_FP) as u32);
+        chem::deposit_corpse(pixels, &cell, soft, bone);
     }
     let to_film = cell.film || age > FILM_STUCK_AGE && near_solid(grid, cell.px, cell.py);
     let fragments = cells.kill(genomes, pixels, id, to_film, tick);
@@ -754,11 +801,21 @@ fn die(
     }
 }
 
+/// Split a corpse into soft litter (glucose units) and bone litter (the
+/// wall minerals, in field units). The glucose the bone band will later
+/// recover from the bone comes out of the soft share so mass is conserved.
+fn corpse_split(mc: &ModeCoeffs, area: i32, soft_units: u32) -> (u32, u32) {
+    let bone = mc.mineral_px as u32 * area as u32;
+    let soft = soft_units.saturating_sub(bone * minerals::BONE_GLUCOSE_PER_UNIT as u32);
+    (soft, bone)
+}
+
 /// First passing transition changes the mode in place (§b.4 item 5).
 fn try_transition(
     cells: &mut CellStore,
     genomes: &GenomeStore,
     pixels: &mut PixelLayer,
+    coarse: &mut CoarseField,
     id: u32,
     scalars: &Scalars,
 ) -> bool {
@@ -785,6 +842,21 @@ fn try_transition(
     let cost = if delta > 0 { delta } else { delta / 2 };
     if cell.energy - cost <= FP / 2 {
         return false;
+    }
+    // Harder walls draw minerals for the whole footprint (and wait for
+    // them); softer ones give theirs back to the water.
+    let m_delta = new.mineral_px as i32 - old.mineral_px as i32;
+    let ci = minerals::idx_of_pixel(coarse, cell.px, cell.py);
+    match m_delta.cmp(&0) {
+        std::cmp::Ordering::Greater => {
+            if !minerals::take(coarse, ci, m_delta as u32 * cell.area() as u32) {
+                return false;
+            }
+        }
+        std::cmp::Ordering::Less => {
+            minerals::give(coarse, ci, (-m_delta) as u32 * cell.area() as u32);
+        }
+        std::cmp::Ordering::Equal => {}
     }
     let new_mode = g.mode(target);
     let reps = if new_mode.n_children > 0 {
@@ -821,6 +893,7 @@ fn try_divide(
     genomes: &mut GenomeStore,
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
+    coarse: &mut CoarseField,
     world_seed: u64,
     tick: u64,
     parent: u32,
@@ -856,23 +929,12 @@ fn try_divide(
             }
             // Program exhausted: regrow a dead child slot instead (§b.5).
             return mc.regrow
-                && try_regrow(cells, genomes, pixels, parent, mc, strategy_q8, out);
+                && try_regrow(cells, genomes, pixels, coarse, parent, mc, strategy_q8, out);
         }
         (mode.children[child_idx as usize], child_idx, child_reps)
     };
     if spec.kind != ChildKind::Grow {
-        // Secretions land in B3 (2.3.4); skip the entry for now.
-        if let Some(c) = cells.get_mut(parent) {
-            c.child_idx = child_idx + 1;
-            c.child_reps = genomes
-                .genome(genotype)
-                .mode(cell.mode)
-                .children
-                .get(c.child_idx as usize)
-                .map(|ch| ch.repeat)
-                .unwrap_or(0);
-        }
-        return false;
+        return try_secrete(cells, genomes, grid, pixels, coarse, parent, spec.kind, spec.dir, child_idx, child_reps);
     }
     let immediate = matches!(spec.detach, Detach::Immediate);
     // Place the daughter adjacent to the footprint on the chosen side. Phase 2
@@ -893,7 +955,17 @@ fn try_divide(
     let (dx, dy) = spec.dir.delta(cell.heading);
     let mut nx = cell.px as i32 + side_offset(dx, cell.w);
     let mut ny = cell.py as i32 + side_offset(dy, cell.h);
-    if !seat_ok(nx, ny) {
+    // A body part growing into another organism's shell cracks it (§d.8).
+    let cracks = !immediate
+        && nx >= 0
+        && ny >= 0
+        && cells.blocked_by_foreign_shell(pixels, cell.org, nx as u16, ny as u16, 1, 1, 0)
+        && {
+            let (vx, vy) = pixel_to_phys(nx as u16, ny as u16, vis_h);
+            let seat = grid.get_visible(vx, vy);
+            seat.is_open() && seat.sat > 40
+        };
+    if !cracks && !seat_ok(nx, ny) {
         if !immediate {
             return false;
         }
@@ -924,6 +996,15 @@ fn try_divide(
     };
     if cell.energy - cost < FP {
         return false;
+    }
+    // Hard walls pay minerals for the daughter's first pixel, or wait.
+    let m_need = child_cc.mineral_px as u32;
+    let ci = minerals::idx_of_pixel(coarse, nx as u16, ny as u16);
+    if !minerals::take(coarse, ci, m_need) {
+        return false;
+    }
+    if cracks {
+        cells.crack_shells(pixels, cell.org, nx as u16, ny as u16, 1, 1);
     }
     let daughter_energy = if immediate {
         child_cc.build_fp - child_cc.birth_fp + BIRTH_ENERGY_FP
@@ -996,6 +1077,7 @@ fn try_divide(
         }
     };
     let Some(did) = daughter else {
+        minerals::give(coarse, ci, m_need);
         return false;
     };
     if let Some(c) = cells.get_mut(parent) {
@@ -1038,11 +1120,139 @@ fn try_divide(
     true
 }
 
+/// `Secrete(BONE | SHELL)` child entry (§b.3 dead matter): lay one dead
+/// pixel on the chosen side, `1 g + 2 m` (bone) or `0.8 g + 3 m` (shell),
+/// drawn from the local mineral field — the entry *waits* while the water
+/// holds too little (K2#1). Repeats extend the line pixel by pixel; when
+/// the line meets a cell of the same body (an egg), the pixels wrap that
+/// cell instead. Nowhere left to lay → the entry is skipped.
+fn try_secrete(
+    cells: &mut CellStore,
+    genomes: &GenomeStore,
+    grid: &PhysicsGrid,
+    pixels: &mut PixelLayer,
+    coarse: &mut CoarseField,
+    parent: u32,
+    kind: ChildKind,
+    dir: crate::bio::program::Dir,
+    child_idx: u8,
+    child_reps: u8,
+) -> bool {
+    let Some(cell) = cells.get(parent).copied() else {
+        return false;
+    };
+    let vis_h = grid.visible_h() as u32;
+    let pw = pixels.w as i32;
+    let ph = pixels.h as i32;
+    let water = |x: i32, y: i32| -> bool {
+        let (vx, vy) = pixel_to_phys(x as u16, y as u16, vis_h);
+        let seat = grid.get_visible(vx, vy);
+        seat.is_open() && seat.sat > 40
+    };
+    let free = |pixels: &PixelLayer, x: i32, y: i32| -> bool {
+        x >= 0
+            && y >= 0
+            && x < pw
+            && y < ph
+            && pixels.owner[(y * pw + x) as usize] == EMPTY_OWNER
+            && water(x, y)
+    };
+    let (dx, dy) = dir.delta(cell.heading);
+    let mut x = cell.px as i32 + side_offset(dx, cell.w);
+    let mut y = cell.py as i32 + side_offset(dy, cell.h);
+    let mut seat: Option<(i32, i32)> = None;
+    for _ in 0..8 {
+        if x < 0 || y < 0 || x >= pw || y >= ph {
+            break;
+        }
+        let owner = pixels.owner[(y * pw + x) as usize];
+        if owner == EMPTY_OWNER {
+            if water(x, y) {
+                seat = Some((x, y));
+            }
+            break;
+        }
+        if secretion_kind(owner).is_some() {
+            if cells.secretion_org_at(x as u16, y as u16) != Some(cell.org) {
+                break;
+            }
+            x += dx;
+            y += dy;
+            continue;
+        }
+        // A living cell: wrap it if it is ours.
+        let Some(t) = cells.get(owner - OWNER_BIAS) else {
+            break;
+        };
+        if t.org != cell.org {
+            break;
+        }
+        let (x0, y0) = (t.px as i32, t.py as i32);
+        let (x1, y1) = (x0 + t.w as i32 - 1, y0 + t.h as i32 - 1);
+        let mut ring: Vec<(i32, i32)> = Vec::with_capacity(16);
+        for xx in x0..=x1 {
+            ring.push((xx, y0 - 1));
+            ring.push((xx, y1 + 1));
+        }
+        for yy in y0..=y1 {
+            ring.push((x0 - 1, yy));
+            ring.push((x1 + 1, yy));
+        }
+        seat = ring.into_iter().find(|&(rx, ry)| free(pixels, rx, ry));
+        break;
+    }
+    let advance = |cells: &mut CellStore, consumed: bool| {
+        if let Some(c) = cells.get_mut(parent) {
+            let left = if consumed { child_reps.saturating_sub(1) } else { 0 };
+            if left == 0 {
+                c.child_idx = child_idx.saturating_add(1);
+                c.child_reps = genomes
+                    .genome(cell.genotype)
+                    .mode(cell.mode)
+                    .children
+                    .get(c.child_idx as usize)
+                    .map(|ch| ch.repeat)
+                    .unwrap_or(0);
+            } else {
+                c.child_idx = child_idx;
+                c.child_reps = left;
+            }
+        }
+    };
+    let Some((sx, sy)) = seat else {
+        advance(cells, false);
+        return false;
+    };
+    let (cost, m_units) = match kind {
+        ChildKind::SecreteShell => (FP * 4 / 5, minerals::SHELL_M_UNITS as u32),
+        _ => (FP, minerals::BONE_M_UNITS as u32),
+    };
+    if cell.energy - cost < FP {
+        return false;
+    }
+    let ci = minerals::idx_of_pixel(coarse, sx as u16, sy as u16);
+    if !minerals::take(coarse, ci, m_units) {
+        return false;
+    }
+    if !cells.add_secretion(pixels, cell.org, sx as u16, sy as u16, kind) {
+        minerals::give(coarse, ci, m_units);
+        advance(cells, false);
+        return false;
+    }
+    if let Some(c) = cells.get_mut(parent) {
+        c.energy -= cost;
+        c.flash = 2;
+    }
+    advance(cells, true);
+    true
+}
+
 /// Regrow the first dead child slot at full build cost.
 fn try_regrow(
     cells: &mut CellStore,
     genomes: &mut GenomeStore,
     pixels: &mut PixelLayer,
+    coarse: &mut CoarseField,
     parent: u32,
     _mc: &ModeCoeffs,
     strategy_q8: u32,
@@ -1063,7 +1273,12 @@ fn try_regrow(
     if cell.energy - cost < FP {
         return false;
     }
+    let ci = minerals::idx_of_pixel(coarse, cell.px, cell.py);
+    if !minerals::take(coarse, ci, cc.mineral_px as u32) {
+        return false;
+    }
     let Some(did) = cells.regrow_slot(genomes, pixels, org, slot, BIRTH_ENERGY_FP / 2) else {
+        minerals::give(coarse, ci, cc.mineral_px as u32);
         return false;
     };
     if let Some(c) = cells.get_mut(parent) {
@@ -1170,8 +1385,8 @@ fn shed(
         let refund = vmc.birth_fp / 2;
         // The other half of the structure, and her store, fall as litter.
         let mass = vmc.birth_fp * v.area() - refund + v.energy.max(0);
-        let hard = vmc.is_hard;
-        chem::deposit_corpse(pixels, &v, (mass / GLUCOSE_UNIT_FP) as u32, hard);
+        let (soft, bone) = corpse_split(vmc, v.area(), (mass / GLUCOSE_UNIT_FP) as u32);
+        chem::deposit_corpse(pixels, &v, soft, bone);
         let _ = cells.kill(genomes, pixels, vid, false, tick);
         out.deaths += 1;
         out.death_causes[3] += 1;

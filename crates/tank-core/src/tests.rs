@@ -565,14 +565,15 @@ fn sticky_algae_form_glue_attachments() {
 #[test]
 fn enzyme_field_decays_and_blurs() {
     use crate::bio::fields::{deposit, step_fields, KeyedField};
-    use crate::pixels::PixelLayer;
+    use crate::pixels::{CoarseField, PixelLayer};
     let grid = water_grid(8, 8);
     let mut pixels = PixelLayer::new(8, 8);
+    let mut coarse = CoarseField::new(8, 8);
     let idx = 10 * pixels.w as usize + 10;
     deposit(&mut pixels, KeyedField::Enzyme, idx, 200, 90);
     assert_eq!(pixels.enzyme_amt[idx], 200);
     assert!(pixels.fields_active);
-    step_fields(&mut pixels, &grid, 0);
+    step_fields(&mut pixels, &grid, &mut coarse, 0);
     assert!(pixels.enzyme_amt[idx] < 200, "decay should reduce amount");
     let neigh = idx + 1;
     assert!(
@@ -793,15 +794,16 @@ fn water_grid(w: u32, h: u32) -> crate::grid::PhysicsGrid {
 #[test]
 fn chamber_holds_enzyme_and_open_water_does_not() {
     use crate::bio::fields::{deposit, step_fields, KeyedField};
-    use crate::pixels::PixelLayer;
+    use crate::pixels::{CoarseField, PixelLayer};
     let grid = water_grid(16, 16);
+    let mut coarse = CoarseField::new(16, 16);
     let pw = 48usize;
     // Open-water plume: one emitter at (10, 10).
     let mut open = PixelLayer::new(16, 16);
     let src = 10 * pw + 10;
     for t in 0..200u64 {
         deposit(&mut open, KeyedField::Enzyme, src, 32, 90);
-        step_fields(&mut open, &grid, t);
+        step_fields(&mut open, &grid, &mut coarse, t);
     }
     let total_open: u32 = open.enzyme_amt.iter().map(|&a| a as u32).sum();
     let nonzero = open.enzyme_amt.iter().filter(|&&a| a > 0).count() as u32;
@@ -835,7 +837,7 @@ fn chamber_holds_enzyme_and_open_water_does_not() {
         for &s in &seats {
             deposit(&mut cham, KeyedField::Enzyme, s, 32, 90);
         }
-        step_fields(&mut cham, &grid, t);
+        step_fields(&mut cham, &grid, &mut coarse, t);
     }
     let mut inside = 0u32;
     for y in 20..23usize {
@@ -1075,4 +1077,139 @@ fn corpses_become_litter_that_settles() {
     let (pw, ph) = tank.pixel_size();
     let floor: u64 = (0..pw as u16).map(|px| tank.litter_at(px, (ph - 1) as u16) as u64).sum();
     assert_eq!(floor, total, "all litter settled onto the floor row");
+}
+
+/// 2.3.4 — K2#1 mineral cap: in mineral-free water a hard-walled body
+/// cannot grow a single part; a calcium feed lets it build, and the feed
+/// is consumed.
+#[test]
+fn hard_walls_wait_for_minerals_until_calcium_is_fed() {
+    use crate::bio::Genome;
+    let mut tank = water_box(21, 32, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    tank.set_minerals_all(0);
+    let id = tank.seed_genome_at(48, 50, Genome::chamber_predator()).expect("seed");
+    tank.pin_cell_for_test(id);
+    for _ in 0..1500 {
+        tank.tick(&day());
+    }
+    assert_eq!(tank.org_slot_count(id), 1, "no hard part may grow without minerals");
+    assert!(tank.cell(id).is_some(), "the seed itself lives on");
+    let (vx, vy) = crate::bio::pixel_to_phys(48, 50, 24);
+    tank.add_calcium(vx, vy, 3, 128);
+    let fed = tank.mineral_total();
+    assert!(fed > 0);
+    let mut built = 0;
+    for _ in 0..2500 {
+        tank.tick(&day());
+        built = built.max(tank.org_slot_count(id));
+        if built >= 4 {
+            break;
+        }
+    }
+    assert!(built >= 4, "calcium should unblock the body (got {built} cells)");
+    assert!(tank.mineral_total() < fed, "building hard walls consumes minerals");
+}
+
+/// 2.3.4 — BONE secretion: a cell lays dead bone pixels one by one along
+/// its heading, each costing `2 m`; when the body dies its bone stays as
+/// bone litter, and a bone-band enzyme returns those minerals to the water.
+#[test]
+fn bone_spine_grows_pixel_by_pixel_and_bone_eaters_recycle_it() {
+    use crate::bio::store::BONE_OWNER;
+    use crate::bio::{Block, Entry, Genome};
+    let mut tank = water_box(23, 24, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    let m0 = tank.mineral_total();
+    let id = tank.seed_genome_at(36, 40, Genome::spiny()).expect("seed");
+    tank.pin_cell_for_test(id);
+    let mut bone = 0;
+    for _ in 0..1500 {
+        tank.tick(&day());
+        bone = tank.secretion_counts().0;
+        if bone >= 3 {
+            break;
+        }
+    }
+    assert_eq!(bone, 3, "three bone pixels should be laid");
+    for k in 1..=3u16 {
+        assert_eq!(tank.owner_at(36, 40 - k), BONE_OWNER, "spine extends along the heading (up)");
+    }
+    let spent = m0 - tank.mineral_total();
+    assert_eq!(spent, 3 * crate::bio::minerals::BONE_M_UNITS as u64, "2 m per bone pixel");
+    // The body dies: its bone falls as bone litter.
+    assert!(tank.kill_cell(id));
+    assert_eq!(tank.secretion_counts().0, 0);
+    let bone_litter: u64 = (1..=3u16).map(|k| tank.litter_at(36, 40 - k) as u64).sum();
+    assert_eq!(bone_litter, spent, "bone keeps its minerals as litter");
+    // A bone eater (ENZYME key 220) in the dark digests it and frees minerals.
+    let mut eater = Genome::algae();
+    eater.modes[0].entries[0] = Entry::with_params(Block::Enzyme, 4, 220, 24);
+    for _ in 0..600 {
+        tank.tick(&dark());
+    }
+    // The litter has settled onto the floor row; the eater sits on it.
+    let (_, ph) = tank.pixel_size();
+    let floor = (ph - 1) as u16;
+    assert_eq!(tank.litter_at(36, floor) as u64, spent, "bone litter settles to the floor");
+    let eid = tank.seed_genome_at(36, floor - 1, eater).expect("eater");
+    tank.pin_cell_for_test(eid);
+    let m1 = tank.mineral_total();
+    let before = tank.litter_total();
+    for _ in 0..600 {
+        tank.tick(&dark());
+    }
+    let after = tank.litter_total();
+    assert!(after < before, "bone litter is digested ({before} → {after})");
+    assert_eq!(tank.mineral_total() - m1, before - after, "lysed bone returns its minerals");
+}
+
+/// 2.3.4 / d.8 — SHELL: the egg layer wraps her brood daughter in shell;
+/// after release the hatchling grows a part and cracks the shell, which
+/// falls as bone litter.
+#[test]
+fn shell_wraps_the_egg_and_cracks_when_the_hatchling_grows() {
+    use crate::bio::Genome;
+    let mut tank = water_box(29, 24, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank.seed_genome_at(36, 40, Genome::egg_layer()).expect("seed");
+    tank.pin_cell_for_test(id);
+    let mut max_shell = 0;
+    let mut released = None;
+    for _ in 0..6000 {
+        tank.tick(&day());
+        max_shell = max_shell.max(tank.secretion_counts().1);
+        while let Some(ev) = tank.poll_event() {
+            if ev.kind == crate::bio::ev::BROOD_RELEASED && released.is_none() {
+                released = Some(ev.arg0);
+            }
+        }
+        if released.is_some() && max_shell >= 3 {
+            break;
+        }
+    }
+    assert_eq!(max_shell, 3, "the egg should be wrapped in three shell pixels");
+    let hatchling = released.expect("the egg is released");
+    let shell_at_release = tank.secretion_counts().1;
+    let mut cracked = false;
+    for _ in 0..4000 {
+        tank.tick(&day());
+        let n = tank.cells().org(hatchling).map(|o| o.n_alive).unwrap_or(0);
+        if n >= 2 {
+            cracked = true;
+            break;
+        }
+    }
+    assert!(cracked, "the hatchling should grow its second cell through the shell");
+    assert!(
+        tank.secretion_counts().1 < shell_at_release,
+        "growing through the shell removes a shell pixel"
+    );
+    let (pw, ph) = tank.pixel_size();
+    let bone_litter: u64 = (0..pw as u16)
+        .flat_map(|px| (0..ph as u16).map(move |py| (px, py)))
+        .filter(|&(px, py)| tank.litter_at(px, py) > 0)
+        .map(|(px, py)| tank.litter_at(px, py) as u64)
+        .sum();
+    assert!(bone_litter >= crate::bio::minerals::SHELL_M_UNITS as u64, "the cracked shell is bone litter");
 }

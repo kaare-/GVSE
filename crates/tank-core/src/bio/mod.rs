@@ -1,12 +1,14 @@
 //! Phase 2 biology. B0: free algae cells, interned genomes, glass film.
 //! B1: profiles, growth, stress. B2: mode-program bodies, realised map,
 //! GLUE colonies, pace law, brood detach. B3: tiled keyed fields, contact
-//! chemistry (enzyme / toxin / needle / signal / receptor), litter, cilia.
+//! chemistry (enzyme / toxin / needle / signal / receptor), litter, minerals,
+//! bone / shell secretions, cilia.
 #![allow(clippy::too_many_arguments)]
 
 pub mod chem;
 pub mod fields;
 pub mod genome;
+pub mod minerals;
 pub mod profile;
 pub mod program;
 pub mod step;

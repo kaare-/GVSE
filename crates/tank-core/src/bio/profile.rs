@@ -696,6 +696,8 @@ pub struct ModeCoeffs {
     pub sacrifice_order: u8,
     pub regrow: bool,
     pub is_hard: bool,
+    /// WALL mineral cost per pixel in field units (§a.4 #7: `2·h` m per unit).
+    pub mineral_px: u8,
 }
 
 impl ModeCoeffs {
@@ -751,6 +753,7 @@ impl ModeCoeffs {
             sacrifice_order: mode.sacrifice_order,
             regrow: mode.regrow,
             is_hard: false,
+            mineral_px: 0,
         };
         let mut mg_s = 0i64;
         for i in 0..mode.n_entries as usize {
@@ -824,6 +827,7 @@ impl ModeCoeffs {
         c.upkeep_units_fp_tick = (mg_s * FP as i64 / (1000 * TICK_HZ as i64)) as i32;
         c.store_units_fp = STORE_PER_UNIT_FP * c.store as i32;
         c.is_hard = c.wall_h > 128;
+        c.mineral_px = crate::bio::minerals::wall_units_px(c.wall_units, c.wall_h);
         // Light passthrough: PHOTO absorbs 50 %, other tissue 25 %,
         // TRANSPARENT passes 95 %, WALL h cuts passthrough.
         let mut pass: u32 = if c.photo > 0 {

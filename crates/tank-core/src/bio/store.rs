@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::bio::genome::GenomeStore;
-use crate::bio::program::Gate;
+use crate::bio::program::{ChildKind, Gate};
 use crate::consts::MAX_SLOTS;
 use crate::hash::hash_u64;
 use crate::pixels::PixelLayer;
@@ -18,6 +18,47 @@ pub const EMPTY_OWNER: u32 = 0;
 pub const OWNER_BIAS: u32 = 1;
 pub const NONE: u32 = u32::MAX;
 pub const NONE16: u16 = u16::MAX;
+/// Dead secretion pixels (§b.3): owned by an organism through
+/// `OrgRec::secretions`, never by a cell. They block placement, drift,
+/// litter and the fields like living tissue does.
+pub const BONE_OWNER: u32 = u32::MAX - 1;
+pub const SHELL_OWNER: u32 = u32::MAX - 2;
+
+/// Which dead secretion an owner value stands for, if any.
+#[inline]
+pub fn secretion_kind(owner: u32) -> Option<ChildKind> {
+    match owner {
+        BONE_OWNER => Some(ChildKind::SecreteBone),
+        SHELL_OWNER => Some(ChildKind::SecreteShell),
+        _ => None,
+    }
+}
+
+/// Owner value for a secretion kind (`Grow` is not a secretion).
+#[inline]
+pub fn secretion_owner(kind: ChildKind) -> u32 {
+    match kind {
+        ChildKind::SecreteShell => SHELL_OWNER,
+        _ => BONE_OWNER,
+    }
+}
+
+/// Mineral units a secretion pixel holds (its bone-litter mass).
+#[inline]
+pub fn secretion_units(kind: ChildKind) -> u8 {
+    match kind {
+        ChildKind::SecreteShell => crate::bio::minerals::SHELL_M_UNITS,
+        _ => crate::bio::minerals::BONE_M_UNITS,
+    }
+}
+
+/// One dead bone / shell pixel attached to an organism.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Secretion {
+    pub px: u16,
+    pub py: u16,
+    pub kind: ChildKind,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CellRec {
@@ -134,6 +175,9 @@ pub struct OrgRec {
     pub body_cost_fp: i32,
     /// Birth tick, for inspect.
     pub born_tick: u64,
+    /// Dead bone / shell pixels this body has laid (rigid, no upkeep).
+    #[serde(default)]
+    pub secretions: Vec<Secretion>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +269,7 @@ impl CellStore {
             n_alive: 0,
             body_cost_fp: 0,
             born_tick: tick,
+            secretions: Vec::new(),
         };
         if let Some(id) = self.org_free.pop() {
             self.orgs[id as usize] = rec;
@@ -571,27 +616,149 @@ impl CellStore {
         }
         if seed_died {
             // Everything downstream has re-rooted; the old body is gone.
-            self.retire_org(org_id);
-        } else if let Some(o) = self.orgs.get_mut(org_id as usize) {
-            if o.n_alive == 0 {
-                o.alive = false;
-                o.slots = Vec::new();
-                self.org_free.push(org_id);
-            }
+            self.retire_org(pixels, org_id);
+        } else if self.orgs.get(org_id as usize).is_some_and(|o| o.n_alive == 0) {
+            self.retire_org(pixels, org_id);
         }
         self.free.push(id);
         fragments
     }
 
-    fn retire_org(&mut self, org_id: u32) {
-        if let Some(o) = self.orgs.get_mut(org_id as usize) {
-            if o.alive {
-                o.alive = false;
-                o.slots = Vec::new();
-                o.n_alive = 0;
-                self.org_free.push(org_id);
+    /// An organism with no living cell is gone; its bone and shell stay
+    /// behind as bone litter (§a.4 S1).
+    fn retire_org(&mut self, pixels: &mut PixelLayer, org_id: u32) {
+        let Some(o) = self.orgs.get_mut(org_id as usize) else {
+            return;
+        };
+        if !o.alive {
+            return;
+        }
+        o.alive = false;
+        o.slots = Vec::new();
+        o.n_alive = 0;
+        let secretions = std::mem::take(&mut o.secretions);
+        self.org_free.push(org_id);
+        for sec in secretions {
+            let idx = (sec.py as usize) * (pixels.w as usize) + sec.px as usize;
+            if pixels.owner[idx] == secretion_owner(sec.kind) {
+                pixels.owner[idx] = EMPTY_OWNER;
+            }
+            crate::bio::fields::add_litter(
+                pixels,
+                idx,
+                secretion_units(sec.kind),
+                crate::bio::chem::LITTER_BONE_CODE,
+            );
+        }
+    }
+
+    /// Lay a dead bone / shell pixel for `org_id` at a free pixel.
+    pub fn add_secretion(
+        &mut self,
+        pixels: &mut PixelLayer,
+        org_id: u32,
+        px: u16,
+        py: u16,
+        kind: ChildKind,
+    ) -> bool {
+        let idx = (py as usize) * (pixels.w as usize) + px as usize;
+        if idx >= pixels.owner.len() || pixels.owner[idx] != EMPTY_OWNER {
+            return false;
+        }
+        let Some(o) = self.orgs.get_mut(org_id as usize) else {
+            return false;
+        };
+        if !o.alive || o.secretions.len() >= MAX_SLOTS * 2 {
+            return false;
+        }
+        o.secretions.push(Secretion { px, py, kind });
+        pixels.owner[idx] = secretion_owner(kind);
+        true
+    }
+
+    /// Organism owning the secretion pixel at `(px, py)`.
+    pub fn secretion_org_at(&self, px: u16, py: u16) -> Option<u32> {
+        self.orgs
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.alive && !o.secretions.is_empty())
+            .find(|(_, o)| o.secretions.iter().any(|s| s.px == px && s.py == py))
+            .map(|(i, _)| i as u32)
+    }
+
+    /// Detach the secretion pixel at `(px, py)` from its organism and free
+    /// the pixel. Returns its kind.
+    pub fn remove_secretion_at(&mut self, pixels: &mut PixelLayer, px: u16, py: u16) -> Option<ChildKind> {
+        let idx = (py as usize) * (pixels.w as usize) + px as usize;
+        let kind = secretion_kind(*pixels.owner.get(idx)?)?;
+        pixels.owner[idx] = EMPTY_OWNER;
+        if let Some(org) = self.secretion_org_at(px, py) {
+            let o = &mut self.orgs[org as usize];
+            o.secretions.retain(|s| !(s.px == px && s.py == py));
+        }
+        Some(kind)
+    }
+
+    /// Shell cracking (§d.8): shell pixels of *another* organism inside the
+    /// rectangle a cell of `org_id` is growing into are removed and fall
+    /// as bone litter. Returns true when the rectangle is now free of
+    /// foreign shell.
+    pub fn crack_shells(
+        &mut self,
+        pixels: &mut PixelLayer,
+        org_id: u32,
+        px: u16,
+        py: u16,
+        w: u8,
+        h: u8,
+    ) -> bool {
+        let pw = pixels.w as usize;
+        for dy in 0..h as u16 {
+            for dx in 0..w as u16 {
+                let (x, y) = (px + dx, py + dy);
+                if x as u32 >= pixels.w || y as u32 >= pixels.h {
+                    return false;
+                }
+                let idx = (y as usize) * pw + x as usize;
+                if pixels.owner[idx] != SHELL_OWNER {
+                    continue;
+                }
+                if self.secretion_org_at(x, y) == Some(org_id) {
+                    return false;
+                }
+                self.remove_secretion_at(pixels, x, y);
+                crate::bio::fields::add_litter(
+                    pixels,
+                    idx,
+                    secretion_units(ChildKind::SecreteShell),
+                    crate::bio::chem::LITTER_BONE_CODE,
+                );
             }
         }
+        true
+    }
+
+    /// True when the rectangle is blocked only by another organism's shell.
+    pub fn blocked_by_foreign_shell(&self, pixels: &PixelLayer, org_id: u32, px: u16, py: u16, w: u8, h: u8, owner: u32) -> bool {
+        let pw = pixels.w as usize;
+        let mut any = false;
+        for dy in 0..h as u16 {
+            for dx in 0..w as u16 {
+                let (x, y) = (px + dx, py + dy);
+                if x as u32 >= pixels.w || y as u32 >= pixels.h {
+                    return false;
+                }
+                let cur = pixels.owner[(y as usize) * pw + x as usize];
+                if cur == EMPTY_OWNER || cur == owner {
+                    continue;
+                }
+                if cur != SHELL_OWNER || self.secretion_org_at(x, y) == Some(org_id) {
+                    return false;
+                }
+                any = true;
+            }
+        }
+        any
     }
 
     /// Detach a brood daughter: her subtree becomes a new organism of the
@@ -810,8 +977,24 @@ impl CellStore {
             .filter(|s| s.cell != NONE)
             .map(|s| s.cell)
             .collect();
+        let secretions = o.secretions.clone();
         let pw = pixels.w as i32;
         let ph = pixels.h as i32;
+        // A destination pixel is free when empty, or held by this body
+        // (a living cell of it or one of its own secretions).
+        let own_pixel = |pixels: &PixelLayer, idx: usize, x: i32, y: i32| -> bool {
+            let owner = pixels.owner[idx];
+            if owner == EMPTY_OWNER {
+                return true;
+            }
+            if secretion_kind(owner).is_some() {
+                return secretions.iter().any(|s| s.px as i32 == x && s.py as i32 == y);
+            }
+            if owner < OWNER_BIAS {
+                return false;
+            }
+            matches!(self.cells.get((owner - OWNER_BIAS) as usize), Some(oc) if oc.alive && oc.org == org_id)
+        };
         for &id in &ids {
             let Some(c) = self.get(id) else {
                 return false;
@@ -823,24 +1006,28 @@ impl CellStore {
             }
             for yy in 0..c.h as i32 {
                 for xx in 0..c.w as i32 {
-                    let idx = ((ny + yy) * pw + nx + xx) as usize;
-                    let owner = pixels.owner[idx];
-                    if owner == EMPTY_OWNER {
-                        continue;
-                    }
-                    if owner < OWNER_BIAS {
+                    let (x, y) = (nx + xx, ny + yy);
+                    if !own_pixel(pixels, (y * pw + x) as usize, x, y) {
                         return false;
                     }
-                    match self.cells.get((owner - OWNER_BIAS) as usize) {
-                        Some(oc) if oc.alive && oc.org == org_id => {}
-                        _ => return false,
-                    }
                 }
+            }
+        }
+        for s in &secretions {
+            let (x, y) = (s.px as i32 + dx, s.py as i32 + dy);
+            if x < 0 || y < 0 || x >= pw || y >= ph || !own_pixel(pixels, (y * pw + x) as usize, x, y) {
+                return false;
             }
         }
         for &id in &ids {
             let c = self.cells[id as usize];
             release_rect(pixels, c.px, c.py, c.w, c.h, id + OWNER_BIAS);
+        }
+        for s in &secretions {
+            let idx = (s.py as i32 * pw + s.px as i32) as usize;
+            if pixels.owner[idx] == secretion_owner(s.kind) {
+                pixels.owner[idx] = EMPTY_OWNER;
+            }
         }
         for &id in &ids {
             let c = &mut self.cells[id as usize];
@@ -852,6 +1039,12 @@ impl CellStore {
         if let Some(o) = self.orgs.get_mut(org_id as usize) {
             o.origin_x += dx;
             o.origin_y += dy;
+            for s in o.secretions.iter_mut() {
+                s.px = (s.px as i32 + dx) as u16;
+                s.py = (s.py as i32 + dy) as u16;
+                let idx = (s.py as i32 * pw + s.px as i32) as usize;
+                pixels.owner[idx] = secretion_owner(s.kind);
+            }
         }
         true
     }

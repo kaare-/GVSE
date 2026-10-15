@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use crate::bio::profile::{Block, Entry, Mode, ModeCoeffs};
 use crate::bio::program::{
-    rewire_child, rewire_transition, ChildKind, ChildSpec, Dir, Gate, HeadingRule, Scalar,
-    Transition,
+    rewire_child, rewire_transition, ChildKind, ChildSpec, Detach, Dir, Gate, HeadingRule,
+    Scalar, Transition,
 };
 use crate::consts::{BASE_AGE_S, LAMBDA0_MILLI, MAX_MODES};
 use crate::hash::hash_u64;
@@ -313,6 +313,62 @@ impl Genome {
         m.push_entry(Entry::with_params(Block::Receptor, 1, 90, 0));
         m.push_child(ChildSpec::propagule(0, 15));
         g.modes.push(m);
+        g
+    }
+
+    /// Bone spine: PHOTO 4, STORE 2; lays three BONE pixels ahead
+    /// (`1 g + 2 m` each, §a.4 S1) before releasing propagules.
+    pub fn spiny() -> Self {
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 4));
+        m.push_entry(Entry::new(Block::Store, 2));
+        m.push_child(ChildSpec {
+            dir: Dir::Ahead,
+            mode: 0,
+            kind: ChildKind::SecreteBone,
+            bond: 255,
+            repeat: 3,
+            detach: Detach::Never,
+        });
+        m.push_child(ChildSpec::propagule(0, 15));
+        g.modes.push(m);
+        g
+    }
+
+    /// d.8-lite egg layer: the base lays a brood daughter ahead, wraps her
+    /// in SHELL (`0.8 g + 3 m` per pixel, §a.4 S2) and releases her when
+    /// her `age_frac ≥ 0.3`; the hatchling (mode 1) then grows a 2-cell
+    /// body, cracking the shell. Mode 1 = PHOTO 4, STORE 1, one part Ahead.
+    pub fn egg_layer() -> Self {
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut base = Mode::blank();
+        base.push_entry(Entry::new(Block::Photo, 4));
+        base.push_entry(Entry::new(Block::Store, 4));
+        base.push_child(crate::bio::profile::child_brood(
+            Dir::Ahead,
+            1,
+            120,
+            Gate::above(Scalar::AgeFrac, 77),
+        ));
+        base.push_child(ChildSpec {
+            dir: Dir::Ahead,
+            mode: 0,
+            kind: ChildKind::SecreteShell,
+            bond: 255,
+            repeat: 3,
+            detach: Detach::Never,
+        });
+        base.divide_when.energy_frac = 200;
+        let mut hatch = Mode::blank();
+        hatch.push_entry(Entry::new(Block::Photo, 4));
+        hatch.push_entry(Entry::new(Block::Store, 1));
+        hatch.push_child(ChildSpec::part(Dir::Ahead, 1, 200, 1));
+        hatch.divide_when.energy_frac = 100;
+        g.modes.push(base);
+        g.modes.push(hatch);
         g
     }
 

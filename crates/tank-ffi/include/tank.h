@@ -15,7 +15,7 @@ typedef struct TankHandle TankHandle;
 typedef struct Carried Carried;
 
 typedef struct ToolEvent {
-  uint8_t kind;      /* 1 paint 2 erase 3 pour 4 drain 5 fill 6 undo */
+  uint8_t kind;      /* 1 paint 2 erase 3 pour 4 drain 5 fill 6 undo 7 swipe 8 seed 9 remove 10 glucose 11 calcium 12 detritus */
   uint8_t material;
   uint16_t x;
   uint16_t y;

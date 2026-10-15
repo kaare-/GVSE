@@ -9,11 +9,12 @@
 //! Keys mix by dominance: an inflow larger than half the receiver's amount
 //! takes the key.
 
+use crate::bio::minerals::{self, BONE_GLUCOSE_PER_UNIT};
 use crate::bio::program::ring_match_q8;
 use crate::consts::PX_PER_CELL;
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_u64;
-use crate::pixels::PixelLayer;
+use crate::pixels::{CoarseField, PixelLayer};
 
 pub const TILE: usize = 16;
 
@@ -215,7 +216,7 @@ pub(crate) fn open_idx(grid: &PhysicsGrid, pixels: &PixelLayer, idx: usize) -> b
 }
 
 /// One tick of decay + blur over the active tiles of every field.
-pub fn step_fields(pixels: &mut PixelLayer, grid: &PhysicsGrid, tick: u64) {
+pub fn step_fields(pixels: &mut PixelLayer, grid: &PhysicsGrid, coarse: &mut CoarseField, tick: u64) {
     let any = pixels.tile_active.iter().any(|&a| a != 0);
     if !any {
         pixels.fields_active = false;
@@ -239,7 +240,7 @@ pub fn step_fields(pixels: &mut PixelLayer, grid: &PhysicsGrid, tick: u64) {
             blur_tiles(pixels, grid, f, &active);
         }
         if f == Field::Enzyme {
-            lyse_litter(pixels, &active, tick);
+            lyse_litter(pixels, coarse, &active, tick);
         }
         if f == Field::Litter && tick % 4 == 2 {
             settle_litter(pixels, grid, &active);
@@ -365,8 +366,9 @@ fn blur_tiles(pixels: &mut PixelLayer, grid: &PhysicsGrid, f: Field, active: &[u
 
 /// Field lysis of litter (§a.4 ENZYME): where the enzyme field lies on
 /// litter whose code matches its key, mass converts to dissolved glucose
-/// in place at `amount/255 · match` of contact strength.
-fn lyse_litter(pixels: &mut PixelLayer, enzyme_tiles: &[usize], tick: u64) {
+/// in place at `amount/255 · match` of contact strength; bone litter gives
+/// its minerals back to the physics cell plus a little glucose.
+fn lyse_litter(pixels: &mut PixelLayer, coarse: &mut CoarseField, enzyme_tiles: &[usize], tick: u64) {
     let pw = pixels.w as usize;
     for &t in enzyme_tiles {
         if pixels.tile_active[t] & Field::Litter.bit() == 0 {
@@ -387,12 +389,24 @@ fn lyse_litter(pixels: &mut PixelLayer, enzyme_tiles: &[usize], tick: u64) {
                 let rate_q8 = e as u32 * m / 128;
                 let h = hash_u64(tick, i as u64, 0, 0xF1_15);
                 let take = (rate_q8 >> 8) + ((h & 0xFF) < (rate_q8 & 0xFF) as u64) as u32;
-                let take = take.min(l as u32).min(255 - pixels.glucose[i] as u32) as u8;
+                let room = 255 - pixels.glucose[i] as u32;
+                let bone = pixels.litter_key[i] >= 192;
+                let take = if bone {
+                    take.min(l as u32).min(room / BONE_GLUCOSE_PER_UNIT as u32)
+                } else {
+                    take.min(l as u32).min(room)
+                };
                 if take == 0 {
                     continue;
                 }
-                pixels.litter[i] -= take;
-                add_plain(pixels, Field::Glucose, i, take);
+                pixels.litter[i] -= take as u8;
+                if bone {
+                    let ci = minerals::idx_of_pixel(coarse, x as u16, y as u16);
+                    minerals::give(coarse, ci, take);
+                    add_plain(pixels, Field::Glucose, i, (take * BONE_GLUCOSE_PER_UNIT as u32) as u8);
+                } else {
+                    add_plain(pixels, Field::Glucose, i, take as u8);
+                }
             }
         }
     }
