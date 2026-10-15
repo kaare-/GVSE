@@ -64,7 +64,8 @@ pub use frozen_backlog::{
     frozen_backlog_total, should_absorb_missing, FrozenBacklog,
 };
 pub use seam::{
-    absorb_seam_water, apply_field_mirror, apply_inbound, attach_open_seam, blend_edge_toward_mirror,
+    absorb_seam_water, apply_field_mirror, apply_inbound, attach_open_seam, attach_seam_config,
+    blend_edge_toward_mirror,
     exchange_seam_p0, export_seam_face, sample_edge_fields, seam_backlog_dissolved_total,
     seam_backlog_sediment_total, seam_backlog_water_total, should_absorb_seam, take_outbound,
     SeamConfig, SeamFieldMirror, SeamSide, SeamState, SeamTransfer, SEAM_FACE_EXPORT_MAX,

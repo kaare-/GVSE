@@ -7,6 +7,7 @@
 mod present;
 pub mod ipc;
 pub mod seam_discover;
+pub mod seam_graph;
 pub mod seam_ipc;
 
 use std::collections::HashMap;
@@ -17,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 use wk_voxel::{
     ack_life_ids, apply_field_mirror, apply_inbound, apply_life_inbound, apply_season_sky_tint,
-    attach_open_seam, blend_edge_toward_mirror, cave_humidity_haze_wash, celestial_local_cfg,
+    attach_open_seam, attach_seam_config, blend_edge_toward_mirror, cave_humidity_haze_wash,
+    celestial_local_cfg,
     climate_with_season, day_night_factor_cfg, export_life_at_seam, export_seam_face,
     is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, restore_all_from_store, sample_edge_fields,
     season_fraction_cfg, sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, steam_haze_wash,
@@ -25,8 +27,9 @@ use wk_voxel::{
     take_pending_acks, tick_life_in_flight, wake_floating_competent, Blueprint, CarbonBudget,
     CarbonConfig, Cell, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig,
     CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity,
-    KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SeamFieldMirror,
-    SeamLifeParcel, SeamSide, SeamTransfer, SimSnapshot, SpawnFail, SteamConfig, StreamWindow,
+    KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SeamConfig,
+    SeamFieldMirror, SeamLifeParcel, SeamSide, SeamTransfer, SimSnapshot, SpawnFail, SteamConfig,
+    StreamWindow,
     SupportMap, SyncResidencyStats, Temperature, Wind, World, WorldStep, WorldStepConfig,
     WorldgenParams, CHUNK_CELLS_W, SEAM_FACE_EXPORT_MAX, SEAM_FIELD_BLEND_ALPHA,
     STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
@@ -551,6 +554,16 @@ impl Host {
         let width = self.params.width_cols.max(1);
         self.params.wrap_x = false;
         attach_open_seam(&mut self.world, width, side);
+    }
+
+    /// Dig F5: open one or both seam faces from an official graph plan.
+    pub fn enable_seam_faces(&mut self, open_west: bool, open_east: bool) {
+        let width = self.params.width_cols.max(1);
+        self.params.wrap_x = false;
+        attach_seam_config(
+            &mut self.world,
+            SeamConfig::open_faces(width, open_west, open_east),
+        );
     }
 
     pub fn world(&self) -> &World {

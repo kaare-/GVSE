@@ -41,20 +41,20 @@ pub struct SeamConfig {
 impl SeamConfig {
     /// Single open face on a `[0, width)` strip.
     pub fn open_side(width: i32, side: SeamSide) -> Self {
-        let width = width.max(1);
         match side {
-            SeamSide::West => Self {
-                x_min: 0,
-                x_max: width,
-                open_west: true,
-                open_east: false,
-            },
-            SeamSide::East => Self {
-                x_min: 0,
-                x_max: width,
-                open_west: false,
-                open_east: true,
-            },
+            SeamSide::West => Self::open_faces(width, true, false),
+            SeamSide::East => Self::open_faces(width, false, true),
+        }
+    }
+
+    /// Dig F5 — one or both faces open on a `[0, width)` strip.
+    pub fn open_faces(width: i32, open_west: bool, open_east: bool) -> Self {
+        let width = width.max(1);
+        Self {
+            x_min: 0,
+            x_max: width,
+            open_west,
+            open_east,
         }
     }
 
@@ -377,8 +377,13 @@ pub fn exchange_seam_p0(west: &mut World, east: &mut World) {
 
 /// Attach an open Lab seam on a non-wrapping strip `[0, width)`.
 pub fn attach_open_seam(world: &mut World, width: i32, side: SeamSide) {
+    attach_seam_config(world, SeamConfig::open_side(width, side));
+}
+
+/// Dig F5 — attach an arbitrary open-face config (clears ring wrap).
+pub fn attach_seam_config(world: &mut World, cfg: SeamConfig) {
     world.wrap_width = None;
-    world.seam.config = Some(SeamConfig::open_side(width, side));
+    world.seam.config = Some(cfg);
 }
 
 pub(crate) fn edge_x_for(cfg: SeamConfig, side: SeamSide) -> i32 {
