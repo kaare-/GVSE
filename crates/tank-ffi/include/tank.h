@@ -33,6 +33,9 @@ typedef struct TankInput {
   uint8_t _pad1;
   float light_slider;
   float t_base;
+  int32_t flash_x;   /* physics cell; flash_r==0 means off */
+  int32_t flash_y;
+  int32_t flash_r;
   const ToolEvent *tools;
   uint32_t tool_count;
 } TankInput;

@@ -82,12 +82,23 @@ impl CoarseField {
 }
 
 /// Incident light, top-down. Water loses 0.1 % per pixel of depth.
+#[derive(Clone, Copy)]
+pub struct Flashlight {
+    /// Visible physics column centre.
+    pub vx: i32,
+    /// Half-width in physics cells.
+    pub radius: i32,
+    /// Boost multiplier in 1/256 units (512 = ×2).
+    pub boost: u16,
+}
+
 pub fn rebuild_light(
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
     tick: u64,
     always_day: bool,
     light_slider: f32,
+    flash: Option<Flashlight>,
 ) {
     let vis_w = grid.visible_w();
     let vis_h = grid.visible_h();
@@ -99,6 +110,11 @@ pub fn rebuild_light(
 
     for vx in 0..vis_w {
         let mut incoming = incident0;
+        if let Some(f) = flash {
+            if (vx - f.vx).abs() <= f.radius {
+                incoming = (incoming * f.boost as u32 / 256).min(255);
+            }
+        }
         for vy_top in 0..vis_h {
             let gy = 1 + (vis_h - 1 - vy_top);
             let gx = 1 + vx;

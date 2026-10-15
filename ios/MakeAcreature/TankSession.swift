@@ -235,11 +235,27 @@ final class TankSession: ObservableObject {
     }
 
     private func queueStroke(at point: CGPoint) {
-        guard let metal, let handle else { return }
+        guard let cell = physicsCell(at: point) else { return }
+        pendingTools.append(
+            ToolEvent(
+                kind: tool.kind,
+                material: tool.material,
+                x: cell.0,
+                y: cell.1,
+                r: UInt16(brush),
+                variant: UInt8(variant),
+                _pad: 0
+            )
+        )
+    }
+
+    /// Map a view touch to a visible physics cell (origin bottom-left).
+    private func physicsCell(at point: CGPoint) -> (UInt16, UInt16)? {
+        guard let metal, let handle else { return nil }
         var w: UInt32 = 0
         var h: UInt32 = 0
         _ = tank_pixels(handle, &w, &h)
-        guard w > 0, h > 0 else { return }
+        guard w > 0, h > 0 else { return nil }
         let scale = metal.contentScale
         let drawableW = metal.bounds.width * scale
         let drawableH = metal.bounds.height * scale
@@ -250,22 +266,20 @@ final class TankSession: ObservableObject {
         let oy = (drawableH - th) * 0.5
         let px = (point.x * scale - ox) / k
         let py = (point.y * scale - oy) / k
-        guard px >= 0, py >= 0, px < CGFloat(w), py < CGFloat(h) else { return }
+        guard px >= 0, py >= 0, px < CGFloat(w), py < CGFloat(h) else { return nil }
         let cellX = UInt16(px / 3)
         let cellYFromTop = UInt16(py / 3)
         let cellsH = UInt16(h / 3)
         let cellY = cellsH > 0 ? cellsH - 1 - cellYFromTop : 0
-        pendingTools.append(
-            ToolEvent(
-                kind: tool.kind,
-                material: tool.material,
-                x: cellX,
-                y: cellY,
-                r: UInt16(brush),
-                variant: UInt8(variant),
-                _pad: 0
-            )
-        )
+        return (cellX, cellY)
+    }
+
+    /// Hold finger → flashlight cone (×2 light, no heat). Off while feeding.
+    private func flashlightCell() -> (Int32, Int32, Int32) {
+        guard let point = magnifierPoint, let cell = physicsCell(at: point) else {
+            return (0, 0, 0)
+        }
+        return (Int32(cell.0), Int32(cell.1), 8)
     }
 
     private func advance(_ dt: CFTimeInterval) {
@@ -275,6 +289,7 @@ final class TankSession: ObservableObject {
         while accumulator >= step && steps < 4 {
             var tools = pendingTools
             pendingTools.removeAll(keepingCapacity: true)
+            let flash = tool == .feed ? (0, 0, 0) : flashlightCell()
             tools.withUnsafeBufferPointer { buf in
                 var input = TankInput(
                     grav_x: lastGravX,
@@ -285,6 +300,9 @@ final class TankSession: ObservableObject {
                     _pad1: 0,
                     light_slider: 1,
                     t_base: 15,
+                    flash_x: flash.0,
+                    flash_y: flash.1,
+                    flash_r: flash.2,
                     tools: buf.baseAddress,
                     tool_count: UInt32(buf.count)
                 )

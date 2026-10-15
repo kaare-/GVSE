@@ -179,7 +179,38 @@ impl Mode {
             }
             self.n_entries -= 1;
         }
-        // Cap to capacity.
+        self.clamp_to_capacity();
+    }
+
+    pub fn gain_or_lose_block(&mut self, seed: u64, salt: u64) {
+        use crate::hash::hash_u64;
+        let lose = hash_u64(seed, salt, 1, 0xB1_20) % 3 == 0;
+        if lose && self.n_entries > 1 {
+            let i = (hash_u64(seed, salt, 2, 0xB1_21) as usize) % self.n_entries as usize;
+            for j in i..self.n_entries as usize - 1 {
+                self.entries[j] = self.entries[j + 1];
+            }
+            self.n_entries -= 1;
+            return;
+        }
+        if self.n_entries >= 6 {
+            return;
+        }
+        let kind = 1 + (hash_u64(seed, salt, 3, 0xB1_22) % 9) as u8;
+        let Some(block) = Block::from_u8(kind) else {
+            return;
+        };
+        // Skip duplicates.
+        if self.units_of(block) > 0 {
+            return;
+        }
+        let units = 1 + (hash_u64(seed, salt, 4, 0xB1_23) % 3) as u8;
+        self.entries[self.n_entries as usize] = Entry { block, units };
+        self.n_entries += 1;
+        self.clamp_to_capacity();
+    }
+
+    pub fn clamp_to_capacity(&mut self) {
         while self.used_units() > self.capacity() && self.n_entries > 0 {
             let last = self.n_entries as usize - 1;
             if self.entries[last].units > 0 {

@@ -1,4 +1,4 @@
-//! B0 biology tick: move, feed, divide, die, film.
+//! B0/B1 biology tick: move, feed, grow, divide, die, film.
 #![allow(clippy::too_many_arguments)]
 
 use wk_material::MaterialId;
@@ -22,6 +22,10 @@ const MAX_AGE: u16 = 60 * 30; // 60 s
 const FILM_STUCK_AGE: u16 = 45;
 /// Soft live-cell lever from the handoff (30k hard stop for B0).
 const LIVE_CAP: usize = 30_000;
+/// Growth ticks between size steps (handoff `t_grow = 8`).
+const T_GROW: u16 = 8;
+/// No mitosis below this tank temperature (°C).
+const MITOSIS_FLOOR_C: f32 = 4.0;
 
 pub struct BioStepResult {
     pub events: Vec<SimEvent>,
@@ -36,6 +40,7 @@ pub fn step(
     pixels: &mut PixelLayer,
     world_seed: u64,
     tick: u64,
+    t_base: f32,
 ) -> BioStepResult {
     let mut events = Vec::new();
     let mut divisions = 0u32;
@@ -51,6 +56,7 @@ pub fn step(
             world_seed,
             tick,
             id,
+            t_base,
             &mut events,
             &mut divisions,
             &mut deaths,
@@ -109,8 +115,8 @@ fn move_cell(
     }
     let pw = pixels.w as i32;
     let ph = pixels.h as i32;
-    nx = nx.clamp(0, pw - 1);
-    ny = ny.clamp(0, ph - 1);
+    nx = nx.clamp(0, pw - cell.w as i32);
+    ny = ny.clamp(0, ph - cell.h as i32);
     if nx != cell.px as i32 || ny != cell.py as i32 {
         let _ = cells.move_cell(pixels, id, nx as u16, ny as u16);
     }
@@ -124,6 +130,7 @@ fn metabolise(
     world_seed: u64,
     tick: u64,
     id: u32,
+    t_base: f32,
     events: &mut Vec<SimEvent>,
     divisions: &mut u32,
     deaths: &mut u32,
@@ -146,20 +153,53 @@ fn metabolise(
     } else {
         0
     };
-    let eff = g.metab_eff as i32;
+    let area = (cell.w as i32).max(1) * (cell.h as i32).max(1);
+    let temp_q = g.temp_eff_q8(t_base) as i32;
+    let eff = g.metab_eff as i32 * temp_q / 255;
     let photo = g.photo() as i32;
+    // Perimeter-bound income: larger cells don't get free area scaling.
+    let peri = 2 * (cell.w as i32 + cell.h as i32).max(1);
     let mut income = PHOTO_YIELD * photo * light as i32 * eff / (255 * 128);
+    income = income * peri / (4 * area).max(1);
     // Baseline + UPTAKE(glucose) from the dissolved field.
     let uptake = g.mode.units_of(crate::bio::profile::Block::UptakeGlucose) as i32;
     income += (2 + uptake * 4) * glucose as i32 * FP / 255;
     if glucose > 0 && idx < pixels.glucose.len() {
         pixels.glucose[idx] = glucose.saturating_sub(1 + uptake as u8);
     }
-    let upkeep = g.mode.upkeep_fp();
+    let upkeep = g.mode.upkeep_fp() * area;
+    // Structure upkeep 0.01 g/s/px (handoff).
+    let upkeep = upkeep + (area * FP) / 100;
     let energy = cell.energy as i32 + income - upkeep;
     let age = cell.age.saturating_add(1);
 
-    if energy <= 0 || age > MAX_AGE {
+    // Stress: weighted hunger / dark / heat / cold.
+    let hunger = ((DIVIDE_ENERGY - energy.max(0)).max(0) * 255 / DIVIDE_ENERGY) as u8;
+    let dark = 255u8.saturating_sub(light);
+    let heat = if t_base > 30.0 {
+        ((t_base - 30.0) * 25.0).min(255.0) as u8
+    } else {
+        0
+    };
+    let cold = if t_base < 10.0 {
+        ((10.0 - t_base) * 25.0).min(255.0) as u8
+    } else {
+        0
+    };
+    let stress_sum = (hunger as u32 * g.stress_hunger as u32
+        + dark as u32 * g.stress_dark as u32
+        + heat as u32 * g.stress_heat as u32
+        + cold as u32 * g.stress_cold as u32)
+        / (255 * 4);
+    let stress = stress_sum.min(255) as u8;
+
+    // EXCRETE dumps a little waste into the field.
+    let excrete = g.mode.units_of(crate::bio::profile::Block::Excrete);
+    if excrete > 0 && idx < pixels.waste.len() {
+        pixels.waste[idx] = pixels.waste[idx].saturating_add(excrete.min(4));
+    }
+
+    if energy <= 0 || age > MAX_AGE || (t_base > 38.0 && heat > 200) {
         let (vx, vy) = pixel_to_phys(cell.px, cell.py, pixels.w, grid.visible_h() as u32);
         // Soft litter: only replace nearly-dry air so free water is conserved.
         let seat = grid.get_visible(vx, vy);
@@ -180,6 +220,14 @@ fn metabolise(
     if let Some(c) = cells.get_mut(id) {
         c.energy = energy.min(u16::MAX as i32) as u16;
         c.age = age;
+        c.stress = stress;
+    }
+
+    // Grow toward the mode's target shape, one axis step every t_grow.
+    if age % T_GROW == 0 {
+        let tw = g.mode.shape_w.max(1);
+        let th = g.mode.shape_h.max(1);
+        let _ = cells.try_grow(pixels, id, tw, th);
     }
 
     // Stick to a wall / waterline → contribute film.
@@ -191,11 +239,18 @@ fn metabolise(
         pixels.film[idx] = 40;
     }
 
+    // Division only at target shape (B1); no mitosis in the cold.
+    let at_shape = cells
+        .get(id)
+        .map(|c| c.w >= g.mode.shape_w && c.h >= g.mode.shape_h)
+        .unwrap_or(false);
     if energy >= DIVIDE_ENERGY
         && age >= MIN_AGE_DIVIDE
+        && at_shape
+        && t_base >= MITOSIS_FLOOR_C
         && cells.len() < LIVE_CAP
         && try_divide(
-            cells, genomes, pixels, world_seed, tick, id, &g, energy, events,
+            cells, genomes, pixels, world_seed, tick, id, &g, energy, stress, t_base, events,
         )
     {
         *divisions += 1;
@@ -211,19 +266,21 @@ fn try_divide(
     parent: u32,
     parent_g: &GenomeV0,
     energy: i32,
+    stress: u8,
+    t_base: f32,
     events: &mut Vec<SimEvent>,
 ) -> bool {
     let Some(cell) = cells.get(parent).copied() else {
         return false;
     };
     let (dx, dy) = heading_delta(cell.heading);
-    let nx = cell.px as i32 + dx;
-    let ny = cell.py as i32 + dy;
+    let nx = cell.px as i32 + dx * cell.w as i32;
+    let ny = cell.py as i32 + dy * cell.h as i32;
     if nx < 0 || ny < 0 || nx >= pixels.w as i32 || ny >= pixels.h as i32 {
         return false;
     }
-    // λ ≈ 0.1 per division (handoff seed is 0.3; B0 starts gentler).
-    let mutate = hash_u64(world_seed, tick, parent as u64, 0xD1_01) % 1000 < 100;
+    let lambda_m = parent_g.lambda_milli(stress, t_base);
+    let mutate = hash_u64(world_seed, tick, parent as u64, 0xD1_01) % 1000 < lambda_m as u64;
     let child_g = if mutate {
         parent_g.mutate(world_seed, tick ^ (parent as u64) << 8)
     } else {
@@ -239,6 +296,8 @@ fn try_divide(
         .map(|c| cells.org_generation(c.org))
         .unwrap_or(0)
         .saturating_add(1);
+    // Cheap strategy lowers division cost; accurate raises it.
+    let cost = DIVIDE_COST * (200 + parent_g.accurate as i32) / (200 + parent_g.cheap as i32);
     let daughter = cells.spawn(
         genomes,
         pixels,
@@ -246,7 +305,7 @@ fn try_divide(
         ny as u16,
         geno,
         gen,
-        (DIVIDE_COST / 2) as u16,
+        (cost / 2) as u16,
         cell.heading,
         world_seed,
     );
@@ -254,7 +313,7 @@ fn try_divide(
         return false;
     }
     if let Some(c) = cells.get_mut(parent) {
-        c.energy = (energy - DIVIDE_COST).max(0) as u16;
+        c.energy = (energy - cost).max(0) as u16;
         c.age = 0;
     }
     events.push(SimEvent {

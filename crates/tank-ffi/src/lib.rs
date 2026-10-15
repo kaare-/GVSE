@@ -37,6 +37,9 @@ pub struct TankInputC {
     pub _pad1: u8,
     pub light_slider: f32,
     pub t_base: f32,
+    pub flash_x: i32,
+    pub flash_y: i32,
+    pub flash_r: i32,
     pub tools: *const ToolEventC,
     pub tool_count: u32,
 }
@@ -173,6 +176,9 @@ pub extern "C" fn tank_tick(handle: *mut TankHandle, input: *const TankInputC) {
         swirl: input.swirl != 0,
         light_slider: input.light_slider,
         t_base: input.t_base,
+        flash_x: input.flash_x,
+        flash_y: input.flash_y,
+        flash_r: input.flash_r,
         tools,
     });
 }
@@ -438,6 +444,9 @@ mod tests {
             _pad1: 0,
             light_slider: 1.0,
             t_base: 15.0,
+            flash_x: 0,
+            flash_y: 0,
+            flash_r: 0,
             tools: ptr::null(),
             tool_count: 0,
         }
@@ -446,8 +455,10 @@ mod tests {
     #[test]
     fn abi_sizes_match_the_header() {
         assert_eq!(std::mem::size_of::<ToolEventC>(), 10);
-        assert_eq!(std::mem::size_of::<TankInputC>(), 40);
-        assert_eq!(std::mem::offset_of!(TankInputC, tools), 24);
+        // grav(8) + flags(4) + slider/t_base(8) + flash(12) + tools*(8) + count(4) + pad(4) = 48
+        assert_eq!(std::mem::size_of::<TankInputC>(), 48);
+        assert_eq!(std::mem::offset_of!(TankInputC, tools), 32);
+        assert_eq!(std::mem::offset_of!(TankInputC, flash_x), 20);
         assert_eq!(std::mem::size_of::<InspectRec>(), 20);
         assert_eq!(std::mem::size_of::<EventRec>(), 8);
         assert_eq!(std::mem::size_of::<TelRec>(), 8);

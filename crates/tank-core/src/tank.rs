@@ -36,6 +36,10 @@ pub struct TankInput {
     pub swirl: bool,
     pub light_slider: f32,
     pub t_base: f32,
+    /// Flashlight cone centre in visible physics cells; radius 0 = off.
+    pub flash_x: i32,
+    pub flash_y: i32,
+    pub flash_r: i32,
     pub tools: Vec<ToolEvent>,
 }
 
@@ -49,6 +53,9 @@ impl Default for TankInput {
             swirl: false,
             light_slider: 1.0,
             t_base: crate::consts::T_BASE_DEFAULT,
+            flash_x: 0,
+            flash_y: 0,
+            flash_r: 0,
             tools: Vec::new(),
         }
     }
@@ -91,6 +98,9 @@ pub struct Tank {
     undo: Vec<UndoFrame>,
     cells: CellStore,
     genomes: GenomeStore,
+    flash_x: i32,
+    flash_y: i32,
+    flash_r: i32,
 }
 
 impl Tank {
@@ -125,6 +135,9 @@ impl Tank {
             undo: Vec::new(),
             cells: CellStore::new(),
             genomes: GenomeStore::new(),
+            flash_x: 0,
+            flash_y: 0,
+            flash_r: 0,
         };
         tank.rebuild_light();
         Ok(tank)
@@ -277,6 +290,36 @@ impl Tank {
         Some(id)
     }
 
+    /// Seed a cell whose mode targets `shape_w × shape_h` (growth tests).
+    pub fn seed_shaped_algae(&mut self, px: u16, py: u16, shape_w: u8, shape_h: u8) -> Option<u32> {
+        use crate::bio::GenomeV0;
+        let mut g = GenomeV0::algae();
+        g.mode.shape_w = shape_w.clamp(1, crate::consts::SHAPE_CAP);
+        g.mode.shape_h = shape_h.clamp(1, crate::consts::SHAPE_CAP);
+        let parent = self.genomes.seed_algae();
+        let geno = self.genomes.intern_child(parent, g);
+        self.cells.spawn(
+            &mut self.genomes,
+            &mut self.pixels,
+            px,
+            py,
+            geno,
+            0,
+            12 * 256,
+            2,
+            self.seed,
+        )
+    }
+
+    pub fn cell_size(&self, id: u32) -> Option<(u8, u8)> {
+        self.cells.get(id).map(|c| (c.w, c.h))
+    }
+
+    pub fn pixel_light_at(&self, px: u16, py: u16) -> u8 {
+        let idx = (py as usize) * (self.pixels.w as usize) + px as usize;
+        self.pixels.light.get(idx).copied().unwrap_or(0)
+    }
+
     /// Clear front-pane film along a stroke (pixel space, top-left origin).
     pub fn swipe_film(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, radius: i32) -> u32 {
         bio::swipe_film(&mut self.pixels, x0, y0, x1, y1, radius)
@@ -350,12 +393,23 @@ impl Tank {
         self.swirl = input.swirl;
         self.grav_x = input.grav_x;
         self.grav_y = input.grav_y;
+        self.flash_x = input.flash_x;
+        self.flash_y = input.flash_y;
+        self.flash_r = input.flash_r;
         if input.paused {
             self.apply_tools(&input.tools);
             self.rebuild_light();
             return;
         }
         self.apply_tools(&input.tools);
+        self.rebuild_light();
+        // Tank temperature: base + solar heat (flashlight does not heat, K4#7).
+        let day = if self.always_day {
+            1.0
+        } else {
+            crate::clock::day_factor(self.tick_count)
+        };
+        let t_tank = self.t_base + 10.0 * self.light_slider.clamp(0.0, 1.0) * day;
         let tilt = if self.swirl { self.grav_x } else { 0.0 };
         rules::step(&mut self.grid, self.seed, self.tick_count, tilt);
         let bio = bio::step(
@@ -365,6 +419,7 @@ impl Tank {
             &mut self.pixels,
             self.seed,
             self.tick_count,
+            t_tank,
         );
         for ev in bio.events {
             self.events.push_back(ev);
@@ -448,6 +503,14 @@ impl Tank {
             // Energy brightens a little so hungry cells read duller.
             let e = (cell.energy / 256).min(8);
             rgb[1] = (rgb[1] as u16 + e * 2).min(255) as u8;
+            // Desaturate under stress (pull toward gray).
+            if cell.stress > 32 {
+                let s = cell.stress as u16;
+                let gray = (rgb[0] as u16 + rgb[1] as u16 + rgb[2] as u16) / 3;
+                for c in &mut rgb {
+                    *c = ((*c as u16 * (255 - s) + gray * s) / 255) as u8;
+                }
+            }
             Some(rgb)
         });
     }
@@ -568,12 +631,22 @@ impl Tank {
     }
 
     fn rebuild_light(&mut self) {
+        let flash = if self.flash_r > 0 {
+            Some(pixels::Flashlight {
+                vx: self.flash_x,
+                radius: self.flash_r,
+                boost: 512, // ×2, does not heat (K4#7)
+            })
+        } else {
+            None
+        };
         pixels::rebuild_light(
             &self.grid,
             &mut self.pixels,
             self.tick_count,
             self.always_day,
             self.light_slider,
+            flash,
         );
     }
 

@@ -13,10 +13,15 @@ pub const OWNER_BIAS: u32 = 1;
 pub struct CellRec {
     pub px: u16,
     pub py: u16,
+    /// Current realised size in pixels (grows toward the mode shape).
+    pub w: u8,
+    pub h: u8,
     pub genotype: u32,
     pub org: u32,
     pub age: u16,
     pub energy: u16,
+    /// 0..=255 composite stress (hunger/dark/heat/cold).
+    pub stress: u8,
     pub heading: u8,
     /// Stuck as front-pane film.
     pub film: bool,
@@ -95,10 +100,13 @@ impl CellStore {
             self.cells.push(CellRec {
                 px,
                 py,
+                w: 1,
+                h: 1,
                 genotype,
                 org: 0,
                 age: 0,
                 energy,
+                stress: 0,
                 heading,
                 film: false,
                 alive: false,
@@ -125,15 +133,18 @@ impl CellStore {
         self.cells[cell_id as usize] = CellRec {
             px,
             py,
+            w: 1,
+            h: 1,
             genotype,
             org: org_id,
             age: 0,
             energy,
+            stress: 0,
             heading: heading.wrapping_add(jitter) % 8,
             film: false,
             alive: true,
         };
-        pixels.owner[idx] = cell_id + OWNER_BIAS;
+        claim_rect(pixels, px, py, 1, 1, cell_id + OWNER_BIAS);
         genomes.on_birth(genotype);
         Some(cell_id)
     }
@@ -151,12 +162,11 @@ impl CellStore {
         if !cell.alive {
             return;
         }
-        let (px, py, genotype, org) = (cell.px, cell.py, cell.genotype, cell.org);
+        let (px, py, w, h, genotype, org) =
+            (cell.px, cell.py, cell.w, cell.h, cell.genotype, cell.org);
         cell.alive = false;
+        release_rect(pixels, px, py, w, h, id + OWNER_BIAS);
         let idx = (py as usize) * (pixels.w as usize) + px as usize;
-        if idx < pixels.owner.len() && pixels.owner[idx] == id + OWNER_BIAS {
-            pixels.owner[idx] = EMPTY_OWNER;
-        }
         if to_film && idx < pixels.film.len() {
             pixels.film[idx] = pixels.film[idx].saturating_add(180).min(220);
         }
@@ -175,18 +185,41 @@ impl CellStore {
         if !cell.alive {
             return false;
         }
-        let nidx = (ny as usize) * (pixels.w as usize) + nx as usize;
-        if nidx >= pixels.owner.len() || pixels.owner[nidx] != EMPTY_OWNER {
+        if !footprint_free(pixels, nx, ny, cell.w, cell.h, id + OWNER_BIAS) {
             return false;
         }
-        let oidx = (cell.py as usize) * (pixels.w as usize) + cell.px as usize;
-        if oidx < pixels.owner.len() {
-            pixels.owner[oidx] = EMPTY_OWNER;
-        }
-        pixels.owner[nidx] = id + OWNER_BIAS;
+        release_rect(pixels, cell.px, cell.py, cell.w, cell.h, id + OWNER_BIAS);
+        claim_rect(pixels, nx, ny, cell.w, cell.h, id + OWNER_BIAS);
         if let Some(c) = self.cells.get_mut(id as usize) {
             c.px = nx;
             c.py = ny;
+        }
+        true
+    }
+
+    /// Grow one axis step when neighbouring pixels are free.
+    pub fn try_grow(&mut self, pixels: &mut PixelLayer, id: u32, tw: u8, th: u8) -> bool {
+        let Some(cell) = self.cells.get(id as usize).copied() else {
+            return false;
+        };
+        if !cell.alive {
+            return false;
+        }
+        let (nw, nh) = if cell.w < tw {
+            (cell.w + 1, cell.h)
+        } else if cell.h < th {
+            (cell.w, cell.h + 1)
+        } else {
+            return false;
+        };
+        if !footprint_free(pixels, cell.px, cell.py, nw, nh, id + OWNER_BIAS) {
+            return false;
+        }
+        release_rect(pixels, cell.px, cell.py, cell.w, cell.h, id + OWNER_BIAS);
+        claim_rect(pixels, cell.px, cell.py, nw, nh, id + OWNER_BIAS);
+        if let Some(c) = self.cells.get_mut(id as usize) {
+            c.w = nw;
+            c.h = nh;
         }
         true
     }
@@ -220,5 +253,55 @@ impl CellStore {
 impl Default for CellStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn footprint_free(pixels: &PixelLayer, px: u16, py: u16, w: u8, h: u8, owner: u32) -> bool {
+    let pw = pixels.w as i32;
+    let ph = pixels.h as i32;
+    for dy in 0..h as i32 {
+        for dx in 0..w as i32 {
+            let x = px as i32 + dx;
+            let y = py as i32 + dy;
+            if x < 0 || y < 0 || x >= pw || y >= ph {
+                return false;
+            }
+            let idx = (y as usize) * (pixels.w as usize) + x as usize;
+            let cur = pixels.owner[idx];
+            if cur != EMPTY_OWNER && cur != owner {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn claim_rect(pixels: &mut PixelLayer, px: u16, py: u16, w: u8, h: u8, owner: u32) {
+    for dy in 0..h as u16 {
+        for dx in 0..w as u16 {
+            let x = px as u32 + dx as u32;
+            let y = py as u32 + dy as u32;
+            if x >= pixels.w || y >= pixels.h {
+                continue;
+            }
+            let idx = (y as usize) * (pixels.w as usize) + x as usize;
+            pixels.owner[idx] = owner;
+        }
+    }
+}
+
+fn release_rect(pixels: &mut PixelLayer, px: u16, py: u16, w: u8, h: u8, owner: u32) {
+    for dy in 0..h as u16 {
+        for dx in 0..w as u16 {
+            let x = px as u32 + dx as u32;
+            let y = py as u32 + dy as u32;
+            if x >= pixels.w || y >= pixels.h {
+                continue;
+            }
+            let idx = (y as usize) * (pixels.w as usize) + x as usize;
+            if pixels.owner[idx] == owner {
+                pixels.owner[idx] = EMPTY_OWNER;
+            }
+        }
     }
 }

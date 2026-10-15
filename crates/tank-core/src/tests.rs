@@ -432,3 +432,72 @@ fn genome_tree_counts_births() {
     }
     assert!(tank.live_cells() >= 1);
 }
+
+#[test]
+fn shaped_cell_grows_pixel_by_pixel() {
+    let mut tank = Tank::try_new(1, 24, 24).unwrap();
+    for vx in 0..24 {
+        for vy in 0..16 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let id = tank.seed_shaped_algae(36, 30, 3, 3).expect("seed");
+    assert_eq!(tank.cell_size(id), Some((1, 1)));
+    for _ in 0..80 {
+        tank.tick(&TankInput {
+            always_day: true,
+            ..TankInput::default()
+        });
+    }
+    let (w, h) = tank.cell_size(id).expect("alive");
+    assert!(
+        w >= 2 || h >= 2,
+        "3×3 lineage should grow past 1×1 (got {w}×{h})"
+    );
+}
+
+#[test]
+fn flashlight_boosts_column_light() {
+    let mut tank = Tank::try_new(1, 32, 32).unwrap();
+    // Advance into night so the floor leaves headroom for the ×2 boost.
+    for _ in 0..36_000 {
+        tank.tick(&TankInput {
+            always_day: false,
+            light_slider: 0.5,
+            ..TankInput::default()
+        });
+    }
+    tank.tick(&TankInput {
+        always_day: false,
+        light_slider: 0.5,
+        flash_x: 10,
+        flash_y: 20,
+        flash_r: 4,
+        ..TankInput::default()
+    });
+    let lit = tank.pixel_light_at(10 * 3 + 1, 5);
+    let dark = tank.pixel_light_at(28 * 3 + 1, 5);
+    assert!(
+        lit > dark,
+        "flashlight column should be brighter (lit={lit} dark={dark})"
+    );
+}
+
+#[test]
+fn mutation_fuzz_stays_valid() {
+    use crate::bio::GenomeV0;
+    let mut g = GenomeV0::algae();
+    for i in 0..10_000u64 {
+        g = g.mutate(0xF1_55, i);
+        assert!(g.is_valid(), "invalid after mutation {i}: {g:?}");
+    }
+}
+
+#[test]
+fn hot_tank_raises_mutation_lambda() {
+    use crate::bio::GenomeV0;
+    let g = GenomeV0::algae();
+    let cold = g.lambda_milli(40, 12.0);
+    let hot = g.lambda_milli(40, 32.0);
+    assert!(hot > cold, "Q10 should raise λ when hot (cold={cold} hot={hot})");
+}
