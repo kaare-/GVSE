@@ -1741,3 +1741,178 @@ fn species_split_on_structure_or_drift_and_are_named() {
     assert_eq!(after.species_name, card.species_name);
     assert_eq!(after.species, card.species);
 }
+
+/// Phase 3 — glass walls: solid to water and grains, light goes through,
+/// paintable by tool, erasable, saved.
+#[test]
+fn glass_wall_holds_water_and_passes_light() {
+    let mut tank = Tank::try_new(5, 12, 12).unwrap();
+    // A glass box on the floor: walls at vx 3 and 8, floor row 0 is bedrock
+    // already; water inside only.
+    for vy in 0..6 {
+        tank.tick(&TankInput {
+            paused: true,
+            tools: vec![
+                ToolEvent { kind: 1, material: Cell::GLASS, x: 3, y: vy, r: 0, variant: 0 },
+                ToolEvent { kind: 1, material: Cell::GLASS, x: 8, y: vy, r: 0, variant: 0 },
+            ],
+            ..TankInput::default()
+        });
+    }
+    assert!(tank.cell_visible(3, 2).is_glass());
+    assert_eq!(tank.inspect(3 * 3 + 1, (12 - 1 - 2) * 3 + 1).material, Cell::GLASS);
+    for vx in 4..8 {
+        for vy in 0..5 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let before: u64 = (4..8).map(|vx| column_sat(&tank, vx)).sum();
+    tick_n(&mut tank, 300);
+    let inside: u64 = (4..8).map(|vx| column_sat(&tank, vx)).sum();
+    let outside: u64 = (0..3).chain(9..12).map(|vx| column_sat(&tank, vx)).sum();
+    assert_eq!(inside, before, "glass holds the water in");
+    assert_eq!(outside, 0, "nothing leaks through glass");
+    // Light under a pane is almost full; under stone it is not.
+    place(&mut tank, 1, 8, Cell::glass());
+    place(&mut tank, 10, 8, Cell::stone());
+    tank.tick(&TankInput { always_day: true, ..TankInput::default() });
+    let under_glass = tank.pixel_light_at(3 + 1, (12 - 1 - 7) * 3 + 1);
+    let under_stone = tank.pixel_light_at(10 * 3 + 1, (12 - 1 - 7) * 3 + 1);
+    assert!(under_glass > 220, "light through glass {under_glass}");
+    assert!(under_stone < under_glass / 2, "stone shades {under_stone} vs glass {under_glass}");
+    // Erase takes it away; the save keeps it.
+    let bytes = tank.save_bytes().unwrap();
+    let loaded = Tank::load_bytes(&bytes).unwrap();
+    assert!(loaded.cell_visible(3, 2).is_glass());
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent { kind: 2, material: 0, x: 3, y: 2, r: 0, variant: 0 }],
+        ..TankInput::default()
+    });
+    assert!(tank.cell_visible(3, 2).is_open());
+}
+
+/// Phase 3 — the scoop lifts a body whole with its litter and water,
+/// release puts it down elsewhere with ids remapped and nothing lost;
+/// a full seat refuses; discard removes it from the live counts.
+#[test]
+fn scoop_carries_a_body_and_release_puts_it_down_intact() {
+    use crate::bio::Genome;
+    let mut tank = water_box(7, 32, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    let seed = tank.seed_genome_at(24, 30, Genome::straw()).expect("seed straw");
+    for _ in 0..400 {
+        tank.tick(&day());
+    }
+    let seed_rec = *tank.cell(seed).expect("seed alive");
+    let (sx, sy) = (seed_rec.px as i32, seed_rec.py as i32);
+    let org = seed_rec.org;
+    let slots_before = tank.org_slot_count(seed);
+    assert!(slots_before >= 2, "straw grew (slots={slots_before})");
+    let cells_before = tank.live_cells();
+    let genotype = tank.genotype_of_cell(seed).unwrap();
+    let live_geno_before = tank.live_cells_of(genotype);
+    let bbox = tank.org_bbox(org).expect("bbox");
+    // A stone block on the left for the no-room case below.
+    for vx in 1..8 {
+        for vy in 6..14 {
+            place(&mut tank, vx, vy, Cell::stone());
+        }
+    }
+    // Litter and water inside the ring.
+    tank.drop_litter(sx as u16, sy as u16 + 3, 40, crate::bio::chem::LITTER_SOFT_CODE);
+    let litter_before = tank.litter_total();
+    let water_before = (0..32).map(|vx| column_sat(&tank, vx)).sum::<u64>();
+    let body_cells = tank.cells().org(org).unwrap().n_alive as usize;
+
+    let carried = tank.scoop_region(sx, sy, 9);
+    assert_eq!(carried.orgs.len(), 1, "one body in the bucket");
+    assert_eq!(carried.cell_count() as usize, body_cells);
+    assert!(carried.water > 0);
+    assert_eq!(tank.live_cells(), cells_before - body_cells);
+    assert_eq!(tank.litter_total(), litter_before - 40, "litter went into the bucket");
+    assert!(tank.cells().org(org).is_none(), "the old organism record is gone");
+    assert_eq!(tank.live_cells_of(genotype), live_geno_before, "carried cells stay counted as alive");
+    // Every pixel of the old body is free again.
+    for py in bbox.1..=bbox.3 {
+        for px in bbox.0..=bbox.2 {
+            assert_eq!(tank.owner_at(px, py), 0, "pixel ({px},{py}) still owned");
+        }
+    }
+
+    // No room: a release into a stone block fails and the bucket comes back.
+    let (carried, err) = tank.release(carried, 4 * 3 + 1, (23 - 10) * 3 + 1).expect_err("stone refuses");
+    assert_eq!(err, crate::tank::ReleaseError::NoRoom);
+    assert_eq!(carried.orgs.len(), 1);
+
+    // Room: 30 px sideways in open water.
+    let shift: i32 = if sx < 48 { 30 } else { -30 };
+    let (tx, ty) = (sx + shift, sy);
+    assert!(tank.release(carried, tx, ty).is_ok());
+    assert_eq!(tank.live_cells(), cells_before);
+    assert_eq!(tank.litter_total(), litter_before, "litter came back out");
+    assert_eq!(
+        (0..32).map(|vx| column_sat(&tank, vx)).sum::<u64>(),
+        water_before,
+        "water is conserved through the bucket"
+    );
+    let moved = tank.inspect(tx as u32, ty as u32);
+    assert_ne!(moved.cell, u32::MAX, "the seed cell sits at the new centre");
+    assert_eq!(moved.genotype, genotype);
+    assert_eq!(moved.org_cells as usize, slots_before as usize, "slots travelled");
+    let nb = tank.org_bbox(moved.org).expect("new bbox");
+    assert_eq!((nb.2 - nb.0, nb.3 - nb.1), (bbox.2 - bbox.0, bbox.3 - bbox.1), "same shape");
+    assert_eq!(nb.0 as i32, bbox.0 as i32 + shift);
+    assert_eq!(tank.live_cells_of(genotype), live_geno_before);
+    // The body keeps living and dividing after the move.
+    for _ in 0..300 {
+        tank.tick(&day());
+    }
+    assert!(tank.live_cells() >= cells_before, "the moved body carries on");
+
+    // Discard: lift again and throw away → live counts drop, no corpse.
+    let seed_now = *tank.cell(moved.cell).expect("moved seed alive");
+    let c = tank.scoop_region(seed_now.px as i32, seed_now.py as i32, 9);
+    let n = c.cell_count();
+    assert!(n >= 1);
+    let live_now = tank.live_cells();
+    tank.discard(c);
+    assert_eq!(tank.corpse_count(), 0);
+    assert_eq!(tank.live_cells(), live_now);
+    assert_eq!(tank.live_cells_of(genotype), tank.live_cells() as u32, "counts settle on discard");
+}
+
+/// Phase 3 — remove takes anything under the brush: the whole body a
+/// cell belongs to, corpses, litter and grit; nothing comes back.
+#[test]
+fn remove_tool_takes_bodies_litter_and_grit_whole() {
+    use crate::bio::Genome;
+    let mut tank = water_box(8, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    let seed = tank.seed_genome_at(36, 30, Genome::straw()).expect("seed");
+    for _ in 0..400 {
+        tank.tick(&day());
+    }
+    let org = tank.inspect(36, 30).org;
+    let body = tank.cells().org(org).unwrap().n_alive;
+    assert!(body >= 2);
+    let tip = tank.cells().org(org).unwrap().slots.iter().map(|s| s.cell).find(|&c| c != seed && c != u32::MAX);
+    let tip = tip.expect("a second cell");
+    let tip_px = tank.cell(tip).unwrap().px as i32 / 3;
+    let tip_vy = tank.visible_size().1 as i32 - 1 - tank.cell(tip).unwrap().py as i32 / 3;
+    tank.drop_litter(36, 33, 20, crate::bio::chem::LITTER_SOFT_CODE);
+    let before = tank.live_cells();
+    let litter = tank.litter_total();
+    // Brush radius 0 on the *tip* cell only: the whole body goes.
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent { kind: 9, material: 0, x: tip_px as u16, y: tip_vy as u16, r: 0, variant: 0 }],
+        ..TankInput::default()
+    });
+    assert_eq!(tank.live_cells(), before - body as usize, "the body left whole");
+    assert_eq!(tank.corpse_count(), 0, "no corpse for a cull");
+    assert!(tank.cells().org(org).is_none());
+    // Litter under a wider brush at the centre goes too.
+    let _ = tank.remove_at(12, 13, 2);
+    assert!(tank.litter_total() < litter, "litter removed");
+}

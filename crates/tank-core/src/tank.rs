@@ -129,6 +129,40 @@ pub struct LineageCard {
     pub children: u32,
 }
 
+/// What the scoop holds (Phase 3): whole organisms with their records,
+/// litter and grit by offset from the bucket centre, and water in
+/// saturation units. Not part of the save — the shell releases or
+/// discards before saving.
+#[derive(Debug, Clone)]
+pub struct Carried {
+    pub cx: i32,
+    pub cy: i32,
+    pub r: i32,
+    pub orgs: Vec<bio::OrgBundle>,
+    /// `(dx, dy, units, litter code)`.
+    pub litter: Vec<(i16, i16, u8, u8)>,
+    /// `(dx, dy, units)`.
+    pub grit: Vec<(i16, i16, u8)>,
+    pub water: u32,
+}
+
+impl Carried {
+    pub fn is_empty(&self) -> bool {
+        self.orgs.is_empty() && self.litter.is_empty() && self.grit.is_empty() && self.water == 0
+    }
+
+    pub fn cell_count(&self) -> u32 {
+        self.orgs.iter().map(|b| b.cells.len() as u32).sum()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseError {
+    /// Some organism would land on tissue, a solid or outside the tank.
+    NoRoom,
+    OutOfBounds,
+}
+
 pub struct Tank {
     seed: u64,
     tick_count: u64,
@@ -669,6 +703,259 @@ impl Tank {
             }
             bio::fields::add_litter(&mut self.pixels, idx, room as u8, LITTER_SOFT_CODE);
             self.fines[px] = (f - room as f32 / 64.0).max(0.0);
+        }
+    }
+
+    /// Phase 3 scoop: lift everything inside the O of radius `r` pixels
+    /// around pixel `(cx, cy)` — organisms whose seed cell lies inside
+    /// travel whole (glue breaks, division bonds hold), plus the litter,
+    /// grit and water inside the ring. Corpses stay. Nothing is lost:
+    /// the bucket holds it until `release` or `discard`.
+    pub fn scoop_region(&mut self, cx: i32, cy: i32, r: i32) -> Carried {
+        let r = r.max(1);
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        let inside = |x: i32, y: i32| (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r;
+        let mut carried = Carried {
+            cx,
+            cy,
+            r,
+            orgs: Vec::new(),
+            litter: Vec::new(),
+            grit: Vec::new(),
+            water: 0,
+        };
+        let org_ids: Vec<u32> = self
+            .cells
+            .iter_orgs()
+            .filter(|(_, o)| {
+                self.cells
+                    .get(o.seed)
+                    .is_some_and(|c| inside(c.px as i32 + c.w as i32 / 2, c.py as i32 + c.h as i32 / 2))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for org in org_ids {
+            if let Some(b) = self.cells.lift_org(&mut self.pixels, org) {
+                carried.orgs.push(b);
+            }
+        }
+        let vis_h = self.grid.visible_h();
+        for y in (cy - r).max(0)..=(cy + r).min(ph - 1) {
+            for x in (cx - r).max(0)..=(cx + r).min(pw - 1) {
+                if !inside(x, y) {
+                    continue;
+                }
+                let idx = (y * pw + x) as usize;
+                if self.pixels.litter[idx] > 0 {
+                    carried.litter.push((
+                        (x - cx) as i16,
+                        (y - cy) as i16,
+                        self.pixels.litter[idx],
+                        self.pixels.litter_key[idx],
+                    ));
+                    self.pixels.litter[idx] = 0;
+                    self.pixels.litter_key[idx] = 0;
+                }
+                if self.pixels.grit[idx] > 0 {
+                    carried.grit.push(((x - cx) as i16, (y - cy) as i16, self.pixels.grit[idx]));
+                    self.pixels.grit[idx] = 0;
+                }
+            }
+        }
+        // Water: every open physics cell whose centre pixel is inside.
+        let ppc = crate::consts::PX_PER_CELL as i32;
+        for vy_top in ((cy - r) / ppc).max(0)..=((cy + r) / ppc).min(vis_h - 1) {
+            for vx in ((cx - r) / ppc).max(0)..=((cx + r) / ppc).min(self.grid.visible_w() - 1) {
+                if !inside(vx * ppc + 1, vy_top * ppc + 1) {
+                    continue;
+                }
+                let vy = vis_h - 1 - vy_top;
+                let c = self.grid.get_visible(vx, vy);
+                if c.is_open() && c.sat > 0 {
+                    carried.water += c.sat as u32;
+                    let mut dry = c;
+                    dry.sat = 0;
+                    self.grid.set_visible(vx, vy, dry);
+                }
+            }
+        }
+        bio::fields::rescan_tiles(&mut self.pixels);
+        self.light_dirty = true;
+        carried
+    }
+
+    /// Put a bucket down with its centre at pixel `(x, y)`. Every
+    /// organism must fit on free open pixels or nothing moves
+    /// (`Err(ReleaseError::NoRoom)`); litter, grit and water then land
+    /// as near as they can to where they were in the ring.
+    pub fn release(&mut self, carried: Carried, x: i32, y: i32) -> Result<(), (Carried, ReleaseError)> {
+        let dx = x - carried.cx;
+        let dy = y - carried.cy;
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        if x < 0 || y < 0 || x >= pw || y >= ph {
+            return Err((carried, ReleaseError::OutOfBounds));
+        }
+        let vis_h = self.grid.visible_h() as u32;
+        let open = |px: i32, py: i32| -> bool {
+            let (vx, vy) = bio::pixel_to_phys(px as u16, py as u16, vis_h);
+            self.grid.get_visible(vx, vy).is_open()
+        };
+        for b in &carried.orgs {
+            if !self.cells.bundle_fits(&self.pixels, b, dx, dy, &open) {
+                return Err((carried, ReleaseError::NoRoom));
+            }
+        }
+        // Two bodies in one bucket may not overlap each other either.
+        for (i, a) in carried.orgs.iter().enumerate() {
+            for b in carried.orgs.iter().skip(i + 1) {
+                for (_, ca) in &a.cells {
+                    for (_, cb) in &b.cells {
+                        if ca.px < cb.px + cb.w as u16
+                            && cb.px < ca.px + ca.w as u16
+                            && ca.py < cb.py + cb.h as u16
+                            && cb.py < ca.py + ca.h as u16
+                        {
+                            return Err((carried, ReleaseError::NoRoom));
+                        }
+                    }
+                }
+            }
+        }
+        for b in &carried.orgs {
+            self.cells.place_bundle(&mut self.pixels, b, dx, dy);
+        }
+        for &(ox, oy, units, code) in &carried.litter {
+            if let Some(idx) = self.landing_pixel(carried.cx + ox as i32 + dx, carried.cy + oy as i32 + dy) {
+                bio::fields::add_litter(&mut self.pixels, idx, units, code);
+            }
+        }
+        for &(ox, oy, units) in &carried.grit {
+            if let Some(idx) = self.landing_pixel(carried.cx + ox as i32 + dx, carried.cy + oy as i32 + dy) {
+                self.pixels.grit[idx] = self.pixels.grit[idx].saturating_add(units);
+            }
+        }
+        self.pour_water_near(x, y, carried.water);
+        bio::fields::rescan_tiles(&mut self.pixels);
+        self.light_dirty = true;
+        Ok(())
+    }
+
+    /// Throw the bucket away: the organisms die without a corpse and the
+    /// matter leaves the tank (this is the "remove" reading of a scoop).
+    pub fn discard(&mut self, carried: Carried) {
+        for b in &carried.orgs {
+            for (_, c) in &b.cells {
+                self.genomes.on_death(c.genotype);
+            }
+        }
+    }
+
+    /// Remove tool (Phase 3, §2.4 #5): anything under the brush leaves
+    /// the tank — organisms whose cells are hit (whole, no corpse, no
+    /// fragments), corpses, litter and grit. Returns cells removed.
+    pub fn remove_at(&mut self, vx: i32, vy: i32, r: i32) -> u32 {
+        let r = r.max(0);
+        let vis_h = self.grid.visible_h();
+        let mut orgs: Vec<u32> = Vec::new();
+        for (_, c) in self.cells.iter_alive() {
+            let cx = c.px as i32 / 3;
+            let cy = vis_h - 1 - c.py as i32 / 3;
+            let (dx, dy) = (cx - vx, cy - vy);
+            if dx * dx + dy * dy <= r * r && !orgs.contains(&c.org) {
+                orgs.push(c.org);
+            }
+        }
+        let mut removed = 0;
+        for org in orgs {
+            if let Some(b) = self.cells.lift_org(&mut self.pixels, org) {
+                removed += b.cells.len() as u32;
+                for (_, c) in &b.cells {
+                    self.genomes.on_death(c.genotype);
+                }
+            }
+        }
+        let _ = self.clean_at(vx, vy, r);
+        self.light_dirty = true;
+        removed
+    }
+
+    /// The pixel where loose matter put down at `(x, y)` comes to rest:
+    /// the pixel itself when open, else the lowest open pixel of that
+    /// column, else the nearest open pixel anywhere.
+    fn landing_pixel(&self, x: i32, y: i32) -> Option<usize> {
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        let vis_h = self.grid.visible_h() as u32;
+        let open = |px: i32, py: i32| -> bool {
+            px >= 0 && py >= 0 && px < pw && py < ph && {
+                let (vx, vy) = bio::pixel_to_phys(px as u16, py as u16, vis_h);
+                self.grid.get_visible(vx, vy).is_open()
+            }
+        };
+        let x = x.clamp(0, pw - 1);
+        let y = y.clamp(0, ph - 1);
+        if open(x, y) {
+            return Some((y * pw + x) as usize);
+        }
+        if let Some(py) = (0..ph).rev().find(|&py| open(x, py)) {
+            return Some((py * pw + x) as usize);
+        }
+        let mut best: Option<(i32, usize)> = None;
+        for py in 0..ph {
+            for px in 0..pw {
+                if open(px, py) {
+                    let d = (px - x) * (px - x) + (py - y) * (py - y);
+                    if best.is_none_or(|(bd, _)| d < bd) {
+                        best = Some((d, (py * pw + px) as usize));
+                    }
+                }
+            }
+        }
+        best.map(|(_, i)| i)
+    }
+
+    /// Pour `sat` units of water into the open physics cells nearest to
+    /// pixel `(x, y)` (breadth-first), filling each to full.
+    fn pour_water_near(&mut self, x: i32, y: i32, mut sat: u32) {
+        if sat == 0 {
+            return;
+        }
+        let vis_h = self.grid.visible_h();
+        let vis_w = self.grid.visible_w();
+        let (sx, sy) = bio::pixel_to_phys(
+            x.clamp(0, self.pixels.w as i32 - 1) as u16,
+            y.clamp(0, self.pixels.h as i32 - 1) as u16,
+            vis_h as u32,
+        );
+        let mut seen = vec![false; (vis_w * vis_h) as usize];
+        let mut queue = VecDeque::new();
+        queue.push_back((sx, sy));
+        seen[(sy * vis_w + sx) as usize] = true;
+        while let Some((vx, vy)) = queue.pop_front() {
+            let c = self.grid.get_visible(vx, vy);
+            if c.is_open() && c.sat < 255 {
+                let take = (255 - c.sat as u32).min(sat);
+                let mut w = c;
+                w.sat += take as u8;
+                self.grid.set_visible(vx, vy, w);
+                sat -= take;
+                if sat == 0 {
+                    return;
+                }
+            }
+            for (nx, ny) in [(vx - 1, vy), (vx + 1, vy), (vx, vy - 1), (vx, vy + 1)] {
+                if nx < 0 || ny < 0 || nx >= vis_w || ny >= vis_h {
+                    continue;
+                }
+                let i = (ny * vis_w + nx) as usize;
+                if seen[i] {
+                    continue;
+                }
+                seen[i] = true;
+                queue.push_back((nx, ny));
+            }
         }
     }
 
@@ -1477,8 +1764,8 @@ impl Tank {
                 continue;
             }
             if tool.kind == 9 {
-                // Remove living cell under the brush (thin selection).
-                self.remove_cells_at(tool.x as i32, tool.y as i32, tool.r as i32);
+                // Remove anything under the brush (Phase 3, §2.4 #5).
+                let _ = self.remove_at(tool.x as i32, tool.y as i32, tool.r as i32);
                 continue;
             }
             if tool.kind == 10 {

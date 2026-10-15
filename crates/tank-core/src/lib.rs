@@ -29,7 +29,7 @@ pub use cell::Cell;
 pub use clock::{day_factor, is_day, phase, phase_name};
 pub use font::{glyph_bits, glyph_rows};
 pub use hash::{hash_bytes, hash_u64};
-pub use tank::{Inspect, SimEvent, Tank, TankError, TankInput, ToolEvent};
+pub use tank::{Carried, Inspect, LineageCard, ReleaseError, SimEvent, Tank, TankError, TankInput, ToolEvent};
 pub use telemetry::{format_batch, TelEvent, Telemetry};
 pub use tools::set_fill_level;
 

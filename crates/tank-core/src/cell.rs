@@ -62,8 +62,31 @@ impl Cell {
         Self::solid(MaterialId::Bedrock)
     }
 
+    /// Player-drawn glass wall (Phase 3). Tank-local material byte
+    /// outside `wk_material`'s table: solid and impervious to water and
+    /// grains (it maps to Bedrock for the physics rules), but light
+    /// passes through and it renders as a pale transparent pane.
+    pub const GLASS: u8 = 18;
+
+    pub const fn glass() -> Self {
+        Self {
+            material: Self::GLASS,
+            sat: 0,
+            flags: 0,
+            pad: 0,
+        }
+    }
+
+    #[inline]
+    pub fn is_glass(self) -> bool {
+        self.material == Self::GLASS
+    }
+
     #[inline]
     pub fn id(self) -> MaterialId {
+        if self.material == Self::GLASS {
+            return MaterialId::Bedrock;
+        }
         MaterialId::from_u8(self.material).unwrap_or(MaterialId::Air)
     }
 

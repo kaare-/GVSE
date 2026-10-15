@@ -1,9 +1,12 @@
 //! Build tools and the fill slider.
 //!
 //! Tool kinds match the C ABI:
-//! 1 paint · 2 erase · 3 pour · 4 drain · 5 set fill level · 6 undo ·
-//! 7 swipe film · 8 seed algae · 9 remove · 10 glucose drip ·
-//! 11 calcium feed · 12 detritus feed · 13 clean (litter, grit, corpses).
+//! 1 paint (material byte; `Cell::GLASS` = 18 paints a glass wall) ·
+//! 2 erase · 3 pour · 4 drain · 5 set fill level · 6 undo ·
+//! 7 swipe film · 8 seed algae · 9 remove anything (organisms whole,
+//! corpses, litter, grit) · 10 glucose drip · 11 calcium feed ·
+//! 12 detritus feed · 13 clean (litter, grit, corpses only).
+//! The scoop is not a tool event: `Tank::scoop_region` / `release`.
 
 use wk_material::MaterialId;
 
@@ -58,14 +61,17 @@ pub fn apply_one(grid: &mut PhysicsGrid, tool: &ToolEvent) -> bool {
 }
 
 fn paint(grid: &mut PhysicsGrid, tool: &ToolEvent) -> bool {
+    let glass = tool.material == Cell::GLASS;
     let id = MaterialId::from_u8(tool.material).unwrap_or(MaterialId::Sand);
-    if id == MaterialId::Bedrock {
+    if id == MaterialId::Bedrock && !glass {
         return false;
     }
     let variant = tool.variant & 0b11;
     let mut changed = false;
     for_brush(grid, tool, |g, vx, vy| {
-        let mut cell = if id == MaterialId::Air {
+        let mut cell = if glass {
+            Cell::glass()
+        } else if id == MaterialId::Air {
             Cell::air()
         } else {
             Cell::solid(id)
