@@ -37,6 +37,8 @@ pub const LIFELESS_TICKS: u64 = 300;
 pub const GLASS_EVERY: u64 = 300;
 pub const GLASS_DIV: usize = 40;
 pub const GLASS_COOLDOWN: u64 = 5400;
+/// Minimum ticks between two "new species" announcements.
+pub const NEW_SPECIES_COOLDOWN: u64 = 1800;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ColourRec {
@@ -54,6 +56,8 @@ pub struct Milestones {
     lifeless_fired: bool,
     glass_dirty: bool,
     glass_last: u64,
+    #[serde(default)]
+    species_last: Option<u64>,
     colour: Vec<ColourRec>,
     /// `(genotype, organisms of it that reached ≥ 2 cells)`.
     multicell: Vec<(u32, u16)>,
@@ -133,6 +137,22 @@ impl Milestones {
                     }
                 }
                 ev::MULTICELLULAR => self.multicellular(e.arg0, cells, out),
+                ev::NEW_SPECIES => {
+                    // Roots (placed genomes) are not news; later species
+                    // are, one announcement per cooldown.
+                    let derived = genomes
+                        .species(e.arg0 as u16)
+                        .map(|s| s.parent != crate::bio::NO_SPECIES)
+                        .unwrap_or(false);
+                    let due = self.species_last.map(|t| tick.saturating_sub(t) >= NEW_SPECIES_COOLDOWN).unwrap_or(true);
+                    if derived && due {
+                        self.species_last = Some(tick);
+                        out.push_back(SimEvent {
+                            kind: ev::MS_NEW_SPECIES,
+                            arg0: e.arg0,
+                        });
+                    }
+                }
                 _ => {}
             }
         }

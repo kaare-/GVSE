@@ -209,6 +209,9 @@ pub struct OrgRec {
     /// Dead bone / shell pixels this body has laid (rigid, no upkeep).
     #[serde(default)]
     pub secretions: Vec<Secretion>,
+    /// Daughter organisms released (propagules and broods), for inspect.
+    #[serde(default)]
+    pub children: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +256,13 @@ impl CellStore {
 
     pub fn org(&self, org: u32) -> Option<&OrgRec> {
         self.orgs.get(org as usize).filter(|o| o.alive)
+    }
+
+    /// Count a released daughter organism on `org`.
+    pub fn note_child(&mut self, org: u32) {
+        if let Some(o) = self.orgs.get_mut(org as usize) {
+            o.children = o.children.saturating_add(1);
+        }
     }
 
     pub fn org_mut(&mut self, org: u32) -> Option<&mut OrgRec> {
@@ -375,6 +385,7 @@ impl CellStore {
             body_cost_fp: 0,
             born_tick: tick,
             secretions: Vec::new(),
+            children: 0,
         };
         if let Some(id) = self.org_free.pop() {
             self.orgs[id as usize] = rec;

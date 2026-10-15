@@ -97,6 +97,36 @@ pub struct Inspect {
     pub max_age_ticks: u32,
     pub energy_frac: u8,
     pub stress: u8,
+    /// Species cluster of the genotype (`NO_SPECIES` when no cell).
+    pub species: u16,
+    /// Children this organism has released (propagules + broods).
+    pub children: u32,
+}
+
+/// Phase 3 inspect lineage card (`roadmap.md` Phase 3): species, where
+/// it sits in the tree, and who else is alive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineageCard {
+    pub cell: u32,
+    pub org: u32,
+    pub genotype: u32,
+    pub species: u16,
+    pub species_name: String,
+    pub parent_species_name: String,
+    /// Organism divisions since the root organism.
+    pub generation: u32,
+    /// Mutation events between this genotype and its root.
+    pub mutations_since_seed: u16,
+    /// Species on the path from the root (the numeral).
+    pub species_depth: u16,
+    /// Live cells of the same species, this organism excluded.
+    pub kin_alive: u32,
+    /// Live cells of this genotype and everything descended from it.
+    pub descendants_alive: u32,
+    /// Archived species on the ancestor path, this species included.
+    pub archived_relatives: u32,
+    /// Children this organism has released.
+    pub children: u32,
 }
 
 pub struct Tank {
@@ -859,6 +889,15 @@ impl Tank {
         for ev in &bio.events {
             self.events.push_back(*ev);
         }
+        let mut bio = bio;
+        for sid in self.genomes.drain_new_species() {
+            let e = SimEvent {
+                kind: bio::ev::NEW_SPECIES,
+                arg0: sid as u32,
+            };
+            self.events.push_back(e);
+            bio.events.push(e);
+        }
         for (acc, n) in self.death_causes.iter_mut().zip(bio.death_causes) {
             *acc += n as u64;
         }
@@ -914,6 +953,7 @@ impl Tank {
         if px >= self.pixels.w || py >= self.pixels.h {
             return Inspect {
                 cell: u32::MAX,
+                species: bio::NO_SPECIES,
                 ..Inspect::default()
             };
         }
@@ -923,6 +963,7 @@ impl Tank {
         let cell = self.grid.get_visible(vx as i32, vy as i32);
         let owner = self.pixels.owner[(py as usize) * (self.pixels.w as usize) + px as usize];
         let mut rec = Inspect {
+            species: bio::NO_SPECIES,
             hit: true,
             material: cell.material,
             sat: cell.sat,
@@ -952,9 +993,86 @@ impl Tank {
                 let cap = mc.store_cap_fp(c.area()).max(1);
                 rec.energy_frac = (c.energy.max(0) as i64 * 255 / cap as i64).min(255) as u8;
                 rec.stress = c.stress;
+                rec.species = self.genomes.species_of(c.genotype);
+                rec.children = self.cells.org(c.org).map(|o| o.children).unwrap_or(0);
             }
         }
         rec
+    }
+
+    /// The lineage card of a living cell's organism.
+    pub fn lineage_card(&self, cell: u32) -> Option<LineageCard> {
+        let c = self.cells.get(cell)?;
+        let species = self.genomes.species_of(c.genotype);
+        let rec = self.genomes.species(species);
+        let parent_species_name = rec
+            .and_then(|r| self.genomes.species(r.parent))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let mut archived = 0;
+        let mut cur = species;
+        let mut hops = 0;
+        while let Some(r) = self.genomes.species(cur) {
+            if r.archived {
+                archived += 1;
+            }
+            if r.parent == bio::NO_SPECIES || hops > self.genomes.species_count() {
+                break;
+            }
+            cur = r.parent;
+            hops += 1;
+        }
+        let own = self.cells.org(c.org).map(|o| o.n_alive as u32).unwrap_or(1);
+        Some(LineageCard {
+            cell,
+            org: c.org,
+            genotype: c.genotype,
+            species,
+            species_name: rec.map(|r| r.name.clone()).unwrap_or_default(),
+            parent_species_name,
+            generation: self.cells.org_generation(c.org),
+            mutations_since_seed: self.genomes.get(c.genotype).map(|n| n.depth).unwrap_or(0),
+            species_depth: rec.map(|r| r.depth).unwrap_or(0),
+            kin_alive: self.genomes.species_live_cells(species).saturating_sub(own),
+            descendants_alive: self.genomes.lineage_live_cells(c.genotype),
+            archived_relatives: archived,
+            children: self.cells.org(c.org).map(|o| o.children).unwrap_or(0),
+        })
+    }
+
+    /// Name of a species (`""` when unknown).
+    pub fn species_name(&self, species: u16) -> &str {
+        self.genomes.species(species).map(|s| s.name.as_str()).unwrap_or("")
+    }
+
+    pub fn species_count(&self) -> usize {
+        self.genomes.species_count()
+    }
+
+    pub fn species_parent(&self, species: u16) -> Option<u16> {
+        self.genomes.species(species).map(|s| s.parent).filter(|&p| p != bio::NO_SPECIES)
+    }
+
+    /// Pixel bounding box `(x0, y0, x1, y1)` (inclusive) of a living
+    /// organism's cells and secretions — the inspect tracking rectangle.
+    pub fn org_bbox(&self, org: u32) -> Option<(u16, u16, u16, u16)> {
+        let o = self.cells.org(org)?;
+        let mut bb: Option<(u16, u16, u16, u16)> = None;
+        let mut add = |x0: u16, y0: u16, x1: u16, y1: u16| {
+            bb = Some(match bb {
+                None => (x0, y0, x1, y1),
+                Some(b) => (b.0.min(x0), b.1.min(y0), b.2.max(x1), b.3.max(y1)),
+            });
+        };
+        for s in o.slots.iter().filter(|s| s.cell != bio::store::NONE) {
+            if let Some(c) = self.cells.get(s.cell) {
+                add(c.px, c.py, c.px + c.w as u16 - 1, c.py + c.h as u16 - 1);
+            }
+        }
+        for sec in &o.secretions {
+            add(sec.px, sec.py, sec.px, sec.py);
+        }
+        bb
     }
 
     pub fn write_rgba(&mut self, out: &mut Vec<u8>) {
@@ -1117,6 +1235,8 @@ impl Tank {
             bio_cells: self.cells.raw_cells().to_vec(),
             orgs: self.cells.raw_orgs().to_vec(),
             milestones: self.milestones.clone(),
+            species: self.genomes.species_table().to_vec(),
+            node_species: self.genomes.export_species(),
         };
         postcard::to_allocvec(&blob).map_err(|_| TankError::Postcard)
     }
@@ -1194,6 +1314,8 @@ impl Tank {
         tank.coarse.humidity = blob.humidity;
         // Life: genotypes first (cells index them), then live counts.
         let mut genomes = GenomeStore::import(&blob.genomes);
+        genomes.import_species(blob.species, &blob.node_species);
+        genomes.set_tick(blob.tick_count);
         for c in blob.bio_cells.iter().filter(|c| c.alive) {
             if genomes.get(c.genotype).is_none() {
                 return Err(TankError::Shape);
@@ -1470,6 +1592,10 @@ struct SaveBlob {
     orgs: Vec<bio::OrgRec>,
     #[serde(default)]
     milestones: Milestones,
+    #[serde(default)]
+    species: Vec<bio::SpeciesRec>,
+    #[serde(default)]
+    node_species: Vec<(u32, u16)>,
 }
 
 fn default_t_base() -> f32 {

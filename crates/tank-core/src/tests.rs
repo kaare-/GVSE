@@ -1647,3 +1647,97 @@ fn colour_heterotroph_and_glass_detectors_work_on_the_model() {
     ms.run(3 * GLASS_EVERY + GLASS_COOLDOWN, &[], &cells, &genomes, &dirty, &mut out);
     assert_eq!(kinds(&mut out), vec![ev::GLASS], "a cleaned pane re-arms the detector");
 }
+
+/// Phase 3 — the species layer (§c.4): tuning mutations stay in the
+/// founder's species, a structural change or a long parametric drift
+/// founds a new one, names are a pure function of the tree, and the
+/// layer survives a save/load round trip.
+#[test]
+fn species_split_on_structure_or_drift_and_are_named() {
+    use crate::bio::species::{param_distance_q8, signature, SPECIES_D_Q8};
+    use crate::bio::{Block, Entry, Genome, GenomeStore, NO_SPECIES};
+    let mut genomes = GenomeStore::new();
+    let root = genomes.intern_root(Genome::algae());
+    let root_sp = genomes.species_of(root);
+    assert_ne!(root_sp, NO_SPECIES);
+    let root_name = genomes.species(root_sp).unwrap().name.clone();
+    assert!(root_name.starts_with("Vir"), "algae stem is PHOTO ({root_name})");
+    assert_eq!(root, 0, "the seed algae is the root node");
+    assert!(root_name.ends_with(" I"), "the root species is depth 1 ({root_name})");
+
+    // A tuning step: same signature, small distance → same species.
+    let mut tuned = Genome::algae();
+    tuned.modes[0].divide_when.energy_frac = tuned.modes[0].divide_when.energy_frac.wrapping_sub(10);
+    assert_eq!(signature(&tuned), signature(&Genome::algae()));
+    assert!(param_distance_q8(&tuned, &Genome::algae()) < SPECIES_D_Q8);
+    let t = genomes.intern_child(root, tuned.clone());
+    assert_eq!(genomes.species_of(t), root_sp, "a point mutation does not found a species");
+
+    // A structural step: a new block with ≥ 2 units → new species whose
+    // name extends the parent's with the block's syllable.
+    let mut pig = tuned.clone();
+    pig.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
+    assert_ne!(signature(&pig), signature(&tuned));
+    let p = genomes.intern_child(t, pig.clone());
+    let p_sp = genomes.species_of(p);
+    assert_ne!(p_sp, root_sp);
+    let rec = genomes.species(p_sp).unwrap();
+    assert_eq!(rec.parent, root_sp);
+    assert_eq!(rec.depth, 2);
+    assert!(rec.name.contains("ros"), "a red pigment adds its syllable ({})", rec.name);
+    assert!(rec.name.ends_with(" II"), "numeral is the species depth ({})", rec.name);
+
+    // Drift only: same structure, keys walked far → a sibling-named species.
+    let mut drift = tuned.clone();
+    drift.wall_key = 180;
+    drift.glue_key = drift.glue_key.wrapping_add(90);
+    drift.resist_key = drift.resist_key.wrapping_add(90);
+    drift.temp_opt = 200;
+    assert_eq!(signature(&drift), signature(&tuned));
+    assert!(param_distance_q8(&drift, &Genome::algae()) > SPECIES_D_Q8, "{}", param_distance_q8(&drift, &Genome::algae()));
+    let d = genomes.intern_child(t, drift.clone());
+    let d_sp = genomes.species_of(d);
+    assert_ne!(d_sp, root_sp);
+    assert_ne!(d_sp, p_sp);
+    let drec = genomes.species(d_sp).unwrap();
+    assert_eq!(drec.parent, root_sp);
+    assert_eq!(drec.name, format!("{} II", root_name.trim_end_matches(" I")), "pure drift keeps the stem");
+    // A second drifted sibling with the same name gets a letter.
+    let mut drift2 = drift.clone();
+    drift2.temp_opt = 10;
+    drift2.wall_key = 70;
+    let d2 = genomes.intern_child(t, drift2);
+    let d2_sp = genomes.species_of(d2);
+    assert_ne!(d2_sp, d_sp);
+    assert!(genomes.species(d2_sp).unwrap().name.ends_with("II-b"), "{}", genomes.species(d2_sp).unwrap().name);
+    // Children of the drifted species measure against *its* founder.
+    let mut near = drift.clone();
+    near.temp_width = near.temp_width.wrapping_add(3);
+    let n = genomes.intern_child(d, near);
+    assert_eq!(genomes.species_of(n), d_sp);
+
+    // Round trip through a tank save.
+    let mut tank = water_box(61, 24, 24, 20);
+    let id = tank.seed_genome_at(36, 36, pig.clone()).expect("seed");
+    let sp = tank.inspect(36, 36).species;
+    assert_ne!(sp, NO_SPECIES);
+    let card = tank.lineage_card(id).expect("card");
+    assert!(card.species_name.contains("ros"));
+    assert_eq!(card.species_depth, 2, "{card:?}");
+    let parent = tank.species_parent(card.species).expect("parent species");
+    assert_eq!(card.parent_species_name, tank.species_name(parent));
+    assert_eq!(card.generation, 0);
+    assert_eq!(card.mutations_since_seed, 1, "one interning step under the algae root");
+    for _ in 0..200 {
+        tank.tick(&day());
+    }
+    let bytes = tank.save_bytes().unwrap();
+    let loaded = Tank::load_bytes(&bytes).unwrap();
+    assert_eq!(loaded.species_count(), tank.species_count());
+    for s in 0..tank.species_count() as u16 {
+        assert_eq!(loaded.species_name(s), tank.species_name(s));
+    }
+    let after = loaded.lineage_card(id).expect("card after load");
+    assert_eq!(after.species_name, card.species_name);
+    assert_eq!(after.species, card.species);
+}

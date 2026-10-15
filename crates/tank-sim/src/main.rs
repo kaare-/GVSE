@@ -255,7 +255,7 @@ fn cmd_tank(args: impl Iterator<Item = String>) -> ExitCode {
     let input = TankInput::default();
     let mut csv_file = csv.map(|path| BufWriter::new(File::create(path).expect("csv")));
     if log_every > 0 {
-        println!("tick,phase,cells,genotypes,bodies,litter,glucose,grit,sediment,minerals,fines_g,starved,aged,damaged,shed,ms");
+        println!("tick,phase,cells,genotypes,species,bodies,litter,glucose,grit,sediment,minerals,fines_g,starved,aged,damaged,shed,ms");
     }
     if let Some(file) = csv_file.as_mut() {
         writeln!(file, "tick,phase,day_factor,pixel_hash").ok();
@@ -273,11 +273,12 @@ fn cmd_tank(args: impl Iterator<Item = String>) -> ExitCode {
             let d = tank.death_causes();
             let (_, bodies) = tank.org_counts(2);
             println!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3}",
                 tank.tick_count(),
                 tank.phase_name(),
                 tank.live_cells(),
                 tank.genotype_count(),
+                tank.species_count(),
                 bodies,
                 tank.litter_total(),
                 tank.glucose_total(),
@@ -592,6 +593,7 @@ fn milestone_name(kind: u32) -> Option<&'static str> {
         ev::MS_POISON => "poison",
         ev::MS_SIGNALLING => "signalling",
         ev::MS_MOVED => "moved",
+        ev::MS_NEW_SPECIES => "new_species",
         _ => return None,
     })
 }
