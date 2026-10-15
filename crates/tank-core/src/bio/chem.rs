@@ -10,7 +10,10 @@
 //! the arithmetic stays integer and deterministic.
 #![allow(clippy::too_many_arguments)]
 
-use crate::bio::fields::{add_litter, add_plain, deposit, open_idx, tile_of, Field, KeyedField, FIELD_WIDTH};
+use crate::bio::fields::{
+    add_grit, add_litter, add_plain, credit_digestion, deposit, open_idx, tile_of, Field, KeyedField,
+    BONE_GRIT_PER_UNIT, FIELD_WIDTH, GRIT_SHARE_Q8,
+};
 use crate::bio::genome::GenomeStore;
 use crate::bio::profile::ModeCoeffs;
 use crate::bio::program::{heading_delta, keyed_potency_q8, ring_match_q8, Scalars};
@@ -283,7 +286,15 @@ fn hit_living(
 /// Digest litter at `j` with `pot`; glucose appears at `own`. Bone litter
 /// (code ≥ 192) returns its minerals to the physics cell under `j` and a
 /// little glucose from the organic matrix.
-fn lyse_litter_px(pixels: &mut PixelLayer, coarse: &mut CoarseField, j: usize, own: usize, pot: u32, h: u64) {
+fn lyse_litter_px(
+    pixels: &mut PixelLayer,
+    grid: &PhysicsGrid,
+    coarse: &mut CoarseField,
+    j: usize,
+    own: usize,
+    pot: u32,
+    h: u64,
+) {
     let l = pixels.litter[j];
     if l == 0 || pot == 0 {
         return;
@@ -305,9 +316,44 @@ fn lyse_litter_px(pixels: &mut PixelLayer, coarse: &mut CoarseField, j: usize, o
         let ci = minerals::idx_of_pixel(coarse, (j % pw) as u16, (j / pw) as u16);
         minerals::give(coarse, ci, take);
         add_plain(pixels, Field::Glucose, own, (take * BONE_GLUCOSE_PER_UNIT as u32).min(255) as u8);
+        add_grit(pixels, j, (take * BONE_GRIT_PER_UNIT as u32).min(255) as u8);
     } else {
-        add_plain(pixels, Field::Glucose, own, take as u8);
+        // 15 % of soft litter is left as inert grit (§d.4); the digestion
+        // counts toward fungus-made soil under the litter.
+        let grit = frac_round(take * GRIT_SHARE_Q8, h >> 24);
+        add_plain(pixels, Field::Glucose, own, (take - grit) as u8);
+        add_grit(pixels, j, grit as u8);
+        credit_digestion(pixels, grid, coarse, j, take);
     }
+}
+
+/// Contact enzyme on a corpse (soft-litter band): its soft mass is eaten
+/// like litter — glucose at `own`, a grit share, digestion credited to
+/// the bed under the corpse pixel. The corpse crumbles when it is empty.
+fn eat_corpse(
+    cells: &mut CellStore,
+    pixels: &mut PixelLayer,
+    grid: &PhysicsGrid,
+    coarse: &mut CoarseField,
+    tid: u32,
+    j: usize,
+    own: usize,
+    pot: u32,
+    h: u64,
+) {
+    if pot == 0 {
+        return;
+    }
+    let room = 255 - pixels.glucose[own] as u32;
+    let want = frac_round(pot * 2, h).min(room);
+    let got = cells.corpse_eat(tid, want);
+    if got == 0 {
+        return;
+    }
+    let grit = frac_round(got * GRIT_SHARE_Q8, h >> 24);
+    add_plain(pixels, Field::Glucose, own, (got - grit) as u8);
+    add_grit(pixels, j, grit as u8);
+    credit_digestion(pixels, grid, coarse, j, got);
 }
 
 /// Contact enzyme on a dead bone / shell pixel: a stateless break chance
@@ -351,6 +397,9 @@ pub fn enzyme_act(
         } else if owner >= OWNER_BIAS {
             let tid = owner - OWNER_BIAS;
             let Some(t) = cells.get(tid).copied() else {
+                if cells.corpse(tid).is_some() {
+                    eat_corpse(cells, pixels, grid, coarse, tid, j, own, litter_potency(mc, LITTER_SOFT_CODE), h);
+                }
                 continue;
             };
             if t.org == c.org {
@@ -365,7 +414,7 @@ pub fn enzyme_act(
         }
         if pixels.litter[j] > 0 {
             let pot = litter_potency(mc, pixels.litter_key[j]);
-            lyse_litter_px(pixels, coarse, j, own, pot, h >> 16);
+            lyse_litter_px(pixels, grid, coarse, j, own, pot, h >> 16);
         }
     }
     // Sitting on litter is contact too.
@@ -376,7 +425,7 @@ pub fn enzyme_act(
             if pixels.litter[i] > 0 {
                 let pot = litter_potency(mc, pixels.litter_key[i]);
                 let h = hash_u64(world_seed, tick, id as u64 ^ ((i as u64) << 32), 0xC4_02);
-                lyse_litter_px(pixels, coarse, i, i, pot, h);
+                lyse_litter_px(pixels, grid, coarse, i, i, pot, h);
             }
         }
     }

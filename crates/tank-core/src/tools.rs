@@ -3,7 +3,7 @@
 //! Tool kinds match the C ABI:
 //! 1 paint · 2 erase · 3 pour · 4 drain · 5 set fill level · 6 undo ·
 //! 7 swipe film · 8 seed algae · 9 remove · 10 glucose drip ·
-//! 11 calcium feed · 12 detritus feed.
+//! 11 calcium feed · 12 detritus feed · 13 clean (litter, grit, corpses).
 
 use wk_material::MaterialId;
 
@@ -13,7 +13,7 @@ use crate::grid::PhysicsGrid;
 #[derive(Debug, Clone, Copy)]
 pub struct ToolEvent {
     /// 1 paint, 2 erase, 3 pour, 4 drain, 5 fill level, 6 undo, 7 swipe,
-    /// 8 seed, 9 remove, 10 glucose, 11 calcium, 12 detritus.
+    /// 8 seed, 9 remove, 10 glucose, 11 calcium, 12 detritus, 13 clean.
     pub kind: u8,
     pub material: u8,
     /// Visible physics cell, origin at the bottom-left of the interior.

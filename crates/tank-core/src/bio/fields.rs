@@ -40,16 +40,31 @@ pub enum Field {
     /// Soft litter / bone: settles, never blurs or decays; digested by
     /// enzyme contact (`chem.rs`) and by the enzyme field (`lyse_litter`).
     Litter,
+    /// Inert grit: settles, nothing digests it, only the clean tool removes it.
+    Grit,
 }
 
+/// Share of lysed soft litter that is left as grit (§d.4: 15 %), Q8.
+pub const GRIT_SHARE_Q8: u32 = 38;
+/// Grit units left per bone-litter unit lysed (the organic matrix not
+/// recovered as glucose).
+pub const BONE_GRIT_PER_UNIT: u8 = 2;
+/// Digested litter (units / 4) that turns a sand / gravel physics cell
+/// into fungus-made soil: 512 units ≈ 8 g.
+pub const SOIL_DIGEST: u8 = 128;
+/// Waste (and, slower, glucose) touching sand / soil becomes sediment
+/// nutrient at this many units per pixel per pass.
+const SETTLE_WASTE_PER_PASS: u8 = 4;
+
 impl Field {
-    pub const ALL: [Field; 6] = [
+    pub const ALL: [Field; 7] = [
         Field::Enzyme,
         Field::Toxin,
         Field::Signal,
         Field::Glucose,
         Field::Waste,
         Field::Litter,
+        Field::Grit,
     ];
 
     #[inline]
@@ -61,6 +76,7 @@ impl Field {
             Field::Glucose => 8,
             Field::Waste => 16,
             Field::Litter => 32,
+            Field::Grit => 64,
         }
     }
 
@@ -69,7 +85,7 @@ impl Field {
         match self {
             Field::Enzyme | Field::Toxin => 192, // ×0.75, half-life ≈ 2.4 ticks
             Field::Signal => 235,                // ×0.92, half-life ≈ 8 ticks
-            Field::Glucose | Field::Waste | Field::Litter => 256,
+            Field::Glucose | Field::Waste | Field::Litter | Field::Grit => 256,
         }
     }
 
@@ -77,7 +93,7 @@ impl Field {
     fn blur_every(self) -> u64 {
         match self {
             Field::Glucose | Field::Waste => 4,
-            Field::Litter => 0,
+            Field::Litter | Field::Grit => 0,
             _ => 2,
         }
     }
@@ -105,6 +121,121 @@ fn bufs(pixels: &mut PixelLayer, f: Field) -> (&mut Vec<u8>, Option<&mut Vec<u8>
         Field::Glucose => (&mut pixels.glucose, None),
         Field::Waste => (&mut pixels.waste, None),
         Field::Litter => (&mut pixels.litter, Some(&mut pixels.litter_key)),
+        Field::Grit => (&mut pixels.grit, None),
+    }
+}
+
+/// Add inert grit at a pixel.
+pub fn add_grit(pixels: &mut PixelLayer, idx: usize, add: u8) {
+    add_plain(pixels, Field::Grit, idx, add);
+}
+
+/// Credit `units` of digested litter to the sand / gravel cell on or
+/// under pixel `idx` (fungus-made soil, `evolution-system.md` §9).
+pub fn credit_digestion(pixels: &PixelLayer, grid: &PhysicsGrid, coarse: &mut CoarseField, idx: usize, units: u32) {
+    let pw = pixels.w as usize;
+    let (x, y) = ((idx % pw) as u16, (idx / pw) as u16);
+    let vis_h = grid.visible_h() as u32;
+    let (vx, vy) = crate::bio::step::pixel_to_phys(x, y, vis_h);
+    let target = if is_soil_parent(grid.get_visible(vx, vy)) {
+        Some((vx, vy))
+    } else if is_soil_parent(grid.get_visible(vx, vy - 1)) {
+        Some((vx, vy - 1))
+    } else {
+        None
+    };
+    let Some((tx, ty)) = target else {
+        return;
+    };
+    if tx < 0 || ty < 0 || tx >= coarse.w as i32 || ty >= coarse.h as i32 {
+        return;
+    }
+    let ci = (ty as usize) * (coarse.w as usize) + tx as usize;
+    coarse.digested[ci] = coarse.digested[ci].saturating_add((units / 4).clamp(1, 255) as u8);
+}
+
+#[inline]
+fn is_soil_parent(c: crate::cell::Cell) -> bool {
+    matches!(c.id(), wk_material::MaterialId::Sand | wk_material::MaterialId::Gravel)
+}
+
+#[inline]
+fn is_sediment_bed(c: crate::cell::Cell) -> bool {
+    matches!(
+        c.id(),
+        wk_material::MaterialId::Sand | wk_material::MaterialId::Gravel | wk_material::MaterialId::Soil
+    )
+}
+
+/// Sand / gravel cells whose digested litter reached `SOIL_DIGEST` turn to
+/// `Soil` (keeping their water). Returns the number of new soil cells.
+pub fn make_soil(grid: &mut PhysicsGrid, coarse: &mut CoarseField) -> u32 {
+    let mut made = 0;
+    let w = coarse.w as usize;
+    for ci in 0..coarse.digested.len() {
+        if coarse.digested[ci] < SOIL_DIGEST {
+            continue;
+        }
+        let (vx, vy) = ((ci % w) as i32, (ci / w) as i32);
+        let cur = grid.get_visible(vx, vy);
+        coarse.digested[ci] = 0;
+        if !is_soil_parent(cur) {
+            continue;
+        }
+        let mut soil = crate::cell::Cell::solid(wk_material::MaterialId::Soil);
+        soil.sat = cur.sat.min(crate::cell::water_capacity(wk_material::MaterialId::Soil));
+        grid.set_visible(vx, vy, soil);
+        made += 1;
+    }
+    made
+}
+
+/// Waste (every pass) and glucose (every 4th pass) lying on a pixel whose
+/// physics cell below is sand / gravel / soil settle into that cell's
+/// sediment nutrient (§a.3). Runs on the active tiles of the field.
+fn settle_sediment(pixels: &mut PixelLayer, grid: &PhysicsGrid, coarse: &mut CoarseField, f: Field, active: &[usize]) {
+    let pw = pixels.w as usize;
+    let vis_h = grid.visible_h() as u32;
+    let per = if f == Field::Waste { SETTLE_WASTE_PER_PASS } else { 1 };
+    for &t in active {
+        let (x0, y0, x1, y1) = tile_bounds(pixels, t);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = y * pw + x;
+                let amt = {
+                    let (a, _) = bufs(pixels, f);
+                    a[i]
+                };
+                if amt == 0 {
+                    continue;
+                }
+                let (vx, vy) = crate::bio::step::pixel_to_phys(x as u16, y as u16, vis_h);
+                // The bed is the cell under the pixel's cell, or the pixel's
+                // own cell when it sits inside wet sand.
+                let bed = if is_sediment_bed(grid.get_visible(vx, vy - 1)) {
+                    Some((vx, vy - 1))
+                } else if is_sediment_bed(grid.get_visible(vx, vy)) {
+                    Some((vx, vy))
+                } else {
+                    None
+                };
+                let Some((bx, by)) = bed else {
+                    continue;
+                };
+                if bx < 0 || by < 0 || bx >= coarse.w as i32 || by >= coarse.h as i32 {
+                    continue;
+                }
+                let ci = (by as usize) * (coarse.w as usize) + bx as usize;
+                let room = 255 - coarse.sediment[ci];
+                let take = amt.min(per).min(room);
+                if take == 0 {
+                    continue;
+                }
+                coarse.sediment[ci] += take;
+                let (a, _) = bufs(pixels, f);
+                a[i] -= take;
+            }
+        }
     }
 }
 
@@ -240,10 +371,16 @@ pub fn step_fields(pixels: &mut PixelLayer, grid: &PhysicsGrid, coarse: &mut Coa
             blur_tiles(pixels, grid, f, &active);
         }
         if f == Field::Enzyme {
-            lyse_litter(pixels, coarse, &active, tick);
+            lyse_litter(pixels, grid, coarse, &active, tick);
         }
-        if f == Field::Litter && tick % 4 == 2 {
-            settle_litter(pixels, grid, &active);
+        if (f == Field::Litter || f == Field::Grit) && tick % 4 == 2 {
+            settle_litter(pixels, grid, &active, f);
+        }
+        if f == Field::Waste && tick % 4 == 3 {
+            settle_sediment(pixels, grid, coarse, f, &active);
+        }
+        if f == Field::Glucose && tick % 16 == 3 {
+            settle_sediment(pixels, grid, coarse, f, &active);
         }
         // Retire tiles that emptied out.
         for &t in &active {
@@ -368,7 +505,7 @@ fn blur_tiles(pixels: &mut PixelLayer, grid: &PhysicsGrid, f: Field, active: &[u
 /// litter whose code matches its key, mass converts to dissolved glucose
 /// in place at `amount/255 · match` of contact strength; bone litter gives
 /// its minerals back to the physics cell plus a little glucose.
-fn lyse_litter(pixels: &mut PixelLayer, coarse: &mut CoarseField, enzyme_tiles: &[usize], tick: u64) {
+fn lyse_litter(pixels: &mut PixelLayer, grid: &PhysicsGrid, coarse: &mut CoarseField, enzyme_tiles: &[usize], tick: u64) {
     let pw = pixels.w as usize;
     for &t in enzyme_tiles {
         if pixels.tile_active[t] & Field::Litter.bit() == 0 {
@@ -404,18 +541,22 @@ fn lyse_litter(pixels: &mut PixelLayer, coarse: &mut CoarseField, enzyme_tiles: 
                     let ci = minerals::idx_of_pixel(coarse, x as u16, y as u16);
                     minerals::give(coarse, ci, take);
                     add_plain(pixels, Field::Glucose, i, (take * BONE_GLUCOSE_PER_UNIT as u32) as u8);
+                    add_grit(pixels, i, (take * BONE_GRIT_PER_UNIT as u32).min(255) as u8);
                 } else {
-                    add_plain(pixels, Field::Glucose, i, take as u8);
+                    let grit = (take * GRIT_SHARE_Q8 + ((h >> 8) & 0xFF) as u32) / 256;
+                    add_plain(pixels, Field::Glucose, i, (take - grit) as u8);
+                    add_grit(pixels, i, grit as u8);
+                    credit_digestion(pixels, grid, coarse, i, take);
                 }
             }
         }
     }
 }
 
-/// Litter sinks one pixel per settle pass through open, unowned pixels,
-/// merging only with litter of the same code. Tiles are walked bottom-up
-/// so a grain moves at most once per pass.
-fn settle_litter(pixels: &mut PixelLayer, grid: &PhysicsGrid, active: &[usize]) {
+/// Litter and grit sink one pixel per settle pass through open, unowned
+/// pixels; litter merges only with litter of the same code. Tiles are
+/// walked bottom-up so a grain moves at most once per pass.
+fn settle_litter(pixels: &mut PixelLayer, grid: &PhysicsGrid, active: &[usize], f: Field) {
     let pw = pixels.w as usize;
     let ph = pixels.h as usize;
     for &t in active.iter().rev() {
@@ -426,7 +567,10 @@ fn settle_litter(pixels: &mut PixelLayer, grid: &PhysicsGrid, active: &[usize]) 
             }
             for x in x0..x1 {
                 let i = y * pw + x;
-                let l = pixels.litter[i];
+                let l = {
+                    let (a, _) = bufs(pixels, f);
+                    a[i]
+                };
                 if l == 0 {
                     continue;
                 }
@@ -434,14 +578,20 @@ fn settle_litter(pixels: &mut PixelLayer, grid: &PhysicsGrid, active: &[usize]) 
                 if pixels.owner[j] != 0 || !open(grid, pixels, x, y + 1) {
                     continue;
                 }
-                let below = pixels.litter[j];
-                if below != 0 && (pixels.litter_key[j] != pixels.litter_key[i] || below as u32 + l as u32 > 255) {
+                let (a, key) = bufs(pixels, f);
+                let below = a[j];
+                if below as u32 + l as u32 > 255 {
                     continue;
                 }
-                pixels.litter_key[j] = pixels.litter_key[i];
-                pixels.litter[j] = below + l;
-                pixels.litter[i] = 0;
-                touch(pixels, Field::Litter, j);
+                if let Some(key) = key {
+                    if below != 0 && key[j] != key[i] {
+                        continue;
+                    }
+                    key[j] = key[i];
+                }
+                a[j] = below + l;
+                a[i] = 0;
+                touch(pixels, f, j);
             }
         }
     }

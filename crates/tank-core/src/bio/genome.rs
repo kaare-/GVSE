@@ -238,6 +238,21 @@ impl Genome {
         g
     }
 
+    /// Sediment feeder: CHEMO 3, STORE 2, the spare units as PHOTO; sinks
+    /// onto the bed (`buoy` −5) and lives on sediment nutrient in the dark.
+    pub fn sediment_feeder() -> Self {
+        let mut g = Self::base();
+        g.buoy = -5;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Chemo, 3));
+        m.push_entry(Entry::new(Block::Store, 2));
+        m.push_entry(Entry::new(Block::Photo, 1));
+        m.divide_when.energy_frac = 153;
+        m.push_child(ChildSpec::propagule(0, 15));
+        g.modes.push(m);
+        g
+    }
+
     /// d.7 — mouth-cavity predator: a hard-walled U. Mode 0 (base) grows a
     /// side-wall chain (mode 1) on each side; the lining secretes a
     /// living-wall enzyme (key 120, width 24) gated on touch; chains end in

@@ -17,8 +17,12 @@ use crate::pixels::{self, CoarseField, PixelLayer};
 use crate::rules;
 use crate::telemetry::{self, TelEvent, Telemetry};
 use crate::tools::{self, UndoFrame, UNDO_CAP};
+use wk_material::MaterialId;
 
 pub use crate::tools::ToolEvent;
+
+/// Light passing a corpse pixel (Q8): dead soft tissue, slightly murky.
+const CORPSE_PASS_Q8: u8 = 192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TankError {
@@ -470,9 +474,48 @@ impl Tank {
         }
         let _ = self
             .cells
-            .kill(&mut self.genomes, &mut self.pixels, id, false, self.tick_count);
+            .kill(&mut self.genomes, &mut self.pixels, id, false, self.tick_count, None);
         self.light_dirty = true;
         true
+    }
+
+    /// Clean tool (K2#5): sweep litter, grit and corpses from the physics
+    /// cells within `r` of `(vx, vy)`. Returns pixels cleared.
+    pub fn clean_at(&mut self, vx: i32, vy: i32, r: i32) -> u32 {
+        let r = r.max(0);
+        let vis_h = self.grid.visible_h();
+        let pw = self.pixels.w as i32;
+        let mut cleared = 0u32;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy > r * r {
+                    continue;
+                }
+                let (x, y) = (vx + dx, vy + dy);
+                if x < 0 || y < 0 || x >= self.grid.visible_w() || y >= vis_h {
+                    continue;
+                }
+                let py_top = vis_h - 1 - y;
+                for sy in 0..3 {
+                    for sx in 0..3 {
+                        let idx = ((py_top * 3 + sy) * pw + x * 3 + sx) as usize;
+                        if self.pixels.litter[idx] > 0 || self.pixels.grit[idx] > 0 {
+                            self.pixels.litter[idx] = 0;
+                            self.pixels.litter_key[idx] = 0;
+                            self.pixels.grit[idx] = 0;
+                            cleared += 1;
+                        }
+                        let owner = self.pixels.owner[idx];
+                        if owner >= OWNER_BIAS && self.cells.corpse(owner - OWNER_BIAS).is_some() {
+                            self.cells.expire_corpse(&mut self.pixels, owner - OWNER_BIAS);
+                            cleared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        self.light_dirty = true;
+        cleared
     }
 
     /// Clear front-pane film along a stroke (pixel space, top-left origin).
@@ -499,6 +542,7 @@ impl Tank {
                     id,
                     false,
                     self.tick_count,
+                    None,
                 );
             }
         }
@@ -561,6 +605,44 @@ impl Tank {
     pub fn litter_at(&self, px: u16, py: u16) -> u8 {
         let idx = (py as usize) * (self.pixels.w as usize) + px as usize;
         self.pixels.litter.get(idx).copied().unwrap_or(0)
+    }
+
+    /// Total inert grit in units (harness probe).
+    pub fn grit_total(&self) -> u64 {
+        self.pixels.grit.iter().map(|&g| g as u64).sum()
+    }
+
+    /// Total sediment nutrient in the beds, in units (harness probe).
+    pub fn sediment_total(&self) -> u64 {
+        self.coarse.sediment.iter().map(|&s| s as u64).sum()
+    }
+
+    /// Set the sediment nutrient of every sand / gravel / soil cell.
+    pub fn set_sediment_all(&mut self, units: u8) {
+        let (vw, vh) = (self.grid.visible_w(), self.grid.visible_h());
+        for vy in 0..vh {
+            for vx in 0..vw {
+                let bed = self.grid.get_visible(vx, vy).id();
+                if matches!(bed, MaterialId::Sand | MaterialId::Gravel | MaterialId::Soil) {
+                    self.coarse.sediment[(vy as usize) * (vw as usize) + vx as usize] = units;
+                }
+            }
+        }
+    }
+
+    /// Dead cells still lying on their pixels.
+    pub fn corpse_count(&self) -> usize {
+        self.cells.corpse_count()
+    }
+
+    /// Corpse record by cell id (tests / inspect).
+    pub fn corpse(&self, id: u32) -> Option<&bio::CellRec> {
+        self.cells.corpse(id)
+    }
+
+    /// Suspended fines per pixel column, in grams (Phase 4 consumes them).
+    pub fn fines(&self) -> &[f32] {
+        &self.fines
     }
 
     /// Calcium feed (K2#1): raise the dissolved-mineral field by `amount`
@@ -656,6 +738,14 @@ impl Tank {
         }
     }
 
+    /// Test rig: set a living cell's store (FP).
+    #[cfg(test)]
+    pub(crate) fn set_energy_for_test(&mut self, id: u32, energy: i32) {
+        if let Some(c) = self.cells.get_mut(id) {
+            c.energy = energy;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn place_for_test(&mut self, vx: i32, vy: i32, cell: Cell) {
         self.grid.set_visible(vx, vy, cell);
@@ -720,6 +810,12 @@ impl Tank {
         }
         for (acc, n) in self.death_causes.iter_mut().zip(bio.death_causes) {
             *acc += n as u64;
+        }
+        // 2.3.7: crumbling corpses send 30 % of their soft mass up as fines.
+        for (px, units) in bio.fines {
+            if let Some(f) = self.fines.get_mut(px as usize) {
+                *f += units as f32 * crate::consts::GLUCOSE_UNIT_FP as f32 / crate::consts::FP as f32;
+            }
         }
         if bio.deaths > 0 && self.cells.is_empty() {
             self.events.push_back(SimEvent {
@@ -818,7 +914,18 @@ impl Tank {
                 _ => {}
             }
             let id = owner - OWNER_BIAS;
-            let cell = cells.get(id)?;
+            let Some(cell) = cells.get(id) else {
+                // A corpse fades from its living colour to gray-brown.
+                let c = cells.corpse(id)?;
+                let live = genomes.coeffs(c.genotype, c.mode).colour;
+                let t = 255 - (c.corpse as u16 * 255 / bio::store::CORPSE_TICKS as u16);
+                let dead = [0x6Bu8, 0x55, 0x45];
+                let mut rgb = [0u8; 3];
+                for k in 0..3 {
+                    rgb[k] = ((live[k] as u16 * (255 - t) + dead[k] as u16 * t) / 255) as u8;
+                }
+                return Some(rgb);
+            };
             let mc = genomes.coeffs(cell.genotype, cell.mode);
             let mut rgb = mc.colour;
             if cell.flash > 0 {
@@ -914,11 +1021,14 @@ impl Tank {
             signal_key: self.pixels.signal_key.clone(),
             litter: self.pixels.litter.clone(),
             litter_key: self.pixels.litter_key.clone(),
+            grit: self.pixels.grit.clone(),
             film: self.pixels.film.clone(),
             fines: self.fines.clone(),
             coarse_w: self.coarse.w,
             coarse_h: self.coarse.h,
             minerals: self.coarse.minerals.clone(),
+            sediment: self.coarse.sediment.clone(),
+            digested: self.coarse.digested.clone(),
             t_local: self.coarse.t_local.clone(),
             humidity: self.coarse.humidity.clone(),
             genomes: self.genomes.export(),
@@ -954,11 +1064,14 @@ impl Tank {
             || blob.signal_key.len() != n
             || blob.litter.len() != n
             || blob.litter_key.len() != n
+            || blob.grit.len() != n
             || blob.film.len() != n
             || blob.fines.len() != tank.pixels.w as usize
             || blob.coarse_w != tank.coarse.w
             || blob.coarse_h != tank.coarse.h
             || blob.minerals.len() != tank.coarse.minerals.len()
+            || blob.sediment.len() != tank.coarse.sediment.len()
+            || blob.digested.len() != tank.coarse.digested.len()
             || blob.t_local.len() != tank.coarse.t_local.len()
             || blob.humidity.len() != tank.coarse.humidity.len()
         {
@@ -987,10 +1100,13 @@ impl Tank {
         tank.pixels.signal_key = blob.signal_key;
         tank.pixels.litter = blob.litter;
         tank.pixels.litter_key = blob.litter_key;
+        tank.pixels.grit = blob.grit;
         tank.pixels.film = blob.film;
         bio::fields::rescan_tiles(&mut tank.pixels);
         tank.fines = blob.fines;
         tank.coarse.minerals = blob.minerals;
+        tank.coarse.sediment = blob.sediment;
+        tank.coarse.digested = blob.digested;
         tank.coarse.t_local = blob.t_local;
         tank.coarse.humidity = blob.humidity;
         // Life: genotypes first (cells index them), then live counts.
@@ -1114,10 +1230,11 @@ impl Tank {
                 if secretion_kind(owner).is_some() {
                     return crate::consts::TISSUE_PASS_OTHER_Q8 as u8 / 2;
                 }
-                cells
-                    .get(owner - OWNER_BIAS)
-                    .map(|c| genomes.coeffs(c.genotype, c.mode).light_pass_q8)
-                    .unwrap_or(255)
+                match cells.get(owner - OWNER_BIAS) {
+                    Some(c) => genomes.coeffs(c.genotype, c.mode).light_pass_q8,
+                    None if cells.corpse(owner - OWNER_BIAS).is_some() => CORPSE_PASS_Q8,
+                    None => 255,
+                }
             },
         );
     }
@@ -1180,6 +1297,11 @@ impl Tank {
                         bio::chem::LITTER_SOFT_CODE,
                     );
                 }
+                continue;
+            }
+            if tool.kind == 13 {
+                // Clean: sweep litter, grit and corpses under the brush.
+                let _ = self.clean_at(tool.x as i32, tool.y as i32, tool.r as i32);
                 continue;
             }
             if !need_push {
@@ -1246,11 +1368,14 @@ struct SaveBlob {
     signal_key: Vec<u8>,
     litter: Vec<u8>,
     litter_key: Vec<u8>,
+    grit: Vec<u8>,
     film: Vec<u8>,
     fines: Vec<f32>,
     coarse_w: u32,
     coarse_h: u32,
     minerals: Vec<u8>,
+    sediment: Vec<u8>,
+    digested: Vec<u8>,
     t_local: Vec<i8>,
     humidity: Vec<u8>,
     #[serde(default)]

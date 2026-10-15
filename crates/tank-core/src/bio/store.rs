@@ -107,7 +107,18 @@ pub struct CellRec {
     /// Stuck as front-pane film.
     pub film: bool,
     pub alive: bool,
+    /// Ticks left as a visible corpse (§a.4 detritus). A corpse is not
+    /// alive, keeps its pixels and id, sinks, and is eaten by contact
+    /// enzyme; `energy` then holds its soft mass and `corpse_bone` its
+    /// wall minerals, both released as litter when it expires.
+    #[serde(default)]
+    pub corpse: u8,
+    #[serde(default)]
+    pub corpse_bone: u16,
 }
+
+/// How long a dead cell stays a visible corpse before it crumbles.
+pub const CORPSE_TICKS: u8 = 90;
 
 impl CellRec {
     fn blank() -> Self {
@@ -141,7 +152,15 @@ impl CellRec {
             running: true,
             film: false,
             alive: false,
+            corpse: 0,
+            corpse_bone: 0,
         }
+    }
+
+    /// A dead cell still occupying its pixels.
+    #[inline]
+    pub fn is_corpse(&self) -> bool {
+        !self.alive && self.corpse > 0
     }
 
     pub fn area(&self) -> i32 {
@@ -246,6 +265,80 @@ impl CellStore {
 
     pub fn live_ids(&self) -> Vec<u32> {
         self.iter_alive().map(|(id, _)| id).collect()
+    }
+
+    /// A corpse record (dead, still on its pixels).
+    pub fn corpse(&self, id: u32) -> Option<&CellRec> {
+        self.cells.get(id as usize).filter(|c| c.is_corpse())
+    }
+
+    pub fn corpse_ids(&self) -> Vec<u32> {
+        self.cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.is_corpse())
+            .map(|(i, _)| i as u32)
+            .collect()
+    }
+
+    pub fn corpse_count(&self) -> usize {
+        self.cells.iter().filter(|c| c.is_corpse()).count()
+    }
+
+    /// Age a corpse by `by` ticks. Returns true when it is due to crumble
+    /// (the record stays a corpse until `expire_corpse` is called).
+    pub fn corpse_decay(&mut self, id: u32, by: u8) -> bool {
+        match self.cells.get_mut(id as usize) {
+            Some(c) if c.is_corpse() => {
+                if c.corpse <= by {
+                    true
+                } else {
+                    c.corpse -= by;
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Eat `units` of a corpse's soft mass (glucose units). Returns what
+    /// was actually taken.
+    pub fn corpse_eat(&mut self, id: u32, units: u32) -> u32 {
+        let Some(c) = self.cells.get_mut(id as usize).filter(|c| c.is_corpse()) else {
+            return 0;
+        };
+        let have = (c.energy.max(0) / crate::consts::GLUCOSE_UNIT_FP) as u32;
+        let take = units.min(have);
+        c.energy -= take as i32 * crate::consts::GLUCOSE_UNIT_FP;
+        take
+    }
+
+    /// Move a corpse to `(nx, ny)` if the footprint is free.
+    pub fn move_corpse(&mut self, pixels: &mut PixelLayer, id: u32, nx: u16, ny: u16) -> bool {
+        let Some(c) = self.corpse(id).copied() else {
+            return false;
+        };
+        if !footprint_free(pixels, nx, ny, c.w, c.h, id + OWNER_BIAS) {
+            return false;
+        }
+        release_rect(pixels, c.px, c.py, c.w, c.h, id + OWNER_BIAS);
+        claim_rect(pixels, nx, ny, c.w, c.h, id + OWNER_BIAS);
+        let c = &mut self.cells[id as usize];
+        c.px = nx;
+        c.py = ny;
+        true
+    }
+
+    /// Remove a corpse: free its pixels and recycle the id. Returns the
+    /// record so the caller can drop its mass as litter.
+    pub fn expire_corpse(&mut self, pixels: &mut PixelLayer, id: u32) -> Option<CellRec> {
+        let c = *self.corpse(id)?;
+        release_rect(pixels, c.px, c.py, c.w, c.h, id + OWNER_BIAS);
+        let rec = &mut self.cells[id as usize];
+        rec.corpse = 0;
+        rec.corpse_bone = 0;
+        self.free.push(id);
+        Some(c)
     }
 
     fn alloc_cell(&mut self) -> u32 {
@@ -545,8 +638,10 @@ impl CellStore {
     }
 
     /// Kill a cell. Its slot stays (regrowable); a cut-off subtree
-    /// re-roots as a new organism (§b.5 fragments). Returns the ids of the
-    /// new fragment organisms.
+    /// re-roots as a new organism (§b.5 fragments). With `corpse =
+    /// Some((soft_fp, bone_units))` the body stays on its pixels as a
+    /// corpse holding that mass; otherwise it vanishes at once. Returns
+    /// the ids of the new fragment organisms.
     pub fn kill(
         &mut self,
         genomes: &mut GenomeStore,
@@ -554,6 +649,7 @@ impl CellStore {
         id: u32,
         to_film: bool,
         tick: u64,
+        corpse: Option<(i32, u16)>,
     ) -> Vec<u32> {
         let mut fragments = Vec::new();
         let Some(cell) = self.cells.get(id as usize).copied() else {
@@ -564,7 +660,17 @@ impl CellStore {
         }
         self.cells[id as usize].alive = false;
         self.live -= 1;
-        release_rect(pixels, cell.px, cell.py, cell.w, cell.h, id + OWNER_BIAS);
+        match corpse {
+            Some((soft_fp, bone)) => {
+                let c = &mut self.cells[id as usize];
+                c.corpse = CORPSE_TICKS;
+                c.corpse_bone = bone;
+                c.energy = soft_fp.max(0);
+                c.glue_to = NONE;
+                c.glue_strength = 0;
+            }
+            None => release_rect(pixels, cell.px, cell.py, cell.w, cell.h, id + OWNER_BIAS),
+        }
         let idx = (cell.py as usize) * (pixels.w as usize) + cell.px as usize;
         if to_film && idx < pixels.film.len() {
             pixels.film[idx] = pixels.film[idx].saturating_add(180).min(220);
@@ -582,7 +688,9 @@ impl CellStore {
         let org_id = cell.org;
         let (child_slots, seed_died) = {
             let Some(o) = self.orgs.get_mut(org_id as usize) else {
-                self.free.push(id);
+                if corpse.is_none() {
+                    self.free.push(id);
+                }
                 return fragments;
             };
             if let Some(s) = o.slots.get_mut(cell.slot as usize) {
@@ -620,7 +728,9 @@ impl CellStore {
         } else if self.orgs.get(org_id as usize).is_some_and(|o| o.n_alive == 0) {
             self.retire_org(pixels, org_id);
         }
-        self.free.push(id);
+        if corpse.is_none() {
+            self.free.push(id);
+        }
         fragments
     }
 
@@ -1113,7 +1223,7 @@ impl CellStore {
         let free = cells
             .iter()
             .enumerate()
-            .filter(|(_, c)| !c.alive)
+            .filter(|(_, c)| !c.alive && !c.is_corpse())
             .map(|(i, _)| i as u32)
             .collect();
         let org_free = orgs

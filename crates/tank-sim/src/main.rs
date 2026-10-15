@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         Some("fuzz") => cmd_fuzz(args),
         _ => {
             eprintln!(
-                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer|saprotroph|predator|stinger|signaller|spiny|egg] [--cycle] [--dark] [--verbose] [--litter N] [--lambda-q8 N] [--minerals N]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]"
+                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer|saprotroph|predator|stinger|signaller|spiny|egg|chemo] [--cycle] [--dark] [--verbose] [--litter N] [--lambda-q8 N] [--minerals N]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]"
             );
             ExitCode::from(2)
         }
@@ -64,6 +64,7 @@ fn genome_by_name(name: &str) -> Genome {
         "signaller" => Genome::signaller(),
         "spiny" => Genome::spiny(),
         "egg" => Genome::egg_layer(),
+        "chemo" => Genome::sediment_feeder(),
         _ => Genome::algae(),
     }
 }

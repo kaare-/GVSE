@@ -35,7 +35,17 @@ pub struct BioStepResult {
     pub deaths: u32,
     /// Deaths by cause this tick: [starved, old age, damage, shed].
     pub death_causes: [u32; 4],
+    /// Suspended fines released by crumbling corpses this tick:
+    /// `(pixel column, glucose units)` (§a.4 S3; consumed by Phase 4).
+    pub fines: Vec<(u16, u32)>,
 }
+
+/// Share of a corpse's soft mass that drifts off as fines (Q8).
+pub const FINES_SHARE_Q8: u32 = 77; // 30 %
+/// Corpses settle one pixel per this many ticks.
+const CORPSE_SINK_EVERY: u64 = 2;
+/// Fungus-made soil is checked for this often (`fields::make_soil`).
+const SOIL_EVERY: u64 = 16;
 
 /// Event kinds pushed by the biology (see `tank.rs` for the full table).
 pub mod ev {
@@ -58,6 +68,8 @@ pub mod ev {
     pub const SIGNALLING: u32 = 18;
     /// A cell lives mainly on dissolved glucose, not light (arg0 = cell).
     pub const HETEROTROPH: u32 = 19;
+    /// Digestion turned sand into soil (arg0 = soil cells made this pass).
+    pub const FUNGUS: u32 = 20;
 }
 
 pub fn step(
@@ -76,6 +88,7 @@ pub fn step(
         divisions: 0,
         deaths: 0,
         death_causes: [0; 4],
+        fines: Vec::new(),
     };
     let ids = cells.live_ids();
     for id in ids {
@@ -96,10 +109,67 @@ pub fn step(
         drift_bodies(cells, genomes, grid, pixels, world_seed, tick);
     }
     form_glue_bonds(cells, genomes, pixels);
+    step_corpses(cells, grid, pixels, tick, &mut out);
     rebuild_block(cells, genomes, pixels);
     step_fields(pixels, grid, coarse, tick);
     minerals::diffuse(coarse, grid, tick);
+    if tick % SOIL_EVERY == 7 {
+        let made = crate::bio::fields::make_soil(grid, coarse);
+        if made > 0 {
+            out.events.push(SimEvent {
+                kind: ev::FUNGUS,
+                arg0: made,
+            });
+        }
+    }
     out
+}
+
+/// Corpses (§a.4 detritus): sink through water a pixel at a time (film
+/// corpses stay stuck), and crumble into litter when their time is up or
+/// when the saprotrophs have eaten all of their soft mass.
+fn step_corpses(
+    cells: &mut CellStore,
+    grid: &PhysicsGrid,
+    pixels: &mut PixelLayer,
+    tick: u64,
+    out: &mut BioStepResult,
+) {
+    let vis_h = grid.visible_h() as u32;
+    for id in cells.corpse_ids() {
+        let Some(c) = cells.corpse(id).copied() else {
+            continue;
+        };
+        if c.energy < GLUCOSE_UNIT_FP || cells.corpse_decay(id, 1) {
+            crumble_corpse(cells, pixels, id, out);
+            continue;
+        }
+        if c.film || tick % CORPSE_SINK_EVERY != 0 {
+            continue;
+        }
+        let below_py = c.py + c.h as u16;
+        if below_py as u32 >= pixels.h {
+            continue;
+        }
+        let (bx, by) = pixel_to_phys(c.px, below_py, vis_h);
+        if grid.get_visible(bx, by).is_open() {
+            let _ = cells.move_corpse(pixels, id, c.px, c.py + 1);
+        }
+    }
+}
+
+/// A corpse becomes litter where it lies: 70 % of its soft mass as soft
+/// litter, 30 % as suspended fines (2.3.7), and its wall minerals as bone.
+fn crumble_corpse(cells: &mut CellStore, pixels: &mut PixelLayer, id: u32, out: &mut BioStepResult) {
+    let Some(c) = cells.expire_corpse(pixels, id) else {
+        return;
+    };
+    let soft_units = (c.energy.max(0) / GLUCOSE_UNIT_FP) as u32;
+    let fines_units = soft_units * FINES_SHARE_Q8 / 256;
+    chem::deposit_corpse(pixels, &c, soft_units - fines_units, c.corpse_bone as u32);
+    if fines_units > 0 {
+        out.fines.push((c.px + (c.w / 2) as u16, fines_units));
+    }
 }
 
 /// Diffusion barrier mask (§b.3): hard living tissue (`h > 0.5`) and dead
@@ -467,7 +537,17 @@ fn metabolise(
         }
         glucose_income = got as i64 * GLUCOSE_UNIT_FP as i64;
     }
-    let income = (photo_income + glucose_income) * eff_q / 128;
+    // CHEMO (§a.4 #2): sediment nutrient in the sand / soil cells touching
+    // the footprint → glucose, `units` nutrient units every 4th tick
+    // (≈ PHOTO at half light), in the dark.
+    let mut chemo_income: i64 = 0;
+    if mc.chemo > 0 && (tick + id as u64) % 4 == 0 {
+        let room = ((store_cap - cell.energy).max(0) / GLUCOSE_UNIT_FP) as u32;
+        let got = chemo_feed(grid, coarse, &cell, (mc.chemo as u32).min(room));
+        chemo_income = got as i64 * GLUCOSE_UNIT_FP as i64;
+    }
+    let income = (photo_income + glucose_income + chemo_income) * eff_q / 128;
+    let glucose_income = glucose_income + chemo_income;
     if glucose_income > photo_income && glucose_income > 0 && (tick + id as u64) % 128 == 0 {
         out.events.push(SimEvent {
             kind: ev::HETEROTROPH,
@@ -776,18 +856,18 @@ fn die(
     // In dry air the corpse becomes an Organic seat; in water (free water
     // is conserved) its mass becomes pixel litter for the saprotrophs.
     let seat = grid.get_visible(vx, vy);
-    if seat.is_open() && seat.sat < 40 {
+    let corpse = if seat.is_open() && seat.sat < 40 {
         grid.set_visible(vx, vy, Cell::solid(MaterialId::Organic));
+        None
     } else {
         // Structure not already lysed away (damage 255 = all of it) + store.
         let mc = genomes.coeffs(cell.genotype, cell.mode);
         let structure = mc.birth_fp as i64 * cell.area() as i64 * (255 - cell.damage as i64) / 255;
         let mass = structure as i32 + cell.energy.max(0);
-        let (soft, bone) = corpse_split(mc, cell.area(), (mass / GLUCOSE_UNIT_FP) as u32);
-        chem::deposit_corpse(pixels, &cell, soft, bone);
-    }
+        Some(corpse_split(mc, cell.area(), mass))
+    };
     let to_film = cell.film || age > FILM_STUCK_AGE && near_solid(grid, cell.px, cell.py);
-    let fragments = cells.kill(genomes, pixels, id, to_film, tick);
+    let fragments = cells.kill(genomes, pixels, id, to_film, tick, corpse);
     out.deaths += 1;
     out.events.push(SimEvent {
         kind: ev::DEATH,
@@ -801,13 +881,43 @@ fn die(
     }
 }
 
-/// Split a corpse into soft litter (glucose units) and bone litter (the
+/// Draw up to `want` sediment units from the sand / soil physics cells
+/// under and beside the footprint (own cell first, then the cell below,
+/// then left / right).
+fn chemo_feed(grid: &PhysicsGrid, coarse: &mut CoarseField, c: &crate::bio::CellRec, want: u32) -> u32 {
+    if want == 0 {
+        return 0;
+    }
+    let vis_h = grid.visible_h() as u32;
+    let (vx, vy) = pixel_to_phys(c.px, c.py + c.h as u16 - 1, vis_h);
+    let mut got = 0u32;
+    for (dx, dy) in [(0, 0), (0, -1), (-1, 0), (1, 0)] {
+        if got >= want {
+            break;
+        }
+        let (x, y) = (vx + dx, vy + dy);
+        if x < 0 || y < 0 || x >= coarse.w as i32 || y >= coarse.h as i32 {
+            continue;
+        }
+        let bed = grid.get_visible(x, y).id();
+        if !matches!(bed, MaterialId::Sand | MaterialId::Gravel | MaterialId::Soil) {
+            continue;
+        }
+        let ci = (y as usize) * (coarse.w as usize) + x as usize;
+        let take = (coarse.sediment[ci] as u32).min(want - got);
+        coarse.sediment[ci] -= take as u8;
+        got += take;
+    }
+    got
+}
+
+/// Split a dead cell's mass (FP) into soft mass (FP) and bone litter (the
 /// wall minerals, in field units). The glucose the bone band will later
 /// recover from the bone comes out of the soft share so mass is conserved.
-fn corpse_split(mc: &ModeCoeffs, area: i32, soft_units: u32) -> (u32, u32) {
+fn corpse_split(mc: &ModeCoeffs, area: i32, mass_fp: i32) -> (i32, u16) {
     let bone = mc.mineral_px as u32 * area as u32;
-    let soft = soft_units.saturating_sub(bone * minerals::BONE_GLUCOSE_PER_UNIT as u32);
-    (soft, bone)
+    let bone_fp = bone as i32 * minerals::BONE_GLUCOSE_PER_UNIT as i32 * GLUCOSE_UNIT_FP;
+    ((mass_fp - bone_fp).max(0), bone.min(u16::MAX as u32) as u16)
 }
 
 /// First passing transition changes the mode in place (§b.4 item 5).
@@ -1385,9 +1495,8 @@ fn shed(
         let refund = vmc.birth_fp / 2;
         // The other half of the structure, and her store, fall as litter.
         let mass = vmc.birth_fp * v.area() - refund + v.energy.max(0);
-        let (soft, bone) = corpse_split(vmc, v.area(), (mass / GLUCOSE_UNIT_FP) as u32);
-        chem::deposit_corpse(pixels, &v, soft, bone);
-        let _ = cells.kill(genomes, pixels, vid, false, tick);
+        let corpse = corpse_split(vmc, v.area(), mass);
+        let _ = cells.kill(genomes, pixels, vid, false, tick, Some(corpse));
         out.deaths += 1;
         out.death_causes[3] += 1;
         if let Some(p) = cells.get_mut(parent) {

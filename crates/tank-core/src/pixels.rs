@@ -27,6 +27,9 @@ pub struct PixelLayer {
     /// bone-band enzymes digest. Settles under gravity.
     pub litter: Vec<u8>,
     pub litter_key: Vec<u8>,
+    /// Grit: inert residue of lysis (§a.3 third detritus class). Settles,
+    /// is never digested, leaves only with the clean tool (K2#8).
+    pub grit: Vec<u8>,
     /// Front-pane film. 0 = clean. Phase 2 swipe-clears it.
     pub film: Vec<u8>,
     /// Diffusion barrier mask: hard living tissue, bone, shell (rebuilt
@@ -60,6 +63,7 @@ impl PixelLayer {
             signal_key: vec![0; n],
             litter: vec![0; n],
             litter_key: vec![0; n],
+            grit: vec![0; n],
             film: vec![0; n],
             block: vec![0; n],
             tiles_w: w.div_ceil(crate::bio::fields::TILE as u32),
@@ -91,6 +95,12 @@ pub struct CoarseField {
     pub minerals: Vec<u8>,
     pub t_local: Vec<i8>,
     pub humidity: Vec<u8>,
+    /// Sediment nutrient (§a.3): waste that settled into sand / soil;
+    /// CHEMO's food.
+    pub sediment: Vec<u8>,
+    /// Litter digested on or in this sand cell (units / 4); at
+    /// `bio::fields::SOIL_DIGEST` the cell turns to `Soil` (fungus-made soil).
+    pub digested: Vec<u8>,
 }
 
 impl CoarseField {
@@ -102,6 +112,8 @@ impl CoarseField {
             minerals: vec![0; n],
             t_local: vec![0; n],
             humidity: vec![0; n],
+            sediment: vec![0; n],
+            digested: vec![0; n],
         }
     }
 }
@@ -208,15 +220,21 @@ pub fn write_rgba(
             r = ((r as u32) * li / 255) as u8;
             g = ((g as u32) * li / 255) as u8;
             b = ((b as u32) * li / 255) as u8;
-            // Litter: brown speck (bone band ivory) scaled by mass.
+            // Litter: brown speck (bone band ivory, grit grey) scaled by mass.
             let litter = pixels.litter[i];
-            if owner == 0 && litter > 0 {
-                let c = if pixels.litter_key[i] >= 192 {
-                    [0xC9, 0xC2, 0xB6]
+            let grit = pixels.grit[i];
+            if owner == 0 && (litter > 0 || grit > 0) {
+                let (c, mass) = if litter >= grit {
+                    let c = if pixels.litter_key[i] >= 192 {
+                        [0xC9, 0xC2, 0xB6]
+                    } else {
+                        [0x6B, 0x4F, 0x32]
+                    };
+                    (c, litter)
                 } else {
-                    [0x6B, 0x4F, 0x32]
+                    ([0x7E, 0x7A, 0x74], grit)
                 };
-                let t = (litter as u32 * 3).min(255) * 3 / 4;
+                let t = (mass as u32 * 3).min(255) * 3 / 4;
                 r = ((r as u32 * (255 - t) + c[0] as u32 * li / 255 * t) / 255) as u8;
                 g = ((g as u32 * (255 - t) + c[1] as u32 * li / 255 * t) / 255) as u8;
                 b = ((b as u32 * (255 - t) + c[2] as u32 * li / 255 * t) / 255) as u8;

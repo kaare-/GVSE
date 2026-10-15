@@ -1068,8 +1068,19 @@ fn corpses_become_litter_that_settles() {
         }
     }
     assert!(died, "the algae should die in a hot tank");
+    // The dead cell lies there as a corpse first (2.3.5), then crumbles.
+    // Any daughters are removed (the tool leaves no corpse) so only the
+    // corpses' mass is in play.
+    assert!(tank.corpse_count() >= 1, "a water death leaves a corpse");
+    tank.remove_cells_at(8, 8, 32);
+    for _ in 0..(crate::bio::store::CORPSE_TICKS as u32 + 8) {
+        tank.tick(&hot);
+    }
+    assert_eq!(tank.corpse_count(), 0, "the corpses crumbled");
     let total = tank.litter_total();
-    assert!(total >= 200, "a 6 g corpse leaves ≥ 200 units of litter (got {total})");
+    assert!(total >= 140, "a 6 g corpse leaves ≥ 140 units of litter (got {total})");
+    let fines: f32 = tank.fines().iter().sum();
+    assert!(fines > 0.0, "30 % of the soft mass went up as fines");
     for _ in 0..600 {
         tank.tick(&hot);
     }
@@ -1077,6 +1088,151 @@ fn corpses_become_litter_that_settles() {
     let (pw, ph) = tank.pixel_size();
     let floor: u64 = (0..pw as u16).map(|px| tank.litter_at(px, (ph - 1) as u16) as u64).sum();
     assert_eq!(floor, total, "all litter settled onto the floor row");
+}
+
+/// 2.3.5 / 2.3.7 — corpse lifecycle: a starved cell stays on its pixels
+/// as a corpse, sinks through the water, keeps its id and pixel claim,
+/// then crumbles into soft litter (70 %) and fines (30 %) on expiry.
+#[test]
+fn corpse_sinks_then_becomes_litter_and_fines() {
+    use crate::bio::store::{CORPSE_TICKS, OWNER_BIAS};
+    use crate::bio::Genome;
+    let mut tank = water_box(31, 16, 16, 16);
+    tank.set_lambda_scale_q8(0);
+    let id = tank.seed_genome_at(24, 10, Genome::algae()).expect("seed");
+    tank.set_energy_for_test(id, 0);
+    tank.tick(&dark());
+    assert!(tank.cell(id).is_none(), "the cell starved");
+    let corpse = *tank.corpse(id).expect("it lies there as a corpse");
+    assert!(corpse.energy > 0, "the corpse carries its soft mass");
+    assert_eq!(tank.owner_at(corpse.px, corpse.py), id + OWNER_BIAS, "the corpse keeps its pixel");
+    assert_eq!(tank.litter_total(), 0);
+    for _ in 0..40 {
+        tank.tick(&dark());
+    }
+    let sunk = tank.corpse(id).expect("still a corpse");
+    assert!(sunk.py > 10, "a corpse sinks ({} → {})", 10, sunk.py);
+    for _ in 0..(CORPSE_TICKS as u32) {
+        tank.tick(&dark());
+    }
+    assert!(tank.corpse(id).is_none(), "the corpse crumbled");
+    assert_eq!(tank.corpse_count(), 0);
+    let soft_units = (corpse.energy / crate::consts::GLUCOSE_UNIT_FP) as u64;
+    let litter = tank.litter_total();
+    let fines_units = soft_units * crate::bio::FINES_SHARE_Q8 as u64 / 256;
+    assert_eq!(litter, soft_units - fines_units, "70 % of the soft mass is litter");
+    let fines_g = tank.fines()[corpse.px as usize];
+    let expect_g = fines_units as f32 / 64.0;
+    assert!((fines_g - expect_g).abs() < 1e-3, "30 % went to fines[x] (got {fines_g}, want {expect_g})");
+}
+
+/// 2.3.5 — three detritus classes: digesting soft litter leaves inert
+/// grit that nothing eats; only the clean tool (kind 13) removes it.
+#[test]
+fn grit_accumulates_until_cleaned() {
+    use crate::bio::chem::LITTER_SOFT_CODE;
+    use crate::bio::Genome;
+    let mut tank = water_box(33, 32, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    let (pw, ph) = tank.pixel_size();
+    for px in 0..pw as u16 {
+        tank.drop_litter(px, (ph - 1) as u16, 255, LITTER_SOFT_CODE);
+    }
+    tank.seed_genome_at(48, 40, Genome::saprotroph()).expect("seed");
+    for _ in 0..6000 {
+        tank.tick(&dark());
+    }
+    let grit = tank.grit_total();
+    assert!(grit > 100, "digestion should leave grit (got {grit})");
+    for _ in 0..300 {
+        tank.tick(&dark());
+    }
+    assert!(tank.grit_total() >= grit, "nothing eats grit");
+    let (vw, vh) = tank.visible_size();
+    let clean = TankInput {
+        tools: vec![ToolEvent {
+            kind: 13,
+            material: 0,
+            x: (vw / 2) as u16,
+            y: 0,
+            r: (vw + vh) as u16,
+            variant: 0,
+        }],
+        ..dark()
+    };
+    tank.tick(&clean);
+    assert_eq!(tank.grit_total(), 0, "the clean tool sweeps grit");
+}
+
+/// 2.3.5 — CHEMO: a sediment feeder on a nutrient-rich sand bed lives
+/// and multiplies in the dark; on a barren bed the same lineage only
+/// spends its seed store.
+#[test]
+fn chemo_cell_lives_on_sediment_in_the_dark() {
+    use crate::bio::Genome;
+    let run = |fed: bool| -> (u32, u64) {
+        let mut tank = water_box(35, 32, 24, 20);
+        tank.set_lambda_scale_q8(0);
+        for vx in 0..32 {
+            place(&mut tank, vx, 0, Cell::sand());
+        }
+        tank.tick(&dark());
+        if fed {
+            tank.set_sediment_all(255);
+        }
+        let start = tank.sediment_total();
+        let id = tank.seed_genome_at(48, 50, Genome::sediment_feeder()).expect("seed");
+        let geno = tank.genotype_of_cell(id).unwrap();
+        for _ in 0..6000 {
+            tank.tick(&dark());
+        }
+        (tank.live_cells_of(geno), start - tank.sediment_total())
+    };
+    let (fed_cells, eaten) = run(true);
+    let (starved_cells, _) = run(false);
+    assert!(eaten > 500, "the feeder draws down the sediment (ate {eaten})");
+    assert!(fed_cells >= 4, "fed chemo cells multiply (cells {fed_cells})");
+    assert!(starved_cells <= 2, "on a barren bed nothing grows in the dark ({starved_cells})");
+}
+
+/// 2.3.5 acceptance — soil appears under a fungus colony: saprotrophs
+/// digesting litter on a sand bed turn the sand beneath them into `Soil`
+/// (FUNGUS event), and their waste settles into sediment nutrient.
+#[test]
+fn soil_appears_under_a_fungus_colony() {
+    use crate::bio::chem::LITTER_SOFT_CODE;
+    use crate::bio::Genome;
+    let mut tank = water_box(37, 32, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    for vx in 0..32 {
+        place(&mut tank, vx, 0, Cell::sand());
+    }
+    tank.tick(&dark());
+    assert_eq!(tank.count_material(MaterialId::Soil as u8), 0);
+    let (pw, ph) = tank.pixel_size();
+    let sand_top = (ph - 3) as u16; // first water pixel row above the bed
+    tank.seed_genome_at(48, 40, Genome::saprotroph()).expect("seed");
+    let mut fungus_event = false;
+    for t in 0..8000 {
+        if t % 400 == 0 {
+            for px in 0..pw as u16 {
+                tank.drop_litter(px, sand_top - 1, 200, LITTER_SOFT_CODE);
+            }
+        }
+        tank.tick(&dark());
+        while let Some(ev) = tank.poll_event() {
+            if ev.kind == crate::bio::ev::FUNGUS {
+                fungus_event = true;
+            }
+        }
+        if fungus_event && tank.count_material(MaterialId::Soil as u8) > 0 {
+            break;
+        }
+    }
+    let soil = tank.count_material(MaterialId::Soil as u8);
+    assert!(soil > 0, "digestion should turn sand into soil");
+    assert!(fungus_event, "the FUNGUS event fires when soil is made");
+    assert!(tank.sediment_total() > 0, "waste settles into the bed as sediment nutrient");
 }
 
 /// 2.3.4 — K2#1 mineral cap: in mineral-free water a hard-walled body
