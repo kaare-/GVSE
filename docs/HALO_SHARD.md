@@ -1,6 +1,6 @@
 # Halo / shard handoff *(dig F contract)*
 
-**Status:** F0–F2 Lab seam path landed (2026-10-15). Product dig order **F**
+**Status:** F0–F3 Lab seam path landed (2026-10-15). Product dig order **F**
 from [`PRODUCT_ROADMAP.md`](PRODUCT_ROADMAP.md). Region envelope:
 [`REGION_CAPACITY.md`](REGION_CAPACITY.md). Cost: [`HOSTING_COST.md`](HOSTING_COST.md).
 
@@ -156,9 +156,13 @@ Host flags: `--seam-side west|east`, `--seam-listen`, `--seam-peer`,
 - [x] Unit test: edge temp moves toward peer sample  
 - [ ] Owner two-host feel check (optional)
 
-### F3
+### F3 — organism / corpse handoff
 
-- [ ] F3: one organism walks across; no ghost duplicate; habit caps honored  
+- [x] `SeamLifeParcel` + in-flight tombstones / idempotent ACK (`SEAM_SCHEMA` 3)  
+- [x] Face export when anchor `gx` is on the open edge; remap onto peer face  
+- [x] Habit / pop refuse → no ACK; timeout re-spawns on owner  
+- [x] Unit tests: cross once; habit-cap revive  
+- [ ] Owner two-host creature walk (optional)  
 
 ## Explicit non-goals *(until unlocked)*
 

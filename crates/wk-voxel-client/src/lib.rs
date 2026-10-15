@@ -15,17 +15,19 @@ use serde::{Deserialize, Serialize};
 
 use wk_material::MaterialId;
 use wk_voxel::{
-    apply_field_mirror, apply_inbound, apply_season_sky_tint, attach_open_seam,
-    blend_edge_toward_mirror, cave_humidity_haze_wash, celestial_local_cfg, climate_with_season,
-    day_night_factor_cfg, export_seam_face, is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg,
-    restore_all_from_store, sample_edge_fields, season_fraction_cfg, sky_rgb_at_height_phased,
-    sky_rgb_phased, stamp_world, steam_haze_wash, step_world, sync_residency, take_outbound,
-    wake_floating_competent, Blueprint, CarbonBudget, CarbonConfig, Cell, ClimateConfig,
-    CloudConfig, CloudStore, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
-    FungiConfig, GeotechMap, GrainConfig, Humidity, KarstConfig, LandscapeBodyStore, OrganismStore,
-    PerfConfig, PhaseConfig, SeamFieldMirror, SeamSide, SeamTransfer, SimSnapshot, SpawnFail,
-    SteamConfig, StreamWindow, SupportMap, SyncResidencyStats, Temperature, Wind, World, WorldStep,
-    WorldStepConfig, WorldgenParams, CHUNK_CELLS_W, SEAM_FACE_EXPORT_MAX, SEAM_FIELD_BLEND_ALPHA,
+    ack_life_ids, apply_field_mirror, apply_inbound, apply_life_inbound, apply_season_sky_tint,
+    attach_open_seam, blend_edge_toward_mirror, cave_humidity_haze_wash, celestial_local_cfg,
+    climate_with_season, day_night_factor_cfg, export_life_at_seam, export_seam_face,
+    is_daytime_cfg, moon_phase_cfg, phase_fraction_cfg, restore_all_from_store, sample_edge_fields,
+    season_fraction_cfg, sky_rgb_at_height_phased, sky_rgb_phased, stamp_world, steam_haze_wash,
+    stash_pending_acks, step_world, sync_residency, take_life_outbound, take_outbound,
+    take_pending_acks, tick_life_in_flight, wake_floating_competent, Blueprint, CarbonBudget,
+    CarbonConfig, Cell, ClimateConfig, CloudConfig, CloudStore, CompetentFallConfig,
+    CondensationConfig, EvapConfig, FailureConfig, FungiConfig, GeotechMap, GrainConfig, Humidity,
+    KarstConfig, LandscapeBodyStore, OrganismStore, PerfConfig, PhaseConfig, SeamFieldMirror,
+    SeamLifeParcel, SeamSide, SeamTransfer, SimSnapshot, SpawnFail, SteamConfig, StreamWindow,
+    SupportMap, SyncResidencyStats, Temperature, Wind, World, WorldStep, WorldStepConfig,
+    WorldgenParams, CHUNK_CELLS_W, SEAM_FACE_EXPORT_MAX, SEAM_FIELD_BLEND_ALPHA,
     STRATOSPHERE_CELLS, TROPOSPHERE_TOP_Y,
 };
 
@@ -594,6 +596,34 @@ impl Host {
             side,
             SEAM_FIELD_BLEND_ALPHA,
         );
+    }
+
+    /// Dig F3: export face life + age in-flight tombstones.
+    pub fn drain_seam_life(&mut self, side: SeamSide) -> Vec<SeamLifeParcel> {
+        tick_life_in_flight(&mut self.world, &mut self.organisms, side);
+        export_life_at_seam(&mut self.world, &mut self.organisms, side);
+        take_life_outbound(&mut self.world, side)
+    }
+
+    /// Dig F3: inject peer life; returns ACK ids.
+    pub fn apply_seam_life(
+        &mut self,
+        side: SeamSide,
+        parcels: Vec<SeamLifeParcel>,
+    ) -> Vec<u64> {
+        apply_life_inbound(&mut self.world, &mut self.organisms, side, parcels)
+    }
+
+    pub fn ack_seam_life(&mut self, side: SeamSide, ids: &[u64]) {
+        ack_life_ids(&mut self.world, side, ids);
+    }
+
+    pub fn stash_seam_life_acks(&mut self, side: SeamSide, ids: Vec<u64>) {
+        stash_pending_acks(&mut self.world, side, ids);
+    }
+
+    pub fn take_seam_life_acks(&mut self, side: SeamSide) -> Vec<u64> {
+        take_pending_acks(&mut self.world, side)
     }
 
     pub fn new(params: WorldgenParams) -> Self {

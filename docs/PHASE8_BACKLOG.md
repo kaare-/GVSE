@@ -48,9 +48,9 @@ Apple notarize remains pinned → **2026-11-15** (parallel, not blocking).
 
 ## Agent default next
 
-Dig **F2** edge field mirror on park-bank ([`HALO_SHARD.md`](HALO_SHARD.md)):
-`SeamFieldMirror` + blend (`SEAM_SCHEMA` 2). Next: **F3** organism handoff —
-or Dig **E** / Apple notarize (**2026-11-15**) if redirected. Cost:
+Dig **F3** organism seam handoff on park-bank ([`HALO_SHARD.md`](HALO_SHARD.md)):
+`SeamLifeParcel` (`SEAM_SCHEMA` 3). Next: **F4** Shadow discovery — or Dig
+**E** / Apple notarize (**2026-11-15**) if redirected. Cost:
 [`HOSTING_COST.md`](HOSTING_COST.md). Dig **D** agent-closed
 ([`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md); D4 owner visual).
 
@@ -64,8 +64,9 @@ or Dig **E** / Apple notarize (**2026-11-15**) if redirected. Cost:
 | E2 tipped grey-log visual | owner play/Xvfb | not a code blocker |
 | Dig F0 halo design | ✅ | [`HALO_SHARD.md`](HALO_SHARD.md) |
 | Dig F1 Lab mass seam | ✅ | seam + `--seam-*` |
-| Dig F2 edge fields | ✅ code | `SeamFieldMirror` + edge blend |
-| Dig F3–F5 | after F2 | life → Shadow → Wild |
+| Dig F2 edge fields | ✅ | `SeamFieldMirror` + edge blend |
+| Dig F3 life handoff | ✅ code | `SeamLifeParcel` + ACK / timeout |
+| Dig F4–F5 | after F3 | Shadow discovery → Wild |
 | Dig D (biology) | agent-closed | [`BIOLOGY_DEPTH.md`](BIOLOGY_DEPTH.md) |
 | Optional FPS headroom | owner ask | Compact/5 km leftovers |
 

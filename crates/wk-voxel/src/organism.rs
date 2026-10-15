@@ -417,6 +417,9 @@ pub struct Atom {
     /// Photosystem count when the light cache was filled (invalidate on growth).
     #[serde(default)]
     pub photo_n_cache: u16,
+    /// Dig F3: ticks to stay put after a seam import (blocks re-export ping-pong).
+    #[serde(default)]
+    pub seam_hold_ticks: u16,
 }
 
 impl Atom {
@@ -460,6 +463,7 @@ impl Atom {
             photo_light_cache: 0.0,
             photo_tip_sky_cache: 0.0,
             photo_n_cache: 0,
+            seam_hold_ticks: 0,
         }
     }
 
@@ -571,6 +575,9 @@ pub struct Corpse {
     /// Dig D3b: soft litter already dripped during settle (deducted at dissolve).
     #[serde(default)]
     pub litter_dripped: u16,
+    /// Dig F3: ticks to stay put after a seam import (blocks re-export ping-pong).
+    #[serde(default)]
+    pub seam_hold_ticks: u16,
 }
 
 impl Corpse {
@@ -628,6 +635,7 @@ impl Corpse {
             upright_growth,
             stem_integrity,
             litter_dripped: 0,
+            seam_hold_ticks: 0,
         }
     }
 

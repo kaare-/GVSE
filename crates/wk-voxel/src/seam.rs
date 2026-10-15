@@ -108,7 +108,7 @@ impl SeamFieldMirror {
 }
 
 /// Per-world seam bookkeeping (not saved).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct SeamState {
     pub config: Option<SeamConfig>,
     pub out_west: SeamTransfer,
@@ -119,6 +119,8 @@ pub struct SeamState {
     pub mirror_west: Option<SeamFieldMirror>,
     /// Last mirror received from the east neighbor (Dig F2).
     pub mirror_east: Option<SeamFieldMirror>,
+    /// Dig F3 organism / corpse handoff bookkeeping.
+    pub life: crate::seam_life::SeamLifeState,
     /// Neighbor silent ticks (Lab default absorb after 60 — host may bump).
     pub silent_ticks: u32,
 }
@@ -379,7 +381,7 @@ pub fn attach_open_seam(world: &mut World, width: i32, side: SeamSide) {
     world.seam.config = Some(SeamConfig::open_side(width, side));
 }
 
-fn edge_x_for(cfg: SeamConfig, side: SeamSide) -> i32 {
+pub(crate) fn edge_x_for(cfg: SeamConfig, side: SeamSide) -> i32 {
     match side {
         SeamSide::West => cfg.x_min,
         SeamSide::East => cfg.x_max - 1,
