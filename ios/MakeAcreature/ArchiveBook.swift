@@ -49,6 +49,17 @@ struct ArchiveBook: View {
                 }
                 .buttonStyle(.plain)
             }
+            HStack(spacing: 6) {
+                PixelLabel(text: "STARTERS", scale: 1, color: Palette.dimPaper)
+                ForEach([(0, "MOSS"), (1, "PLANT"), (2, "CROWN")], id: \.0) { kind, label in
+                    Button {
+                        _ = session.addStarter(kind: UInt8(kind))
+                    } label: {
+                        PixelPanel { PixelLabel(text: label, scale: 1) }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
             if store.specimens.isEmpty {
                 Spacer()
                 PixelLabel(text: "EMPTY. LOOK AT A CREATURE AND ARCHIVE IT.", scale: 2, color: Palette.dimPaper)

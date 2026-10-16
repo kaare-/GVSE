@@ -3,6 +3,7 @@ import SwiftUI
 enum BuildTool: Int, CaseIterable {
     case sand, rock, glass, erase, pour, drain, fill, undo
     case look, scoop, remove, clean, feed, calcium, detritus
+    case topUp, cut, enclose
 
     var label: String {
         switch self {
@@ -21,12 +22,17 @@ enum BuildTool: Int, CaseIterable {
         case .feed: return "SUGAR"
         case .calcium: return "LIME"
         case .detritus: return "MULCH"
+        case .topUp: return "TOP UP"
+        case .cut: return "CUT"
+        case .enclose: return "BOX"
         }
     }
 
-    /// Build tools on the first row, the selection loop on the second.
+    /// Build tools on the first row, the selection loop on the second,
+    /// Phase 4 land / enclosure tools on the third.
     static let buildRow: [BuildTool] = [.sand, .rock, .glass, .erase, .pour, .drain, .fill, .undo]
     static let lifeRow: [BuildTool] = [.look, .scoop, .remove, .clean, .feed, .calcium, .detritus]
+    static let landRow: [BuildTool] = [.topUp, .cut, .enclose]
 
     /// Tool event kind (`tank.h`); 0 for tools that are not strokes.
     var kind: UInt8 {
@@ -42,6 +48,9 @@ enum BuildTool: Int, CaseIterable {
         case .calcium: return 11
         case .detritus: return 12
         case .clean: return 13
+        case .topUp: return 14
+        case .cut: return 15
+        case .enclose: return 16
         case .look, .scoop: return 0
         }
     }
@@ -66,12 +75,16 @@ struct ToolWheel: View {
     @Binding var brush: Int
     @Binding var variant: Int
     @Binding var fillLevel: Double
+    /// Enclosure op when `tool == .enclose`: 0 walls, 1 drain, 2 fill, 3 release.
+    @Binding var encloseOp: Int
     var onUndo: () -> Void
+    var onTopUp: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             row(BuildTool.buildRow)
             row(BuildTool.lifeRow)
+            row(BuildTool.landRow)
             HStack(spacing: 8) {
                 PixelLabel(text: tool == .scoop ? "BUCKET \(brush)" : "BRUSH \(brush)", scale: 2)
                 Button {
@@ -89,6 +102,13 @@ struct ToolWheel: View {
                     } label: { PixelLabel(text: ">", scale: 3) }
                     .buttonStyle(.plain)
                 }
+                if tool == .enclose {
+                    PixelLabel(text: encloseLabel, scale: 2)
+                    Button {
+                        encloseOp = (encloseOp + 1) % 4
+                    } label: { PixelLabel(text: ">", scale: 3) }
+                    .buttonStyle(.plain)
+                }
             }
             if tool == .fill {
                 HStack {
@@ -102,6 +122,15 @@ struct ToolWheel: View {
         .padding(6)
     }
 
+    private var encloseLabel: String {
+        switch encloseOp {
+        case 1: return "DRAIN"
+        case 2: return "FILL"
+        case 3: return "FREE"
+        default: return "WALLS"
+        }
+    }
+
     /// Rows scroll sideways on narrow phones; the selected tool stays put.
     private func row(_ tools: [BuildTool]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -110,6 +139,9 @@ struct ToolWheel: View {
                     Button {
                         if t == .undo {
                             onUndo()
+                        } else if t == .topUp {
+                            tool = t
+                            onTopUp()
                         } else {
                             tool = t
                         }
