@@ -2513,3 +2513,65 @@ fn cut_tool_severs_a_stem_and_trims_roots() {
     assert!(land.live_cells() < live_before, "root trim kills root cells");
     assert!(land.litter_total() > litter_before, "trimmed roots become litter");
 }
+
+/// 4.7 — a glass box is an enclosure: drain, fill, delete walls.
+#[test]
+fn enclosure_drain_fill_and_delete_walls() {
+    use crate::tools::ToolEvent;
+    let mut tank = Tank::try_new(15, 16, 16).unwrap();
+    // Glass box: walls at x=3,x=10 and y=2,y=8; open interior.
+    for vy in 2..=8 {
+        place(&mut tank, 3, vy, Cell::glass());
+        place(&mut tank, 10, vy, Cell::glass());
+    }
+    for vx in 3..=10 {
+        place(&mut tank, vx, 2, Cell::glass());
+        place(&mut tank, vx, 8, Cell::glass());
+    }
+    for vx in 4..10 {
+        for vy in 3..8 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let enc = tank.enclosure_at(6, 5).expect("enclosure");
+    assert!(enc.area() >= 20, "interior {}", enc.area());
+    assert!(!enc.walls.is_empty());
+    // Drain.
+    assert!(tank.enclosure_op(6, 5, 1) > 0);
+    let inside: u64 = (4..10).map(|vx| column_sat(&tank, vx)).sum();
+    // Columns 4..10 still include water outside the box above/below; check a cell.
+    assert_eq!(tank.cell_visible(6, 5).sat, 0, "drained");
+    // Fill.
+    assert!(tank.enclosure_op(6, 5, 2) > 0);
+    assert!(tank.cell_visible(6, 5).sat >= 200, "filled");
+    // Delete walls: water can now spill.
+    let walls = tank.enclosure_op(6, 5, 0);
+    assert!(walls > 0, "walls removed");
+    assert!(!tank.cell_visible(3, 5).is_glass());
+    let _ = inside;
+    assert!(!tank.cell_visible(3, 5).is_glass(), "wall cells are gone");
+    // Tool path.
+    place(&mut tank, 3, 5, Cell::glass());
+    place(&mut tank, 10, 5, Cell::glass());
+    for vx in 3..=10 {
+        place(&mut tank, vx, 2, Cell::glass());
+        place(&mut tank, vx, 8, Cell::glass());
+    }
+    for vy in 2..=8 {
+        place(&mut tank, 3, vy, Cell::glass());
+        place(&mut tank, 10, vy, Cell::glass());
+    }
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 16,
+            material: 1, // drain
+            x: 6,
+            y: 5,
+            r: 0,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert_eq!(tank.cell_visible(6, 5).sat, 0);
+}

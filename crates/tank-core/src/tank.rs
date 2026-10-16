@@ -13,6 +13,7 @@ use crate::consts::{
 };
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_bytes;
+use crate::enclosure;
 use crate::humidity;
 use crate::milestones::{self, Milestones};
 use crate::pixels::{self, CoarseField, PixelLayer};
@@ -222,6 +223,8 @@ pub struct Tank {
     humidity_primed: bool,
     /// Water lost to evaporation, in sat units (telemetry / tests).
     evaporated_sat: u64,
+    /// Scoop bucket filled by enclosure "release" (kind 16 / op 3).
+    pending_enclosure_bucket: Option<Carried>,
 }
 
 impl Tank {
@@ -271,6 +274,7 @@ impl Tank {
             cloudy_last: None,
             humidity_primed: false,
             evaporated_sat: 0,
+            pending_enclosure_bucket: None,
         };
         tank.rebuild_light();
         Ok(tank)
@@ -2151,6 +2155,11 @@ impl Tank {
                 let _ = self.cut_at(tool.x as i32, tool.y as i32, tool.r as i32);
                 continue;
             }
+            if tool.kind == 16 {
+                // Enclosure management (Phase 4): material selects the op.
+                let _ = self.enclosure_op(tool.x as i32, tool.y as i32, tool.material);
+                continue;
+            }
             // Digging through rooted sand cuts the roots (§h.1 / K4#5).
             if tool.kind == 1 || tool.kind == 2 {
                 self.cut_roots_under(tool.x as i32, tool.y as i32, tool.r as i32);
@@ -2164,6 +2173,71 @@ impl Tank {
             }
             let _ = tools::apply_one(&mut self.grid, tool);
         }
+    }
+
+
+    /// Flood-fill the glass-bounded enclosure containing `(vx, vy)`.
+    pub fn enclosure_at(&self, vx: i32, vy: i32) -> Option<enclosure::Enclosure> {
+        enclosure::find(&self.grid, vx, vy)
+    }
+
+    /// Enclosure op: 0 delete walls, 1 drain, 2 fill, 3 release contents
+    /// into the scoop bucket (caller should then `release` / `discard`).
+    /// Returns how many cells / items were affected.
+    pub fn enclosure_op(&mut self, vx: i32, vy: i32, op: u8) -> u32 {
+        let Some(enc) = enclosure::find(&self.grid, vx, vy) else {
+            return 0;
+        };
+        match op {
+            0 => {
+                let n = enclosure::delete_walls(&mut self.grid, &enc);
+                self.light_dirty = true;
+                n
+            }
+            1 => {
+                let n = enclosure::drain(&mut self.grid, &enc);
+                self.light_dirty = true;
+                n
+            }
+            2 => {
+                let n = enclosure::fill(&mut self.grid, &enc);
+                self.light_dirty = true;
+                n
+            }
+            3 => self.release_enclosure(&enc),
+            _ => 0,
+        }
+    }
+
+    fn release_enclosure(&mut self, enc: &enclosure::Enclosure) -> u32 {
+        // Scoop a region covering the enclosure's bounding box of pixels.
+        if enc.interior.is_empty() {
+            return 0;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for &(vx, vy) in &enc.interior {
+            x0 = x0.min(vx);
+            y0 = y0.min(vy);
+            x1 = x1.max(vx);
+            y1 = y1.max(vy);
+        }
+        let vis_h = self.grid.visible_h();
+        let cx = (x0 + x1) * 3 / 2;
+        let cy = (vis_h - 1 - (y0 + y1) / 2) * 3;
+        let rx = ((x1 - x0 + 1) * 3 / 2 + 2).max(2);
+        let ry = ((y1 - y0 + 1) * 3 / 2 + 2).max(2);
+        let r = rx.max(ry);
+        let carried = self.scoop_region(cx, cy, r);
+        let n = carried.cell_count() + carried.litter.len() as u32 + carried.water;
+        // Park the bucket on the tank so the player can pour it out.
+        self.pending_enclosure_bucket = Some(carried);
+        self.light_dirty = true;
+        n
+    }
+
+    /// Take the bucket filled by `enclosure_op(.., 3)`, if any.
+    pub fn take_enclosure_bucket(&mut self) -> Option<Carried> {
+        self.pending_enclosure_bucket.take()
     }
 
     /// Cut / root-trim tool (kind 15, §h.3): every living cell under the

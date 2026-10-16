@@ -19,6 +19,7 @@ pub mod consts;
 pub mod font;
 pub mod grid;
 pub mod hash;
+pub mod enclosure;
 pub mod humidity;
 pub mod milestones;
 pub mod pixels;
