@@ -24,11 +24,12 @@ pub struct SensorCounts {
     pub light: usize,
     pub touch: usize,
     pub chem: usize,
+    pub colour: usize,
 }
 
 impl SensorCounts {
     pub fn extra_inputs(self) -> usize {
-        self.light + self.touch + self.chem
+        self.light + self.touch + self.chem + self.colour
     }
 }
 
@@ -43,6 +44,7 @@ pub struct StudioNet {
     pub n_light: usize,
     pub n_touch: usize,
     pub n_chem: usize,
+    pub n_colour: usize,
     pub w1: Vec<f32>,
     pub b1: Vec<f32>,
     pub w2: Vec<f32>,
@@ -61,6 +63,7 @@ pub struct SensorFrame {
     pub light: Vec<f32>,
     pub touch: Vec<f32>,
     pub chem: Vec<f32>,
+    pub colour: Vec<f32>,
 }
 
 impl StudioNet {
@@ -88,6 +91,7 @@ impl StudioNet {
             n_light: sensors.light,
             n_touch: sensors.touch,
             n_chem: sensors.chem,
+            n_colour: sensors.colour,
             w1,
             b1,
             w2,
@@ -100,6 +104,7 @@ impl StudioNet {
             light: self.n_light,
             touch: self.n_touch,
             chem: self.n_chem,
+            colour: self.n_colour,
         }
     }
 
@@ -108,7 +113,13 @@ impl StudioNet {
     }
 
     pub fn encode_inputs(fb: &[EffectorFeedback], sensors: &SensorFrame) -> Vec<f32> {
-        let mut v = Vec::with_capacity(fb.len() * 3 + sensors.light.len() + sensors.touch.len() + sensors.chem.len());
+        let mut v = Vec::with_capacity(
+            fb.len() * 3
+                + sensors.light.len()
+                + sensors.touch.len()
+                + sensors.chem.len()
+                + sensors.colour.len(),
+        );
         for m in fb {
             v.push(m.actuation);
             v.push(m.length_ratio.clamp(0.0, 2.0) * 0.5);
@@ -121,6 +132,9 @@ impl StudioNet {
             v.push(x.clamp(0.0, 1.0));
         }
         for &x in &sensors.chem {
+            v.push(x.clamp(0.0, 1.0));
+        }
+        for &x in &sensors.colour {
             v.push(x.clamp(0.0, 1.0));
         }
         v
@@ -248,6 +262,12 @@ fn drive_org(
                     sensors.touch.push(v);
                     sensor_counts.touch += 1;
                 }
+                3..=6 => {
+                    // Colour / temp / humidity / gravity share one net
+                    // channel; the sense scalar already encodes the kind.
+                    sensors.colour.push(v);
+                    sensor_counts.colour += 1;
+                }
                 _ => {
                     sensors.chem.push(v);
                     sensor_counts.chem += 1;
@@ -316,6 +336,7 @@ mod tests {
                 light: 1,
                 touch: 0,
                 chem: 0,
+                colour: 0,
             },
             1,
         );

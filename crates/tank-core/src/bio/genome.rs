@@ -499,12 +499,12 @@ impl Genome {
         g
     }
 
-    /// d.7 — mouth-cavity predator: a hard-walled U. Mode 0 (base) grows a
-    /// side-wall chain (mode 1) on each side; the lining secretes a
-    /// living-wall enzyme (key 120, width 24) gated on touch; chains end in
-    /// a lip mode (2) at depth 3. Walls are `h 0.6`, so the cavity holds
-    /// its enzyme (§b.3). MUSCLE lips and the touch link arrive in 2.3.6.
+    /// d.7 / Phase 5 M4 — mouth-cavity predator: hard-walled U with
+    /// enzyme lining, EXCRETE, and MUSCLE lips that close on touch.
+    /// Walls are `h 0.6`, so the cavity holds its enzyme (§b.3).
     pub fn chamber_predator() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_TOUCH;
         let mut g = Self::base();
         g.buoy = 0;
         g.wall_key = 170;
@@ -512,16 +512,18 @@ impl Genome {
         g.base_age = 150;
         let mut base = Mode::blank();
         base.push_entry(Entry::with_params(Block::Wall, 2, 153, 0));
-        base.push_entry(Entry::new(Block::Photo, 4));
+        base.push_entry(Entry::new(Block::Photo, 2));
         base.push_entry(Entry::new(Block::Store, 2));
+        base.push_entry(Entry::new(Block::Nerve, 1));
         base.push_child(ChildSpec::part(Dir::Left, 1, 220, 1));
         base.push_child(ChildSpec::part(Dir::Right, 1, 220, 1));
         let mut wall = Mode::blank();
         wall.push_entry(Entry::with_params(Block::Wall, 2, 153, 0));
-        wall.push_entry(Entry::new(Block::Photo, 3));
+        wall.push_entry(Entry::new(Block::Photo, 2));
         let mut enz = Entry::with_params(Block::Enzyme, 2, 120, 24 | 0x80);
         enz.gate = Gate::above(Scalar::Touch, 1);
         wall.push_entry(enz);
+        wall.push_entry(Entry::new(Block::Excrete, 1));
         wall.push_entry(Entry::new(Block::Store, 1));
         wall.push_child(ChildSpec::part(Dir::Ahead, 1, 220, 1));
         wall.push_transition(Transition {
@@ -529,22 +531,48 @@ impl Genome {
             mode: 2,
         });
         wall.sacrifice_order = 1;
-        // Lips: the body's propagules leave from the opening.
+        // Lips: muscle + touch sensor close the opening when prey bumps them.
         let mut lip = Mode::blank();
         lip.push_entry(Entry::with_params(Block::Wall, 1, 153, 0));
-        lip.push_entry(Entry::new(Block::Photo, 4));
+        lip.push_entry(Entry::new(Block::Muscle, 2));
+        lip.push_entry(Entry::with_params(Block::Sensor, 1, SENSOR_TOUCH, 0));
+        lip.push_entry(Entry::new(Block::Nerve, 1));
         lip.push_entry(Entry::with_params(
             Block::Uptake,
             2,
             crate::bio::profile::UPTAKE_GLUCOSE,
             0,
         ));
+        // Close (contract) when touched — positive drive shortens springs.
+        lip.push_link(Link::level(Scalar::Touch, 1, 96));
         lip.push_child(ChildSpec::propagule(0, 15));
         lip.divide_when.energy_frac = 230;
         lip.sacrifice_order = 2;
         g.modes.push(base);
         g.modes.push(wall);
         g.modes.push(lip);
+        g
+    }
+
+    /// Phase 5 M4 — SENSOR(colour) seeker: looks along heading for a hue
+    /// matching `param_b` (yellow ≈ 43). Hook for the insect–flower stretch.
+    pub fn colour_seeker() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_COLOUR;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.shape_w = 2;
+        m.shape_h = 2;
+        m.push_entry(Entry::new(Block::Photo, 2));
+        m.push_entry(Entry::new(Block::Store, 1));
+        m.push_entry(Entry::new(Block::Cilia, 2));
+        m.push_entry(Entry::new(Block::Nerve, 1));
+        // Hue 43 ≈ yellow on the 256-circle; width is fixed in sensor_read.
+        m.push_entry(Entry::with_params(Block::Sensor, 2, SENSOR_COLOUR, 43));
+        m.push_link(Link::level(Scalar::Sense, 80, 100));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
         g
     }
 

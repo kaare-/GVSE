@@ -135,6 +135,15 @@ pub mod ev {
     pub const LOCOMOTION: u32 = 29;
     /// Milestone: first locomotion.
     pub const MS_LOCOMOTION: u32 = 50;
+    /// Raw (Phase 5): a swallowed organism left an eater alive (arg0 = prey org).
+    pub const ESCAPE: u32 = 30;
+    /// Milestone: first escape.
+    pub const MS_ESCAPE: u32 = 51;
+    /// Raw (Phase 5): a geometric mouth — hard walls + enzyme lining +
+    /// muscle opening enclosing water (arg0 = organism).
+    pub const CHAMBER: u32 = 31;
+    /// Milestone: first chamber / mouth.
+    pub const MS_CHAMBER: u32 = 52;
 }
 
 /// "Something moved" (§a.6): net cilia displacement over this window.
@@ -157,6 +166,7 @@ pub fn step(
     tick: u64,
     t_tank: f32,
     lambda_scale_q8: u32,
+    grav_x: f32,
 ) -> BioStepResult {
     genomes.set_tick(tick);
     let mut out = BioStepResult {
@@ -178,7 +188,7 @@ pub fn step(
         move_free_cell(cells, genomes, grid, pixels, world_seed, tick, id);
         metabolise(
             cells, genomes, grid, pixels, coarse, world_seed, tick, id, t_tank, lambda_scale_q8,
-            &mut out,
+            grav_x, &mut out,
         );
     }
     share_bond_energy(cells, genomes);
@@ -480,12 +490,12 @@ fn thrust_period(units: u32, perimeter_px: u32) -> u64 {
     (TICK_HZ * perimeter_px as u64 / (THRUST_PX_S_NUM * units as u64)).max(1)
 }
 
-/// SENSOR (§a.4 #14). Light / chem: contrast between the far end of a ray
-/// along the heading (`8·units` px, stopped by anything occupying a
-/// pixel or by solid matter) and the cell's own footprint, `128 + (far −
-/// here)`; a ray blocked at its first pixel sees nothing (0). Touch:
-/// `touch × 64`.
+/// SENSOR (§a.4 #14 / §h.5). Light / chem: contrast along a heading ray.
+/// Touch: `touch × 64`. Colour: first owned cell's hue vs `sensor_hue`
+/// ring-match. Temp / humidity: local scalars. Gravity: |tilt| × 255.
 fn sensor_read(
+    cells: &CellStore,
+    genomes: &GenomeStore,
     pixels: &PixelLayer,
     grid: &PhysicsGrid,
     c: &crate::bio::CellRec,
@@ -493,10 +503,25 @@ fn sensor_read(
     here_light: u8,
     here_glucose: u8,
     touch: u8,
+    humidity: u8,
+    t_tank: f32,
+    grav_x: f32,
 ) -> u8 {
-    use crate::bio::profile::{SENSOR_CHEM, SENSOR_TOUCH};
-    if mc.sensor_kind == SENSOR_TOUCH {
-        return touch.saturating_mul(64);
+    use crate::bio::profile::{
+        SENSOR_CHEM, SENSOR_COLOUR, SENSOR_GRAVITY, SENSOR_HUMIDITY, SENSOR_TEMP, SENSOR_TOUCH,
+    };
+    use crate::bio::program::ring_match_q8;
+    match mc.sensor_kind {
+        SENSOR_TOUCH => return touch.saturating_mul(64),
+        SENSOR_TEMP => {
+            // 22 °C → 128; ±16 °C → edges.
+            return ((t_tank - 6.0) * (255.0 / 32.0)).clamp(0.0, 255.0) as u8;
+        }
+        SENSOR_HUMIDITY => return humidity,
+        SENSOR_GRAVITY => {
+            return (grav_x.abs().min(1.0) * 255.0) as u8;
+        }
+        _ => {}
     }
     let (dx, dy) = heading_delta(c.heading);
     // First pixel outside the footprint on the heading side, centred.
@@ -508,9 +533,45 @@ fn sensor_read(
     let pw = pixels.w as i32;
     let ph = pixels.h as i32;
     let vis_h = grid.visible_h() as u32;
-    let field = if mc.sensor_kind == SENSOR_CHEM { &pixels.glucose } else { &pixels.light };
-    let here = if mc.sensor_kind == SENSOR_CHEM { here_glucose } else { here_light } as i32;
     let len = 8 * mc.sensor as i32;
+    if mc.sensor_kind == SENSOR_COLOUR {
+        for _ in 0..len {
+            if x < 0 || y < 0 || x >= pw || y >= ph {
+                break;
+            }
+            let i = (y * pw + x) as usize;
+            let owner = pixels.owner[i];
+            if owner != EMPTY_OWNER {
+                if owner < OWNER_BIAS || secretion_kind(owner).is_some() {
+                    break;
+                }
+                let Some(seen) = cells.get(owner - OWNER_BIAS) else {
+                    break;
+                };
+                let rgb = genomes.coeffs(seen.genotype, seen.mode).colour;
+                let hue = rgb_to_hue(rgb[0], rgb[1], rgb[2]);
+                // Width 48 ≈ ±34° of a 256-hue circle — selective but not brittle.
+                return ring_match_q8(hue, mc.sensor_hue, 48);
+            }
+            let (vx, vy) = pixel_to_phys(x as u16, y as u16, vis_h);
+            if !grid.get_visible(vx, vy).is_open() {
+                break;
+            }
+            x += dx;
+            y += dy;
+        }
+        return 0;
+    }
+    let field = if mc.sensor_kind == SENSOR_CHEM {
+        &pixels.glucose
+    } else {
+        &pixels.light
+    };
+    let here = if mc.sensor_kind == SENSOR_CHEM {
+        here_glucose
+    } else {
+        here_light
+    } as i32;
     let mut far: Option<i32> = None;
     for _ in 0..len {
         if x < 0 || y < 0 || x >= pw || y >= ph {
@@ -532,6 +593,27 @@ fn sensor_read(
         None => 0,
         Some(f) => (128 + (f - here).clamp(-127, 127)) as u8,
     }
+}
+
+/// Coarse RGB → hue byte on a 256-circle (HSV-style).
+fn rgb_to_hue(r: u8, g: u8, b: u8) -> u8 {
+    let r = r as i32;
+    let g = g as i32;
+    let b = b as i32;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    if d == 0 {
+        return 0;
+    }
+    let h = if max == r {
+        ((g - b) * 43) / d
+    } else if max == g {
+        85 + ((b - r) * 43) / d
+    } else {
+        171 + ((r - g) * 43) / d
+    };
+    h.rem_euclid(256) as u8
 }
 
 /// Motor drive (§a.6, Q8): the CILIA gate contributes +1 when it passes;
@@ -755,6 +837,7 @@ fn metabolise(
     id: u32,
     t_tank: f32,
     lambda_scale_q8: u32,
+    grav_x: f32,
     out: &mut BioStepResult,
 ) {
     let Some(cell) = cells.get(id).copied() else {
@@ -792,7 +875,20 @@ fn metabolise(
     };
     let sense = if mc.sensor > 0 {
         let here_glucose = (glucose_sum / area as u32).min(255) as u8;
-        sensor_read(pixels, grid, &cell, &mc, light_mean, here_glucose, touch)
+        sensor_read(
+            cells,
+            genomes,
+            pixels,
+            grid,
+            &cell,
+            &mc,
+            light_mean,
+            here_glucose,
+            touch,
+            humidity,
+            t_tank,
+            grav_x,
+        )
     } else {
         0
     };

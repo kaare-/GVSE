@@ -2714,6 +2714,159 @@ fn nerved_body_builds_a_studio_net_and_drives() {
     assert!(Genome::nerved().is_valid());
 }
 
+/// 5.4 M4 — chamber predator grows a geometric mouth (hard + enzyme + muscle).
+#[test]
+fn chamber_mouth_fires_the_chamber_milestone() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(17, 32, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    assert!(Genome::chamber_predator().is_valid());
+    let id = tank
+        .seed_genome_at(48, 60, Genome::chamber_predator())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    let mut chamber = false;
+    for _ in 0..5_000 {
+        tank.tick(&day());
+        tank.feed_org_full(org);
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::CHAMBER || e.kind == ev::MS_CHAMBER {
+                chamber = true;
+            }
+        }
+        if chamber {
+            break;
+        }
+    }
+    let alive = tank
+        .cells()
+        .org(org)
+        .map(|o| o.n_alive)
+        .unwrap_or(0);
+    assert!(alive >= 5, "U should form (alive={alive})");
+    assert!(chamber, "geometric chamber milestone should fire");
+}
+
+/// 5.4 M4 — unmatched prey enclosed then freed (eater dies) fires ESCAPE.
+#[test]
+fn enclosed_prey_escape_fires_when_freed() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(17, 32, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(48, 60, Genome::chamber_predator())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    for _ in 0..4_000 {
+        tank.tick(&day());
+        tank.feed_org_full(org);
+        if tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 7 {
+            break;
+        }
+    }
+    assert!(
+        tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 7,
+        "U never finished"
+    );
+    let base = tank
+        .cells()
+        .iter_alive()
+        .find(|(_, c)| c.org == org && c.mode == 0)
+        .map(|(_, c)| (c.px, c.py))
+        .expect("base");
+    let cavity = (base.0, base.1 - 1);
+    // Unmatched wall_key so the lining does not lyse the prey quickly.
+    let mut prey_g = Genome::algae();
+    prey_g.wall_key = 200;
+    prey_g.buoy = -20;
+    let prey = tank
+        .seed_genome_at(cavity.0, cavity.1, prey_g)
+        .expect("prey");
+    let prey_org = tank.cell(prey).unwrap().org;
+    tank.pin_cell_for_test(prey);
+    // Wait until SCAN_EVERY records the swallowed set (≥ 2 periods).
+    for _ in 0..160 {
+        tank.tick(&day());
+        assert!(
+            tank.cells().get(prey).is_some(),
+            "unmatched prey should survive the cavity briefly"
+        );
+    }
+    // Destroy the eater — cavity vanishes; prey stays alive ⇒ escape.
+    let eater_cells: Vec<u32> = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .map(|(id, _)| id)
+        .collect();
+    for cid in eater_cells {
+        tank.kill_cell(cid);
+    }
+    let mut escape = false;
+    for _ in 0..200 {
+        tank.tick(&day());
+        while let Some(e) = tank.poll_event() {
+            if (e.kind == ev::ESCAPE || e.kind == ev::MS_ESCAPE) && e.arg0 == prey_org {
+                escape = true;
+            }
+        }
+        if escape {
+            break;
+        }
+    }
+    assert!(
+        tank.cells().get(prey).is_some(),
+        "prey should still be alive after the eater dies"
+    );
+    assert!(escape, "freed unmatched prey should fire ESCAPE");
+}
+
+/// 5.4 M4 — SENSOR(colour) returns a high match when looking at a yellow tip.
+#[test]
+fn colour_sensor_matches_a_pigment_target() {
+    use crate::bio::profile::{Block, Entry, SENSOR_COLOUR};
+    use crate::bio::Genome;
+    let mut tank = water_box(13, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    // Yellow crown tip above the seeker (pigment hue 43).
+    let mut crown = Genome::algae();
+    crown.modes[0].n_entries = 0;
+    crown.modes[0].push_entry(Entry::with_params(Block::Pigment, 6, 43, 0));
+    crown.modes[0].push_entry(Entry::new(Block::Photo, 1));
+    crown.modes[0].n_children = 0;
+    assert!(crown.is_valid());
+    // Heading 0 = east: tip sits to the right of the seeker.
+    let seeker = tank
+        .seed_genome_at(30, 40, Genome::colour_seeker())
+        .expect("seeker");
+    tank.pin_cell_for_test(seeker);
+    let tip = tank.seed_genome_at(36, 40, crown).expect("tip");
+    tank.pin_cell_for_test(tip);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut sense = 0u8;
+    for _ in 0..60 {
+        tank.tick(&input);
+        if let Some(c) = tank.cell(seeker) {
+            sense = c.sense;
+            if sense > 100 {
+                break;
+            }
+        }
+    }
+    let mc = tank
+        .genomes()
+        .coeffs(tank.genotype_of_cell(seeker).unwrap(), 0);
+    assert_eq!(mc.sensor_kind, SENSOR_COLOUR);
+    assert!(
+        sense > 80,
+        "colour sensor should match yellow tip (sense={sense})"
+    );
+    assert!(Genome::colour_seeker().is_valid());
+}
+
 /// 5.3 M3 — an eyed body fires the geometric eye milestone.
 #[test]
 fn eyed_body_fires_the_eye_milestone() {

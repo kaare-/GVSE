@@ -1464,6 +1464,7 @@ impl Tank {
             self.tick_count,
             t_tank,
             self.lambda_scale_q8 as u32,
+            self.grav_x,
         );
         let _soft_moved = bio::soft::step(
             &mut self.soft,

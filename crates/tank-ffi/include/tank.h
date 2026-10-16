@@ -62,11 +62,13 @@ typedef struct InspectRec {
  * 10 lifeless 11 glass needs cleaning 12 brood released 13 shed 14 fragment
  * 15 regrown 16 predation 17 poison 18 signalling 19 heterotroph 20 fungus
  * 21 something moved 22 new species 23 warm-blooded 24 cloudy 25 life on land
- * 26 cutting took root 27 colour crown 28 eye 29 locomotion; milestones (once per tank) 32 first
+ * 26 cutting took root 27 colour crown 28 eye 29 locomotion 30 escape
+ * 31 chamber; milestones (once per tank) 32 first
  * life 33 first division 34 first death 35 new colour (per lineage)
  * 36 multicellular 37 giant cell 38 fungus 39 heterotroph 40 predation
  * 41 poison 42 signalling 43 something moved 44 new species
- * 45 warm-blooded 46 life on land 47 cutting took root 48 colour crown 49 eye 50 locomotion.
+ * 45 warm-blooded 46 life on land 47 cutting took root 48 colour crown
+ * 49 eye 50 locomotion 51 escape 52 chamber.
  * kind 0 = none. */
 typedef struct EventRec {
   uint32_t kind;
