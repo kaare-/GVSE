@@ -91,16 +91,19 @@ struct ToolWheel: View {
                     brush = max(1, brush - 1)
                 } label: { PixelLabel(text: "-", scale: 3) }
                 .buttonStyle(.plain)
+                .a11yButton("Smaller brush")
                 Button {
                     brush = min(12, brush + 1)
                 } label: { PixelLabel(text: "+", scale: 3) }
                 .buttonStyle(.plain)
+                .a11yButton("Larger brush")
                 if tool == .sand || tool == .rock {
                     PixelLabel(text: "TONE \(variant + 1)", scale: 2)
                     Button {
                         variant = (variant + 1) % 4
                     } label: { PixelLabel(text: ">", scale: 3) }
                     .buttonStyle(.plain)
+                    .a11yButton("Next colour tone")
                 }
                 if tool == .enclose {
                     PixelLabel(text: encloseLabel, scale: 2)
@@ -108,6 +111,7 @@ struct ToolWheel: View {
                         encloseOp = (encloseOp + 1) % 4
                     } label: { PixelLabel(text: ">", scale: 3) }
                     .buttonStyle(.plain)
+                    .a11yButton("Next box action", hint: encloseLabel)
                 }
             }
             if tool == .fill {
@@ -115,6 +119,7 @@ struct ToolWheel: View {
                     PixelLabel(text: "LEVEL", scale: 2)
                     Slider(value: $fillLevel, in: 0...1)
                         .tint(Color(red: 0.4, green: 0.7, blue: 0.9))
+                        .accessibilityLabel("Water level")
                 }
                 .frame(maxWidth: 220)
             }
@@ -157,6 +162,7 @@ struct ToolWheel: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton(t.label, hint: "Tool", selected: tool == t)
                 }
             }
         }

@@ -86,12 +86,15 @@ struct MakeAcreatureApp: App {
             if let rect = session.inspected?.rect {
                 TrackingBox(rect: rect).ignoresSafeArea()
             }
+            ChromeScroll {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         PixelPanel {
                             PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 3)
                         }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(session.isDay ? "Day" : "Night")
                         PixelPanel {
                             PixelLabel(
                                 text: String(format: "%.0f C", session.temperatureC),
@@ -99,6 +102,8 @@ struct MakeAcreatureApp: App {
                                 color: Palette.highlight
                             )
                         }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(String(format: "Tank temperature %.0f degrees", session.temperatureC))
                     }
                     Spacer()
                     slotButtons
@@ -110,18 +115,22 @@ struct MakeAcreatureApp: App {
                             PixelLabel(text: "ROOM", scale: 2, color: Palette.highlight)
                         }
                         .buttonStyle(.plain)
+                        .a11yButton("Room", hint: "Leave the tank and open the room")
                         Button { showPhoto = true } label: {
                             PixelLabel(text: "PHOTO", scale: 2)
                         }
                         .buttonStyle(.plain)
+                        .a11yButton("Photo", hint: "Save a picture of the tank")
                         Button { showSettings = true } label: {
                             PixelLabel(text: "SETTINGS", scale: 2)
                         }
                         .buttonStyle(.plain)
+                        .a11yButton("Settings", hint: "Open the fuse box")
                         Button(action: session.unpauseFromEvent) {
                             PixelLabel(text: "PLAY", scale: 2, color: Palette.dimPaper)
                         }
                         .buttonStyle(.plain)
+                        .a11yButton("Play", hint: "Resume the tank")
                         Button {
                             session.magnifierPinned.toggle()
                         } label: {
@@ -131,6 +140,11 @@ struct MakeAcreatureApp: App {
                             )
                         }
                         .buttonStyle(.plain)
+                        .a11yButton(
+                            session.magnifierPinned ? "Lens pinned" : "Lens",
+                            hint: "Pin the magnifier",
+                            selected: session.magnifierPinned
+                        )
                     }
                 }
                 ToolWheel(
@@ -156,6 +170,7 @@ struct MakeAcreatureApp: App {
                             PixelPanel { PixelLabel(text: "DUMP", scale: 2, color: Palette.dimPaper) }
                         }
                         .buttonStyle(.plain)
+                        .a11yButton("Dump bucket", hint: "Throw away what you scooped")
                     }
                 }
                 if let state = session.inspected {
@@ -165,9 +180,9 @@ struct MakeAcreatureApp: App {
                         onClose: session.closeInspect
                     )
                 }
-                Spacer()
             }
             .padding(10)
+            }
             if let hint = session.hint {
                 VStack {
                     Spacer()
@@ -175,6 +190,7 @@ struct MakeAcreatureApp: App {
                     Spacer().frame(height: 80)
                 }
                 .animation(.easeOut(duration: 0.2), value: hint)
+                .accessibilityElement(children: .combine)
             }
         }
         .simultaneousGesture(zoomGesture(toRoom: true))
@@ -197,6 +213,7 @@ struct MakeAcreatureApp: App {
                     }
                 }
                 .buttonStyle(.plain)
+                .a11yButton("Tank \(i + 1)", selected: session.slot == i)
             }
             Button { session.newTank() } label: {
                 PixelPanel {
@@ -204,6 +221,7 @@ struct MakeAcreatureApp: App {
                 }
             }
             .buttonStyle(.plain)
+            .a11yButton("New tank", hint: "Replace the active slot with an empty tank")
         }
     }
 }

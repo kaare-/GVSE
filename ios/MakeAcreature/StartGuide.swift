@@ -24,14 +24,14 @@ struct StartGuide: View {
                     PixelLabel(text: "START GUIDE", scale: 3, color: Palette.highlight)
                     Spacer()
                     Button(action: onSkip) {
-                        PixelPanel { PixelLabel(text: "SKIP", scale: 2, color: Palette.dimPaper) }
+                        PixelPanel { PixelLabel(text: "SKIP", scale: 2, color: Palette.paper) }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton("Skip start guide")
                 }
                 PixelLabel(text: "STEP \(step + 1) OF \(steps.count)", scale: 1, color: Palette.dimPaper)
                 PixelLabel(text: steps[step].0, scale: 3, color: Palette.highlight)
-                PixelLabel(text: steps[step].1, scale: 2)
-                    .fixedSize(horizontal: false, vertical: true)
+                PixelLabel(text: steps[step].1, scale: 2, maxWidth: 320)
                 HStack {
                     if step > 0 {
                         Button { step -= 1 } label: {

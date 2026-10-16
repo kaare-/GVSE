@@ -60,6 +60,7 @@ struct PhotoModeOverlay: View {
                         PixelPanel { PixelLabel(text: "TANK", scale: 2) }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton("Snap the tank")
                     Button {
                         preview = PhotoMode.captureCreature(session: session)
                         status = nil
@@ -67,6 +68,7 @@ struct PhotoModeOverlay: View {
                         PixelPanel { PixelLabel(text: "CREATURE", scale: 2) }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton("Snap the creature")
                     Button {
                         guard let preview else { return }
                         PhotoMode.saveToPhotos(preview) { ok in
@@ -77,10 +79,12 @@ struct PhotoModeOverlay: View {
                         PixelPanel { PixelLabel(text: "SAVE", scale: 2, color: Palette.highlight) }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton("Save photo to library")
                     Button(action: onClose) {
                         PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton("Close photo")
                 }
                 if let status {
                     PixelLabel(text: status, scale: 2, color: Palette.highlight)

@@ -23,6 +23,7 @@ struct EventLogView: View {
                         PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton("Close event log")
                 }
                 PixelLabel(
                     text: "\(session.eventLog.count) ENTRIES  THIS SESSION",

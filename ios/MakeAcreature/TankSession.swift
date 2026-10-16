@@ -56,6 +56,9 @@ final class TankSession: ObservableObject {
     @Published var fillLevel = 0.55
     @Published var slot = 0
     @Published var swirl = false
+    /// System Reduce Motion. Swirl stays off while this is set.
+    @Published private(set) var reduceMotion = UIAccessibility.isReduceMotionEnabled
+    var effectiveSwirl: Bool { swirl && !reduceMotion }
     /// Pause the sim when a big evolution milestone fires (Phase 6).
     @Published var pauseOnEvent = false
     @Published var soundOn = true
@@ -103,6 +106,7 @@ final class TankSession: ObservableObject {
     private var lastGravY: Float = -1
     private var frame = 0
     private var hintToken = 0
+    private var reduceMotionObserver: NSObjectProtocol?
 
     private var docs: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -128,6 +132,13 @@ final class TankSession: ObservableObject {
         favouriteId = UInt64(UserDefaults.standard.integer(forKey: "favouriteId"))
         showStartGuide = !UserDefaults.standard.bool(forKey: "startGuideDone")
         PixelKeyboard.applyAppearance()
+        reduceMotionObserver = NotificationCenter.default.addObserver(
+            forName: UIAccessibility.reduceMotionStatusDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reduceMotion = UIAccessibility.isReduceMotionEnabled
+        }
         loadSlot(slot)
         consent = UserDefaults.standard.bool(forKey: "telemetryConsent")
         if let handle {
@@ -576,7 +587,7 @@ final class TankSession: ObservableObject {
             // Portrait: x is left/right tilt.
             self.lastGravX = Float(g.x)
             self.lastGravY = Float(g.y)
-            if self.swirl {
+            if self.effectiveSwirl {
                 let deg = Double(g.x) * 4.0
                 self.cameraTiltDegrees = max(-4, min(4, deg))
                 self.metal?.cameraTiltDegrees = self.cameraTiltDegrees
@@ -849,7 +860,7 @@ final class TankSession: ObservableObject {
                     grav_y: lastGravY,
                     paused: 0,
                     always_day: alwaysDay ? 1 : 0,
-                    swirl: swirl ? 1 : 0,
+                    swirl: effectiveSwirl ? 1 : 0,
                     _pad1: 0,
                     light_slider: Float(lightSlider),
                     t_base: Float(tBase),

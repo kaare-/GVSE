@@ -45,11 +45,12 @@ struct RoomView: View {
                     .padding(.horizontal, 16)
                     HStack {
                         Button(action: onOpenLog) {
-                            PixelLabel(text: "EVENT LOG", scale: 1, color: Palette.dimPaper)
+                            PixelLabel(text: "EVENT LOG", scale: 1, color: Palette.paper)
                         }
                         .buttonStyle(.plain)
+                        .a11yButton("Event log")
                         Spacer()
-                        PixelLabel(text: "PINCH IN · TAP TANK", scale: 1, color: Color(white: 0.35))
+                        PixelLabel(text: "PINCH IN · TAP TANK", scale: 1, color: Palette.paper)
                     }
                     .padding(.horizontal, 18)
                     .padding(.top, 8)
@@ -134,6 +135,7 @@ struct RoomView: View {
             }
         }
         .buttonStyle(.plain)
+        .a11yButton("Tank \(session.slot + 1), \(session.liveCells) cells", hint: "Look into the tank")
     }
 
     private var treePicture: some View {
@@ -145,30 +147,44 @@ struct RoomView: View {
             }
         }
         .buttonStyle(.plain)
+        .a11yButton("Tree of life")
     }
 
     private var fuseBox: some View {
         Button(action: onOpenSettings) {
             VStack(spacing: 4) {
                 ZStack {
-                    Rectangle().fill(Color(red: 0.22, green: 0.24, blue: 0.2))
-                    VStack(spacing: 3) {
+                    Rectangle().fill(Color(red: 0.07, green: 0.08, blue: 0.07))
+                    VStack(spacing: 4) {
                         ForEach(0..<3, id: \.self) { i in
                             HStack(spacing: 4) {
                                 Circle()
-                                    .fill(i == 0 && session.soundOn ? Color.green.opacity(0.7) : Color(white: 0.35))
-                                    .frame(width: 6, height: 6)
-                                Rectangle().fill(Color(white: 0.4)).frame(width: 28, height: 4)
+                                    .fill(breakerOn(i) ? Color(red: 0.78, green: 1, blue: 0.35) : Color(white: 0.22))
+                                    .frame(width: 8, height: 8)
+                                    .overlay(Circle().stroke(Color(white: 0.85), lineWidth: 1))
+                                Rectangle()
+                                    .fill(Color(red: 0.96, green: 0.9, blue: 0.72))
+                                    .frame(width: 28, height: 5)
                             }
                         }
                     }
                 }
                 .frame(width: 56, height: 56)
-                .overlay(Rectangle().stroke(Color(white: 0.4), lineWidth: 2))
-                PixelLabel(text: "FUSE BOX", scale: 1, color: Palette.dimPaper)
+                .overlay(Rectangle().stroke(Color(red: 0.93, green: 0.86, blue: 0.62), lineWidth: 2))
+                PixelLabel(text: "FUSE BOX", scale: 1, color: Palette.paper)
             }
         }
         .buttonStyle(.plain)
+        .a11yButton("Fuse box", hint: "Settings")
+    }
+
+    /// Sound, clock, and swirl lamps. Off is a dark well; on is a bright lamp.
+    private func breakerOn(_ index: Int) -> Bool {
+        switch index {
+        case 0: return session.soundOn
+        case 1: return session.alwaysDay
+        default: return session.effectiveSwirl
+        }
     }
 
     private var book: some View {
@@ -184,6 +200,7 @@ struct RoomView: View {
             }
         }
         .buttonStyle(.plain)
+        .a11yButton("The book", hint: "Archive")
     }
 
     private var favouriteFrame: some View {
@@ -205,6 +222,7 @@ struct RoomView: View {
             }
         }
         .buttonStyle(.plain)
+        .a11yButton("Favourite frame", hint: "Cycle the framed creature")
         .contextMenu {
             Button("Clear favourite") { session.clearFavourite() }
         }
@@ -227,6 +245,7 @@ struct RoomView: View {
             }
         }
         .buttonStyle(.plain)
+        .a11yButton("Door sign", hint: session.doorName.isEmpty ? "Set your name" : session.doorName)
     }
 
     private var doorSignEditor: some View {
