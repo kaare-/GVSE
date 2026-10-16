@@ -18,6 +18,7 @@
 		B1000000000000000000000C /* TreeOfLifeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000C /* TreeOfLifeView.swift */; };
 		B1000000000000000000000D /* ArchiveBook.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000D /* ArchiveBook.swift */; };
 		B1000000000000000000000E /* RoomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000E /* RoomView.swift */; };
+		B1000000000000000000000F /* EventToasts.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000F /* EventToasts.swift */; };
 		B10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -33,6 +34,7 @@
 		F1000000000000000000000C /* TreeOfLifeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TreeOfLifeView.swift; sourceTree = "<group>"; };
 		F1000000000000000000000D /* ArchiveBook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveBook.swift; sourceTree = "<group>"; };
 		F1000000000000000000000E /* RoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomView.swift; sourceTree = "<group>"; };
+		F1000000000000000000000F /* EventToasts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventToasts.swift; sourceTree = "<group>"; };
 		F10000000000000000000006 /* Tank-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Tank-Bridging-Header.h"; sourceTree = "<group>"; };
 		F10000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F10000000000000000000008 /* MakeAcreature.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MakeAcreature.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -71,6 +73,7 @@
 				F1000000000000000000000C /* TreeOfLifeView.swift */,
 				F1000000000000000000000D /* ArchiveBook.swift */,
 				F1000000000000000000000E /* RoomView.swift */,
+				F1000000000000000000000F /* EventToasts.swift */,
 				F10000000000000000000006 /* Tank-Bridging-Header.h */,
 				F10000000000000000000007 /* Assets.xcassets */,
 			);
@@ -159,6 +162,7 @@
 				B1000000000000000000000C /* TreeOfLifeView.swift in Sources */,
 				B1000000000000000000000D /* ArchiveBook.swift in Sources */,
 				B1000000000000000000000E /* RoomView.swift in Sources */,
+				B1000000000000000000000F /* EventToasts.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

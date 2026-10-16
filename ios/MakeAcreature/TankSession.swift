@@ -56,6 +56,8 @@ final class TankSession: ObservableObject {
     @Published var fillLevel = 0.55
     @Published var slot = 0
     @Published var swirl = false
+    /// Pause the sim when a big evolution milestone fires (Phase 6).
+    @Published var pauseOnEvent = false
     /// Freeze the tank clock at midday (Phase 4 setting).
     @Published var alwaysDay = false
     /// Base temperature °C (default 15).
@@ -103,6 +105,7 @@ final class TankSession: ObservableObject {
         TelemetryClient.installCrashHook()
         slot = UserDefaults.standard.integer(forKey: "activeSlot")
         swirl = UserDefaults.standard.bool(forKey: "swirlEnabled")
+        pauseOnEvent = UserDefaults.standard.bool(forKey: "pauseOnEvent")
         alwaysDay = UserDefaults.standard.bool(forKey: "alwaysDay")
         let savedBase = UserDefaults.standard.double(forKey: "tBase")
         tBase = savedBase == 0 ? 15 : savedBase
@@ -263,6 +266,11 @@ final class TankSession: ObservableObject {
     func toggleAlwaysDay() {
         alwaysDay.toggle()
         UserDefaults.standard.set(alwaysDay, forKey: "alwaysDay")
+    }
+
+    func togglePauseOnEvent() {
+        pauseOnEvent.toggle()
+        UserDefaults.standard.set(pauseOnEvent, forKey: "pauseOnEvent")
     }
 
     func nudgeBaseTemp(_ delta: Double) {
@@ -639,6 +647,27 @@ final class TankSession: ObservableObject {
         }
     }
 
+    /// Drain the sim event queue into toasts (and optional pause).
+    private func drainEvents(_ handle: OpaquePointer) {
+        var pause = false
+        while true {
+            let ev = tank_poll_event(handle)
+            if ev.kind == 0 { break }
+            if let msg = EventToast.message(kind: ev.kind) {
+                showHint(msg)
+            }
+            // Sound sting reserved for Phase 6 AVAudioEngine.
+            _ = EventToast.soundTrigger(kind: ev.kind)
+            if pauseOnEvent && EventToast.shouldPause(kind: ev.kind) {
+                pause = true
+            }
+        }
+        if pause {
+            running = false
+            showHint(hint.map { "\($0) · PAUSED" } ?? "PAUSED")
+        }
+    }
+
     // MARK: frame
 
     private func advance(_ dt: CFTimeInterval) {
@@ -667,6 +696,7 @@ final class TankSession: ObservableObject {
                 )
                 tank_tick(handle, &input)
             }
+            drainEvents(handle)
             accumulator -= step
             steps += 1
         }
