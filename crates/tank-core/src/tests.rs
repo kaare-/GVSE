@@ -2438,3 +2438,78 @@ fn roots_bind_sand_and_dig_cuts_them() {
     assert!(tank.litter_total() > litter_before, "cut roots become litter");
     assert!(!tank.cell_visible(vx, vy).is_bound(), "bound flag clears");
 }
+
+/// 4.5 — cut / root-trim (kind 15): a stroke kills cells under the brush;
+/// a stem cut leaves a fragment, a root cut becomes soft litter.
+#[test]
+fn cut_tool_severs_a_stem_and_trims_roots() {
+    use crate::bio::Genome;
+    use crate::tools::ToolEvent;
+    // Straw: a short bonded chain in water.
+    let mut tank = water_box(13, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    let id = tank.seed_genome_at(36, 40, Genome::straw()).expect("straw");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    // Grow the chain.
+    for _ in 0..200 {
+        tank.tick(&day());
+        if tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 3 {
+            break;
+        }
+    }
+    let before = tank.live_cells();
+    let orgs_before = tank.cells().iter_orgs().count();
+    assert!(before >= 2, "straw has cells ({before})");
+    // Cut the middle of the body.
+    let seed = tank.cell(id).unwrap();
+    let (vx, vy) = crate::bio::pixel_to_phys(seed.px, seed.py, 24);
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 15,
+            material: 0,
+            x: vx as u16,
+            y: vy as u16,
+            r: 1,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert!(tank.live_cells() < before || tank.cells().iter_orgs().count() > orgs_before,
+        "cut kills or fragments the body");
+
+    // Root trim: five roots in wet sand.
+    let mut land = Tank::try_new(14, 16, 16).unwrap();
+    land.set_lambda_scale_q8(0);
+    for vx in 0..16 {
+        for vy in 0..6 {
+            let mut c = Cell::sand();
+            c.sat = 255;
+            place(&mut land, vx, vy, c);
+        }
+    }
+    let (vx, vy) = (8i32, 3i32);
+    for i in 0..5u16 {
+        let px = vx as u16 * 3 + (i % 3);
+        let py = (15 - vy as u16) * 3 + (i / 3);
+        let _ = land.seed_genome_at(px, py, Genome::rooting());
+    }
+    tick_n(&mut land, 2);
+    let litter_before = land.litter_total();
+    let live_before = land.live_cells();
+    land.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 15,
+            material: 0,
+            x: vx as u16,
+            y: vy as u16,
+            r: 1,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert!(land.live_cells() < live_before, "root trim kills root cells");
+    assert!(land.litter_total() > litter_before, "trimmed roots become litter");
+}

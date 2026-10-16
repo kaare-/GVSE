@@ -6,7 +6,8 @@
 //! 7 swipe film · 8 seed algae · 9 remove anything (organisms whole,
 //! corpses, litter, grit) · 10 glucose drip · 11 calcium feed ·
 //! 12 detritus feed · 13 clean (litter, grit, corpses only) ·
-//! 14 top-up (pure water onto every free surface, `r` rows; Phase 4).
+//! 14 top-up (pure water onto every free surface, `r` rows; Phase 4) ·
+//! 15 cut / root-trim (kill cells under the stroke; roots → soft litter).
 //! The scoop is not a tool event: `Tank::scoop_region` / `release`.
 
 use wk_material::MaterialId;
@@ -18,7 +19,7 @@ use crate::grid::PhysicsGrid;
 pub struct ToolEvent {
     /// 1 paint, 2 erase, 3 pour, 4 drain, 5 fill level, 6 undo, 7 swipe,
     /// 8 seed, 9 remove, 10 glucose, 11 calcium, 12 detritus, 13 clean,
-    /// 14 top-up.
+    /// 14 top-up, 15 cut / root-trim.
     pub kind: u8,
     pub material: u8,
     /// Visible physics cell, origin at the bottom-left of the interior.

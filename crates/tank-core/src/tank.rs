@@ -2145,6 +2145,12 @@ impl Tank {
                 let _ = self.clean_at(tool.x as i32, tool.y as i32, tool.r as i32);
                 continue;
             }
+            if tool.kind == 15 {
+                // Cut / root-trim (§h.3): kill cells under the stroke;
+                // rooted cells become soft litter, other cuts fragment.
+                let _ = self.cut_at(tool.x as i32, tool.y as i32, tool.r as i32);
+                continue;
+            }
             // Digging through rooted sand cuts the roots (§h.1 / K4#5).
             if tool.kind == 1 || tool.kind == 2 {
                 self.cut_roots_under(tool.x as i32, tool.y as i32, tool.r as i32);
@@ -2160,8 +2166,50 @@ impl Tank {
         }
     }
 
+    /// Cut / root-trim tool (kind 15, §h.3): every living cell under the
+    /// brush is killed. Roots on solid become soft litter; air/water cuts
+    /// re-root as fragments via the existing realised-map path.
+    pub fn cut_at(&mut self, vx: i32, vy: i32, r: i32) -> u32 {
+        let roots = self.cut_roots_under(vx, vy, r);
+        let r = r.max(0);
+        let vis_h = self.grid.visible_h();
+        let mut kill: Vec<u32> = Vec::new();
+        for (id, c) in self.cells.iter_alive() {
+            let cx = c.px as i32 / 3;
+            let cy = vis_h - 1 - c.py as i32 / 3;
+            let (dx, dy) = (cx - vx, cy - vy);
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            // Roots were already handled.
+            if self.genomes.coeffs(c.genotype, c.mode).uptake_water >= 2 {
+                let seat = self.grid.get_visible(cx, cy);
+                if !seat.is_open() {
+                    continue;
+                }
+            }
+            kill.push(id);
+        }
+        let mut n = roots;
+        for id in kill {
+            let _ = self.cells.kill(
+                &mut self.genomes,
+                &mut self.pixels,
+                id,
+                false,
+                self.tick_count,
+                None,
+            );
+            n += 1;
+        }
+        if n > 0 {
+            self.light_dirty = true;
+        }
+        n
+    }
+
     /// Kill root cells whose pixels sit in the brush (they become soft
-    /// litter in place). Used by dig/erase and later by the cut tool.
+    /// litter in place). Used by dig/erase and the cut tool.
     pub fn cut_roots_under(&mut self, vx: i32, vy: i32, r: i32) -> u32 {
         let r = r.max(0);
         let vis_h = self.grid.visible_h();
