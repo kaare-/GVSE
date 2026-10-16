@@ -1,51 +1,83 @@
 import SwiftUI
 
-/// The minimal room (Phase 3): a cosy pixel wall around the aquarium
-/// with the tree-of-life picture and the archive book. The fuse box,
-/// favourite frame and door sign are reserved spots until Phase 6. The
-/// sim keeps running; tapping the tank or pinching in goes back.
+/// The dressed room (Phase 6): aquarium, tree picture, archive book,
+/// fuse-box settings, favourite-creature frame, and a door sign with
+/// the player's name. Post-MVP spots stay dashed. The sim keeps running.
 struct RoomView: View {
     @ObservedObject var session: TankSession
     var onBack: () -> Void
     var onOpenBook: () -> Void
     var onOpenTree: () -> Void
+    var onOpenSettings: () -> Void
+    var onOpenLog: () -> Void
 
     @State private var tree: [SpeciesNode] = []
+    @State private var editingSign = false
+    @State private var signDraft = ""
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 wall
+                shelves
                 VStack(spacing: 0) {
-                    Spacer(minLength: 24)
-                    HStack(alignment: .bottom, spacing: 18) {
+                    Spacer(minLength: 20)
+                    HStack(alignment: .bottom, spacing: 14) {
                         treePicture
                         Spacer(minLength: 0)
-                        reserved("FUSE BOX")
+                        fuseBox
                     }
-                    .padding(.horizontal, 18)
-                    Spacer(minLength: 16)
-                    tankOnStand
-                    Spacer(minLength: 12)
-                    HStack(alignment: .bottom, spacing: 18) {
+                    .padding(.horizontal, 16)
+                    Spacer(minLength: 10)
+                    HStack(alignment: .center, spacing: 10) {
+                        lamp
+                        tankOnStand
+                        lamp
+                    }
+                    Spacer(minLength: 10)
+                    HStack(alignment: .bottom, spacing: 14) {
                         book
                         Spacer(minLength: 0)
-                        reserved("FRAME")
-                        reserved("DOOR SIGN")
+                        favouriteFrame
+                        doorSign
+                    }
+                    .padding(.horizontal, 16)
+                    HStack {
+                        Button(action: onOpenLog) {
+                            PixelLabel(text: "EVENT LOG", scale: 1, color: Palette.dimPaper)
+                        }
+                        .buttonStyle(.plain)
+                        Spacer()
+                        PixelLabel(text: "PINCH IN · TAP TANK", scale: 1, color: Color(white: 0.35))
                     }
                     .padding(.horizontal, 18)
-                    Spacer(minLength: geo.size.height * 0.14)
+                    .padding(.top, 8)
+                    Spacer(minLength: geo.size.height * 0.08)
                 }
             }
         }
-        .onAppear { tree = session.speciesTree() }
+        .onAppear {
+            tree = session.speciesTree()
+            signDraft = session.doorName
+        }
         .onReceive(refresh) { _ in tree = session.speciesTree() }
+        .sheet(isPresented: $editingSign) {
+            doorSignEditor
+        }
     }
 
     private var wall: some View {
         Canvas { ctx, size in
             ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Palette.wall))
+            // Soft vertical lamp wash.
+            for i in 0..<6 {
+                let x = size.width * (0.12 + CGFloat(i) * 0.15)
+                ctx.fill(
+                    Path(CGRect(x: x - 20, y: 0, width: 40, height: size.height * 0.55)),
+                    with: .color(Color(red: 1, green: 0.9, blue: 0.6).opacity(0.04))
+                )
+            }
             let floorY = size.height * 0.82
             ctx.fill(Path(CGRect(x: 0, y: floorY, width: size.width, height: size.height - floorY)), with: .color(Palette.floor))
             ctx.fill(Path(CGRect(x: 0, y: floorY, width: size.width, height: 3)), with: .color(Color(white: 0.08)))
@@ -56,6 +88,26 @@ struct RoomView: View {
             }
         }
         .ignoresSafeArea()
+    }
+
+    private var shelves: some View {
+        VStack {
+            HStack(spacing: 0) {
+                Rectangle().fill(Color(red: 0.28, green: 0.2, blue: 0.12)).frame(height: 8)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 36)
+            Spacer()
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var lamp: some View {
+        VStack(spacing: 2) {
+            Circle().fill(Color(red: 1, green: 0.92, blue: 0.7).opacity(0.7)).frame(width: 10, height: 10)
+            Rectangle().fill(Color(white: 0.25)).frame(width: 2, height: 28)
+        }
+        .allowsHitTesting(false)
     }
 
     private var tankOnStand: some View {
@@ -95,6 +147,30 @@ struct RoomView: View {
         .buttonStyle(.plain)
     }
 
+    private var fuseBox: some View {
+        Button(action: onOpenSettings) {
+            VStack(spacing: 4) {
+                ZStack {
+                    Rectangle().fill(Color(red: 0.22, green: 0.24, blue: 0.2))
+                    VStack(spacing: 3) {
+                        ForEach(0..<3, id: \.self) { i in
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(i == 0 && session.soundOn ? Color.green.opacity(0.7) : Color(white: 0.35))
+                                    .frame(width: 6, height: 6)
+                                Rectangle().fill(Color(white: 0.4)).frame(width: 28, height: 4)
+                            }
+                        }
+                    }
+                }
+                .frame(width: 56, height: 56)
+                .overlay(Rectangle().stroke(Color(white: 0.4), lineWidth: 2))
+                PixelLabel(text: "FUSE BOX", scale: 1, color: Palette.dimPaper)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
     private var book: some View {
         Button(action: onOpenBook) {
             VStack(spacing: 4) {
@@ -110,14 +186,84 @@ struct RoomView: View {
         .buttonStyle(.plain)
     }
 
-    private func reserved(_ label: String) -> some View {
-        VStack(spacing: 4) {
-            Rectangle()
-                .stroke(Color(white: 0.3), style: StrokeStyle(lineWidth: 2, dash: [4, 4]))
+    private var favouriteFrame: some View {
+        Button {
+            session.cycleFavourite()
+        } label: {
+            VStack(spacing: 4) {
+                ZStack {
+                    Rectangle().fill(Color(red: 0.35, green: 0.28, blue: 0.18))
+                    if let fav = session.favouriteSpecimen {
+                        portrait(fav, side: 48)
+                    } else {
+                        PixelLabel(text: "PICK", scale: 1, color: Color(white: 0.4))
+                    }
+                }
                 .frame(width: 56, height: 56)
-                .overlay(PixelLabel(text: "SOON", scale: 1, color: Color(white: 0.35)))
-            PixelLabel(text: label, scale: 1, color: Color(white: 0.4))
+                .overlay(Rectangle().stroke(Color(red: 0.55, green: 0.42, blue: 0.22), lineWidth: 3))
+                PixelLabel(text: "FAVOURITE", scale: 1, color: Palette.dimPaper)
+            }
         }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Clear favourite") { session.clearFavourite() }
+        }
+    }
+
+    private var doorSign: some View {
+        Button { editingSign = true } label: {
+            VStack(spacing: 4) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 2).fill(Color(red: 0.55, green: 0.45, blue: 0.28))
+                    PixelLabel(
+                        text: shortSign(session.doorName),
+                        scale: 1,
+                        color: Color(red: 0.15, green: 0.1, blue: 0.05)
+                    )
+                }
+                .frame(width: 72, height: 36)
+                .overlay(Rectangle().stroke(Color(red: 0.35, green: 0.28, blue: 0.15), lineWidth: 2))
+                PixelLabel(text: "DOOR SIGN", scale: 1, color: Palette.dimPaper)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var doorSignEditor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            PixelLabel(text: "DOOR SIGN", scale: 3, color: Palette.highlight)
+            PixelLabel(text: "YOUR NAME ON THE DOOR", scale: 1, color: Palette.dimPaper)
+            PixelTextField(text: $signDraft, placeholder: "NAME") {
+                session.setDoorName(signDraft)
+                editingSign = false
+            }
+            HStack {
+                Button {
+                    editingSign = false
+                } label: {
+                    PixelPanel { PixelLabel(text: "CANCEL", scale: 2) }
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Button {
+                    session.setDoorName(signDraft)
+                    editingSign = false
+                } label: {
+                    PixelPanel { PixelLabel(text: "HANG IT", scale: 2, color: Palette.highlight) }
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .padding(16)
+        .background(Palette.panel.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+    }
+
+    private func shortSign(_ name: String) -> String {
+        let up = name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if up.isEmpty { return "????" }
+        return up.count > 10 ? String(up.prefix(9)) + "." : up
     }
 }
 
