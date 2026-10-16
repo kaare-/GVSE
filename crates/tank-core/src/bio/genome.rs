@@ -322,6 +322,52 @@ impl Genome {
         g
     }
 
+    /// Phase 4 plant: rooting base + hard stem chain + leaf pair.
+    pub fn plant() -> Self {
+        use crate::bio::program::{Dir, Gate, Scalar, Transition};
+        let mut g = Self::rooting();
+        let mut stem = Mode::blank();
+        stem.push_entry(Entry::new(Block::Photo, 3));
+        stem.push_entry(Entry::with_params(Block::Wall, 3, 180, 0));
+        stem.push_entry(Entry::new(Block::Store, 1));
+        stem.push_child(ChildSpec::part(Dir::Ahead, 2, 200, 4));
+        stem.push_child(ChildSpec::part(Dir::Left, 3, 180, 1));
+        stem.push_child(ChildSpec::part(Dir::Right, 3, 180, 1));
+        stem.divide_when.energy_frac = 180;
+        let mut leaf = Mode::blank();
+        leaf.push_entry(Entry::new(Block::Photo, 4));
+        leaf.push_entry(Entry::with_params(Block::Wall, 1, 120, 0));
+        if let Some(seed) = g.modes.get_mut(0) {
+            seed.push_transition(Transition {
+                gate: Gate::above(Scalar::Depth, 0),
+                mode: 2,
+            });
+            seed.push_child(ChildSpec::part(Dir::Ahead, 2, 200, 1));
+        }
+        g.modes.push(stem);
+        g.modes.push(leaf);
+        g
+    }
+
+    /// Phase 4 colour-crown plant: plant + pigment tip at depth ≥ 3.
+    pub fn crown() -> Self {
+        use crate::bio::program::{Dir, Gate, Scalar, Transition};
+        let mut g = Self::plant();
+        let mut crown = Mode::blank();
+        crown.push_entry(Entry::with_params(Block::Pigment, 5, 40, 0));
+        crown.push_entry(Entry::new(Block::Photo, 1));
+        crown.push_child(ChildSpec::part(Dir::Left, 4, 150, 1));
+        crown.push_child(ChildSpec::part(Dir::Right, 4, 150, 1));
+        if let Some(stem) = g.modes.get_mut(2) {
+            stem.push_transition(Transition {
+                gate: Gate::above(Scalar::Depth, 2),
+                mode: 4,
+            });
+        }
+        g.modes.push(crown);
+        g
+    }
+
     /// d.4 — saprotroph: PHOTO 1, ENZYME 4 (key 30, width 24, litter
     /// band, contact only), UPTAKE(glucose) 2, the spare unit as STORE;
     /// divides at energy ≥ 0.6. Sinks onto the litter (`buoy` −5).

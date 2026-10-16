@@ -388,3 +388,61 @@ impl Tank {
         }
     }
 }
+
+/// Built-in archive seeds for Phase 4 (moss / plant / crown / …).
+pub fn starter_genome(kind: u8) -> Option<Genome> {
+    match kind {
+        0 => Some(Genome::moss()),
+        1 => Some(Genome::plant()),
+        2 => Some(Genome::crown()),
+        3 => Some(Genome::rooting()),
+        4 => Some(Genome::heater()),
+        _ => None,
+    }
+}
+
+pub fn starter_name(kind: u8) -> &'static str {
+    match kind {
+        0 => "Moss",
+        1 => "Plant",
+        2 => "Crown",
+        3 => "Rooting",
+        4 => "Heater",
+        _ => "Starter",
+    }
+}
+
+impl Specimen {
+    /// A starter specimen; `kind` selects moss / plant / crown / …
+    pub fn starter(kind: u8) -> Option<Self> {
+        let genome = starter_genome(kind)?;
+        let name = starter_name(kind).to_string();
+        let colour = genome_colour(&genome);
+        let (portrait_w, portrait_h, portrait) = portrait(&genome);
+        let id_bytes = postcard::to_allocvec(&genome).unwrap_or_default();
+        Some(Self {
+            version: SPECIMEN_VERSION,
+            id: hash_bytes(&id_bytes),
+            genome,
+            species_name: name.clone(),
+            display_name: name,
+            lineage: Vec::new(),
+            species_depth: 0,
+            tank_seed: 0,
+            tick: 0,
+            generation: 0,
+            mutations_since_seed: 0,
+            stats: SpecimenStats {
+                cells: 1,
+                slots: 1,
+                ..SpecimenStats::default()
+            },
+            colour,
+            notes: String::new(),
+            portrait_w,
+            portrait_h,
+            portrait,
+            archive_parent: None,
+        })
+    }
+}

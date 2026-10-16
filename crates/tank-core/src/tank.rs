@@ -657,8 +657,9 @@ impl Tank {
         self.archive_roots.iter().find(|(g, _)| *g == root).map(|(_, id)| *id)
     }
 
-    /// Fill every cell of an organism to its store cap (portrait sandbox).
-    pub(crate) fn feed_org_full(&mut self, org: u32) {
+    /// Fill every cell of an organism to its store cap (portrait sandbox /
+    /// harness scenarios).
+    pub fn feed_org_full(&mut self, org: u32) {
         let ids: Vec<u32> = match self.cells.org(org) {
             Some(o) => o.slots.iter().map(|s| s.cell).filter(|&c| c != bio::store::NONE).collect(),
             None => return,

@@ -2575,3 +2575,18 @@ fn enclosure_drain_fill_and_delete_walls() {
     });
     assert_eq!(tank.cell_visible(6, 5).sat, 0);
 }
+
+/// 4.8 — starter archive seeds (moss / plant / crown) are valid and seedable.
+#[test]
+fn starter_specimens_seed_into_a_tank() {
+    use crate::archive::Specimen;
+    for kind in 0..=2u8 {
+        let spec = Specimen::starter(kind).expect("starter");
+        assert!(spec.genome.is_valid(), "kind {kind}");
+        assert!(!spec.display_name.is_empty());
+        assert!(spec.portrait_w > 0 && !spec.portrait.is_empty());
+        let mut tank = water_box(16 + kind as u64, 24, 24, 16);
+        let id = tank.seed_specimen(&spec, 36, 30).expect("seed");
+        assert!(tank.cell(id).is_some());
+    }
+}
