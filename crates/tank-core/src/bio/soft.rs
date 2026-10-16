@@ -6,6 +6,7 @@
 //! CILIA thrust (`step::swim_bodies`) still translates free bodies; this
 //! module deforms them.
 
+use crate::bio::bones;
 use crate::bio::genome::GenomeStore;
 use crate::bio::store::{CellStore, NONE};
 use crate::consts::{PX_PER_CELL, SOFT_ITERS, SOFT_STIFF, TICK_HZ};
@@ -262,6 +263,8 @@ fn integrate(
         })
         .collect();
 
+    // M1: bone parts stiffen intra-part springs; joints stay compliant.
+    let bone = bones::activate(cells, genomes, org_id);
     for _ in 0..SOFT_ITERS {
         for s in &body.springs {
             let (ai, bi) = (s.a as usize, s.b as usize);
@@ -270,12 +273,19 @@ fn integrate(
             }
             let act_ab = act[ai].max(act[bi]);
             let rest = s.rest * (1.0 - 0.28 * act_ab);
+            let stiff = SOFT_STIFF
+                * bone
+                    .as_ref()
+                    .map(|g| {
+                        bones::spring_stiff_scale(g, body.nodes[ai].cell, body.nodes[bi].cell)
+                    })
+                    .unwrap_or(1.0);
             let (ax, ay) = (body.nodes[ai].x, body.nodes[ai].y);
             let (bx, by) = (body.nodes[bi].x, body.nodes[bi].y);
             let dx = bx - ax;
             let dy = by - ay;
             let dist = (dx * dx + dy * dy).sqrt().max(1e-3);
-            let diff = (dist - rest) / dist * SOFT_STIFF;
+            let diff = (dist - rest) / dist * stiff;
             let ox = dx * 0.5 * diff;
             let oy = dy * 0.5 * diff;
             body.nodes[ai].x += ox;

@@ -5,6 +5,7 @@
 //! bone / shell secretions, cilia.
 #![allow(clippy::too_many_arguments)]
 
+pub mod bones;
 pub mod chem;
 pub mod fields;
 pub mod genome;

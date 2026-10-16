@@ -172,6 +172,35 @@ impl Genome {
         g
     }
 
+    /// Phase 5 M1 — hard–soft–hard hinge: hard bone ends with a muscle
+    /// joint in the middle (studio hinge-chain shape, tank blocks).
+    pub fn hinge() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        let mut g = Self::base();
+        g.buoy = 0;
+        // Mode 0: hard bone seed.
+        let mut bone = Mode::blank();
+        bone.push_entry(Entry::new(Block::Photo, 1));
+        bone.push_entry(Entry::new(Block::Store, 1));
+        bone.push_entry(Entry::with_params(Block::Wall, 4, 200, 0));
+        bone.push_child(ChildSpec::part(Dir::Ahead, 1, 220, 1));
+        // Mode 1: muscle joint.
+        let mut joint = Mode::blank();
+        joint.push_entry(Entry::new(Block::Photo, 1));
+        joint.push_entry(Entry::new(Block::Store, 1));
+        joint.push_entry(Entry::new(Block::Muscle, 5));
+        joint.push_link(Link::level(Scalar::EnergyFrac, 24, 100));
+        joint.push_child(ChildSpec::part(Dir::Ahead, 2, 220, 1));
+        // Mode 2: hard tip.
+        let mut tip = Mode::blank();
+        tip.push_entry(Entry::new(Block::Photo, 1));
+        tip.push_entry(Entry::with_params(Block::Wall, 4, 200, 0));
+        g.modes.push(bone);
+        g.modes.push(joint);
+        g.modes.push(tip);
+        g
+    }
+
     /// 4×4 giant algae (K3#2 "big single cell").
     pub fn giant(shape: u8) -> Self {
         let mut g = Self::algae();

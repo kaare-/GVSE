@@ -2641,3 +2641,42 @@ fn muscle_body_twitches_on_its_soft_springs() {
     }
     assert!(moved, "soft-body muscle should displace at least one cell");
 }
+
+/// 5.1 M1 — hard–soft–hard hinge: bone ends stay as separate rigid parts
+/// with a muscle joint between them.
+#[test]
+fn hinge_body_has_two_bone_parts_and_a_muscle_joint() {
+    use crate::bio::{bones, Genome};
+    let mut tank = water_box(7, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::hinge())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    for _ in 0..800 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 3, "hinge should grow bone–muscle–bone (alive={alive})");
+    let g = bones::activate(tank.cells(), tank.genomes(), org).expect("bone graph");
+    let bone_parts = g.parts.iter().filter(|p| p.kind == bones::PartKind::Bone).count();
+    assert!(
+        bone_parts >= 2,
+        "expected ≥2 bone parts, got {bone_parts} (parts={})",
+        g.parts.len()
+    );
+    assert!(
+        g.joints.iter().any(|j| j.muscle),
+        "expected a muscle joint between bone parts"
+    );
+}
