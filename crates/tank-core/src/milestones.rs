@@ -129,11 +129,27 @@ impl Milestones {
                 ev::PREDATION => self.fire_once(ev::MS_PREDATION, e.arg0, out),
                 ev::POISON => self.fire_once(ev::MS_POISON, e.arg0, out),
                 ev::SIGNALLING => self.fire_once(ev::MS_SIGNALLING, e.arg0, out),
-                ev::MOVED => self.fire_once(ev::MS_MOVED, e.arg0, out),
+                ev::MOVED => {
+                    self.fire_once(ev::MS_MOVED, e.arg0, out);
+                    // Muscle-driven swim is locomotion (Phase 5).
+                    if !self.has_fired(ev::MS_LOCOMOTION) {
+                        if let Some(c) = cells.get(e.arg0) {
+                            if org_has_muscle(cells, genomes, c.org) {
+                                out.push_back(SimEvent {
+                                    kind: ev::LOCOMOTION,
+                                    arg0: c.org,
+                                });
+                                self.fire_once(ev::MS_LOCOMOTION, c.org, out);
+                            }
+                        }
+                    }
+                }
                 ev::WARM_BLOODED => self.fire_once(ev::MS_WARM_BLOODED, e.arg0, out),
                 ev::LIFE_ON_LAND => self.fire_once(ev::MS_LIFE_ON_LAND, e.arg0, out),
                 ev::CUTTING_TOOK_ROOT => self.fire_once(ev::MS_CUTTING_TOOK_ROOT, e.arg0, out),
                 ev::COLOUR_CROWN => self.fire_once(ev::MS_COLOUR_CROWN, e.arg0, out),
+                ev::EYE => self.fire_once(ev::MS_EYE, e.arg0, out),
+                ev::LOCOMOTION => self.fire_once(ev::MS_LOCOMOTION, e.arg0, out),
                 ev::HETEROTROPH => {
                     // A lineage living on glucose this many generations deep.
                     let deep = cells
@@ -179,6 +195,15 @@ impl Milestones {
                         arg0: org,
                     });
                     self.fire_once(ev::MS_COLOUR_CROWN, org, out);
+                }
+            }
+            if !self.has_fired(ev::MS_EYE) {
+                if let Some(org) = geometric_eye(cells, genomes) {
+                    out.push_back(SimEvent {
+                        kind: ev::EYE,
+                        arg0: org,
+                    });
+                    self.fire_once(ev::MS_EYE, org, out);
                 }
             }
         }
@@ -318,4 +343,70 @@ fn colour_crown(cells: &CellStore, genomes: &GenomeStore) -> Option<u32> {
         }
     }
     None
+}
+
+fn org_has_muscle(cells: &CellStore, genomes: &GenomeStore, org_id: u32) -> bool {
+    let Some(o) = cells.org(org_id) else {
+        return false;
+    };
+    o.slots.iter().any(|s| {
+        s.cell != crate::bio::store::NONE
+            && cells
+                .get(s.cell)
+                .map(|c| genomes.coeffs(c.genotype, c.mode).muscle > 0)
+                .unwrap_or(false)
+    })
+}
+
+/// Geometric eye (§d.6 / Phase 5 M3): a TRANSPARENT window with ≥2
+/// adjacent light-SENSOR cells on a body that also has NERVE and a motor.
+fn geometric_eye(cells: &CellStore, genomes: &GenomeStore) -> Option<u32> {
+    use crate::bio::profile::SENSOR_LIGHT;
+    for (org_id, o) in cells.iter_orgs() {
+        if o.n_alive < 3 {
+            continue;
+        }
+        let mut has_nerve = false;
+        let mut has_motor = false;
+        let mut windows: Vec<(u16, u16, u8, u8)> = Vec::new();
+        let mut sensors: Vec<(u16, u16, u8, u8)> = Vec::new();
+        for s in o.slots.iter().filter(|s| s.cell != crate::bio::store::NONE) {
+            let Some(c) = cells.get(s.cell) else {
+                continue;
+            };
+            let mc = genomes.coeffs(c.genotype, c.mode);
+            if mc.nerve > 0 {
+                has_nerve = true;
+            }
+            if mc.muscle > 0 || mc.cilia > 0 {
+                has_motor = true;
+            }
+            if mc.transparent > 0 {
+                windows.push((c.px, c.py, c.w, c.h));
+            }
+            if mc.sensor > 0 && mc.sensor_kind == SENSOR_LIGHT {
+                sensors.push((c.px, c.py, c.w, c.h));
+            }
+        }
+        if !has_nerve || !has_motor || windows.is_empty() || sensors.len() < 2 {
+            continue;
+        }
+        for &a in &windows {
+            let n = sensors.iter().filter(|&&b| footprints_touch(a, b)).count();
+            if n >= 2 {
+                return Some(org_id);
+            }
+        }
+    }
+    None
+}
+
+fn footprints_touch(a: (u16, u16, u8, u8), b: (u16, u16, u8, u8)) -> bool {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    let a1x = ax as i32 + aw as i32;
+    let a1y = ay as i32 + ah as i32;
+    let b1x = bx as i32 + bw as i32;
+    let b1y = by as i32 + bh as i32;
+    ax as i32 <= b1x && bx as i32 <= a1x && ay as i32 <= b1y && by as i32 <= a1y
 }

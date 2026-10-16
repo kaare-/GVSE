@@ -31,7 +31,7 @@ fn main() -> ExitCode {
         Some("scenario") => cmd_scenario(args),
         _ => {
             eprintln!(
-                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path] [--log N]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer|saprotroph|predator|stinger|signaller|spiny|egg|chemo|heater|moss|plant|crown|rooting|twitcher|hinge|nerved] [--cycle] [--dark] [--verbose] [--litter N] [--lambda-q8 N] [--minerals N]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]\n  tank-sim gates --seeds N --ticks N [--threads N] [--csv path]\n  tank-sim soak --ticks N [--seed N]\n  tank-sim scenario terrarium|cold-night|bloom-crash [--seed N] [--ticks N]"
+                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path] [--log N]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer|saprotroph|predator|stinger|signaller|spiny|egg|chemo|heater|moss|plant|crown|rooting|twitcher|hinge|nerved|eyed] [--cycle] [--dark] [--verbose] [--litter N] [--lambda-q8 N] [--minerals N]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]\n  tank-sim gates --seeds N --ticks N [--threads N] [--csv path]\n  tank-sim soak --ticks N [--seed N]\n  tank-sim scenario terrarium|cold-night|bloom-crash [--seed N] [--ticks N]"
             );
             ExitCode::from(2)
         }
@@ -76,6 +76,7 @@ fn genome_by_name(name: &str) -> Genome {
         "twitcher" => Genome::twitcher(),
         "hinge" => Genome::hinge(),
         "nerved" => Genome::nerved(),
+        "eyed" => Genome::eyed(),
         _ => Genome::algae(),
     }
 }
@@ -759,6 +760,8 @@ fn milestone_name(kind: u32) -> Option<&'static str> {
         ev::MS_LIFE_ON_LAND => "life_on_land",
         ev::MS_CUTTING_TOOK_ROOT => "cutting_took_root",
         ev::MS_COLOUR_CROWN => "colour_crown",
+        ev::MS_EYE => "eye",
+        ev::MS_LOCOMOTION => "locomotion",
         _ => return None,
     })
 }

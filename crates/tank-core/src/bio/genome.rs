@@ -172,6 +172,33 @@ impl Genome {
         g
     }
 
+    /// Phase 5 M3 — geometric eye: TRANSPARENT window with left/right
+    /// light SENSOR children, NERVE + MUSCLE on the seed (§d.6).
+    pub fn eyed() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_LIGHT;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut seed = Mode::blank();
+        seed.shape_w = 2;
+        seed.shape_h = 2;
+        seed.push_entry(Entry::new(Block::Photo, 1));
+        seed.push_entry(Entry::new(Block::Store, 1));
+        seed.push_entry(Entry::new(Block::Nerve, 2));
+        seed.push_entry(Entry::new(Block::Muscle, 2));
+        seed.push_entry(Entry::new(Block::Transparent, 2));
+        seed.push_link(Link::level(Scalar::Sense, 128, 80));
+        seed.push_child(ChildSpec::part(Dir::Left, 1, 200, 1));
+        seed.push_child(ChildSpec::part(Dir::Right, 1, 200, 1));
+        let mut eye = Mode::blank();
+        eye.push_entry(Entry::new(Block::Photo, 1));
+        eye.push_entry(Entry::with_params(Block::Sensor, 3, SENSOR_LIGHT, 0));
+        eye.push_entry(Entry::new(Block::Nerve, 1));
+        g.modes.push(seed);
+        g.modes.push(eye);
+        g
+    }
+
     /// Phase 5 M2 — nerved light-seeker: SENSOR(light) + NERVE + MUSCLE
     /// on a bonded pair; the StudioNet only exists because of NERVE.
     pub fn nerved() -> Self {

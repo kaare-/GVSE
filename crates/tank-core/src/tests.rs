@@ -2713,3 +2713,41 @@ fn nerved_body_builds_a_studio_net_and_drives() {
     assert!(saw_running, "nerved muscle should be driven by the net or links");
     assert!(Genome::nerved().is_valid());
 }
+
+/// 5.3 M3 — an eyed body fires the geometric eye milestone.
+#[test]
+fn eyed_body_fires_the_eye_milestone() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(13, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    assert!(Genome::eyed().is_valid());
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::eyed())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut eye = false;
+    for _ in 0..2_000 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::EYE || e.kind == ev::MS_EYE {
+                eye = true;
+            }
+        }
+        if eye {
+            break;
+        }
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 3, "eyed body should grow window + two sensors (alive={alive})");
+    assert!(eye, "geometric eye milestone should fire");
+}

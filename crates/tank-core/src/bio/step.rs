@@ -126,6 +126,15 @@ pub mod ev {
     pub const COLOUR_CROWN: u32 = 27;
     /// Milestone: first colour crown.
     pub const MS_COLOUR_CROWN: u32 = 48;
+    /// Raw (Phase 5): a geometric eye — ≥2 light SENSOR cells around a
+    /// TRANSPARENT window with NERVE and a motor (arg0 = organism).
+    pub const EYE: u32 = 28;
+    /// Milestone: first eye.
+    pub const MS_EYE: u32 = 49;
+    /// Raw (Phase 5): a muscle-driven body swam ≥ 3 px (arg0 = organism).
+    pub const LOCOMOTION: u32 = 29;
+    /// Milestone: first locomotion.
+    pub const MS_LOCOMOTION: u32 = 50;
 }
 
 /// "Something moved" (§a.6): net cilia displacement over this window.
