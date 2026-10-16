@@ -1059,15 +1059,22 @@ fn metabolise(
             arg0: id,
         });
     }
-    if mc.cilia > 0 {
+    // Motor drive is shared by CILIA (thrust) and MUSCLE (spring rest).
+    if mc.cilia > 0 || mc.muscle > 0 {
         let mut avg = cell.link_avg;
         let drive = motor_drive(&mc, &scalars, &mut avg) > 0;
         if drive {
-            energy -= FP / 50 / TICK_HZ as i32 * mc.cilia as i32;
+            if mc.cilia > 0 {
+                energy -= FP / 50 / TICK_HZ as i32 * mc.cilia as i32;
+            }
+            if mc.muscle > 0 {
+                // Pay-per-use: ~0.05 g per full contraction / s → per tick.
+                energy -= FP / 20 / TICK_HZ as i32 * mc.muscle as i32;
+            }
         }
         if let Some(c) = cells.get_mut(id) {
             c.link_avg = avg;
-            if !drive {
+            if mc.cilia > 0 && !drive {
                 // Tumble: rotate 90° to a hash-chosen side, and keep
                 // turning each tick until some heading gives a drive.
                 let side = if hash_u64(world_seed, tick, id as u64, 0xB3_01) % 2 == 0 { 2 } else { 6 };

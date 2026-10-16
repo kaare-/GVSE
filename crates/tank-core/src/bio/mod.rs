@@ -12,6 +12,7 @@ pub mod hydrate;
 pub mod minerals;
 pub mod profile;
 pub mod program;
+pub mod soft;
 pub mod species;
 pub mod step;
 pub mod store;

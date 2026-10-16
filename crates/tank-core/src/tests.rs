@@ -2590,3 +2590,54 @@ fn starter_specimens_seed_into_a_tank() {
         assert!(tank.cell(id).is_some());
     }
 }
+
+/// 5.0 M0 — a fed muscle body contracts its soft-body spring and the
+/// raster moves at least one cell over a few hundred ticks.
+#[test]
+fn muscle_body_twitches_on_its_soft_springs() {
+    use crate::bio::Genome;
+    let mut tank = water_box(5, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::twitcher())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    // Grow the bonded pair.
+    for _ in 0..400 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 2, "twitcher should grow a bonded pair (alive={alive})");
+    let before: Vec<(u16, u16)> = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .map(|(_, c)| (c.px, c.py))
+        .collect();
+    let mut moved = false;
+    for _ in 0..600 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        let now: Vec<(u16, u16)> = tank
+            .cells()
+            .iter_alive()
+            .filter(|(_, c)| c.org == org)
+            .map(|(_, c)| (c.px, c.py))
+            .collect();
+        if now != before {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "soft-body muscle should displace at least one cell");
+}

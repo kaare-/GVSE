@@ -225,6 +225,8 @@ pub struct Tank {
     evaporated_sat: u64,
     /// Scoop bucket filled by enclosure "release" (kind 16 / op 3).
     pending_enclosure_bucket: Option<Carried>,
+    /// Phase 5 M0 soft-body state (ephemeral; rebuilt on topology change).
+    soft: bio::soft::SoftStore,
 }
 
 impl Tank {
@@ -275,6 +277,7 @@ impl Tank {
             humidity_primed: false,
             evaporated_sat: 0,
             pending_enclosure_bucket: None,
+            soft: bio::soft::SoftStore::default(),
         };
         tank.rebuild_light();
         Ok(tank)
@@ -1458,6 +1461,13 @@ impl Tank {
             self.tick_count,
             t_tank,
             self.lambda_scale_q8 as u32,
+        );
+        let _soft_moved = bio::soft::step(
+            &mut self.soft,
+            &mut self.cells,
+            &self.genomes,
+            &self.grid,
+            &mut self.pixels,
         );
         for ev in &bio.events {
             self.events.push_back(*ev);

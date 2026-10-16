@@ -46,6 +46,13 @@ pub const MIN_VISIBLE: u32 = 4;
 
 pub const SAVE_VERSION: u32 = 9;
 
+// ---- Phase 5 M0: soft bodies (verlet springs) ----
+
+/// Constraint iterations per soft-body step.
+pub const SOFT_ITERS: u32 = 3;
+/// Spring stiffness (fraction of length error corrected per iteration).
+pub const SOFT_STIFF: f32 = 0.45;
+
 // ---- biology (cell-language §a, §b, §c) ----
 
 /// Protein units per biology pixel (handoff §5).

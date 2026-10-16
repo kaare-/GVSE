@@ -156,6 +156,22 @@ impl Genome {
         g
     }
 
+    /// Phase 5 M0 — two-cell muscle twitcher: PHOTO + STORE + MUSCLE on a
+    /// bonded pair; drive from energy so a fed body contracts its spring.
+    pub fn twitcher() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 2));
+        m.push_entry(Entry::new(Block::Store, 2));
+        m.push_entry(Entry::new(Block::Muscle, 4));
+        m.push_link(Link::level(Scalar::EnergyFrac, 32, 96));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
+        g
+    }
+
     /// 4×4 giant algae (K3#2 "big single cell").
     pub fn giant(shape: u8) -> Self {
         let mut g = Self::algae();
