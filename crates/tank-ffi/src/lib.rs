@@ -729,11 +729,71 @@ pub extern "C" fn tank_t_base(handle: *const TankHandle) -> f32 {
         .unwrap_or(0.0)
 }
 
+/// Whole-tank temperature °C (`T_tank = T_base + 0.4·T_direct + 0.6·S`).
+#[no_mangle]
+pub extern "C" fn tank_temperature(handle: *const TankHandle) -> f32 {
+    unsafe { handle.as_ref() }
+        .map(|h| h.tank.t_tank())
+        .unwrap_or(0.0)
+}
+
+/// Air-side humidity 0..=255 at a visible physics cell (water reads 255).
+#[no_mangle]
+pub extern "C" fn tank_humidity_at(handle: *const TankHandle, vx: i32, vy: i32) -> u8 {
+    unsafe { handle.as_ref() }
+        .map(|h| h.tank.humidity_at(vx, vy))
+        .unwrap_or(0)
+}
+
+/// Local THERMO excess °C at a visible physics cell.
+#[no_mangle]
+pub extern "C" fn tank_t_local_at(handle: *const TankHandle, vx: i32, vy: i32) -> f32 {
+    unsafe { handle.as_ref() }
+        .map(|h| h.tank.t_local_at(vx, vy))
+        .unwrap_or(0.0)
+}
+
+/// Mean cloud factor 0..=1 (`1` = clear).
+#[no_mangle]
+pub extern "C" fn tank_cloud_mean(handle: *const TankHandle) -> f32 {
+    unsafe { handle.as_ref() }
+        .map(|h| h.tank.cloud_mean())
+        .unwrap_or(1.0)
+}
+
 #[no_mangle]
 pub extern "C" fn tank_light_slider(handle: *const TankHandle) -> f32 {
     unsafe { handle.as_ref() }
         .map(|h| h.tank.light_slider())
         .unwrap_or(0.0)
+}
+
+/// Built-in Phase 4 starter specimen (`kind`: 0 moss, 1 plant, 2 crown,
+/// 3 rooting, 4 heater). Two-call sizing like `tank_specimen`.
+#[no_mangle]
+pub extern "C" fn tank_starter_specimen(kind: u8, buf: *mut u8, cap: usize) -> usize {
+    let Some(sp) = Specimen::starter(kind) else {
+        return 0;
+    };
+    let bytes = sp.to_bytes();
+    if buf.is_null() || cap < bytes.len() {
+        return bytes.len();
+    }
+    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len()) };
+    bytes.len()
+}
+
+/// Take the scoop bucket filled by enclosure release (tool 16 / op 3).
+/// Null when nothing is pending.
+#[no_mangle]
+pub extern "C" fn tank_take_enclosure_bucket(handle: *mut TankHandle) -> *mut Carried {
+    let Some(handle) = (unsafe { handle.as_mut() }) else {
+        return ptr::null_mut();
+    };
+    match handle.tank.take_enclosure_bucket() {
+        Some(inner) => Box::into_raw(Box::new(Carried { inner })),
+        None => ptr::null_mut(),
+    }
 }
 
 #[no_mangle]
@@ -1207,9 +1267,35 @@ mod tests {
             "tank_mark_species_archived",
             "tank_org_bbox",
             "tank_carried_cells",
+            "tank_temperature",
+            "tank_humidity_at",
+            "tank_t_local_at",
+            "tank_cloud_mean",
+            "tank_starter_specimen",
+            "tank_take_enclosure_bucket",
         ] {
             assert!(header.contains(name), "{name} missing from tank.h");
         }
+    }
+
+    #[test]
+    fn phase4_abi_exposes_climate_and_starters() {
+        let handle = tank_preset(2);
+        assert!(!handle.is_null());
+        let t = tank_temperature(handle);
+        assert!(t > 0.0 && t < 40.0, "t={t}");
+        let _ = tank_humidity_at(handle, 10, 10);
+        let _ = tank_t_local_at(handle, 10, 10);
+        assert!(tank_cloud_mean(handle) > 0.5);
+        let need = tank_starter_specimen(0, ptr::null_mut(), 0);
+        assert!(need > 0);
+        let mut buf = vec![0u8; need];
+        assert_eq!(tank_starter_specimen(0, buf.as_mut_ptr(), need), need);
+        let info = tank_specimen_info(buf.as_ptr(), need);
+        assert!(info.cells >= 1 && info.portrait_w >= 1);
+        assert_eq!(tank_starter_specimen(99, ptr::null_mut(), 0), 0);
+        assert!(tank_take_enclosure_bucket(handle).is_null());
+        tank_free(handle);
     }
 
     #[test]

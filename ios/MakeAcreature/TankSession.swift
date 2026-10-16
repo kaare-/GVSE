@@ -47,6 +47,7 @@ struct SpeciesNode: Identifiable {
 final class TankSession: ObservableObject {
     @Published private(set) var isDay = true
     @Published private(set) var consent = false
+    @Published private(set) var temperatureC: Float = 15
     @Published var tool: BuildTool = .sand {
         didSet { if tool != .look && tool != oldValue { inspected = nil } }
     }
@@ -55,6 +56,14 @@ final class TankSession: ObservableObject {
     @Published var fillLevel = 0.55
     @Published var slot = 0
     @Published var swirl = false
+    /// Freeze the tank clock at midday (Phase 4 setting).
+    @Published var alwaysDay = false
+    /// Base temperature °C (default 15).
+    @Published var tBase: Double = 15
+    /// Global light multiplier 0.25…1.5 (also warms via T_direct).
+    @Published var lightSlider: Double = 1
+    /// Enclosure op when BOX is selected: 0 walls · 1 drain · 2 fill · 3 release.
+    @Published var encloseOp = 0
     @Published var magnifierPinned = false
     @Published var magnifierPoint: CGPoint?
     @Published var cameraTiltDegrees: Double = 0
@@ -94,6 +103,11 @@ final class TankSession: ObservableObject {
         TelemetryClient.installCrashHook()
         slot = UserDefaults.standard.integer(forKey: "activeSlot")
         swirl = UserDefaults.standard.bool(forKey: "swirlEnabled")
+        alwaysDay = UserDefaults.standard.bool(forKey: "alwaysDay")
+        let savedBase = UserDefaults.standard.double(forKey: "tBase")
+        tBase = savedBase == 0 ? 15 : savedBase
+        let savedLight = UserDefaults.standard.double(forKey: "lightSlider")
+        lightSlider = savedLight == 0 ? 1 : min(1.5, max(0.25, savedLight))
         loadSlot(slot)
         consent = UserDefaults.standard.bool(forKey: "telemetryConsent")
         if let handle {
@@ -209,8 +223,8 @@ final class TankSession: ObservableObject {
         var fill = ToolEvent(kind: 5, material: 0, x: 0, y: UInt16(Double(cells) * fillLevel), r: 1, variant: 0, _pad: 0)
         withUnsafePointer(to: &fill) { ptr in
             var input = TankInput(
-                grav_x: 0, grav_y: -1, paused: 0, always_day: 0, swirl: 0, _pad1: 0,
-                light_slider: 1, t_base: 15, flash_x: 0, flash_y: 0, flash_r: 0,
+                grav_x: 0, grav_y: -1, paused: 0, always_day: alwaysDay ? 1 : 0, swirl: 0, _pad1: 0,
+                light_slider: Float(lightSlider), t_base: Float(tBase), flash_x: 0, flash_y: 0, flash_r: 0,
                 tools: ptr, tool_count: 1
             )
             tank_tick(fresh, &input)
@@ -238,6 +252,39 @@ final class TankSession: ObservableObject {
         let cells = max(Int(h) / 3, 1)
         let level = UInt16(Double(cells) * fillLevel)
         pendingTools.append(ToolEvent(kind: 5, material: 0, x: 0, y: level, r: 1, variant: 0, _pad: 0))
+    }
+
+    /// Pour pure water onto every free surface (tool 14).
+    func topUp() {
+        pendingTools.append(ToolEvent(kind: 14, material: 0, x: 0, y: 0, r: 1, variant: 0, _pad: 0))
+        showHint("TOPPED UP")
+    }
+
+    func toggleAlwaysDay() {
+        alwaysDay.toggle()
+        UserDefaults.standard.set(alwaysDay, forKey: "alwaysDay")
+    }
+
+    func nudgeBaseTemp(_ delta: Double) {
+        tBase = min(35, max(5, tBase + delta))
+        UserDefaults.standard.set(tBase, forKey: "tBase")
+    }
+
+    func nudgeLight(_ delta: Double) {
+        lightSlider = min(1.5, max(0.25, lightSlider + delta))
+        UserDefaults.standard.set(lightSlider, forKey: "lightSlider")
+    }
+
+    /// Seed a built-in Phase 4 starter into the archive book.
+    @discardableResult
+    func addStarter(kind: UInt8) -> Bool {
+        let need = tank_starter_specimen(kind, nil, 0)
+        guard need > 0 else { return false }
+        var buf = [UInt8](repeating: 0, count: need)
+        let wrote = tank_starter_specimen(kind, &buf, need)
+        guard wrote == need, let specimen = archive.add(bytes: Data(buf)) else { return false }
+        showHint("GOT \(specimen.displayName.uppercased())")
+        return true
     }
 
     // MARK: inspect / archive
@@ -504,10 +551,11 @@ final class TankSession: ObservableObject {
 
     private func queueStroke(at point: CGPoint) {
         guard let cell = physicsCell(at: point) else { return }
+        let material: UInt8 = tool == .enclose ? UInt8(encloseOp) : tool.material
         pendingTools.append(
             ToolEvent(
                 kind: tool.kind,
-                material: tool.material,
+                material: material,
                 x: cell.0,
                 y: cell.1,
                 r: UInt16(brush),
@@ -606,11 +654,11 @@ final class TankSession: ObservableObject {
                     grav_x: lastGravX,
                     grav_y: lastGravY,
                     paused: 0,
-                    always_day: 0,
+                    always_day: alwaysDay ? 1 : 0,
                     swirl: swirl ? 1 : 0,
                     _pad1: 0,
-                    light_slider: 1,
-                    t_base: 15,
+                    light_slider: Float(lightSlider),
+                    t_base: Float(tBase),
                     flash_x: flash.0,
                     flash_y: flash.1,
                     flash_r: flash.2,
@@ -625,6 +673,12 @@ final class TankSession: ObservableObject {
         if steps == 4 {
             accumulator = 0
         }
+        // Enclosure release fills a pending scoop bucket.
+        if carried == nil, let bucket = tank_take_enclosure_bucket(handle) {
+            carried = bucket
+            carriedCells = Int(tank_carried_cells(bucket))
+            showHint("BOX FREED")
+        }
         frame &+= 1
         var w: UInt32 = 0
         var h: UInt32 = 0
@@ -636,6 +690,7 @@ final class TankSession: ObservableObject {
             if frame % 30 == 0 {
                 liveCells = tank_live_cells(handle)
             }
+            temperatureC = tank_temperature(handle)
         }
         let day = tank_is_day(handle) != 0
         if day != isDay {

@@ -19,14 +19,19 @@ pub mod consts;
 pub mod font;
 pub mod grid;
 pub mod hash;
+pub mod enclosure;
+pub mod humidity;
 pub mod milestones;
 pub mod pixels;
 pub mod rules;
 pub mod tank;
 pub mod telemetry;
+pub mod thermal;
 pub mod tools;
 
-pub use archive::{portrait, SpeciesNode, Specimen, SpecimenStats};
+pub use archive::{
+    portrait, starter_genome, starter_name, SpeciesNode, Specimen, SpecimenStats,
+};
 pub use cell::Cell;
 pub use clock::{day_factor, is_day, phase, phase_name};
 pub use font::{glyph_bits, glyph_rows};

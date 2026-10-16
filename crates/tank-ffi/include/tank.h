@@ -15,8 +15,12 @@ typedef struct TankHandle TankHandle;
 typedef struct Carried Carried;
 
 typedef struct ToolEvent {
-  uint8_t kind;      /* 1 paint 2 erase 3 pour 4 drain 5 fill 6 undo 7 swipe 8 seed 9 remove anything 10 glucose 11 calcium 12 detritus 13 clean */
-  uint8_t material;  /* wk_material id; TANK_GLASS (18) paints a glass wall */
+  uint8_t kind;      /* 1 paint 2 erase 3 pour 4 drain 5 fill 6 undo 7 swipe 8 seed
+                      * 9 remove anything 10 glucose 11 calcium 12 detritus 13 clean
+                      * 14 top-up 15 cut/root-trim 16 enclosure (material: 0 delete
+                      * walls, 1 drain, 2 fill, 3 release → tank_take_enclosure_bucket) */
+  uint8_t material;  /* wk_material id; TANK_GLASS (18) paints a glass wall;
+                        for kind 16: enclosure op 0..3 */
   uint16_t x;
   uint16_t y;
   uint16_t r;
@@ -57,10 +61,12 @@ typedef struct InspectRec {
 /* kind: raw stream 1 seed 2 division 3 death 4 mutant 5 two-cell body
  * 10 lifeless 11 glass needs cleaning 12 brood released 13 shed 14 fragment
  * 15 regrown 16 predation 17 poison 18 signalling 19 heterotroph 20 fungus
- * 21 something moved; milestones (once per tank) 32 first life 33 first
- * division 34 first death 35 new colour (per lineage) 36 multicellular
- * 37 giant cell 38 fungus 39 heterotroph 40 predation 41 poison
- * 42 signalling 43 something moved 44 new species (arg0 = species id).
+ * 21 something moved 22 new species 23 warm-blooded 24 cloudy 25 life on land
+ * 26 cutting took root 27 colour crown; milestones (once per tank) 32 first
+ * life 33 first division 34 first death 35 new colour (per lineage)
+ * 36 multicellular 37 giant cell 38 fungus 39 heterotroph 40 predation
+ * 41 poison 42 signalling 43 something moved 44 new species
+ * 45 warm-blooded 46 life on land 47 cutting took root 48 colour crown.
  * kind 0 = none. */
 typedef struct EventRec {
   uint32_t kind;
@@ -208,7 +214,15 @@ float tank_day_factor(const TankHandle *handle);
 uint8_t tank_is_day(const TankHandle *handle);
 uint64_t tank_seed(const TankHandle *handle);
 float tank_t_base(const TankHandle *handle);
+float tank_temperature(const TankHandle *handle);
+uint8_t tank_humidity_at(const TankHandle *handle, int32_t vx, int32_t vy);
+float tank_t_local_at(const TankHandle *handle, int32_t vx, int32_t vy);
+float tank_cloud_mean(const TankHandle *handle);
 float tank_light_slider(const TankHandle *handle);
+/* kind: 0 moss, 1 plant, 2 crown, 3 rooting, 4 heater. Two-call sizing. */
+size_t tank_starter_specimen(uint8_t kind, uint8_t *buf, size_t cap);
+/* After tool 16 / op 3 (release); null when nothing pending. */
+Carried *tank_take_enclosure_bucket(TankHandle *handle);
 void tank_set_consent(TankHandle *handle, uint8_t on);
 void tank_telemetry_kill(TankHandle *handle, uint8_t killed);
 uint8_t tank_telemetry_push(TankHandle *handle, uint32_t kind, uint32_t arg0);

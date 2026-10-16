@@ -239,6 +239,135 @@ impl Genome {
         g
     }
 
+    /// §a.7 — a self-heating cell: PHOTO 1, STORE 1, THERMO 6 gated on
+    /// `temp_dev ≥ 3 °C` (the halo switches on when the tank is cold or
+    /// hot, off near 22 °C). A photosynthesiser can barely fund it — the
+    /// harness "cold night" scenario feeds it glucose.
+    pub fn heater() -> Self {
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 1));
+        m.push_entry(Entry::new(Block::Store, 1));
+        let mut th = Entry::new(Block::Thermo, 6);
+        th.gate = Gate::above(Scalar::TempDev, 24);
+        m.push_entry(th);
+        m.push_child(ChildSpec::propagule(0, 15));
+        m.divide_when.energy_frac = 200;
+        g.modes.push(m);
+        g
+    }
+
+    /// Phase 4 moss: hard-walled, glued, UPTAKE(water) 1 — mats on damp sand.
+    pub fn moss() -> Self {
+        use crate::bio::program::{ChildSpec, Dir};
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 2));
+        m.push_entry(Entry::with_params(
+            Block::Uptake,
+            1,
+            crate::bio::profile::UPTAKE_WATER,
+            0,
+        ));
+        m.push_entry(Entry::with_params(Block::Wall, 2, 140, 0));
+        m.push_entry(Entry::new(Block::Glue, 1));
+        m.push_child(ChildSpec::propagule(0, 1));
+        let mut left = ChildSpec::propagule(0, 1);
+        left.dir = Dir::Left;
+        m.push_child(left);
+        let mut right = ChildSpec::propagule(0, 1);
+        right.dir = Dir::Right;
+        m.push_child(right);
+        g.modes.push(m);
+        g
+    }
+
+    /// Phase 4 rooting plant: seed mode transitions to a UPTAKE(water) 3
+    /// root mode at `depth == 0`, so a cutting co-occupies moist sand.
+    pub fn rooting() -> Self {
+        use crate::bio::program::{Gate, Scalar, Transition};
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 2));
+        m.push_entry(Entry::new(Block::Store, 1));
+        m.push_entry(Entry::with_params(
+            Block::Uptake,
+            2,
+            crate::bio::profile::UPTAKE_WATER,
+            0,
+        ));
+        m.push_entry(Entry::with_params(Block::Wall, 2, 160, 0));
+        m.push_child(ChildSpec::propagule(0, 15));
+        m.push_transition(Transition {
+            gate: Gate::below(Scalar::Depth, 1),
+            mode: 1,
+        });
+        let mut root = Mode::blank();
+        root.push_entry(Entry::with_params(
+            Block::Uptake,
+            3,
+            crate::bio::profile::UPTAKE_WATER,
+            0,
+        ));
+        root.push_entry(Entry::new(Block::Chemo, 1));
+        root.push_entry(Entry::with_params(Block::Wall, 1, 100, 0));
+        // Grow behind (into the sand below).
+        let down = ChildSpec::part(crate::bio::program::Dir::Behind, 1, 200, 2);
+        root.push_child(down);
+        g.modes.push(m);
+        g.modes.push(root);
+        g
+    }
+
+    /// Phase 4 plant: rooting base + hard stem chain + leaf pair.
+    pub fn plant() -> Self {
+        use crate::bio::program::{Dir, Gate, Scalar, Transition};
+        let mut g = Self::rooting();
+        let mut stem = Mode::blank();
+        stem.push_entry(Entry::new(Block::Photo, 3));
+        stem.push_entry(Entry::with_params(Block::Wall, 3, 180, 0));
+        stem.push_entry(Entry::new(Block::Store, 1));
+        stem.push_child(ChildSpec::part(Dir::Ahead, 2, 200, 4));
+        stem.push_child(ChildSpec::part(Dir::Left, 3, 180, 1));
+        stem.push_child(ChildSpec::part(Dir::Right, 3, 180, 1));
+        stem.divide_when.energy_frac = 180;
+        let mut leaf = Mode::blank();
+        leaf.push_entry(Entry::new(Block::Photo, 4));
+        leaf.push_entry(Entry::with_params(Block::Wall, 1, 120, 0));
+        if let Some(seed) = g.modes.get_mut(0) {
+            seed.push_transition(Transition {
+                gate: Gate::above(Scalar::Depth, 0),
+                mode: 2,
+            });
+            seed.push_child(ChildSpec::part(Dir::Ahead, 2, 200, 1));
+        }
+        g.modes.push(stem);
+        g.modes.push(leaf);
+        g
+    }
+
+    /// Phase 4 colour-crown plant: plant + pigment tip at depth ≥ 3.
+    pub fn crown() -> Self {
+        use crate::bio::program::{Dir, Gate, Scalar, Transition};
+        let mut g = Self::plant();
+        let mut crown = Mode::blank();
+        crown.push_entry(Entry::with_params(Block::Pigment, 5, 40, 0));
+        crown.push_entry(Entry::new(Block::Photo, 1));
+        crown.push_child(ChildSpec::part(Dir::Left, 4, 150, 1));
+        crown.push_child(ChildSpec::part(Dir::Right, 4, 150, 1));
+        if let Some(stem) = g.modes.get_mut(2) {
+            stem.push_transition(Transition {
+                gate: Gate::above(Scalar::Depth, 2),
+                mode: 4,
+            });
+        }
+        g.modes.push(crown);
+        g
+    }
+
     /// d.4 — saprotroph: PHOTO 1, ENZYME 4 (key 30, width 24, litter
     /// band, contact only), UPTAKE(glucose) 2, the spare unit as STORE;
     /// divides at energy ≥ 0.6. Sinks onto the litter (`buoy` −5).

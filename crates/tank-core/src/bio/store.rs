@@ -124,6 +124,17 @@ pub struct CellRec {
     pub moved_dx: i8,
     #[serde(default)]
     pub moved_dy: i8,
+    /// Ticks a THERMO cell has held ≥ +3 °C over ambient (Phase 4).
+    #[serde(default)]
+    pub warm: u8,
+    /// The cell's water column (`cell-language.md` §h.1): 255 submerged,
+    /// sourced from moist substrate, conducted along division bonds.
+    #[serde(default = "hydration_default")]
+    pub hydration: u8,
+}
+
+fn hydration_default() -> u8 {
+    255
 }
 
 /// How long a dead cell stays a visible corpse before it crumbles.
@@ -166,6 +177,8 @@ impl CellRec {
             link_avg: [0; crate::consts::MAX_LINKS],
             moved_dx: 0,
             moved_dy: 0,
+            warm: 0,
+            hydration: 255,
         }
     }
 
@@ -212,6 +225,10 @@ pub struct OrgRec {
     /// Daughter organisms released (propagules and broods), for inspect.
     #[serde(default)]
     pub children: u32,
+    /// Set when this organism was born as a cut-off fragment (Phase 4);
+    /// a depth-0 root into moist substrate fires "cutting took root".
+    #[serde(default)]
+    pub cut: bool,
 }
 
 /// One organism lifted out of the tank by the scoop (Phase 3):
@@ -394,6 +411,7 @@ impl CellStore {
             born_tick: tick,
             secretions: Vec::new(),
             children: 0,
+            cut: false,
         };
         if let Some(id) = self.org_free.pop() {
             self.orgs[id as usize] = rec;
@@ -956,6 +974,12 @@ impl CellStore {
             generation
         };
         let new_org = self.alloc_org(root_cell, gen, ox, oy, tick);
+        // A fragment (not a brood/propagule generation bump) is a cutting.
+        if !next_gen {
+            if let Some(o) = self.orgs.get_mut(new_org as usize) {
+                o.cut = true;
+            }
+        }
         // Copy slots into the new organism with remapped parents.
         let mut remap: Vec<(u16, u16)> = Vec::with_capacity(members.len());
         let mut new_slots: Vec<Slot> = Vec::with_capacity(members.len());

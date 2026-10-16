@@ -5,7 +5,10 @@
 //! 2 erase · 3 pour · 4 drain · 5 set fill level · 6 undo ·
 //! 7 swipe film · 8 seed algae · 9 remove anything (organisms whole,
 //! corpses, litter, grit) · 10 glucose drip · 11 calcium feed ·
-//! 12 detritus feed · 13 clean (litter, grit, corpses only).
+//! 12 detritus feed · 13 clean (litter, grit, corpses only) ·
+//! 14 top-up (pure water onto every free surface, `r` rows; Phase 4) ·
+//! 15 cut / root-trim (kill cells under the stroke; roots → soft litter) ·
+//! 16 enclosure op (`material`: 0 delete walls, 1 drain, 2 fill, 3 release).
 //! The scoop is not a tool event: `Tank::scoop_region` / `release`.
 
 use wk_material::MaterialId;
@@ -16,7 +19,8 @@ use crate::grid::PhysicsGrid;
 #[derive(Debug, Clone, Copy)]
 pub struct ToolEvent {
     /// 1 paint, 2 erase, 3 pour, 4 drain, 5 fill level, 6 undo, 7 swipe,
-    /// 8 seed, 9 remove, 10 glucose, 11 calcium, 12 detritus, 13 clean.
+    /// 8 seed, 9 remove, 10 glucose, 11 calcium, 12 detritus, 13 clean,
+    /// 14 top-up, 15 cut / root-trim, 16 enclosure.
     pub kind: u8,
     pub material: u8,
     /// Visible physics cell, origin at the bottom-left of the interior.
@@ -56,6 +60,7 @@ pub fn apply_one(grid: &mut PhysicsGrid, tool: &ToolEvent) -> bool {
         3 => pour(grid, tool),
         4 => drain(grid, tool),
         5 => set_fill_level(grid, tool.y as i32),
+        14 => crate::humidity::top_up(grid, tool.r as i32),
         _ => false,
     }
 }

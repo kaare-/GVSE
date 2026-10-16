@@ -66,8 +66,17 @@ struct MakeAcreatureApp: App {
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top) {
-                    PixelPanel {
-                        PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 3)
+                    VStack(alignment: .leading, spacing: 4) {
+                        PixelPanel {
+                            PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 3)
+                        }
+                        PixelPanel {
+                            PixelLabel(
+                                text: String(format: "%.0f C", session.temperatureC),
+                                scale: 2,
+                                color: Palette.highlight
+                            )
+                        }
                     }
                     Spacer()
                     slotButtons
@@ -79,6 +88,35 @@ struct MakeAcreatureApp: App {
                             PixelLabel(text: "ROOM", scale: 2, color: Palette.highlight)
                         }
                         .buttonStyle(.plain)
+                        Button(action: session.toggleAlwaysDay) {
+                            PixelLabel(
+                                text: session.alwaysDay ? "ALWAYS DAY" : "DAY/NIGHT",
+                                scale: 2
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        HStack(spacing: 4) {
+                            Button { session.nudgeBaseTemp(-1) } label: {
+                                PixelLabel(text: "T-", scale: 2)
+                            }
+                            .buttonStyle(.plain)
+                            PixelLabel(text: String(format: "BASE %.0f", session.tBase), scale: 2)
+                            Button { session.nudgeBaseTemp(1) } label: {
+                                PixelLabel(text: "T+", scale: 2)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        HStack(spacing: 4) {
+                            Button { session.nudgeLight(-0.1) } label: {
+                                PixelLabel(text: "L-", scale: 2)
+                            }
+                            .buttonStyle(.plain)
+                            PixelLabel(text: String(format: "LIGHT %.0f%%", session.lightSlider * 100), scale: 2)
+                            Button { session.nudgeLight(0.1) } label: {
+                                PixelLabel(text: "L+", scale: 2)
+                            }
+                            .buttonStyle(.plain)
+                        }
                         Button(action: session.toggleConsent) {
                             PixelLabel(
                                 text: session.consent ? "STATS ON" : "STATS OFF",
@@ -109,7 +147,9 @@ struct MakeAcreatureApp: App {
                     brush: $session.brush,
                     variant: $session.variant,
                     fillLevel: $session.fillLevel,
-                    onUndo: session.undo
+                    encloseOp: $session.encloseOp,
+                    onUndo: session.undo,
+                    onTopUp: session.topUp
                 )
                 .onChange(of: session.fillLevel) { _ in
                     if session.tool == .fill {

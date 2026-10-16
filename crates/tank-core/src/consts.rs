@@ -44,7 +44,7 @@ pub const MAX_VISIBLE_W: u32 = 256;
 pub const MAX_VISIBLE_H: u32 = 512;
 pub const MIN_VISIBLE: u32 = 4;
 
-pub const SAVE_VERSION: u32 = 8;
+pub const SAVE_VERSION: u32 = 9;
 
 // ---- biology (cell-language §a, §b, §c) ----
 
@@ -68,6 +68,21 @@ pub const GLUCOSE_UNIT_FP: i32 = FP / 64;
 /// water for minutes, not forever (K2#8: matter stays in the tank).
 pub const FINES_SETTLE_EVERY: u64 = 30;
 pub const FINES_SETTLE_DIV: f32 = 60.0;
+/// `cloud[x] = exp(−CLOUD_K · fines[x])` (fines in grams; §4).
+pub const CLOUD_K: f32 = 0.004;
+/// Settled fines pile this many pixels up a column before they wait.
+pub const FINES_PILE_PX: usize = 72;
+/// Share of open-water lysis that drifts off as fines (Q8, 10 %).
+pub const LYSIS_FINES_Q8: u32 = 26;
+/// Neighbouring columns share fines (3-tap blur) this often.
+pub const FINES_BLUR_EVERY: u64 = 16;
+/// "Water is cloudy" when the mean cloud factor falls under this, with a
+/// cooldown before it can fire again.
+pub const CLOUDY_MEAN: f32 = 0.6;
+pub const CLOUDY_COOLDOWN: u64 = 5400;
+/// Swirl resuspension: `fines[x] += SWIRL_RESUSPEND · |tilt| · litter_g`
+/// per second (§4), applied every `FINES_SETTLE_EVERY` ticks.
+pub const SWIRL_RESUSPEND: f32 = 0.02;
 
 /// Ticks between pixel growth steps toward the mode shape.
 pub const T_GROW: u16 = 8;
@@ -132,3 +147,90 @@ pub const TISSUE_DAM_PIXELS: u8 = 5;
 /// Light absorbed per PHOTO pixel row (×0.5) and per other tissue (×0.75), Q8.
 pub const TISSUE_PASS_PHOTO_Q8: u32 = 128;
 pub const TISSUE_PASS_OTHER_Q8: u32 = 192;
+
+// ---- Phase 4: thermal cycle (`evolution-system.md` §4), THERMO (§a.7) ----
+
+/// Solar heating at full light: `T_direct = ΔT_light · L` (≈ 25 °C at
+/// midday on the 15 °C default).
+pub const DT_LIGHT_C: f32 = 10.0;
+/// `T_tank = T_base + 0.4·T_direct + 0.6·S`.
+pub const T_DIRECT_WEIGHT: f32 = 0.4;
+pub const T_STORED_WEIGHT: f32 = 0.6;
+/// Stored-heat time constant per material class, as a fraction of the
+/// full tank day (`τ = CYCLE_TICKS · Σ fraction · weight`): air, water,
+/// sand / soil, rock / glass, biomass.
+pub const TAU_AIR: f32 = 0.02;
+pub const TAU_WATER: f32 = 0.08;
+pub const TAU_SAND: f32 = 0.12;
+pub const TAU_ROCK: f32 = 0.20;
+pub const TAU_BIO: f32 = 0.10;
+/// Material fractions are re-counted this often (ticks).
+pub const THERMAL_MASS_EVERY: u64 = 64;
+/// `T_local` is stored in quarter degrees; THERMO may lift a coarse cell
+/// at most this far over ambient (+12 °C).
+pub const T_LOCAL_CAP_Q2: i8 = 48;
+/// A THERMO unit adds one quarter degree to its coarse cell every this
+/// many ticks (+0.75 °C per unit per second, §a.7).
+pub const THERMO_INJECT_EVERY: u64 = 10;
+/// `T_local` leaks toward ambient: every `T_LOCAL_RELAX_EVERY` ticks a
+/// cell loses `max(1, v / T_LOCAL_RELAX_DIV)` (τ ≈ 4 s), and diffuses to
+/// its four neighbours every `T_LOCAL_DIFFUSE_EVERY` ticks.
+pub const T_LOCAL_RELAX_EVERY: u64 = 4;
+pub const T_LOCAL_RELAX_DIV: i16 = 30;
+pub const T_LOCAL_DIFFUSE_EVERY: u64 = 16;
+/// Running THERMO costs 0.04 g per unit per second (§a.7).
+pub const THERMO_COST_FP_TICK_PER_UNIT: i32 = FP * 4 / 100 / TICK_HZ as i32;
+/// "Warm-blooded": a THERMO cell that has held ≥ +3 °C (12 quarter
+/// degrees) over ambient for this many ticks.
+pub const WARM_BLOODED_Q2: i8 = 12;
+pub const WARM_BLOODED_TICKS: u8 = 60;
+
+// ---- Phase 4: humidity, evaporation, condensation (K2#5, K2#8) ----
+
+/// The air-side humidity field updates this often (ticks).
+pub const HUMIDITY_EVERY: u64 = 8;
+/// Humidity an air cell over free water is driven toward by day at
+/// 15 °C, plus `HUMIDITY_PER_C` per degree (warm water evaporates more).
+pub const HUMIDITY_EVAP_BASE: f32 = 176.0;
+pub const HUMIDITY_PER_C: f32 = 4.0;
+/// A substrate cell counts as moist (habitability, humidity source) from
+/// this `sat` / film (≈ 0.3 of full).
+pub const MOIST_SAT: u8 = 80;
+/// Each update an air cell leaks `h / HUMIDITY_LEAK_DIV` (the lid is not
+/// perfectly tight), so humidity falls off gently with distance from
+/// water instead of saturating the whole air side.
+pub const HUMIDITY_LEAK_DIV: u16 = 1024;
+/// Night: humid air (≥ this) condenses on glass, rock and sand it touches,
+/// depositing `DEW_GAIN` per update and losing half of that itself
+/// (a pane fogs over in ≈ 15 min of night).
+pub const DEW_H: u8 = 200;
+pub const DEW_GAIN: u8 = 4;
+/// Glass dew fades by this much per update when the air beside it is dry.
+pub const DEW_FADE: u8 = 2;
+/// Evaporation (K2#8, very slow; water only): every `EVAP_EVERY` ticks the
+/// free surface of each column loses `EVAP_SAT_STEP` sat unless the air
+/// above is saturated (≥ `EVAP_STOP_H`). 255 sat / 10 s ≈ 42 min per
+/// physics row — the waterline drops visibly over hours.
+pub const EVAP_EVERY: u64 = 300;
+pub const EVAP_SAT_STEP: u8 = 1;
+pub const EVAP_STOP_H: u8 = 250;
+
+// ---- Phase 4: hydration, roots, desiccation (`cell-language.md` §h.1) ----
+
+/// Hydration is recomputed this often (ticks); also on topology change.
+pub const HYDRATION_EVERY: u64 = 32;
+/// Drop per division-bond hop when the conductor is soft-walled.
+pub const HYDRATION_DROP: u8 = 16;
+/// Drop when the conductor has WALL h ≥ 0.5 (hard-walled xylem).
+pub const HYDRATION_DROP_HARD: u8 = 8;
+/// Baseline hydration from contact with moist substrate (no UPTAKE).
+pub const HYDRATION_CONTACT: u8 = 128;
+/// Air humidity (or substrate moisture) at or above this is habitable.
+pub const HABITABLE_H: u8 = 80;
+/// Desiccation: every `DESICCATE_EVERY` ticks a dry air-side cell takes
+/// `DESICCATE_BASE · (1 − h_wall) · (1 − max(humidity, hydration)/255)`
+/// damage (Q8 factors).
+pub const DESICCATE_EVERY: u64 = 8;
+pub const DESICCATE_BASE: u8 = 4;
+/// A physics cell with this many root pixels is *bound* (no slump).
+pub const ROOT_BOUND_PIXELS: u8 = 5;

@@ -93,6 +93,9 @@ impl Cell {
     /// `flags` bit 7: the cell is at least 5/9 hard living tissue and
     /// behaves as a solid toward water and grains (§b.3 dam rule).
     pub const TISSUE: u8 = 0b1000_0000;
+    /// `flags` bit 6: ≥5 root pixels co-occupy this sand/soil cell —
+    /// bound, so it neither falls nor slumps (§h.1).
+    pub const BOUND: u8 = 0b0100_0000;
 
     /// Fluid seat for the physics rules: air/water that is not dammed by
     /// hard tissue.
@@ -110,6 +113,11 @@ impl Cell {
     #[inline]
     pub fn is_tissue(self) -> bool {
         self.flags & Self::TISSUE != 0
+    }
+
+    #[inline]
+    pub fn is_bound(self) -> bool {
+        self.flags & Self::BOUND != 0
     }
 
     #[inline]

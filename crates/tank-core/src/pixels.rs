@@ -41,6 +41,9 @@ pub struct PixelLayer {
     pub tile_active: Vec<u8>,
     /// True when any keyed field may be non-zero (skip O(n) blur otherwise).
     pub fields_active: bool,
+    /// Open-water lysis this tick that drifted off as fines (Phase 4):
+    /// `(pixel column, glucose units)`, drained by the tank each tick.
+    pub lysis_fines: Vec<(u16, u32)>,
 }
 
 impl PixelLayer {
@@ -74,6 +77,7 @@ impl PixelLayer {
                     * h.div_ceil(crate::bio::fields::TILE as u32)) as usize
             ],
             fields_active: false,
+            lysis_fines: Vec::new(),
         }
     }
 
@@ -94,7 +98,9 @@ pub struct CoarseField {
     pub h: u32,
     pub minerals: Vec<u8>,
     pub t_local: Vec<i8>,
-    pub humidity: Vec<u8>,
+    /// Air-side humidity in Q8 (`>> 8` is the 0..=255 value a cell reads);
+    /// the extra precision keeps the slow leak and diffusion unbiased.
+    pub humidity: Vec<u16>,
     /// Sediment nutrient (§a.3): waste that settled into sand / soil;
     /// CHEMO's food.
     pub sediment: Vec<u8>,
@@ -205,6 +211,14 @@ pub fn rebuild_light(
     }
 }
 
+/// Phase 4 environment layers drawn over open pixels: cloudiness haze
+/// per column and the THERMO warm haze per coarse cell.
+pub struct Overlay<'a> {
+    pub cloud_q8: &'a [u8],
+    pub t_local: &'a [i8],
+    pub coarse_w: u32,
+}
+
 /// RGBA8, row 0 = top of the tank, nearest-neighbour 3×3 blocks.
 /// `bio_rgb` paints living owners: `(owner_id, [r,g,b])` lookup via closure.
 pub fn write_rgba(
@@ -212,11 +226,13 @@ pub fn write_rgba(
     pixels: &PixelLayer,
     out: &mut Vec<u8>,
     bio_rgb: &dyn Fn(u32) -> Option<[u8; 3]>,
+    overlay: &Overlay,
 ) {
     let pw = pixels.w as usize;
     let ph = pixels.h as usize;
     out.resize(pw * ph * 4, 0);
     let vis_h = grid.visible_h();
+    let any_warm = overlay.t_local.iter().any(|&v| v > 0);
     for py in 0..ph {
         for px in 0..pw {
             let vx = (px as i32) / PX_PER_CELL as i32;
@@ -234,6 +250,32 @@ pub fn write_rgba(
             r = ((r as u32) * li / 255) as u8;
             g = ((g as u32) * li / 255) as u8;
             b = ((b as u32) * li / 255) as u8;
+            if owner == 0 && cell.is_open() {
+                // Milky haze over cloudy water columns, densest where the
+                // fines are (alpha ∝ 1 − cloud).
+                if cell.sat >= WATER_SAT_RENDER {
+                    let c = overlay.cloud_q8.get(px).copied().unwrap_or(255) as u32;
+                    if c < 250 {
+                        let t = (255 - c) * 3 / 4;
+                        let milk = [0xB8u32, 0xC4, 0xB0];
+                        r = ((r as u32 * (255 - t) + milk[0] * li / 255 * t) / 255) as u8;
+                        g = ((g as u32 * (255 - t) + milk[1] * li / 255 * t) / 255) as u8;
+                        b = ((b as u32 * (255 - t) + milk[2] * li / 255 * t) / 255) as u8;
+                    }
+                }
+                // Warm haze over a THERMO halo.
+                if any_warm {
+                    let ci = (vy as usize) * overlay.coarse_w as usize + vx as usize;
+                    let w =
+                        crate::thermal::haze_weight(overlay.t_local.get(ci).copied().unwrap_or(0))
+                            as u32;
+                    if w > 0 {
+                        r = ((r as u32 * (255 - w) + 0xE3 * li / 255 * w) / 255) as u8;
+                        g = ((g as u32 * (255 - w) + 0x6A * li / 255 * w) / 255) as u8;
+                        b = ((b as u32 * (255 - w) + 0x50 * li / 255 * w) / 255) as u8;
+                    }
+                }
+            }
             // Litter: brown speck (bone band ivory, grit grey) scaled by mass.
             let litter = pixels.litter[i];
             let grit = pixels.grit[i];
@@ -298,7 +340,9 @@ pub fn enzyme_band_colour(key: u8) -> [u8; 3] {
 fn albedo(cell: Cell) -> [u8; 3] {
     let v = cell.colour_variant() as usize;
     if cell.is_glass() {
-        return [0xC4, 0xE2, 0xEC];
+        // Night dew fogs the pane toward white (Phase 4 condensation).
+        let t = (cell.pad as i32) / 2;
+        return [mix(0xC4, 0xF2, t), mix(0xE2, 0xF6, t), mix(0xEC, 0xFA, t)];
     }
     if cell.is_open() {
         if cell.sat < WATER_SAT_RENDER {

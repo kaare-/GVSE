@@ -1136,10 +1136,16 @@ fn corpse_sinks_then_becomes_litter_and_fines() {
     let soft_units = (corpse.energy / crate::consts::GLUCOSE_UNIT_FP) as u64;
     let litter = tank.litter_total();
     let fines_units = soft_units * crate::bio::FINES_SHARE_Q8 as u64 / 256;
-    assert_eq!(litter, soft_units - fines_units, "70 % of the soft mass is litter");
-    let fines_g = tank.fines()[corpse.px as usize];
+    assert!(litter >= soft_units - fines_units, "at least 70 % of the soft mass is litter ({litter})");
+    // The other 30 % went up as fines; some has already settled back
+    // (Phase 4 cloudiness), the rest still hangs in the column.
+    let fines_g: f32 = tank.fines().iter().sum();
+    let settled = (litter - (soft_units - fines_units)) as f32 / 64.0;
     let expect_g = fines_units as f32 / 64.0;
-    assert!((fines_g - expect_g).abs() < 1e-3, "30 % went to fines[x] (got {fines_g}, want {expect_g})");
+    assert!(
+        (fines_g + settled - expect_g).abs() < 0.1,
+        "30 % went to fines (hanging {fines_g} + settled {settled}, want {expect_g})"
+    );
 }
 
 /// 2.3.5 — three detritus classes: digesting soft litter leaves inert
@@ -1770,7 +1776,14 @@ fn glass_wall_holds_water_and_passes_light() {
     tick_n(&mut tank, 300);
     let inside: u64 = (4..8).map(|vx| column_sat(&tank, vx)).sum();
     let outside: u64 = (0..3).chain(9..12).map(|vx| column_sat(&tank, vx)).sum();
-    assert_eq!(inside, before, "glass holds the water in");
+    // Phase 4 evaporation still ticks under a lid (very slow, water only);
+    // the wall's job is that nothing leaves the basin sideways.
+    assert_eq!(
+        inside + tank.evaporated_sat(),
+        before,
+        "glass holds the water in (inside {inside} + evaporated {})",
+        tank.evaporated_sat()
+    );
     assert_eq!(outside, 0, "nothing leaks through glass");
     // Light under a pane is almost full; under stone it is not.
     place(&mut tank, 1, 8, Cell::glass());
@@ -2009,4 +2022,571 @@ fn archive_specimen_and_seed_a_new_tank_from_it() {
     assert!(node.archived);
     assert_eq!(node.live_cells, 4);
     assert_eq!(node.parent, NO_SPECIES, "an archive seed is a root of this tank's tree");
+}
+
+// ---------------------------------------------------------------- Phase 4
+
+/// 4.1 — the thermal cycle (§4): midday ≈ base + 10, stored heat carries
+/// into the evening and decays with a τ set by the tank's materials, so a
+/// rocky tank cools slower than an airy one.
+#[test]
+fn thermal_cycle_stores_heat_and_rock_cools_slower_than_air() {
+    use crate::consts::{DAY_TICKS, T_BASE_DEFAULT};
+    let mut tank = water_box(3, 16, 32, 12);
+    assert!(
+        (tank.t_tank() - T_BASE_DEFAULT).abs() < 1e-3,
+        "starts at base"
+    );
+    // Midday with always-day: both terms reach +10.
+    for _ in 0..30_000 {
+        tank.tick(&day());
+    }
+    let noon = tank.t_tank();
+    assert!(
+        (noon - (T_BASE_DEFAULT + 10.0)).abs() < 0.5,
+        "midday {noon}"
+    );
+    // Same tank through a real day: the clock starts at noon.
+    let mut airy = water_box(3, 16, 32, 4);
+    let mut rocky = water_box(3, 16, 32, 4);
+    for vx in 0..16 {
+        for vy in 4..28 {
+            place(&mut rocky, vx, vy, Cell::stone());
+        }
+    }
+    assert!(
+        rocky.thermal_mass().tau_ticks() > 2.0 * airy.thermal_mass().tau_ticks(),
+        "rock holds heat longer"
+    );
+    // Mid-afternoon (light ≈ 0.7): both tanks are warm.
+    let dusk = (DAY_TICKS / 2) as u32;
+    tick_n(&mut airy, dusk / 2);
+    tick_n(&mut rocky, dusk / 2);
+    assert!(
+        airy.t_tank() > T_BASE_DEFAULT + 5.0,
+        "afternoon {}",
+        airy.t_tank()
+    );
+    // Dusk: the airy puddle (τ ≈ 1 min) has already shed most of its heat
+    // with the falling sun; the rocky tank (τ ≈ 6 min) carries it on.
+    tick_n(&mut airy, dusk / 2);
+    tick_n(&mut rocky, dusk / 2);
+    let dusk_airy = airy.t_tank();
+    let dusk_rocky = rocky.t_tank();
+    assert!(
+        dusk_rocky > dusk_airy + 1.0,
+        "rock holds heat at dusk ({dusk_rocky} vs {dusk_airy})"
+    );
+    assert!(
+        dusk_rocky > T_BASE_DEFAULT + 2.5,
+        "stored heat at dusk {dusk_rocky}"
+    );
+    // Six minutes into the night: the rocky tank has cooled but is still
+    // the warmer one; the airy tank sits at base + the night-floor light.
+    tick_n(&mut airy, 6 * 60 * 30);
+    tick_n(&mut rocky, 6 * 60 * 30);
+    let night_airy = airy.t_tank();
+    let night_rocky = rocky.t_tank();
+    assert!(
+        night_rocky < dusk_rocky - 1.0,
+        "rocky tank cools ({dusk_rocky} → {night_rocky})"
+    );
+    assert!(
+        night_rocky > night_airy + 0.3,
+        "rock stays warmer ({night_rocky} vs {night_airy})"
+    );
+    assert!(
+        (night_airy - (T_BASE_DEFAULT + 1.0)).abs() < 0.3,
+        "airy puddle at base + floor ({night_airy})"
+    );
+}
+
+/// 4.1 — THERMO (§a.7): a heater cell lifts its coarse cell several
+/// degrees, the halo decays when it stops, costs glucose, and the first
+/// sustained +3 °C fires "warm-blooded".
+#[test]
+fn thermo_cell_warms_its_halo_pays_glucose_and_is_warm_blooded() {
+    use crate::bio::{ev, Genome};
+    let cold = TankInput {
+        always_day: true,
+        t_base: 5.0,
+        ..TankInput::default()
+    };
+    let mut tank = water_box(4, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    // A free cell jitters a pixel a tick and would smear its heat over
+    // many coarse cells; pen the heater in a one-cell rock pocket (a
+    // real heater is an anchored colony).
+    let (mut vx, mut vy) = (12, 10);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            if (dx, dy) != (0, 0) {
+                place(&mut tank, vx + dx, vy + dy, Cell::bedrock());
+            }
+        }
+    }
+    // Control: the same genome in a second pocket, THERMO gated shut.
+    let (cx, cy) = (4, 10);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            if (dx, dy) != (0, 0) {
+                place(&mut tank, cx + dx, cy + dy, Cell::bedrock());
+            }
+        }
+    }
+    let mut shut = Genome::heater();
+    for e in shut.modes[0].entries.iter_mut() {
+        if e.block == crate::bio::Block::Thermo {
+            e.gate = crate::bio::Gate::below(crate::bio::Scalar::TempDev, 0);
+        }
+    }
+    let (hx, hy) = (vx as u16 * 3 + 1, (23 - vy as u16) * 3 + 1);
+    let heater = tank.seed_genome_at(hx, hy, Genome::heater()).expect("seed");
+    let plain = tank
+        .seed_genome_at(cx as u16 * 3 + 1, hy, shut)
+        .expect("seed");
+    for org in [heater, plain] {
+        let o = tank.cell(org).unwrap().org;
+        tank.feed_org_full(o);
+    }
+    let e0 = tank.cell(heater).unwrap().energy;
+    let p0 = tank.cell(plain).unwrap().energy;
+    let mut warm_event = false;
+    let mut peak = 0.0f32;
+    for _ in 0..400 {
+        tank.tick(&cold);
+        // The heat lands in the coarse cell under the heater's anchor
+        // pixel, which may straddle the pocket wall.
+        if let Some(c) = tank.cell(heater) {
+            (vx, vy) = crate::bio::pixel_to_phys(c.px, c.py, 24);
+        }
+        peak = peak.max(tank.t_local_at(vx, vy));
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::WARM_BLOODED || e.kind == ev::MS_WARM_BLOODED {
+                warm_event = true;
+            }
+        }
+    }
+    assert!(peak >= 3.0, "the halo should reach +3 °C (peak {peak})");
+    assert!(warm_event, "warm-blooded fires after 60 ticks over +3 °C");
+    assert!(tank.t_local_at(vx + 6, vy) < 0.5, "the halo is local");
+    let e1 = tank.cell(heater).map(|c| c.energy).unwrap_or(0);
+    let p1 = tank.cell(plain).map(|c| c.energy).unwrap_or(p0);
+    assert!(
+        e0 - e1 > (p0 - p1) + 2 * crate::consts::FP,
+        "heating costs glucose ({} vs {})",
+        e0 - e1,
+        p0 - p1
+    );
+    // Remove the heater: the halo leaks away within a few seconds.
+    let _ = tank.remove_at(vx, vy, 1);
+    tick_n(&mut tank, 240);
+    assert!(
+        tank.t_local_at(vx, vy) < 0.3,
+        "halo decays ({})",
+        tank.t_local_at(vx, vy)
+    );
+}
+
+/// 4.2 — cloudiness (§4): a bloom crash clouds the water (less light,
+/// a milky render, "water is cloudy"), then the fines settle back into
+/// floor litter and the tank clears.
+#[test]
+fn bloom_crash_clouds_the_water_then_it_clears_into_litter() {
+    use crate::bio::ev;
+    let mut tank = water_box(7, 24, 32, 28);
+    let w = tank.visible_size().0 as usize * 3;
+    tick_n(&mut tank, 2);
+    let light_before: u32 = (0..w)
+        .map(|px| tank.pixel_light_at(px as u16, 30) as u32)
+        .sum();
+    let litter_before = tank.litter_total();
+    let grams = 200.0;
+    for px in 0..w {
+        tank.add_fines(px, grams);
+    }
+    tank.tick(&TankInput::default());
+    assert!(tank.cloud_mean() < 0.5, "cloud {}", tank.cloud_mean());
+    let light_after: u32 = (0..w)
+        .map(|px| tank.pixel_light_at(px as u16, 30) as u32)
+        .sum();
+    assert!(
+        light_after < light_before / 2,
+        "cloud halves the light ({light_before} → {light_after})"
+    );
+    let mut cloudy = false;
+    for _ in 0..600 {
+        tank.tick(&TankInput::default());
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::CLOUDY {
+                cloudy = true;
+            }
+        }
+    }
+    assert!(cloudy, "the tank should announce cloudy water");
+    // τ ≈ 60 s: after 6 minutes the water is clear again and the fines
+    // are floor litter.
+    tick_n(&mut tank, 6 * 60 * 30);
+    assert!(tank.cloud_mean() > 0.9, "cleared to {}", tank.cloud_mean());
+    let fines_left: f32 = tank.fines().iter().sum();
+    assert!(
+        fines_left < grams * w as f32 * 0.05,
+        "fines left {fines_left}"
+    );
+    assert!(
+        tank.litter_total() > litter_before,
+        "settled fines are litter"
+    );
+}
+
+/// 4.3 — humidity (K2#5): the air over a half-filled tank is humid near
+/// the water and drier up high; at night humid air condenses as dew on
+/// the glass and damp rock, which dries off again by day.
+#[test]
+fn humidity_rises_over_water_and_dew_forms_on_glass_at_night() {
+    use crate::consts::{DAY_TICKS, DEW_H, MOIST_SAT};
+    let mut tank = water_box(9, 24, 24, 10);
+    // A glass pane and a stone block on the air side.
+    for vy in 10..24 {
+        place(&mut tank, 20, vy, Cell::glass());
+    }
+    for vy in 12..15 {
+        place(&mut tank, 4, vy, Cell::stone());
+    }
+    for _ in 0..1200 {
+        tank.tick(&day());
+    }
+    let low = tank.humidity_at(10, 10);
+    let high = tank.humidity_at(10, 22);
+    assert!(low >= 150, "air over the water is humid ({low})");
+    assert!(high < low, "humidity falls off with height ({high} vs {low})");
+    assert_eq!(tank.humidity_at(10, 3), 255, "water reads saturated");
+    assert_eq!(tank.cell_visible(20, 15).pad, 0, "no dew by day");
+    let dry_rock = tank.cell_visible(4, 13).rock_film();
+    // Into the night.
+    let input = TankInput::default();
+    while crate::clock::is_day(tank.tick_count()) {
+        tank.tick(&input);
+    }
+    tick_n(&mut tank, 600);
+    assert!(tank.tick_count() < DAY_TICKS + 1000);
+    let night_low = tank.humidity_at(10, 10);
+    assert!(night_low >= DEW_H, "cool night air saturates ({night_low})");
+    let dew = tank.cell_visible(20, 11).pad;
+    assert!(dew > 0, "dew on the glass at night");
+    let wet_rock = tank.cell_visible(4, 12).rock_film();
+    assert!(wet_rock > dry_rock, "damp rock at night ({dry_rock} → {wet_rock})");
+    assert!(wet_rock >= MOIST_SAT || dew >= MOIST_SAT, "condensation moistens a surface");
+    // Daylight dries the pane.
+    for _ in 0..1200 {
+        tank.tick(&day());
+    }
+    assert!(tank.cell_visible(20, 20).pad < dew.max(1), "dew fades by day");
+}
+
+/// 4.3 — evaporation (K2#8): the free surface loses water very slowly
+/// (water only, nothing else leaves), and the top-up tool pours pure
+/// water back onto every surface.
+#[test]
+fn evaporation_lowers_the_surface_slowly_and_top_up_restores_it() {
+    use crate::consts::EVAP_EVERY;
+    let mut tank = water_box(10, 24, 24, 12);
+    tank.drop_litter(30, 60, 20, crate::bio::chem::LITTER_SOFT_CODE);
+    let litter = tank.litter_total();
+    let total = |t: &Tank| (0..24).map(|vx| column_sat(t, vx)).sum::<u64>();
+    let before = total(&tank);
+    for _ in 0..(EVAP_EVERY as u32 * 6) {
+        tank.tick(&day());
+    }
+    let after = total(&tank);
+    let lost = tank.evaporated_sat();
+    assert!(lost > 0, "the surface evaporates");
+    assert_eq!(before - after, lost, "only evaporation removes water ({before} → {after})");
+    assert!(lost <= 6 * 24, "very slow: at most one sat per column per period ({lost})");
+    assert_eq!(tank.litter_total(), litter, "nothing but water leaves");
+    // Top up: one row of pure water on every surface.
+    let topup = TankInput {
+        tools: vec![crate::tools::ToolEvent {
+            kind: 14,
+            material: 0,
+            x: 0,
+            y: 0,
+            r: 1,
+            variant: 0,
+        }],
+        ..day()
+    };
+    tank.tick(&topup);
+    let topped = total(&tank);
+    assert!(topped > before, "top-up raises the waterline ({before} → {topped})");
+    assert!(tank.cell_visible(5, 12).sat > 0, "the row above the old surface holds water");
+    assert!(tank.cell_visible(5, 14).sat == 0, "air above the new surface stays dry");
+}
+
+/// 4.4 — hydration conducts along division bonds; a rooted hard-walled
+/// stem stands in dry air where a free soft cell desiccates.
+#[test]
+fn hydration_conducts_and_desiccation_spares_a_rooted_stem() {
+    use crate::bio::Genome;
+    use crate::consts::MOIST_SAT;
+    let mut tank = Tank::try_new(11, 24, 24).unwrap();
+    tank.set_lambda_scale_q8(0);
+    // Half-filled: sand bed, water to vy 8, air above.
+    for vx in 0..24 {
+        for vy in 0..4 {
+            place(&mut tank, vx, vy, Cell::sand());
+        }
+        for vy in 4..8 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    // Keep the sand under the plant at field capacity (won't drain below
+    // retain, which is still ≥ MOIST_SAT).
+    for vx in 10..14 {
+        let mut c = tank.cell_visible(vx, 3);
+        c.sat = 200;
+        place(&mut tank, vx, 3, c);
+    }
+    let (hx, hy) = (12u16 * 3 + 1, (23 - 3) * 3 + 1);
+    let root = tank.seed_genome_at(hx, hy, Genome::rooting()).expect("root");
+    let (ax, ay) = (6u16 * 3 + 1, (23 - 20) * 3 + 1);
+    let airy = tank.seed_genome_at(ax, ay, Genome::algae()).expect("air");
+    let root_org = tank.cell(root).unwrap().org;
+    if let Some(o) = tank.cells_mut_for_test().org_mut(root_org) {
+        o.cut = true;
+    }
+    for org in [root, airy] {
+        let o = tank.cell(org).unwrap().org;
+        tank.feed_org_full(o);
+    }
+    // Force a hydration refresh (tick 0) and read.
+    tank.tick(&day());
+    let h_root = tank.cell(root).map(|c| c.hydration).unwrap_or(0);
+    assert!(h_root >= MOIST_SAT, "root hydration {h_root}");
+    let mut land = false;
+    for _ in 0..400 {
+        tank.tick(&day());
+        // Re-wet the sand so seepage into the water column cannot dry it.
+        for vx in 10..14 {
+            let mut c = tank.cell_visible(vx, 3);
+            if c.sat < 160 {
+                c.sat = 200;
+                place(&mut tank, vx, 3, c);
+            }
+        }
+        while let Some(e) = tank.poll_event() {
+            if e.kind == crate::bio::ev::LIFE_ON_LAND || e.kind == crate::bio::ev::MS_LIFE_ON_LAND {
+                land = true;
+            }
+        }
+    }
+    assert!(land, "life on land fires for an air-side cell");
+    assert!(tank.cell(root).is_some(), "the rooted stem survives dry air");
+    if let Some(c) = tank.cell(airy) {
+        assert!(c.damage > 0, "free air cell takes desiccation damage ({})", c.damage);
+    }
+}
+
+/// 4.4 — roots co-occupy moist sand, bind it (≥5 px), and dig cuts them.
+#[test]
+fn roots_bind_sand_and_dig_cuts_them() {
+    use crate::bio::Genome;
+    use crate::tools::ToolEvent;
+    let mut tank = Tank::try_new(12, 16, 16).unwrap();
+    tank.set_lambda_scale_q8(0);
+    for vx in 0..16 {
+        for vy in 0..6 {
+            let mut c = Cell::sand();
+            c.sat = 255;
+            place(&mut tank, vx, vy, c);
+        }
+    }
+    // Seed five rooting cells into one physics cell so it binds.
+    let (vx, vy) = (8i32, 3i32);
+    let mut ids = Vec::new();
+    for i in 0..5u16 {
+        let px = vx as u16 * 3 + (i % 3);
+        let py = (15 - vy as u16) * 3 + (i / 3);
+        if let Some(id) = tank.seed_genome_at(px, py, Genome::rooting()) {
+            // Force root mode coeffs by ensuring uptake_water ≥ 2 (preset).
+            ids.push(id);
+            let o = tank.cell(id).unwrap().org;
+            tank.feed_org_full(o);
+        }
+    }
+    assert!(ids.len() >= 5, "seeded {}", ids.len());
+    tick_n(&mut tank, 2);
+    assert!(
+        tank.cell_visible(vx, vy).is_bound(),
+        "≥5 root pixels bind the sand"
+    );
+    let before = tank.live_cells();
+    let litter_before = tank.litter_total();
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 2, // erase = dig
+            material: 0,
+            x: vx as u16,
+            y: vy as u16,
+            r: 0,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert!(tank.live_cells() < before, "dig cuts roots");
+    assert!(tank.litter_total() > litter_before, "cut roots become litter");
+    assert!(!tank.cell_visible(vx, vy).is_bound(), "bound flag clears");
+}
+
+/// 4.5 — cut / root-trim (kind 15): a stroke kills cells under the brush;
+/// a stem cut leaves a fragment, a root cut becomes soft litter.
+#[test]
+fn cut_tool_severs_a_stem_and_trims_roots() {
+    use crate::bio::Genome;
+    use crate::tools::ToolEvent;
+    // Straw: a short bonded chain in water.
+    let mut tank = water_box(13, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    let id = tank.seed_genome_at(36, 40, Genome::straw()).expect("straw");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    // Grow the chain.
+    for _ in 0..200 {
+        tank.tick(&day());
+        if tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 3 {
+            break;
+        }
+    }
+    let before = tank.live_cells();
+    let orgs_before = tank.cells().iter_orgs().count();
+    assert!(before >= 2, "straw has cells ({before})");
+    // Cut the middle of the body.
+    let seed = tank.cell(id).unwrap();
+    let (vx, vy) = crate::bio::pixel_to_phys(seed.px, seed.py, 24);
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 15,
+            material: 0,
+            x: vx as u16,
+            y: vy as u16,
+            r: 1,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert!(tank.live_cells() < before || tank.cells().iter_orgs().count() > orgs_before,
+        "cut kills or fragments the body");
+
+    // Root trim: five roots in wet sand.
+    let mut land = Tank::try_new(14, 16, 16).unwrap();
+    land.set_lambda_scale_q8(0);
+    for vx in 0..16 {
+        for vy in 0..6 {
+            let mut c = Cell::sand();
+            c.sat = 255;
+            place(&mut land, vx, vy, c);
+        }
+    }
+    let (vx, vy) = (8i32, 3i32);
+    for i in 0..5u16 {
+        let px = vx as u16 * 3 + (i % 3);
+        let py = (15 - vy as u16) * 3 + (i / 3);
+        let _ = land.seed_genome_at(px, py, Genome::rooting());
+    }
+    tick_n(&mut land, 2);
+    let litter_before = land.litter_total();
+    let live_before = land.live_cells();
+    land.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 15,
+            material: 0,
+            x: vx as u16,
+            y: vy as u16,
+            r: 1,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert!(land.live_cells() < live_before, "root trim kills root cells");
+    assert!(land.litter_total() > litter_before, "trimmed roots become litter");
+}
+
+/// 4.7 — a glass box is an enclosure: drain, fill, delete walls.
+#[test]
+fn enclosure_drain_fill_and_delete_walls() {
+    use crate::tools::ToolEvent;
+    let mut tank = Tank::try_new(15, 16, 16).unwrap();
+    // Glass box: walls at x=3,x=10 and y=2,y=8; open interior.
+    for vy in 2..=8 {
+        place(&mut tank, 3, vy, Cell::glass());
+        place(&mut tank, 10, vy, Cell::glass());
+    }
+    for vx in 3..=10 {
+        place(&mut tank, vx, 2, Cell::glass());
+        place(&mut tank, vx, 8, Cell::glass());
+    }
+    for vx in 4..10 {
+        for vy in 3..8 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    let enc = tank.enclosure_at(6, 5).expect("enclosure");
+    assert!(enc.area() >= 20, "interior {}", enc.area());
+    assert!(!enc.walls.is_empty());
+    // Drain.
+    assert!(tank.enclosure_op(6, 5, 1) > 0);
+    let inside: u64 = (4..10).map(|vx| column_sat(&tank, vx)).sum();
+    // Columns 4..10 still include water outside the box above/below; check a cell.
+    assert_eq!(tank.cell_visible(6, 5).sat, 0, "drained");
+    // Fill.
+    assert!(tank.enclosure_op(6, 5, 2) > 0);
+    assert!(tank.cell_visible(6, 5).sat >= 200, "filled");
+    // Delete walls: water can now spill.
+    let walls = tank.enclosure_op(6, 5, 0);
+    assert!(walls > 0, "walls removed");
+    assert!(!tank.cell_visible(3, 5).is_glass());
+    let _ = inside;
+    assert!(!tank.cell_visible(3, 5).is_glass(), "wall cells are gone");
+    // Tool path.
+    place(&mut tank, 3, 5, Cell::glass());
+    place(&mut tank, 10, 5, Cell::glass());
+    for vx in 3..=10 {
+        place(&mut tank, vx, 2, Cell::glass());
+        place(&mut tank, vx, 8, Cell::glass());
+    }
+    for vy in 2..=8 {
+        place(&mut tank, 3, vy, Cell::glass());
+        place(&mut tank, 10, vy, Cell::glass());
+    }
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 16,
+            material: 1, // drain
+            x: 6,
+            y: 5,
+            r: 0,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert_eq!(tank.cell_visible(6, 5).sat, 0);
+}
+
+/// 4.8 — starter archive seeds (moss / plant / crown) are valid and seedable.
+#[test]
+fn starter_specimens_seed_into_a_tank() {
+    use crate::archive::Specimen;
+    for kind in 0..=2u8 {
+        let spec = Specimen::starter(kind).expect("starter");
+        assert!(spec.genome.is_valid(), "kind {kind}");
+        assert!(!spec.display_name.is_empty());
+        assert!(spec.portrait_w > 0 && !spec.portrait.is_empty());
+        let mut tank = water_box(16 + kind as u64, 24, 24, 16);
+        let id = tank.seed_specimen(&spec, 36, 30).expect("seed");
+        assert!(tank.cell(id).is_some());
+    }
 }

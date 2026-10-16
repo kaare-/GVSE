@@ -28,9 +28,10 @@ fn main() -> ExitCode {
         Some("fuzz") => cmd_fuzz(args),
         Some("gates") => cmd_gates(args),
         Some("soak") => cmd_soak(args),
+        Some("scenario") => cmd_scenario(args),
         _ => {
             eprintln!(
-                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path] [--log N]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer|saprotroph|predator|stinger|signaller|spiny|egg|chemo] [--cycle] [--dark] [--verbose] [--litter N] [--lambda-q8 N] [--minerals N]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]\n  tank-sim gates --seeds N --ticks N [--threads N] [--csv path]\n  tank-sim soak --ticks N [--seed N]"
+                "usage:\n  tank-sim tank --ticks N [--seed N] [--csv path] [--log N]\n  tank-sim clock --tick N\n  tank-sim determinism --ticks N --seed N\n  tank-sim trace --ticks N [--seed N] [--every N] [--genome algae|straw|giant|plate16|brooder|sticky|swimmer|saprotroph|predator|stinger|signaller|spiny|egg|chemo|heater|moss|plant|crown|rooting] [--cycle] [--dark] [--verbose] [--litter N] [--lambda-q8 N] [--minerals N]\n  tank-sim giant-vs-body --ticks N --seeds N\n  tank-sim fuzz --n N [--seed N]\n  tank-sim gates --seeds N --ticks N [--threads N] [--csv path]\n  tank-sim soak --ticks N [--seed N]\n  tank-sim scenario terrarium|cold-night|bloom-crash [--seed N] [--ticks N]"
             );
             ExitCode::from(2)
         }
@@ -67,6 +68,11 @@ fn genome_by_name(name: &str) -> Genome {
         "spiny" => Genome::spiny(),
         "egg" => Genome::egg_layer(),
         "chemo" => Genome::sediment_feeder(),
+        "heater" => Genome::heater(),
+        "moss" => Genome::moss(),
+        "plant" => Genome::plant(),
+        "crown" => Genome::crown(),
+        "rooting" => Genome::rooting(),
         _ => Genome::algae(),
     }
 }
@@ -575,6 +581,158 @@ fn cmd_soak(args: impl Iterator<Item = String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+
+fn cmd_scenario(args: impl Iterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = args.collect();
+    let name = args.first().map(|s| s.as_str()).unwrap_or("");
+    let seed = flag_u64(args.iter().cloned(), "--seed").unwrap_or(1);
+    let ticks = flag_u64(args.iter().cloned(), "--ticks");
+    match name {
+        "terrarium" => scenario_terrarium(seed, ticks.unwrap_or(3_000)),
+        "cold-night" => scenario_cold_night(seed, ticks.unwrap_or(40_000)),
+        "bloom-crash" => scenario_bloom_crash(seed, ticks.unwrap_or(12_000)),
+        _ => {
+            eprintln!("scenario: terrarium | cold-night | bloom-crash");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn scenario_terrarium(seed: u64, ticks: u64) -> ExitCode {
+    let mut tank = Tank::try_new(seed, 32, 32).expect("size");
+    tank.set_lambda_scale_q8(0);
+    for vx in 0..32 {
+        for vy in 0..6 {
+            let mut c = Cell::sand();
+            c.sat = 200;
+            tank.place(vx, vy, c);
+        }
+        for vy in 6..12 {
+            tank.place(vx, vy, Cell::water());
+        }
+    }
+    let moss = tank
+        .seed_genome_at(48, (31 - 5) * 3 + 1, Genome::moss())
+        .expect("moss");
+    let plant = tank
+        .seed_genome_at(60, (31 - 5) * 3 + 1, Genome::plant())
+        .expect("plant");
+    for id in [moss, plant] {
+        let o = tank.cell(id).unwrap().org;
+        tank.feed_org_full(o);
+    }
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut land = false;
+    for _ in 0..ticks {
+        tank.tick(&input);
+        while let Some(e) = tank.poll_event() {
+            if e.kind == tank_core::bio::ev::LIFE_ON_LAND
+                || e.kind == tank_core::bio::ev::MS_LIFE_ON_LAND
+            {
+                land = true;
+            }
+        }
+    }
+    let alive = tank.live_cells();
+    let ok = alive >= 1 && land;
+    println!(
+        "scenario terrarium seed={seed} ticks={ticks} cells={alive} life_on_land={land} → {}",
+        if ok { "PASS" } else { "FAIL" }
+    );
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn scenario_cold_night(seed: u64, ticks: u64) -> ExitCode {
+    let mut tank = water_tank(seed, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    // Pen a heater so its halo holds.
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            if (dx, dy) != (0, 0) {
+                tank.place(16 + dx, 12 + dy, Cell::bedrock());
+            }
+        }
+    }
+    let heater = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::heater())
+        .expect("heater");
+    let algae = tank
+        .seed_genome_at(40, 40, Genome::algae())
+        .expect("algae");
+    for id in [heater, algae] {
+        let o = tank.cell(id).unwrap().org;
+        tank.feed_org_full(o);
+    }
+    let input = TankInput {
+        always_day: false,
+        t_base: 5.0,
+        ..TankInput::default()
+    };
+    let mut warm = false;
+    for _ in 0..ticks {
+        tank.tick(&input);
+        while let Some(e) = tank.poll_event() {
+            if e.kind == tank_core::bio::ev::WARM_BLOODED
+                || e.kind == tank_core::bio::ev::MS_WARM_BLOODED
+            {
+                warm = true;
+            }
+        }
+    }
+    let alive = tank.live_cells();
+    let ok = alive >= 1;
+    println!(
+        "scenario cold-night seed={seed} ticks={ticks} cells={alive} warm_blooded={warm} t={} → {}",
+        tank.t_tank(),
+        if ok { "PASS" } else { "FAIL" }
+    );
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn scenario_bloom_crash(seed: u64, ticks: u64) -> ExitCode {
+    let mut tank = water_tank(seed, 24, 32, 28);
+    let w = tank.visible_size().0 as usize * 3;
+    for px in 0..w {
+        tank.add_fines(px, 200.0);
+    }
+    tank.tick(&TankInput::default());
+    let cloudy0 = tank.cloud_mean();
+    let mut cloudy_ev = false;
+    for _ in 0..600 {
+        tank.tick(&TankInput::default());
+        while let Some(e) = tank.poll_event() {
+            if e.kind == tank_core::bio::ev::CLOUDY {
+                cloudy_ev = true;
+            }
+        }
+    }
+    for _ in 0..ticks.saturating_sub(600) {
+        tank.tick(&TankInput::default());
+    }
+    let clear = tank.cloud_mean();
+    let ok = cloudy0 < 0.5 && cloudy_ev && clear > 0.9;
+    println!(
+        "scenario bloom-crash seed={seed} cloud {cloudy0:.3} → {clear:.3} event={cloudy_ev} → {}",
+        if ok { "PASS" } else { "FAIL" }
+    );
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 /// Player-facing milestone names (2.3.8), for the harness summary.
 fn milestone_name(kind: u32) -> Option<&'static str> {
     use tank_core::bio::ev;
@@ -594,6 +752,10 @@ fn milestone_name(kind: u32) -> Option<&'static str> {
         ev::MS_SIGNALLING => "signalling",
         ev::MS_MOVED => "moved",
         ev::MS_NEW_SPECIES => "new_species",
+        ev::MS_WARM_BLOODED => "warm_blooded",
+        ev::MS_LIFE_ON_LAND => "life_on_land",
+        ev::MS_CUTTING_TOOK_ROOT => "cutting_took_root",
+        ev::MS_COLOUR_CROWN => "colour_crown",
         _ => return None,
     })
 }
