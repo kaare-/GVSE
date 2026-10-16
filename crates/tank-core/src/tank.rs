@@ -227,6 +227,8 @@ pub struct Tank {
     pending_enclosure_bucket: Option<Carried>,
     /// Phase 5 M0 soft-body state (ephemeral; rebuilt on topology change).
     soft: bio::soft::SoftStore,
+    /// Phase 5 M2 StudioNet controllers (only for orgs with NERVE).
+    nets: bio::neural::NetStore,
 }
 
 impl Tank {
@@ -278,6 +280,7 @@ impl Tank {
             evaporated_sat: 0,
             pending_enclosure_bucket: None,
             soft: bio::soft::SoftStore::default(),
+            nets: bio::neural::NetStore::default(),
         };
         tank.rebuild_light();
         Ok(tank)
@@ -1468,6 +1471,12 @@ impl Tank {
             &self.genomes,
             &self.grid,
             &mut self.pixels,
+        );
+        let _nets = bio::neural::step(
+            &mut self.nets,
+            &mut self.cells,
+            &self.genomes,
+            self.seed,
         );
         for ev in &bio.events {
             self.events.push_back(*ev);

@@ -172,6 +172,28 @@ impl Genome {
         g
     }
 
+    /// Phase 5 M2 — nerved light-seeker: SENSOR(light) + NERVE + MUSCLE
+    /// on a bonded pair; the StudioNet only exists because of NERVE.
+    pub fn nerved() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_LIGHT;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        // 2×2 footprint ⇒ 32 unit capacity (PHOTO1+STORE1+NERVE2+SENSOR2+MUSCLE2).
+        m.shape_w = 2;
+        m.shape_h = 2;
+        m.push_entry(Entry::new(Block::Photo, 1));
+        m.push_entry(Entry::new(Block::Store, 1));
+        m.push_entry(Entry::new(Block::Nerve, 2));
+        m.push_entry(Entry::with_params(Block::Sensor, 2, SENSOR_LIGHT, 0));
+        m.push_entry(Entry::new(Block::Muscle, 2));
+        m.push_link(Link::level(Scalar::Sense, 128, 80));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
+        g
+    }
+
     /// Phase 5 M1 — hard–soft–hard hinge: hard bone ends with a muscle
     /// joint in the middle (studio hinge-chain shape, tank blocks).
     pub fn hinge() -> Self {

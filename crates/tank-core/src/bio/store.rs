@@ -131,6 +131,9 @@ pub struct CellRec {
     /// sourced from moist substrate, conducted along division bonds.
     #[serde(default = "hydration_default")]
     pub hydration: u8,
+    /// Last SENSOR reading (Phase 5 M2 net input); 0 without a SENSOR.
+    #[serde(default)]
+    pub sense: u8,
 }
 
 fn hydration_default() -> u8 {
@@ -179,6 +182,7 @@ impl CellRec {
             moved_dy: 0,
             warm: 0,
             hydration: 255,
+            sense: 0,
         }
     }
 

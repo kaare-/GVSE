@@ -11,6 +11,7 @@ pub mod fields;
 pub mod genome;
 pub mod hydrate;
 pub mod minerals;
+pub mod neural;
 pub mod profile;
 pub mod program;
 pub mod soft;

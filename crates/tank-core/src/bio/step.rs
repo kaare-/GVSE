@@ -1139,6 +1139,7 @@ fn metabolise(
         c.sig = sig;
         c.hit = 0;
         c.warm = warm;
+        c.sense = sense;
     }
 
     // ---- develop: grow, transition, brood release, divide

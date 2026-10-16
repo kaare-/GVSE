@@ -2680,3 +2680,36 @@ fn hinge_body_has_two_bone_parts_and_a_muscle_joint() {
         "expected a muscle joint between bone parts"
     );
 }
+
+/// 5.2 M2 — a nerved body gets a StudioNet and its effectors run.
+#[test]
+fn nerved_body_builds_a_studio_net_and_drives() {
+    use crate::bio::Genome;
+    let mut tank = water_box(11, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::nerved())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut saw_running = false;
+    for _ in 0..500 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        if tank
+            .cells()
+            .iter_alive()
+            .filter(|(_, c)| c.org == org)
+            .any(|(_, c)| c.running)
+        {
+            saw_running = true;
+            break;
+        }
+    }
+    assert!(saw_running, "nerved muscle should be driven by the net or links");
+    assert!(Genome::nerved().is_valid());
+}
