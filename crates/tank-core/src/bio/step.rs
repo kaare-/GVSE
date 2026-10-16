@@ -8,15 +8,17 @@ use wk_material::MaterialId;
 use crate::bio::chem::{self, HIT_ENZYME, HIT_TOXIN};
 use crate::bio::fields::{add_plain, step_fields, Field};
 use crate::bio::genome::GenomeStore;
+use crate::bio::hydrate;
 use crate::bio::minerals;
 use crate::bio::profile::{ModeCoeffs, DIVIDE_AGE_UNIT_TICKS};
 use crate::bio::program::{glue_bond, heading_delta, ChildKind, Detach, Scalar, Scalars};
 use crate::bio::store::{secretion_kind, CellStore, EMPTY_OWNER, NONE, OWNER_BIAS};
 use crate::cell::Cell;
 use crate::consts::{
-    ACTIVITY_FLOOR_Q8, ALGAE_COST_FP, BIRTH_ENERGY_FP, BOND_SHARE_DIV, FP, GLUCOSE_UNIT_FP,
-    HEAT_DAMAGE_C, LIVE_CAP, MITOSIS_FLOOR_C, PHOTO_YIELD_MFP, THERMO_COST_FP_TICK_PER_UNIT,
-    THERMO_INJECT_EVERY, TICK_HZ, T_GROW, WARM_BLOODED_Q2, WARM_BLOODED_TICKS,
+    ACTIVITY_FLOOR_Q8, ALGAE_COST_FP, BIRTH_ENERGY_FP, BOND_SHARE_DIV, DESICCATE_BASE,
+    DESICCATE_EVERY, FP, GLUCOSE_UNIT_FP, HEAT_DAMAGE_C, HYDRATION_EVERY, LIVE_CAP,
+    MITOSIS_FLOOR_C, PHOTO_YIELD_MFP, THERMO_COST_FP_TICK_PER_UNIT, THERMO_INJECT_EVERY, TICK_HZ,
+    T_GROW, WARM_BLOODED_Q2, WARM_BLOODED_TICKS,
 };
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_u64;
@@ -110,6 +112,20 @@ pub mod ev {
     /// Repeatable (Phase 4): the water is cloudy — mean cloud factor under
     /// `CLOUDY_MEAN` (arg0 = haze 0..255).
     pub const CLOUDY: u32 = 24;
+    /// Raw (Phase 4): a living cell sits on the air side (arg0 = cell).
+    pub const LIFE_ON_LAND: u32 = 25;
+    /// Milestone: first life on land.
+    pub const MS_LIFE_ON_LAND: u32 = 46;
+    /// Raw (Phase 4): a fragment at `depth == 0` grew a root into moist
+    /// substrate (arg0 = cell).
+    pub const CUTTING_TOOK_ROOT: u32 = 26;
+    /// Milestone: first cutting that took root.
+    pub const MS_CUTTING_TOOK_ROOT: u32 = 47;
+    /// Raw (Phase 4): a body shows a colour crown — ≥ 3 pigment-dominant
+    /// tip cells over PHOTO-dominant tissue (arg0 = organism).
+    pub const COLOUR_CROWN: u32 = 27;
+    /// Milestone: first colour crown.
+    pub const MS_COLOUR_CROWN: u32 = 48;
 }
 
 /// "Something moved" (§a.6): net cilia displacement over this window.
@@ -141,6 +157,10 @@ pub fn step(
         death_causes: [0; 4],
         fines: Vec::new(),
     };
+    if tick % HYDRATION_EVERY == 0 {
+        hydrate::refresh(cells, genomes, grid, coarse);
+    }
+    let (_, anchored) = hydrate::bound_cells(cells, genomes, grid, pixels);
     let ids = cells.live_ids();
     for id in ids {
         if cells.get(id).is_none() {
@@ -157,9 +177,9 @@ pub fn step(
         shed(cells, genomes, pixels, tick, &mut out);
     }
     if tick % 4 == 1 {
-        drift_bodies(cells, genomes, grid, pixels, world_seed, tick);
+        drift_bodies(cells, genomes, grid, pixels, world_seed, tick, &anchored);
     }
-    swim_bodies(cells, genomes, grid, pixels, world_seed, tick);
+    swim_bodies(cells, genomes, grid, pixels, world_seed, tick, &anchored);
     form_glue_bonds(cells, genomes, pixels);
     step_corpses(cells, grid, pixels, tick, &mut out);
     rebuild_block(cells, genomes, pixels);
@@ -348,6 +368,14 @@ fn move_free_cell(
     // A GLUE attachment holds the cell in its colony (bonds carry force).
     if cell.glue_to != NONE {
         return;
+    }
+    // A root co-occupying moist sand/soil is static (§h.1).
+    {
+        let (vx, vy) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
+        let seat = grid.get_visible(vx, vy);
+        if genomes.coeffs(cell.genotype, cell.mode).uptake_water >= 2 && !seat.is_open() {
+            return;
+        }
     }
     // Multi-cell bodies drift as a unit in `drift_bodies`.
     if cells.org_slot_count(cell.org) > 1 {
@@ -571,6 +599,7 @@ fn drift_bodies(
     pixels: &mut PixelLayer,
     world_seed: u64,
     tick: u64,
+    anchored: &[u32],
 ) {
     let orgs: Vec<(u32, i8)> = cells
         .iter_orgs()
@@ -587,7 +616,8 @@ fn drift_bodies(
         let Some(env) = body_env(cells, genomes, grid, org_id) else {
             continue;
         };
-        if env.film || env.touching {
+        // Bound roots (Phase 4) and substrate contact hold a body still.
+        if env.film || env.touching || hydrate::is_anchored(anchored, org_id) {
             continue;
         }
         let (all_water, sand_above) = (env.all_water, env.sand_above);
@@ -622,6 +652,7 @@ fn swim_bodies(
     pixels: &mut PixelLayer,
     world_seed: u64,
     tick: u64,
+    anchored: &[u32],
 ) {
     let orgs: Vec<u32> = cells
         .iter_orgs()
@@ -632,7 +663,7 @@ fn swim_bodies(
         let Some(env) = body_env(cells, genomes, grid, org_id) else {
             continue;
         };
-        if env.film || !env.all_water {
+        if env.film || !env.all_water || hydrate::is_anchored(anchored, org_id) {
             continue;
         }
         let h = hash_u64(world_seed, tick, org_id as u64, 0xB2_D2);
@@ -877,6 +908,38 @@ fn metabolise(
     }
     if t_tank > HEAT_DAMAGE_C && tick % 4 == 0 {
         damage = damage.saturating_add(2);
+    }
+    // Desiccation on the air side (§h.1): reduced by wall hardness and by
+    // the better of air humidity and the cell's own hydration.
+    let (vx_here, vy_here) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
+    let seat_here = grid.get_visible(vx_here, vy_here);
+    let on_land = !(seat_here.is_open() && seat_here.sat > 40);
+    if on_land && tick % DESICCATE_EVERY == 0 {
+        let wet = humidity.max(cell.hydration) as u32;
+        let dry = 255u32.saturating_sub(wet);
+        let soft = 255u32.saturating_sub(mc.wall_h as u32);
+        let dmg = (DESICCATE_BASE as u32 * soft * dry / (255 * 255)) as u8;
+        damage = damage.saturating_add(dmg);
+        if cell.age < 4 {
+            out.events.push(SimEvent {
+                kind: ev::LIFE_ON_LAND,
+                arg0: id,
+            });
+        }
+        // A cutting that has rooted into moist sand/soil.
+        if cell.depth == 0
+            && mc.uptake_water >= 2
+            && hydrate::is_rootable(seat_here)
+            && cells.org(cell.org).is_some_and(|o| o.cut)
+        {
+            out.events.push(SimEvent {
+                kind: ev::CUTTING_TOOK_ROOT,
+                arg0: id,
+            });
+            if let Some(o) = cells.org_mut(cell.org) {
+                o.cut = false; // fire once per cutting
+            }
+        }
     }
 
     // ---- scalars and stress
@@ -1353,20 +1416,13 @@ fn try_divide(
         return try_secrete(cells, genomes, grid, pixels, coarse, parent, spec.kind, spec.dir, child_idx, child_reps);
     }
     let immediate = matches!(spec.detach, Detach::Immediate);
-    // Place the daughter adjacent to the footprint on the chosen side. Phase 2
-    // life is aquatic: the seat must be free water. A propagule that finds
-    // air or a neighbour there tries the other cardinal sides instead.
+    // Place the daughter adjacent to the footprint on the chosen side.
+    // Habitable seats: free water, moist air, or (for roots) moist sand/soil
+    // (§h.1). A propagule that finds a blocked seat tries the other sides.
     let vis_h = grid.visible_h() as u32;
+    let child_preview = *genomes.coeffs(genotype, spec.mode);
     let seat_ok = |nx: i32, ny: i32| -> bool {
-        if nx < 0 || ny < 0 || nx >= pixels.w as i32 || ny >= pixels.h as i32 {
-            return false;
-        }
-        if pixels.owner[(ny as usize) * (pixels.w as usize) + nx as usize] != 0 {
-            return false;
-        }
-        let (vx, vy) = pixel_to_phys(nx as u16, ny as u16, vis_h);
-        let seat = grid.get_visible(vx, vy);
-        seat.is_open() && seat.sat > 40
+        hydrate::seat_ok(grid, coarse, pixels, nx, ny, &child_preview)
     };
     let (dx, dy) = spec.dir.delta(cell.heading);
     let mut nx = cell.px as i32 + side_offset(dx, cell.w);

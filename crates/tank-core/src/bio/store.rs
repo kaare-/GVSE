@@ -225,6 +225,10 @@ pub struct OrgRec {
     /// Daughter organisms released (propagules and broods), for inspect.
     #[serde(default)]
     pub children: u32,
+    /// Set when this organism was born as a cut-off fragment (Phase 4);
+    /// a depth-0 root into moist substrate fires "cutting took root".
+    #[serde(default)]
+    pub cut: bool,
 }
 
 /// One organism lifted out of the tank by the scoop (Phase 3):
@@ -407,6 +411,7 @@ impl CellStore {
             born_tick: tick,
             secretions: Vec::new(),
             children: 0,
+            cut: false,
         };
         if let Some(id) = self.org_free.pop() {
             self.orgs[id as usize] = rec;
@@ -969,6 +974,12 @@ impl CellStore {
             generation
         };
         let new_org = self.alloc_org(root_cell, gen, ox, oy, tick);
+        // A fragment (not a brood/propagule generation bump) is a cutting.
+        if !next_gen {
+            if let Some(o) = self.orgs.get_mut(new_org as usize) {
+                o.cut = true;
+            }
+        }
         // Copy slots into the new organism with remapped parents.
         let mut remap: Vec<(u16, u16)> = Vec::with_capacity(members.len());
         let mut new_slots: Vec<Slot> = Vec::with_capacity(members.len());

@@ -722,6 +722,8 @@ pub struct ModeCoeffs {
     pub excrete: u8,
     pub thermo: u8,
     pub thermo_gate: Gate,
+    /// PIGMENT units (colour-crown detector, §h.4).
+    pub pigment: u8,
     /// Per-tick upkeep at full shape (structure excluded; added per area).
     pub upkeep_units_fp_tick: i32,
     pub build_fp: i32,
@@ -782,6 +784,7 @@ impl ModeCoeffs {
             buoy: 0,
             excrete: 0,
             thermo: 0,
+            pigment: 0,
             thermo_gate: Gate::always(),
             upkeep_units_fp_tick: 0,
             build_fp: mode.build_fp(),
@@ -859,7 +862,7 @@ impl ModeCoeffs {
                 }
                 Block::Buoy => c.buoy = c.buoy.saturating_add(eff),
                 Block::Excrete => c.excrete = c.excrete.saturating_add(eff),
-                Block::Pigment => {}
+                Block::Pigment => c.pigment = c.pigment.saturating_add(eff),
                 Block::Thermo => {
                     c.thermo = c.thermo.saturating_add(eff);
                     c.thermo_gate = e.gate;

@@ -2323,3 +2323,118 @@ fn evaporation_lowers_the_surface_slowly_and_top_up_restores_it() {
     assert!(tank.cell_visible(5, 14).sat == 0, "air above the new surface stays dry");
 }
 
+/// 4.4 — hydration conducts along division bonds; a rooted hard-walled
+/// stem stands in dry air where a free soft cell desiccates.
+#[test]
+fn hydration_conducts_and_desiccation_spares_a_rooted_stem() {
+    use crate::bio::Genome;
+    use crate::consts::MOIST_SAT;
+    let mut tank = Tank::try_new(11, 24, 24).unwrap();
+    tank.set_lambda_scale_q8(0);
+    // Half-filled: sand bed, water to vy 8, air above.
+    for vx in 0..24 {
+        for vy in 0..4 {
+            place(&mut tank, vx, vy, Cell::sand());
+        }
+        for vy in 4..8 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    // Keep the sand under the plant at field capacity (won't drain below
+    // retain, which is still ≥ MOIST_SAT).
+    for vx in 10..14 {
+        let mut c = tank.cell_visible(vx, 3);
+        c.sat = 200;
+        place(&mut tank, vx, 3, c);
+    }
+    let (hx, hy) = (12u16 * 3 + 1, (23 - 3) * 3 + 1);
+    let root = tank.seed_genome_at(hx, hy, Genome::rooting()).expect("root");
+    let (ax, ay) = (6u16 * 3 + 1, (23 - 20) * 3 + 1);
+    let airy = tank.seed_genome_at(ax, ay, Genome::algae()).expect("air");
+    let root_org = tank.cell(root).unwrap().org;
+    if let Some(o) = tank.cells_mut_for_test().org_mut(root_org) {
+        o.cut = true;
+    }
+    for org in [root, airy] {
+        let o = tank.cell(org).unwrap().org;
+        tank.feed_org_full(o);
+    }
+    // Force a hydration refresh (tick 0) and read.
+    tank.tick(&day());
+    let h_root = tank.cell(root).map(|c| c.hydration).unwrap_or(0);
+    assert!(h_root >= MOIST_SAT, "root hydration {h_root}");
+    let mut land = false;
+    for _ in 0..400 {
+        tank.tick(&day());
+        // Re-wet the sand so seepage into the water column cannot dry it.
+        for vx in 10..14 {
+            let mut c = tank.cell_visible(vx, 3);
+            if c.sat < 160 {
+                c.sat = 200;
+                place(&mut tank, vx, 3, c);
+            }
+        }
+        while let Some(e) = tank.poll_event() {
+            if e.kind == crate::bio::ev::LIFE_ON_LAND || e.kind == crate::bio::ev::MS_LIFE_ON_LAND {
+                land = true;
+            }
+        }
+    }
+    assert!(land, "life on land fires for an air-side cell");
+    assert!(tank.cell(root).is_some(), "the rooted stem survives dry air");
+    if let Some(c) = tank.cell(airy) {
+        assert!(c.damage > 0, "free air cell takes desiccation damage ({})", c.damage);
+    }
+}
+
+/// 4.4 — roots co-occupy moist sand, bind it (≥5 px), and dig cuts them.
+#[test]
+fn roots_bind_sand_and_dig_cuts_them() {
+    use crate::bio::Genome;
+    use crate::tools::ToolEvent;
+    let mut tank = Tank::try_new(12, 16, 16).unwrap();
+    tank.set_lambda_scale_q8(0);
+    for vx in 0..16 {
+        for vy in 0..6 {
+            let mut c = Cell::sand();
+            c.sat = 255;
+            place(&mut tank, vx, vy, c);
+        }
+    }
+    // Seed five rooting cells into one physics cell so it binds.
+    let (vx, vy) = (8i32, 3i32);
+    let mut ids = Vec::new();
+    for i in 0..5u16 {
+        let px = vx as u16 * 3 + (i % 3);
+        let py = (15 - vy as u16) * 3 + (i / 3);
+        if let Some(id) = tank.seed_genome_at(px, py, Genome::rooting()) {
+            // Force root mode coeffs by ensuring uptake_water ≥ 2 (preset).
+            ids.push(id);
+            let o = tank.cell(id).unwrap().org;
+            tank.feed_org_full(o);
+        }
+    }
+    assert!(ids.len() >= 5, "seeded {}", ids.len());
+    tick_n(&mut tank, 2);
+    assert!(
+        tank.cell_visible(vx, vy).is_bound(),
+        "≥5 root pixels bind the sand"
+    );
+    let before = tank.live_cells();
+    let litter_before = tank.litter_total();
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 2, // erase = dig
+            material: 0,
+            x: vx as u16,
+            y: vy as u16,
+            r: 0,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert!(tank.live_cells() < before, "dig cuts roots");
+    assert!(tank.litter_total() > litter_before, "cut roots become litter");
+    assert!(!tank.cell_visible(vx, vy).is_bound(), "bound flag clears");
+}

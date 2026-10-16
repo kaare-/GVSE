@@ -8,6 +8,7 @@
 pub mod chem;
 pub mod fields;
 pub mod genome;
+pub mod hydrate;
 pub mod minerals;
 pub mod profile;
 pub mod program;

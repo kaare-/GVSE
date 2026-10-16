@@ -499,6 +499,11 @@ impl Tank {
         self.cells.get(id).and_then(|c| self.cells.org(c.org))
     }
 
+    #[cfg(test)]
+    pub(crate) fn cells_mut_for_test(&mut self) -> &mut CellStore {
+        &mut self.cells
+    }
+
     pub fn cells(&self) -> &CellStore {
         &self.cells
     }
@@ -1974,7 +1979,7 @@ impl Tank {
     fn mark_tissue(&mut self) {
         for &(vx, vy) in &self.tissue_marks {
             let mut c = self.grid.get_visible(vx, vy);
-            c.flags &= !Cell::TISSUE;
+            c.flags &= !(Cell::TISSUE | Cell::BOUND);
             self.grid.set_visible(vx, vy, c);
         }
         self.tissue_marks.clear();
@@ -2018,6 +2023,19 @@ impl Tank {
             c.flags |= Cell::TISSUE;
             self.grid.set_visible(vx, vy, c);
             self.tissue_marks.push((vx, vy));
+        }
+        // Bound sand: ≥5 root pixels co-occupy a sand/soil cell (§h.1).
+        let (bound, _) = bio::hydrate::bound_cells(&self.cells, &self.genomes, &self.grid, &self.pixels);
+        for (vx, vy) in bound {
+            let mut c = self.grid.get_visible(vx, vy);
+            if c.is_open() {
+                continue;
+            }
+            c.flags |= Cell::BOUND;
+            self.grid.set_visible(vx, vy, c);
+            if !self.tissue_marks.contains(&(vx, vy)) {
+                self.tissue_marks.push((vx, vy));
+            }
         }
     }
 
@@ -2127,6 +2145,10 @@ impl Tank {
                 let _ = self.clean_at(tool.x as i32, tool.y as i32, tool.r as i32);
                 continue;
             }
+            // Digging through rooted sand cuts the roots (§h.1 / K4#5).
+            if tool.kind == 1 || tool.kind == 2 {
+                self.cut_roots_under(tool.x as i32, tool.y as i32, tool.r as i32);
+            }
             if !need_push {
                 self.undo.push(tools::capture(&self.grid));
                 if self.undo.len() > UNDO_CAP {
@@ -2136,6 +2158,62 @@ impl Tank {
             }
             let _ = tools::apply_one(&mut self.grid, tool);
         }
+    }
+
+    /// Kill root cells whose pixels sit in the brush (they become soft
+    /// litter in place). Used by dig/erase and later by the cut tool.
+    pub fn cut_roots_under(&mut self, vx: i32, vy: i32, r: i32) -> u32 {
+        let r = r.max(0);
+        let vis_h = self.grid.visible_h();
+        let mut kill: Vec<u32> = Vec::new();
+        for (id, c) in self.cells.iter_alive() {
+            if self.genomes.coeffs(c.genotype, c.mode).uptake_water < 2 {
+                continue;
+            }
+            let cx = c.px as i32 / 3;
+            let cy = vis_h - 1 - c.py as i32 / 3;
+            let (dx, dy) = (cx - vx, cy - vy);
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let seat = self.grid.get_visible(cx, cy);
+            if seat.is_open() {
+                continue;
+            }
+            kill.push(id);
+        }
+        let mut n = 0u32;
+        for id in kill {
+            let Some(c) = self.cells.get(id).copied() else {
+                continue;
+            };
+            let mc = self.genomes.coeffs(c.genotype, c.mode);
+            let structure = mc.birth_fp as i64 * c.area() as i64 * (255 - c.damage as i64) / 255;
+            let soft = (structure as i32 + c.energy.max(0)).max(0);
+            let units = (soft / crate::consts::GLUCOSE_UNIT_FP) as u32;
+            let idx = (c.py as usize) * (self.pixels.w as usize) + c.px as usize;
+            if units > 0 {
+                bio::fields::add_litter(
+                    &mut self.pixels,
+                    idx,
+                    units.min(255) as u8,
+                    bio::chem::LITTER_SOFT_CODE,
+                );
+            }
+            let _ = self.cells.kill(
+                &mut self.genomes,
+                &mut self.pixels,
+                id,
+                false,
+                self.tick_count,
+                None,
+            );
+            n += 1;
+        }
+        if n > 0 {
+            self.light_dirty = true;
+        }
+        n
     }
 }
 

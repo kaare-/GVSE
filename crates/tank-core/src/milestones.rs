@@ -27,6 +27,10 @@ pub const NEW_COLOUR_COOLDOWN: u64 = 1800;
 pub const SCAN_EVERY: u64 = 64;
 /// A cell this large (pixel area) is a "giant cell".
 pub const GIANT_AREA: i32 = 16;
+/// Pigment units that make a tip "pigment-dominant" (weight ≥ 0.4).
+pub const CROWN_PIGMENT: u8 = 4;
+/// Minimum pigment-dominant tips for a colour crown.
+pub const CROWN_TIPS: usize = 3;
 /// A glucose-fed lineage this many generations deep is a heterotroph.
 pub const HETEROTROPH_GENERATIONS: u32 = 3;
 /// "Tank is lifeless" after this many ticks without a living cell.
@@ -127,6 +131,9 @@ impl Milestones {
                 ev::SIGNALLING => self.fire_once(ev::MS_SIGNALLING, e.arg0, out),
                 ev::MOVED => self.fire_once(ev::MS_MOVED, e.arg0, out),
                 ev::WARM_BLOODED => self.fire_once(ev::MS_WARM_BLOODED, e.arg0, out),
+                ev::LIFE_ON_LAND => self.fire_once(ev::MS_LIFE_ON_LAND, e.arg0, out),
+                ev::CUTTING_TOOK_ROOT => self.fire_once(ev::MS_CUTTING_TOOK_ROOT, e.arg0, out),
+                ev::COLOUR_CROWN => self.fire_once(ev::MS_COLOUR_CROWN, e.arg0, out),
                 ev::HETEROTROPH => {
                     // A lineage living on glucose this many generations deep.
                     let deep = cells
@@ -163,6 +170,15 @@ impl Milestones {
             if !self.has_fired(ev::MS_GIANT) {
                 if let Some((id, _)) = cells.iter_alive().find(|(_, c)| c.area() >= GIANT_AREA) {
                     self.fire_once(ev::MS_GIANT, id, out);
+                }
+            }
+            if !self.has_fired(ev::MS_COLOUR_CROWN) {
+                if let Some(org) = colour_crown(cells, genomes) {
+                    out.push_back(SimEvent {
+                        kind: ev::COLOUR_CROWN,
+                        arg0: org,
+                    });
+                    self.fire_once(ev::MS_COLOUR_CROWN, org, out);
                 }
             }
         }
@@ -268,4 +284,38 @@ pub fn colour_distance(genomes: &GenomeStore, a: u32, b: u32) -> u32 {
     let ca = genotype_colour(genomes, a);
     let cb = genotype_colour(genomes, b);
     ca.iter().zip(cb.iter()).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs()).sum()
+}
+
+/// A colour crown (§h.4): ≥ `CROWN_TIPS` pigment-dominant tip cells
+/// (`depth ≥ 3`, no live child slots) on a body whose other cells are
+/// PHOTO-dominant.
+fn colour_crown(cells: &CellStore, genomes: &GenomeStore) -> Option<u32> {
+    for (org_id, o) in cells.iter_orgs() {
+        if o.n_alive < (CROWN_TIPS as u16) + 1 {
+            continue;
+        }
+        let mut tips = 0usize;
+        let mut photo = 0usize;
+        for (si, s) in o.slots.iter().enumerate() {
+            if s.cell == crate::bio::store::NONE {
+                continue;
+            }
+            let Some(c) = cells.get(s.cell) else {
+                continue;
+            };
+            let mc = genomes.coeffs(c.genotype, c.mode);
+            let has_child = o.slots.iter().any(|ch| {
+                ch.parent_slot == si as u16 && ch.cell != crate::bio::store::NONE
+            });
+            if c.depth >= 3 && !has_child && mc.pigment >= CROWN_PIGMENT {
+                tips += 1;
+            } else if mc.photo > mc.pigment {
+                photo += 1;
+            }
+        }
+        if tips >= CROWN_TIPS && photo > 0 {
+            return Some(org_id);
+        }
+    }
+    None
 }

@@ -214,3 +214,23 @@ pub const DEW_FADE: u8 = 2;
 pub const EVAP_EVERY: u64 = 300;
 pub const EVAP_SAT_STEP: u8 = 1;
 pub const EVAP_STOP_H: u8 = 250;
+
+// ---- Phase 4: hydration, roots, desiccation (`cell-language.md` §h.1) ----
+
+/// Hydration is recomputed this often (ticks); also on topology change.
+pub const HYDRATION_EVERY: u64 = 32;
+/// Drop per division-bond hop when the conductor is soft-walled.
+pub const HYDRATION_DROP: u8 = 16;
+/// Drop when the conductor has WALL h ≥ 0.5 (hard-walled xylem).
+pub const HYDRATION_DROP_HARD: u8 = 8;
+/// Baseline hydration from contact with moist substrate (no UPTAKE).
+pub const HYDRATION_CONTACT: u8 = 128;
+/// Air humidity (or substrate moisture) at or above this is habitable.
+pub const HABITABLE_H: u8 = 80;
+/// Desiccation: every `DESICCATE_EVERY` ticks a dry air-side cell takes
+/// `DESICCATE_BASE · (1 − h_wall) · (1 − max(humidity, hydration)/255)`
+/// damage (Q8 factors).
+pub const DESICCATE_EVERY: u64 = 8;
+pub const DESICCATE_BASE: u8 = 4;
+/// A physics cell with this many root pixels is *bound* (no slump).
+pub const ROOT_BOUND_PIXELS: u8 = 5;
