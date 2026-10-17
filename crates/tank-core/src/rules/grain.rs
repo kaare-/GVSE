@@ -1,8 +1,8 @@
 //! Grain fall and repose.
 //!
 //! A mobile grain swaps with the air (wet or dry) directly below, so
-//! sand sinks through water and the water is displaced upward. Stone
-//! and bedrock never move.
+//! sand sinks through water and the water is displaced upward. Bedrock
+//! never moves. Stone and loose rock fall, slump, and turn as they go.
 //!
 //! Repose: a supported grain slides one cell down-diagonal when the
 //! neighbour column drops by more than [`crate::cell::stable_step`].
@@ -24,7 +24,11 @@ pub fn fall(grid: &mut PhysicsGrid, active: &ActiveRect) {
             if !below.is_air() {
                 continue;
             }
-            grid.set(x, y - 1, cell);
+            let mut moving = cell;
+            if moving.tumbles() {
+                moving.spin();
+            }
+            grid.set(x, y - 1, moving);
             grid.set(x, y, below);
         }
     }
@@ -66,7 +70,11 @@ pub fn repose(grid: &mut PhysicsGrid, active: &ActiveRect, seed: u64, tick: u64,
             let nx = x + dx;
             let ny = y - 1;
             let dest = grid.get(nx, ny);
-            grid.set(nx, ny, cell);
+            let mut moving = cell;
+            if moving.tumbles() {
+                moving.spin();
+            }
+            grid.set(nx, ny, moving);
             grid.set(x, y, dest);
         }
     }

@@ -36,6 +36,7 @@ final class TankMetalView: UIView {
         float2 lensCenter;
         float lensRadius;
         float lensScale;
+        float aspect;
         float _pad;
     };
     vertex VOut vs(uint vid [[vertex_id]]) {
@@ -56,13 +57,20 @@ final class TankMetalView: UIView {
         }
         float2 sampleUV = p;
         if (u.lensRadius > 0.0) {
+            // Distance in screen pixels, not raw UV, so a tall phone
+            // does not stretch the glass into an oval.
             float2 d = in.uv - u.lensCenter;
-            if (length(d) < u.lensRadius) {
-                sampleUV = p + (p - ((u.lensCenter - u.window.xy) / u.window.zw)) * (1.0 / u.lensScale - 1.0);
+            d.x *= max(u.aspect, 0.01);
+            float dist = length(d);
+            if (dist < u.lensRadius) {
+                float2 center = (u.lensCenter - u.window.xy) / u.window.zw;
+                // Zoom about the point under the finger. The centre of the
+                // glass shows that pixel; the rim shows the neighbourhood.
+                sampleUV = center + (p - center) / max(u.lensScale, 1.0);
                 sampleUV = clamp(sampleUV, float2(0.0), float2(1.0));
                 float4 c = tex.sample(smp, sampleUV);
-                float rim = smoothstep(u.lensRadius, u.lensRadius * 0.92, length(d));
-                return mix(c, float4(0.85, 0.9, 1.0, 1.0), rim * 0.25);
+                float rim = smoothstep(u.lensRadius, u.lensRadius * 0.9, dist);
+                return mix(c, float4(0.9, 0.95, 1.0, 1.0), rim * 0.35);
             }
         }
         return tex.sample(smp, sampleUV);
@@ -120,15 +128,19 @@ final class TankMetalView: UIView {
             lensCenter: SIMD2<Float>(0, 0),
             lensRadius: 0,
             lensScale: 3,
+            aspect: Float(drawableW / drawableH),
             pad: 0
         )
         if let lens = magnifier {
+            // Shader uv.y is 0 at the top of the view, same as UIKit.
             uniforms.lensCenter = SIMD2(
                 Float(lens.center.x * scale / drawableW),
-                Float(1.0 - lens.center.y * scale / drawableH)
+                Float(lens.center.y * scale / drawableH)
             )
-            uniforms.lensRadius = Float(56 * scale / min(drawableW, drawableH))
+            let radiusPx = max(lens.radius, 24) * scale
+            uniforms.lensRadius = Float(radiusPx / drawableH)
             uniforms.lensScale = 3
+            uniforms.aspect = Float(drawableW / drawableH)
         }
         guard let drawable = metalLayer.nextDrawable(),
               let buffer = queue.makeCommandBuffer(),
@@ -167,6 +179,7 @@ final class TankMetalView: UIView {
         var lensCenter: SIMD2<Float>
         var lensRadius: Float
         var lensScale: Float
+        var aspect: Float
         var pad: Float
     }
 

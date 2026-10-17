@@ -136,6 +136,30 @@ impl Cell {
         self.flags = (self.flags & !0b0000_0011) | (variant & 0b0000_0011);
     }
 
+    /// Bits 2–3: which way a cobble is facing. Render only; advanced
+    /// one turn each time the cell falls or slumps.
+    pub const TUMBLE: u8 = 0b0000_1100;
+
+    #[inline]
+    pub fn tumble(self) -> u8 {
+        (self.flags & Self::TUMBLE) >> 2
+    }
+
+    #[inline]
+    pub fn spin(&mut self) {
+        let n = self.tumble().wrapping_add(1) & 0b11;
+        self.flags = (self.flags & !Self::TUMBLE) | (n << 2);
+    }
+
+    /// Cobbles that should show a turn when they move.
+    #[inline]
+    pub fn tumbles(self) -> bool {
+        matches!(
+            self.id(),
+            MaterialId::Stone | MaterialId::LooseRock | MaterialId::LooseLimestone
+        )
+    }
+
     /// Rock surface film (0..=255) stored in `pad`. Sand uses `sat`.
     #[inline]
     pub fn rock_film(self) -> u8 {
@@ -178,9 +202,8 @@ impl Cell {
     }
 }
 
-/// Grains that fall and slump. Player rocks are static (Phase 1.7):
-/// Stone and the other competent rocks never move. LooseRock is kept
-/// as static cobble in the tank so sand can pile against it.
+/// Grains that fall and slump. Bedrock and the bedded limestones stay
+/// put. Stone and loose rock are cobbles here: they drop, pile, and tumble.
 pub fn is_mobile_grain(id: MaterialId) -> bool {
     matches!(
         id,
@@ -191,6 +214,9 @@ pub fn is_mobile_grain(id: MaterialId) -> bool {
             | MaterialId::Soil
             | MaterialId::Organic
             | MaterialId::Snow
+            | MaterialId::Stone
+            | MaterialId::LooseRock
+            | MaterialId::LooseLimestone
     )
 }
 
@@ -248,7 +274,13 @@ impl MatInfo {
             (props.permeability / 16).max(1)
         };
         let retain = ((capacity as u16) * (props.field_capacity as u16) / 255).min(255) as u8;
-        let step = stable_step_of(props.repose_rise_m);
+        // Painted stone is a cobble in the tank, not a cliff. A step of 1
+        // lets a pile slump instead of stacking in a perfect column.
+        let step = if id == MaterialId::Stone {
+            1
+        } else {
+            stable_step_of(props.repose_rise_m)
+        };
         Self {
             capacity,
             rate,
@@ -276,7 +308,8 @@ pub fn retained_sat(id: MaterialId) -> u8 {
 /// GvsE computes `(repose_rise_m / 0.25 m).floor()`, which is 0 for
 /// sand because a column there is a quarter-metre wide. Tank cells are
 /// about a millimetre, so a finite repose becomes one cell of drop
-/// (a readable ~45° pile). Infinite repose never slumps.
+/// (a readable ~45° pile). Stone is forced to that same step so painted
+/// rock piles. Bedrock and the other infinite-repose rocks never slump.
 pub fn stable_step(id: MaterialId) -> i32 {
     mat_info(id).step
 }

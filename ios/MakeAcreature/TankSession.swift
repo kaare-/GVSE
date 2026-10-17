@@ -56,6 +56,13 @@ final class TankSession: ObservableObject {
     @Published var fillLevel = 0.55
     @Published var slot = 0
     @Published var swirl = false
+    /// System Reduce Motion. Swirl stays off while this is set.
+    @Published private(set) var reduceMotion = UIAccessibility.isReduceMotionEnabled
+    var effectiveSwirl: Bool { swirl && !reduceMotion }
+    /// Pause the sim when a big evolution milestone fires (Phase 6).
+    @Published var pauseOnEvent = false
+    @Published var soundOn = true
+    @Published var hapticsOn = true
     /// Freeze the tank clock at midday (Phase 4 setting).
     @Published var alwaysDay = false
     /// Base temperature °C (default 15).
@@ -73,8 +80,17 @@ final class TankSession: ObservableObject {
     /// Short pixel-font toast ("NO ROOM", "ARCHIVED").
     @Published private(set) var hint: String?
     @Published private(set) var liveCells: UInt32 = 0
+    /// Door sign text (Phase 6 room).
+    @Published private(set) var doorName: String = ""
+    /// Favourite archive specimen id for the room frame.
+    @Published private(set) var favouriteId: UInt64 = 0
+    /// Session event log (newest first).
+    @Published private(set) var eventLog: [EventLogEntry] = []
+    @Published private(set) var showStartGuide = false
 
     let archive = ArchiveStore()
+    private var eventLogSerial: UInt64 = 0
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
 
     private var handle: OpaquePointer?
     private var carried: OpaquePointer?
@@ -90,6 +106,7 @@ final class TankSession: ObservableObject {
     private var lastGravY: Float = -1
     private var frame = 0
     private var hintToken = 0
+    private var reduceMotionObserver: NSObjectProtocol?
 
     private var docs: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -103,11 +120,25 @@ final class TankSession: ObservableObject {
         TelemetryClient.installCrashHook()
         slot = UserDefaults.standard.integer(forKey: "activeSlot")
         swirl = UserDefaults.standard.bool(forKey: "swirlEnabled")
+        pauseOnEvent = UserDefaults.standard.bool(forKey: "pauseOnEvent")
+        soundOn = UserDefaults.standard.object(forKey: "soundOn") as? Bool ?? true
+        hapticsOn = UserDefaults.standard.object(forKey: "hapticsOn") as? Bool ?? true
         alwaysDay = UserDefaults.standard.bool(forKey: "alwaysDay")
         let savedBase = UserDefaults.standard.double(forKey: "tBase")
         tBase = savedBase == 0 ? 15 : savedBase
         let savedLight = UserDefaults.standard.double(forKey: "lightSlider")
         lightSlider = savedLight == 0 ? 1 : min(1.5, max(0.25, savedLight))
+        doorName = UserDefaults.standard.string(forKey: "doorName") ?? ""
+        favouriteId = UInt64(UserDefaults.standard.integer(forKey: "favouriteId"))
+        showStartGuide = !UserDefaults.standard.bool(forKey: "startGuideDone")
+        PixelKeyboard.applyAppearance()
+        reduceMotionObserver = NotificationCenter.default.addObserver(
+            forName: UIAccessibility.reduceMotionStatusDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reduceMotion = UIAccessibility.isReduceMotionEnabled
+        }
         loadSlot(slot)
         consent = UserDefaults.standard.bool(forKey: "telemetryConsent")
         if let handle {
@@ -116,7 +147,11 @@ final class TankSession: ObservableObject {
                 tank_telemetry_kill(handle, 1)
             }
             TelemetryClient.flushPendingCrash(handle: handle, consent: consent)
+            AmbientAudio.shared.setTankSeed(tank_seed(handle))
         }
+        AmbientAudio.shared.setMuted(!soundOn)
+        if soundOn { AmbientAudio.shared.startIfNeeded() }
+        haptic.prepare()
     }
 
     deinit {
@@ -137,6 +172,7 @@ final class TankSession: ObservableObject {
         accumulator = 0
         running = true
         startMotion()
+        if soundOn { AmbientAudio.shared.startIfNeeded() }
         guard link == nil else { return }
         let pump = DisplayPump()
         pump.onFrame = { [weak self] dt in self?.advance(dt) }
@@ -157,8 +193,18 @@ final class TankSession: ObservableObject {
         link = nil
         pump = nil
         motion.stopDeviceMotionUpdates()
+        AmbientAudio.shared.stop()
         dropBucket()
         saveCurrent()
+    }
+
+    /// Resume after pause-on-event (also used from the HUD).
+    func unpauseFromEvent() {
+        if !running {
+            resume()
+            if soundOn { AmbientAudio.shared.startIfNeeded() }
+            showHint("RUNNING")
+        }
     }
 
     func toggleConsent() {
@@ -265,6 +311,129 @@ final class TankSession: ObservableObject {
         UserDefaults.standard.set(alwaysDay, forKey: "alwaysDay")
     }
 
+    func togglePauseOnEvent() {
+        pauseOnEvent.toggle()
+        UserDefaults.standard.set(pauseOnEvent, forKey: "pauseOnEvent")
+    }
+
+    func toggleSound() {
+        soundOn.toggle()
+        UserDefaults.standard.set(soundOn, forKey: "soundOn")
+        AmbientAudio.shared.setMuted(!soundOn)
+    }
+
+    func toggleHaptics() {
+        hapticsOn.toggle()
+        UserDefaults.standard.set(hapticsOn, forKey: "hapticsOn")
+    }
+
+    func setDoorName(_ name: String) {
+        doorName = String(name.prefix(24))
+        UserDefaults.standard.set(doorName, forKey: "doorName")
+    }
+
+    var favouriteSpecimen: ArchivedSpecimen? {
+        archive.specimens.first { $0.id == favouriteId }
+    }
+
+    func cycleFavourite() {
+        let list = archive.specimens
+        guard !list.isEmpty else {
+            showHint("ARCHIVE FIRST")
+            return
+        }
+        if let i = list.firstIndex(where: { $0.id == favouriteId }) {
+            favouriteId = list[(i + 1) % list.count].id
+        } else {
+            favouriteId = list[0].id
+        }
+        UserDefaults.standard.set(Int(favouriteId), forKey: "favouriteId")
+        showHint("FAVOURITE SET")
+    }
+
+    func clearFavourite() {
+        favouriteId = 0
+        UserDefaults.standard.set(0, forKey: "favouriteId")
+    }
+
+    func dismissStartGuide(skipped: Bool) {
+        showStartGuide = false
+        UserDefaults.standard.set(true, forKey: "startGuideDone")
+        if let handle {
+            tank_telemetry_push(handle, skipped ? 60 : 61, 0)
+        }
+    }
+
+    func showPhotoHint(_ text: String) {
+        showHint(text)
+    }
+
+    /// RGBA tank buffer → nearest-neighbour UIImage.
+    func tankSnapshot(scale: Int = 2) -> UIImage? {
+        guard let handle else { return nil }
+        var w: UInt32 = 0
+        var h: UInt32 = 0
+        guard let ptr = tank_pixels(handle, &w, &h), w > 0, h > 0 else { return nil }
+        return rgbaImage(ptr: ptr, width: Int(w), height: Int(h), scale: max(1, scale))
+    }
+
+    /// Crop around the inspected organism bbox.
+    func creatureSnapshot(scale: Int = 4) -> UIImage? {
+        guard let handle, let inspected, inspected.alive else { return nil }
+        var w: UInt32 = 0
+        var h: UInt32 = 0
+        guard let ptr = tank_pixels(handle, &w, &h), w > 0, h > 0 else { return nil }
+        let pw = Int(w)
+        let ph = Int(h)
+        var x0u: UInt16 = 0, y0u: UInt16 = 0, x1u: UInt16 = 0, y1u: UInt16 = 0
+        guard tank_org_bbox(handle, inspected.org, &x0u, &y0u, &x1u, &y1u) != 0, x1u > x0u, y1u > y0u else {
+            return tankSnapshot(scale: scale)
+        }
+        let pad = 4
+        let x0 = max(0, Int(x0u) - pad)
+        let y0 = max(0, Int(y0u) - pad)
+        let x1 = min(pw, Int(x1u) + pad)
+        let y1 = min(ph, Int(y1u) + pad)
+        let cw = max(1, x1 - x0)
+        let ch = max(1, y1 - y0)
+        var crop = [UInt8](repeating: 0, count: cw * ch * 4)
+        for row in 0..<ch {
+            let src = ptr.advanced(by: ((y0 + row) * pw + x0) * 4)
+            _ = crop.withUnsafeMutableBytes { dst in
+                memcpy(dst.baseAddress!.advanced(by: row * cw * 4), src, cw * 4)
+            }
+        }
+        return crop.withUnsafeBytes { raw in
+            rgbaImage(
+                ptr: raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                width: cw,
+                height: ch,
+                scale: max(1, scale)
+            )
+        }
+    }
+
+    private func rgbaImage(ptr: UnsafePointer<UInt8>, width: Int, height: Int, scale: Int) -> UIImage? {
+        let data = Data(bytes: ptr, count: width * height * 4)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                  width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                  bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+              )
+        else { return nil }
+        let size = CGSize(width: width * scale, height: height * scale)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            ctx.cgContext.interpolationQuality = .none
+            ctx.cgContext.translateBy(x: 0, y: size.height)
+            ctx.cgContext.scaleBy(x: 1, y: -1)
+            ctx.cgContext.draw(cg, in: CGRect(origin: .zero, size: size))
+        }
+    }
+
     func nudgeBaseTemp(_ delta: Double) {
         tBase = min(35, max(5, tBase + delta))
         UserDefaults.standard.set(tBase, forKey: "tBase")
@@ -355,7 +524,7 @@ final class TankSession: ObservableObject {
 
     private func scoop(at point: CGPoint) {
         guard let handle, carried == nil, let px = pixel(at: point) else { return }
-        let r = Int32(max(brush, 1) * 3)
+        let r = Int32(max(brush, 1) * 6)
         guard let bucket = tank_scoop(handle, Int32(px.x), Int32(px.y), r) else {
             showHint("EMPTY")
             return
@@ -418,7 +587,7 @@ final class TankSession: ObservableObject {
             // Portrait: x is left/right tilt.
             self.lastGravX = Float(g.x)
             self.lastGravY = Float(g.y)
-            if self.swirl {
+            if self.effectiveSwirl {
                 let deg = Double(g.x) * 4.0
                 self.cameraTiltDegrees = max(-4, min(4, deg))
                 self.metal?.cameraTiltDegrees = self.cameraTiltDegrees
@@ -447,7 +616,7 @@ final class TankSession: ObservableObject {
             return
         case .look:
             magnifierPoint = point
-            metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
+            metal?.magnifier = magnifier(at: point)
             inspect(at: point, ended: ended)
             if ended { clearLensSoon() }
             return
@@ -457,16 +626,25 @@ final class TankSession: ObservableObject {
                 if carried == nil { scoop(at: point) } else { release(at: point) }
             }
             magnifierPoint = point
-            metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
+            metal?.magnifier = magnifier(at: point)
             if ended { clearLensSoon() }
             return
         default:
             break
         }
         magnifierPoint = point
-        metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
+        metal?.magnifier = magnifier(at: point)
         queueStroke(at: point)
         if ended { clearLensSoon() }
+    }
+
+    /// Round glass under the finger. Radius follows the GLASS / SCOOP slider.
+    private func magnifier(at point: CGPoint) -> MagnifierState {
+        MagnifierState(
+            center: point,
+            pinned: magnifierPinned,
+            radius: 28 + CGFloat(max(brush, 1)) * 12
+        )
     }
 
     private func clearLensSoon() {
@@ -639,6 +817,42 @@ final class TankSession: ObservableObject {
         }
     }
 
+    /// Drain the sim event queue into toasts, log, audio, haptics.
+    private func drainEvents(_ handle: OpaquePointer) {
+        var pause = false
+        let tick = tank_tick_count(handle)
+        while true {
+            let ev = tank_poll_event(handle)
+            if ev.kind == 0 { break }
+            if let msg = EventToast.message(kind: ev.kind) {
+                showHint(msg)
+                eventLogSerial &+= 1
+                let entry = EventLogEntry(id: eventLogSerial, tick: tick, kind: ev.kind, message: msg)
+                eventLog.insert(entry, at: 0)
+                if eventLog.count > 200 { eventLog.removeLast(eventLog.count - 200) }
+                if let tip = GuideTip.contextual(kind: ev.kind), showStartGuide == false {
+                    // Soft tip after first milestones once the guide is done.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        self?.showHint(tip)
+                    }
+                }
+            }
+            if let sting = EventToast.soundTrigger(kind: ev.kind) {
+                AmbientAudio.shared.playSting(sting)
+            }
+            if hapticsOn, EventToast.shouldPause(kind: ev.kind) {
+                haptic.impactOccurred()
+            }
+            if pauseOnEvent && EventToast.shouldPause(kind: ev.kind) {
+                pause = true
+            }
+        }
+        if pause {
+            running = false
+            showHint(hint.map { "\($0) · PAUSED" } ?? "PAUSED")
+        }
+    }
+
     // MARK: frame
 
     private func advance(_ dt: CFTimeInterval) {
@@ -646,7 +860,7 @@ final class TankSession: ObservableObject {
         accumulator += dt
         var steps = 0
         while accumulator >= step && steps < 4 {
-            var tools = pendingTools
+            let tools = pendingTools
             pendingTools.removeAll(keepingCapacity: true)
             let flash = tool.isFeed ? (0, 0, 0) : flashlightCell()
             tools.withUnsafeBufferPointer { buf in
@@ -655,7 +869,7 @@ final class TankSession: ObservableObject {
                     grav_y: lastGravY,
                     paused: 0,
                     always_day: alwaysDay ? 1 : 0,
-                    swirl: swirl ? 1 : 0,
+                    swirl: effectiveSwirl ? 1 : 0,
                     _pad1: 0,
                     light_slider: Float(lightSlider),
                     t_base: Float(tBase),
@@ -667,6 +881,7 @@ final class TankSession: ObservableObject {
                 )
                 tank_tick(handle, &input)
             }
+            drainEvents(handle)
             accumulator -= step
             steps += 1
         }
@@ -689,6 +904,7 @@ final class TankSession: ObservableObject {
             refreshInspect()
             if frame % 30 == 0 {
                 liveCells = tank_live_cells(handle)
+                AmbientAudio.shared.setIntensity(liveCells: liveCells)
             }
             temperatureC = tank_temperature(handle)
         }
@@ -702,6 +918,8 @@ final class TankSession: ObservableObject {
 struct MagnifierState {
     var center: CGPoint
     var pinned: Bool
+    /// Glass radius in view points.
+    var radius: CGFloat
 }
 
 private final class DisplayPump: NSObject {

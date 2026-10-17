@@ -44,11 +44,16 @@ pub const N_BLOCKS: u8 = 21;
 pub const UPTAKE_GLUCOSE: u8 = 0;
 pub const UPTAKE_MINERAL: u8 = 1;
 pub const UPTAKE_WATER: u8 = 2;
-/// SENSOR kinds (`param_a % 3`): light contrast along the heading, touch,
-/// dissolved-glucose contrast along the heading.
+/// SENSOR kinds (`param_a % 7`): light / touch / chem / colour / temp /
+/// humidity / gravity. Colour uses `param_b` as the target hue (§h.5).
 pub const SENSOR_LIGHT: u8 = 0;
 pub const SENSOR_TOUCH: u8 = 1;
 pub const SENSOR_CHEM: u8 = 2;
+pub const SENSOR_COLOUR: u8 = 3;
+pub const SENSOR_TEMP: u8 = 4;
+pub const SENSOR_HUMIDITY: u8 = 5;
+pub const SENSOR_GRAVITY: u8 = 6;
+pub const SENSOR_KIND_MOD: u8 = 7;
 
 impl Block {
     pub fn from_u8(v: u8) -> Option<Self> {
@@ -610,7 +615,7 @@ impl Mode {
         e.param_b = (hash_u64(seed, salt, 6, 0xB1_25) % 64) as u8 + 8;
         match block {
             Block::Uptake => e.param_a %= 3,
-            Block::Sensor => e.param_a %= 3,
+            Block::Sensor => e.param_a %= SENSOR_KIND_MOD,
             Block::Wall => e.param_b = 0,
             _ => {}
         }
@@ -712,6 +717,8 @@ pub struct ModeCoeffs {
     pub receptor_key: u8,
     pub sensor: u8,
     pub sensor_kind: u8,
+    /// Target hue for SENSOR(colour); ignored by other kinds.
+    pub sensor_hue: u8,
     pub nerve: u8,
     pub muscle: u8,
     pub cilia: u8,
@@ -775,6 +782,7 @@ impl ModeCoeffs {
             receptor_key: 0,
             sensor: 0,
             sensor_kind: 0,
+            sensor_hue: 0,
             nerve: 0,
             muscle: 0,
             cilia: 0,
@@ -852,7 +860,8 @@ impl ModeCoeffs {
                 }
                 Block::Sensor => {
                     c.sensor = c.sensor.saturating_add(eff);
-                    c.sensor_kind = e.param_a % 3;
+                    c.sensor_kind = e.param_a % SENSOR_KIND_MOD;
+                    c.sensor_hue = e.param_b;
                 }
                 Block::Nerve => c.nerve = c.nerve.saturating_add(eff),
                 Block::Muscle => c.muscle = c.muscle.saturating_add(eff),

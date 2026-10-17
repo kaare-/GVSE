@@ -45,12 +45,18 @@ fn sand_falls_onto_the_bedrock_floor() {
 }
 
 #[test]
-fn stone_does_not_fall() {
+fn stone_falls_and_tumbles() {
     let mut tank = Tank::try_new(1, 8, 16).unwrap();
-    place(&mut tank, 3, 8, Cell::stone());
-    tick_n(&mut tank, 30);
-    assert_eq!(tank.cell_visible(3, 8).id(), MaterialId::Stone);
-    assert_ne!(tank.cell_visible(3, 0).id(), MaterialId::Stone);
+    place(&mut tank, 3, 6, Cell::stone());
+    assert_eq!(tank.cell_visible(3, 6).tumble(), 0);
+    // Two grain passes per tick: one tick drops it two cells and turns twice.
+    tick_n(&mut tank, 1);
+    assert_eq!(tank.cell_visible(3, 4).id(), MaterialId::Stone);
+    assert_eq!(tank.cell_visible(3, 4).tumble(), 2);
+    tick_n(&mut tank, 6);
+    assert_eq!(tank.cell_visible(3, 0).id(), MaterialId::Stone);
+    assert!(tank.cell_visible(3, 4).is_air());
+    assert_ne!(tank.cell_visible(3, 0).tumble(), 0);
 }
 
 #[test]
@@ -336,11 +342,65 @@ fn swirl_tilt_moves_water_downhill() {
 }
 
 #[test]
-fn loose_rock_stays_put() {
+fn loose_rock_falls_and_tumbles() {
     let mut tank = Tank::try_new(1, 8, 12).unwrap();
-    place(&mut tank, 3, 8, Cell::solid(MaterialId::LooseRock));
-    tick_n(&mut tank, 40);
-    assert_eq!(tank.cell_visible(3, 8).id(), MaterialId::LooseRock);
+    place(&mut tank, 3, 5, Cell::solid(MaterialId::LooseRock));
+    tick_n(&mut tank, 1);
+    assert_eq!(tank.cell_visible(3, 3).id(), MaterialId::LooseRock);
+    assert_eq!(tank.cell_visible(3, 3).tumble(), 2);
+    tick_n(&mut tank, 6);
+    assert_eq!(tank.cell_visible(3, 0).id(), MaterialId::LooseRock);
+    assert_eq!(tank.cell_visible(3, 0).tumble(), 1);
+    assert!(tank.cell_visible(3, 5).is_air());
+}
+
+#[test]
+fn wet_sand_renders_darker_and_grains_differ() {
+    let mut tank = Tank::try_new(1, 8, 8).unwrap();
+    let mut wet = Cell::sand();
+    wet.sat = crate::cell::water_capacity(MaterialId::Sand);
+    place(&mut tank, 2, 2, Cell::sand());
+    place(&mut tank, 5, 2, wet);
+    let dry = rgb_at(&mut tank, 2, 2, 0, 0);
+    let soaked = rgb_at(&mut tank, 5, 2, 0, 0);
+    let dry_sum = dry.0 as u16 + dry.1 as u16 + dry.2 as u16;
+    let wet_sum = soaked.0 as u16 + soaked.1 as u16 + soaked.2 as u16;
+    assert!(
+        wet_sum + 30 < dry_sum,
+        "wet sand should read darker (dry {dry:?} wet {soaked:?})"
+    );
+    let next = rgb_at(&mut tank, 2, 2, 1, 0);
+    assert_ne!(dry, next, "neighbouring sand pixels should not match");
+}
+
+#[test]
+fn creature_cap_stops_at_five_hundred() {
+    let mut tank = Tank::try_new(1, 24, 24).unwrap();
+    let mut n = 0u32;
+    'outer: for y in 0..72u16 {
+        for x in 0..72u16 {
+            if tank.seed_algae(x, y).is_some() {
+                n += 1;
+                if n == 500 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    assert_eq!(n, 500);
+    assert_eq!(tank.org_counts(1).0, 500);
+    assert!(tank.seed_algae(70, 70).is_none());
+}
+
+fn rgb_at(tank: &mut Tank, vx: u32, vy: u32, dx: u32, dy: u32) -> (u8, u8, u8) {
+    let mut rgba = Vec::new();
+    tank.write_rgba(&mut rgba);
+    let (pw, _ph) = tank.pixel_size();
+    let vis_h = tank.visible_size().1;
+    let px = vx * PX_PER_CELL + dx;
+    let py = (vis_h - 1 - vy) * PX_PER_CELL + dy;
+    let i = ((py * pw + px) * 4) as usize;
+    (rgba[i], rgba[i + 1], rgba[i + 2])
 }
 
 #[test]
@@ -1785,14 +1845,19 @@ fn glass_wall_holds_water_and_passes_light() {
         tank.evaporated_sat()
     );
     assert_eq!(outside, 0, "nothing leaks through glass");
-    // Light under a pane is almost full; under stone it is not.
+    // The pane passes light. Stone is side-lit, and the water under it
+    // stays readable — a roof no longer blacks out the bed.
     place(&mut tank, 1, 8, Cell::glass());
+    // Bedrock holds the sample stone; loose cobbles would drop on the tick.
+    place(&mut tank, 10, 7, Cell::bedrock());
     place(&mut tank, 10, 8, Cell::stone());
     tank.tick(&TankInput { always_day: true, ..TankInput::default() });
     let under_glass = tank.pixel_light_at(3 + 1, (12 - 1 - 7) * 3 + 1);
+    let stone_face = tank.pixel_light_at(10 * 3 + 1, (12 - 1 - 8) * 3 + 1);
     let under_stone = tank.pixel_light_at(10 * 3 + 1, (12 - 1 - 7) * 3 + 1);
-    assert!(under_glass > 220, "light through glass {under_glass}");
-    assert!(under_stone < under_glass / 2, "stone shades {under_stone} vs glass {under_glass}");
+    assert!(under_glass > 200, "light through glass {under_glass}");
+    assert!(stone_face > 180, "stone is side-lit {stone_face}");
+    assert!(under_stone > 160, "water under stone stays lit {under_stone}");
     // Erase takes it away; the save keeps it.
     let bytes = tank.save_bytes().unwrap();
     let loaded = Tank::load_bytes(&bytes).unwrap();
@@ -2250,8 +2315,10 @@ fn humidity_rises_over_water_and_dew_forms_on_glass_at_night() {
     for vy in 10..24 {
         place(&mut tank, 20, vy, Cell::glass());
     }
+    // Limestone stays put, so the block can hang in the humid air the
+    // way the old static stone did. Painted stone now falls.
     for vy in 12..15 {
-        place(&mut tank, 4, vy, Cell::stone());
+        place(&mut tank, 4, vy, Cell::solid(MaterialId::Limestone));
     }
     for _ in 0..1200 {
         tank.tick(&day());
@@ -2589,4 +2656,331 @@ fn starter_specimens_seed_into_a_tank() {
         let id = tank.seed_specimen(&spec, 36, 30).expect("seed");
         assert!(tank.cell(id).is_some());
     }
+}
+
+/// 5.0 M0 — a fed muscle body contracts its soft-body spring and the
+/// raster moves at least one cell over a few hundred ticks.
+#[test]
+fn muscle_body_twitches_on_its_soft_springs() {
+    use crate::bio::Genome;
+    let mut tank = water_box(5, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::twitcher())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    // Grow the bonded pair.
+    for _ in 0..400 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 2, "twitcher should grow a bonded pair (alive={alive})");
+    let before: Vec<(u16, u16)> = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .map(|(_, c)| (c.px, c.py))
+        .collect();
+    let mut moved = false;
+    for _ in 0..600 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        let now: Vec<(u16, u16)> = tank
+            .cells()
+            .iter_alive()
+            .filter(|(_, c)| c.org == org)
+            .map(|(_, c)| (c.px, c.py))
+            .collect();
+        if now != before {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "soft-body muscle should displace at least one cell");
+}
+
+/// 5.1 M1 — hard–soft–hard hinge: bone ends stay as separate rigid parts
+/// with a muscle joint between them.
+#[test]
+fn hinge_body_has_two_bone_parts_and_a_muscle_joint() {
+    use crate::bio::{bones, Genome};
+    let mut tank = water_box(7, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::hinge())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    for _ in 0..800 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 3, "hinge should grow bone–muscle–bone (alive={alive})");
+    let g = bones::activate(tank.cells(), tank.genomes(), org).expect("bone graph");
+    let bone_parts = g.parts.iter().filter(|p| p.kind == bones::PartKind::Bone).count();
+    assert!(
+        bone_parts >= 2,
+        "expected ≥2 bone parts, got {bone_parts} (parts={})",
+        g.parts.len()
+    );
+    assert!(
+        g.joints.iter().any(|j| j.muscle),
+        "expected a muscle joint between bone parts"
+    );
+}
+
+/// 5.2 M2 — a nerved body gets a StudioNet and its effectors run.
+#[test]
+fn nerved_body_builds_a_studio_net_and_drives() {
+    use crate::bio::Genome;
+    let mut tank = water_box(11, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::nerved())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut saw_running = false;
+    for _ in 0..500 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        if tank
+            .cells()
+            .iter_alive()
+            .filter(|(_, c)| c.org == org)
+            .any(|(_, c)| c.running)
+        {
+            saw_running = true;
+            break;
+        }
+    }
+    assert!(saw_running, "nerved muscle should be driven by the net or links");
+    assert!(Genome::nerved().is_valid());
+}
+
+/// 5.4 M4 — chamber predator grows a geometric mouth (hard + enzyme + muscle).
+#[test]
+fn chamber_mouth_fires_the_chamber_milestone() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(17, 32, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    assert!(Genome::chamber_predator().is_valid());
+    let id = tank
+        .seed_genome_at(48, 60, Genome::chamber_predator())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    let mut chamber = false;
+    for _ in 0..5_000 {
+        tank.tick(&day());
+        tank.feed_org_full(org);
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::CHAMBER || e.kind == ev::MS_CHAMBER {
+                chamber = true;
+            }
+        }
+        if chamber {
+            break;
+        }
+    }
+    let alive = tank
+        .cells()
+        .org(org)
+        .map(|o| o.n_alive)
+        .unwrap_or(0);
+    assert!(alive >= 5, "U should form (alive={alive})");
+    assert!(chamber, "geometric chamber milestone should fire");
+}
+
+/// 5.4 M4 — unmatched prey enclosed then freed (eater dies) fires ESCAPE.
+#[test]
+fn enclosed_prey_escape_fires_when_freed() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(17, 32, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(48, 60, Genome::chamber_predator())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    for _ in 0..4_000 {
+        tank.tick(&day());
+        tank.feed_org_full(org);
+        if tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 7 {
+            break;
+        }
+    }
+    assert!(
+        tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 7,
+        "U never finished"
+    );
+    let base = tank
+        .cells()
+        .iter_alive()
+        .find(|(_, c)| c.org == org && c.mode == 0)
+        .map(|(_, c)| (c.px, c.py))
+        .expect("base");
+    let cavity = (base.0, base.1 - 1);
+    // Unmatched wall_key so the lining does not lyse the prey quickly.
+    let mut prey_g = Genome::algae();
+    prey_g.wall_key = 200;
+    prey_g.buoy = -20;
+    let prey = tank
+        .seed_genome_at(cavity.0, cavity.1, prey_g)
+        .expect("prey");
+    let prey_org = tank.cell(prey).unwrap().org;
+    tank.pin_cell_for_test(prey);
+    // Wait until SCAN_EVERY records the swallowed set (≥ 2 periods).
+    for _ in 0..160 {
+        tank.tick(&day());
+        assert!(
+            tank.cells().get(prey).is_some(),
+            "unmatched prey should survive the cavity briefly"
+        );
+    }
+    // Destroy the eater — cavity vanishes; prey stays alive ⇒ escape.
+    let eater_cells: Vec<u32> = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .map(|(id, _)| id)
+        .collect();
+    for cid in eater_cells {
+        tank.kill_cell(cid);
+    }
+    let mut escape = false;
+    for _ in 0..200 {
+        tank.tick(&day());
+        while let Some(e) = tank.poll_event() {
+            if (e.kind == ev::ESCAPE || e.kind == ev::MS_ESCAPE) && e.arg0 == prey_org {
+                escape = true;
+            }
+        }
+        if escape {
+            break;
+        }
+    }
+    assert!(
+        tank.cells().get(prey).is_some(),
+        "prey should still be alive after the eater dies"
+    );
+    assert!(escape, "freed unmatched prey should fire ESCAPE");
+}
+
+/// 5.4 M4 — SENSOR(colour) returns a high match when looking at a yellow tip.
+#[test]
+fn colour_sensor_matches_a_pigment_target() {
+    use crate::bio::profile::{Block, Entry, SENSOR_COLOUR};
+    use crate::bio::Genome;
+    let mut tank = water_box(13, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    // Yellow crown tip above the seeker (pigment hue 43).
+    let mut crown = Genome::algae();
+    crown.modes[0].n_entries = 0;
+    crown.modes[0].push_entry(Entry::with_params(Block::Pigment, 6, 43, 0));
+    crown.modes[0].push_entry(Entry::new(Block::Photo, 1));
+    crown.modes[0].n_children = 0;
+    assert!(crown.is_valid());
+    // Heading 0 = east: tip sits to the right of the seeker.
+    let seeker = tank
+        .seed_genome_at(30, 40, Genome::colour_seeker())
+        .expect("seeker");
+    tank.pin_cell_for_test(seeker);
+    let tip = tank.seed_genome_at(36, 40, crown).expect("tip");
+    tank.pin_cell_for_test(tip);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut sense = 0u8;
+    for _ in 0..60 {
+        tank.tick(&input);
+        if let Some(c) = tank.cell(seeker) {
+            sense = c.sense;
+            if sense > 100 {
+                break;
+            }
+        }
+    }
+    let mc = tank
+        .genomes()
+        .coeffs(tank.genotype_of_cell(seeker).unwrap(), 0);
+    assert_eq!(mc.sensor_kind, SENSOR_COLOUR);
+    assert!(
+        sense > 80,
+        "colour sensor should match yellow tip (sense={sense})"
+    );
+    assert!(Genome::colour_seeker().is_valid());
+}
+
+/// 5.3 M3 — an eyed body fires the geometric eye milestone.
+#[test]
+fn eyed_body_fires_the_eye_milestone() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(13, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    assert!(Genome::eyed().is_valid());
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::eyed())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut eye = false;
+    for _ in 0..2_000 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::EYE || e.kind == ev::MS_EYE {
+                eye = true;
+            }
+        }
+        if eye {
+            break;
+        }
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 3, "eyed body should grow window + two sensors (alive={alive})");
+    assert!(eye, "geometric eye milestone should fire");
+}
+
+#[test]
+fn a_genotype_gap_still_has_coeffs() {
+    use crate::bio::genome::NONE;
+    use crate::bio::{Genome, GenomeStore};
+    let g = Genome::algae();
+    let store = GenomeStore::import(&[(0, NONE, 0, g.clone()), (2, 0, 1, g)]);
+    let gap = store.get(1).expect("gap id");
+    assert!(gap.tombstone);
+    assert!(!gap.coeffs.is_empty(), "a saved cell naming this id must be able to render");
+    let _ = store.coeffs(1, 0);
+    let _ = store.genome(1);
 }

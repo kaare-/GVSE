@@ -91,6 +91,9 @@ impl Genome {
     /// d.1 — the seed algae.
     pub fn algae() -> Self {
         let mut g = Self::base();
+        // Near-neutral. The free-cell step adds a per-cell offset, so a
+        // clutch spreads through the column instead of pinning to the lid.
+        g.buoy = 0;
         g.modes.push(Mode::algae());
         g
     }
@@ -153,6 +156,100 @@ impl Genome {
         m.push_entry(Entry::new(Block::Cilia, 3));
         m.push_child(ChildSpec::propagule(0, 15));
         g.modes.push(m);
+        g
+    }
+
+    /// Phase 5 M0 — two-cell muscle twitcher: PHOTO + STORE + MUSCLE on a
+    /// bonded pair; drive from energy so a fed body contracts its spring.
+    pub fn twitcher() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 2));
+        m.push_entry(Entry::new(Block::Store, 2));
+        m.push_entry(Entry::new(Block::Muscle, 4));
+        m.push_link(Link::level(Scalar::EnergyFrac, 32, 96));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
+        g
+    }
+
+    /// Phase 5 M3 — geometric eye: TRANSPARENT window with left/right
+    /// light SENSOR children, NERVE + MUSCLE on the seed (§d.6).
+    pub fn eyed() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_LIGHT;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut seed = Mode::blank();
+        seed.shape_w = 2;
+        seed.shape_h = 2;
+        seed.push_entry(Entry::new(Block::Photo, 1));
+        seed.push_entry(Entry::new(Block::Store, 1));
+        seed.push_entry(Entry::new(Block::Nerve, 2));
+        seed.push_entry(Entry::new(Block::Muscle, 2));
+        seed.push_entry(Entry::new(Block::Transparent, 2));
+        seed.push_link(Link::level(Scalar::Sense, 128, 80));
+        seed.push_child(ChildSpec::part(Dir::Left, 1, 200, 1));
+        seed.push_child(ChildSpec::part(Dir::Right, 1, 200, 1));
+        let mut eye = Mode::blank();
+        eye.push_entry(Entry::new(Block::Photo, 1));
+        eye.push_entry(Entry::with_params(Block::Sensor, 3, SENSOR_LIGHT, 0));
+        eye.push_entry(Entry::new(Block::Nerve, 1));
+        g.modes.push(seed);
+        g.modes.push(eye);
+        g
+    }
+
+    /// Phase 5 M2 — nerved light-seeker: SENSOR(light) + NERVE + MUSCLE
+    /// on a bonded pair; the StudioNet only exists because of NERVE.
+    pub fn nerved() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_LIGHT;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        // 2×2 footprint ⇒ 32 unit capacity (PHOTO1+STORE1+NERVE2+SENSOR2+MUSCLE2).
+        m.shape_w = 2;
+        m.shape_h = 2;
+        m.push_entry(Entry::new(Block::Photo, 1));
+        m.push_entry(Entry::new(Block::Store, 1));
+        m.push_entry(Entry::new(Block::Nerve, 2));
+        m.push_entry(Entry::with_params(Block::Sensor, 2, SENSOR_LIGHT, 0));
+        m.push_entry(Entry::new(Block::Muscle, 2));
+        m.push_link(Link::level(Scalar::Sense, 128, 80));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
+        g
+    }
+
+    /// Phase 5 M1 — hard–soft–hard hinge: hard bone ends with a muscle
+    /// joint in the middle (studio hinge-chain shape, tank blocks).
+    pub fn hinge() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        let mut g = Self::base();
+        g.buoy = 0;
+        // Mode 0: hard bone seed.
+        let mut bone = Mode::blank();
+        bone.push_entry(Entry::new(Block::Photo, 1));
+        bone.push_entry(Entry::new(Block::Store, 1));
+        bone.push_entry(Entry::with_params(Block::Wall, 4, 200, 0));
+        bone.push_child(ChildSpec::part(Dir::Ahead, 1, 220, 1));
+        // Mode 1: muscle joint.
+        let mut joint = Mode::blank();
+        joint.push_entry(Entry::new(Block::Photo, 1));
+        joint.push_entry(Entry::new(Block::Store, 1));
+        joint.push_entry(Entry::new(Block::Muscle, 5));
+        joint.push_link(Link::level(Scalar::EnergyFrac, 24, 100));
+        joint.push_child(ChildSpec::part(Dir::Ahead, 2, 220, 1));
+        // Mode 2: hard tip.
+        let mut tip = Mode::blank();
+        tip.push_entry(Entry::new(Block::Photo, 1));
+        tip.push_entry(Entry::with_params(Block::Wall, 4, 200, 0));
+        g.modes.push(bone);
+        g.modes.push(joint);
+        g.modes.push(tip);
         g
     }
 
@@ -405,12 +502,12 @@ impl Genome {
         g
     }
 
-    /// d.7 — mouth-cavity predator: a hard-walled U. Mode 0 (base) grows a
-    /// side-wall chain (mode 1) on each side; the lining secretes a
-    /// living-wall enzyme (key 120, width 24) gated on touch; chains end in
-    /// a lip mode (2) at depth 3. Walls are `h 0.6`, so the cavity holds
-    /// its enzyme (§b.3). MUSCLE lips and the touch link arrive in 2.3.6.
+    /// d.7 / Phase 5 M4 — mouth-cavity predator: hard-walled U with
+    /// enzyme lining, EXCRETE, and MUSCLE lips that close on touch.
+    /// Walls are `h 0.6`, so the cavity holds its enzyme (§b.3).
     pub fn chamber_predator() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_TOUCH;
         let mut g = Self::base();
         g.buoy = 0;
         g.wall_key = 170;
@@ -418,16 +515,18 @@ impl Genome {
         g.base_age = 150;
         let mut base = Mode::blank();
         base.push_entry(Entry::with_params(Block::Wall, 2, 153, 0));
-        base.push_entry(Entry::new(Block::Photo, 4));
+        base.push_entry(Entry::new(Block::Photo, 2));
         base.push_entry(Entry::new(Block::Store, 2));
+        base.push_entry(Entry::new(Block::Nerve, 1));
         base.push_child(ChildSpec::part(Dir::Left, 1, 220, 1));
         base.push_child(ChildSpec::part(Dir::Right, 1, 220, 1));
         let mut wall = Mode::blank();
         wall.push_entry(Entry::with_params(Block::Wall, 2, 153, 0));
-        wall.push_entry(Entry::new(Block::Photo, 3));
+        wall.push_entry(Entry::new(Block::Photo, 2));
         let mut enz = Entry::with_params(Block::Enzyme, 2, 120, 24 | 0x80);
         enz.gate = Gate::above(Scalar::Touch, 1);
         wall.push_entry(enz);
+        wall.push_entry(Entry::new(Block::Excrete, 1));
         wall.push_entry(Entry::new(Block::Store, 1));
         wall.push_child(ChildSpec::part(Dir::Ahead, 1, 220, 1));
         wall.push_transition(Transition {
@@ -435,22 +534,48 @@ impl Genome {
             mode: 2,
         });
         wall.sacrifice_order = 1;
-        // Lips: the body's propagules leave from the opening.
+        // Lips: muscle + touch sensor close the opening when prey bumps them.
         let mut lip = Mode::blank();
         lip.push_entry(Entry::with_params(Block::Wall, 1, 153, 0));
-        lip.push_entry(Entry::new(Block::Photo, 4));
+        lip.push_entry(Entry::new(Block::Muscle, 2));
+        lip.push_entry(Entry::with_params(Block::Sensor, 1, SENSOR_TOUCH, 0));
+        lip.push_entry(Entry::new(Block::Nerve, 1));
         lip.push_entry(Entry::with_params(
             Block::Uptake,
             2,
             crate::bio::profile::UPTAKE_GLUCOSE,
             0,
         ));
+        // Close (contract) when touched — positive drive shortens springs.
+        lip.push_link(Link::level(Scalar::Touch, 1, 96));
         lip.push_child(ChildSpec::propagule(0, 15));
         lip.divide_when.energy_frac = 230;
         lip.sacrifice_order = 2;
         g.modes.push(base);
         g.modes.push(wall);
         g.modes.push(lip);
+        g
+    }
+
+    /// Phase 5 M4 — SENSOR(colour) seeker: looks along heading for a hue
+    /// matching `param_b` (yellow ≈ 43). Hook for the insect–flower stretch.
+    pub fn colour_seeker() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_COLOUR;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.shape_w = 2;
+        m.shape_h = 2;
+        m.push_entry(Entry::new(Block::Photo, 2));
+        m.push_entry(Entry::new(Block::Store, 1));
+        m.push_entry(Entry::new(Block::Cilia, 2));
+        m.push_entry(Entry::new(Block::Nerve, 1));
+        // Hue 43 ≈ yellow on the 256-circle; width is fixed in sensor_read.
+        m.push_entry(Entry::with_params(Block::Sensor, 2, SENSOR_COLOUR, 43));
+        m.push_link(Link::level(Scalar::Sense, 80, 100));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
         g
     }
 
@@ -895,6 +1020,21 @@ pub struct GenotypeNode {
 
 pub const NONE: u32 = u32::MAX;
 
+fn fallback_genome() -> &'static Genome {
+    use std::sync::OnceLock;
+    static G: OnceLock<Genome> = OnceLock::new();
+    G.get_or_init(Genome::algae)
+}
+
+fn fallback_coeffs() -> &'static ModeCoeffs {
+    use std::sync::OnceLock;
+    static C: OnceLock<ModeCoeffs> = OnceLock::new();
+    C.get_or_init(|| {
+        let g = Genome::algae();
+        ModeCoeffs::compile(&g.modes[0], g.metab_eff)
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct GenomeStore {
     nodes: Vec<GenotypeNode>,
@@ -1064,11 +1204,20 @@ impl GenomeStore {
     }
 
     pub fn genome(&self, id: u32) -> &Genome {
+        if self.nodes.is_empty() {
+            return fallback_genome();
+        }
         &self.nodes[(id as usize).min(self.nodes.len() - 1)].genome
     }
 
     pub fn coeffs(&self, id: u32, mode: u8) -> &ModeCoeffs {
+        if self.nodes.is_empty() {
+            return fallback_coeffs();
+        }
         let n = &self.nodes[(id as usize).min(self.nodes.len() - 1)];
+        if n.coeffs.is_empty() {
+            return fallback_coeffs();
+        }
         let mi = (mode as usize).min(n.coeffs.len() - 1);
         &n.coeffs[mi]
     }
@@ -1252,10 +1401,18 @@ impl GenomeStore {
     pub fn import(rows: &[(u32, u32, u16, Genome)]) -> Self {
         let mut s = Self::new();
         let max_id = rows.iter().map(|r| r.0).max().map(|m| m as usize + 1).unwrap_or(0);
-        for i in 0..max_id {
+        for _i in 0..max_id {
+            // Gaps are tombstones. They still need compiled coeffs: a saved
+            // cell can name one, and an empty coeff list aborts the renderer.
+            let genome = Genome::algae();
+            let coeffs = genome
+                .modes
+                .iter()
+                .map(|m| ModeCoeffs::compile(m, genome.metab_eff))
+                .collect();
             let tomb = GenotypeNode {
-                genome: Genome::algae(),
-                coeffs: Vec::new(),
+                genome,
+                coeffs,
                 parent: NONE,
                 first_child: NONE,
                 next_sibling: NONE,
@@ -1266,7 +1423,6 @@ impl GenomeStore {
                 tombstone: true,
                 species: NO_SPECIES,
             };
-            let _ = i;
             s.nodes.push(tomb);
         }
         for (id, parent, depth, genome) in rows {

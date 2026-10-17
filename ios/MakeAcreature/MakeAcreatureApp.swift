@@ -7,6 +7,10 @@ struct MakeAcreatureApp: App {
     @State private var inRoom = false
     @State private var showBook = false
     @State private var showTree = false
+    @State private var showSettings = false
+    @State private var showPhoto = false
+    @State private var showLog = false
+    @State private var confirmNewTank = false
 
     var body: some Scene {
         WindowGroup {
@@ -20,10 +24,23 @@ struct MakeAcreatureApp: App {
                         session: session,
                         onBack: { withAnimation(.easeOut(duration: 0.2)) { inRoom = false } },
                         onOpenBook: { showBook = true },
-                        onOpenTree: { showTree = true }
+                        onOpenTree: { showTree = true },
+                        onOpenSettings: { showSettings = true },
+                        onOpenLog: { showLog = true }
                     )
                     .transition(.opacity)
                     .simultaneousGesture(zoomGesture(toRoom: false))
+                }
+                if session.showStartGuide {
+                    StartGuide(
+                        onSkip: { session.dismissStartGuide(skipped: true) },
+                        onDone: { session.dismissStartGuide(skipped: false) }
+                    )
+                    .zIndex(20)
+                }
+                if showPhoto {
+                    PhotoModeOverlay(session: session) { showPhoto = false }
+                        .zIndex(15)
                 }
             }
             .preferredColorScheme(.dark)
@@ -33,6 +50,12 @@ struct MakeAcreatureApp: App {
             }
             .fullScreenCover(isPresented: $showTree) {
                 TreeScreen(session: session) { showTree = false }
+            }
+            .fullScreenCover(isPresented: $showSettings) {
+                FuseBoxSettings(session: session) { showSettings = false }
+            }
+            .fullScreenCover(isPresented: $showLog) {
+                EventLogView(session: session) { showLog = false }
             }
             .onAppear { session.resume() }
             .onChange(of: scenePhase) { phase in
@@ -64,12 +87,15 @@ struct MakeAcreatureApp: App {
             if let rect = session.inspected?.rect {
                 TrackingBox(rect: rect).ignoresSafeArea()
             }
+            ChromeScroll {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         PixelPanel {
                             PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 3)
                         }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(session.isDay ? "Day" : "Night")
                         PixelPanel {
                             PixelLabel(
                                 text: String(format: "%.0f C", session.temperatureC),
@@ -77,6 +103,8 @@ struct MakeAcreatureApp: App {
                                 color: Palette.highlight
                             )
                         }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(String(format: "Tank temperature %.0f degrees", session.temperatureC))
                     }
                     Spacer()
                     slotButtons
@@ -88,49 +116,22 @@ struct MakeAcreatureApp: App {
                             PixelLabel(text: "ROOM", scale: 2, color: Palette.highlight)
                         }
                         .buttonStyle(.plain)
-                        Button(action: session.toggleAlwaysDay) {
-                            PixelLabel(
-                                text: session.alwaysDay ? "ALWAYS DAY" : "DAY/NIGHT",
-                                scale: 2
-                            )
+                        .a11yButton("Room", hint: "Leave the tank and open the room")
+                        Button { showPhoto = true } label: {
+                            PixelLabel(text: "PHOTO", scale: 2)
                         }
                         .buttonStyle(.plain)
-                        HStack(spacing: 4) {
-                            Button { session.nudgeBaseTemp(-1) } label: {
-                                PixelLabel(text: "T-", scale: 2)
-                            }
-                            .buttonStyle(.plain)
-                            PixelLabel(text: String(format: "BASE %.0f", session.tBase), scale: 2)
-                            Button { session.nudgeBaseTemp(1) } label: {
-                                PixelLabel(text: "T+", scale: 2)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        HStack(spacing: 4) {
-                            Button { session.nudgeLight(-0.1) } label: {
-                                PixelLabel(text: "L-", scale: 2)
-                            }
-                            .buttonStyle(.plain)
-                            PixelLabel(text: String(format: "LIGHT %.0f%%", session.lightSlider * 100), scale: 2)
-                            Button { session.nudgeLight(0.1) } label: {
-                                PixelLabel(text: "L+", scale: 2)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        Button(action: session.toggleConsent) {
-                            PixelLabel(
-                                text: session.consent ? "STATS ON" : "STATS OFF",
-                                scale: 2
-                            )
+                        .a11yButton("Photo", hint: "Save a picture of the tank")
+                        Button { showSettings = true } label: {
+                            PixelLabel(text: "SETTINGS", scale: 2)
                         }
                         .buttonStyle(.plain)
-                        Button(action: session.toggleSwirl) {
-                            PixelLabel(
-                                text: session.swirl ? "SWIRL ON" : "SWIRL OFF",
-                                scale: 2
-                            )
+                        .a11yButton("Settings", hint: "Open the fuse box")
+                        Button(action: session.unpauseFromEvent) {
+                            PixelLabel(text: "PLAY", scale: 2, color: Palette.dimPaper)
                         }
                         .buttonStyle(.plain)
+                        .a11yButton("Play", hint: "Resume the tank")
                         Button {
                             session.magnifierPinned.toggle()
                         } label: {
@@ -140,6 +141,11 @@ struct MakeAcreatureApp: App {
                             )
                         }
                         .buttonStyle(.plain)
+                        .a11yButton(
+                            session.magnifierPinned ? "Lens pinned" : "Lens",
+                            hint: "Pin the magnifier",
+                            selected: session.magnifierPinned
+                        )
                     }
                 }
                 ToolWheel(
@@ -165,6 +171,7 @@ struct MakeAcreatureApp: App {
                             PixelPanel { PixelLabel(text: "DUMP", scale: 2, color: Palette.dimPaper) }
                         }
                         .buttonStyle(.plain)
+                        .a11yButton("Dump bucket", hint: "Throw away what you scooped")
                     }
                 }
                 if let state = session.inspected {
@@ -174,9 +181,9 @@ struct MakeAcreatureApp: App {
                         onClose: session.closeInspect
                     )
                 }
-                Spacer()
             }
             .padding(10)
+            }
             if let hint = session.hint {
                 VStack {
                     Spacer()
@@ -184,9 +191,19 @@ struct MakeAcreatureApp: App {
                     Spacer().frame(height: 80)
                 }
                 .animation(.easeOut(duration: 0.2), value: hint)
+                .accessibilityElement(children: .combine)
             }
         }
         .simultaneousGesture(zoomGesture(toRoom: true))
+        .confirmationDialog(
+            "Replace tank \(session.slot + 1) with an empty tank?",
+            isPresented: $confirmNewTank,
+            titleVisibility: .visible
+        ) {
+            Button("New tank", role: .destructive) {
+                session.newTank()
+            }
+        }
     }
 
     private var slotButtons: some View {
@@ -206,13 +223,15 @@ struct MakeAcreatureApp: App {
                     }
                 }
                 .buttonStyle(.plain)
+                .a11yButton("Tank \(i + 1)", selected: session.slot == i)
             }
-            Button { session.newTank() } label: {
+            Button { confirmNewTank = true } label: {
                 PixelPanel {
                     PixelLabel(text: "NEW", scale: 2)
                 }
             }
             .buttonStyle(.plain)
+            .a11yButton("New tank", hint: "Ask before replacing the active slot")
         }
     }
 }

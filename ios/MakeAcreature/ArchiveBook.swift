@@ -123,13 +123,13 @@ struct SpecimenPage: View {
     @State private var share = false
     @State private var confirmDelete = false
     @State private var confirmNewTank = false
-    @FocusState private var editing: Bool
 
     private var dirty: Bool {
         name != specimen.displayName || notes != specimen.notes
     }
 
     var body: some View {
+        NavigationStack {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
@@ -162,28 +162,14 @@ struct SpecimenPage: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 PixelLabel(text: "NAME", scale: 2, color: Palette.dimPaper)
-                TextField("", text: $name)
-                    .textFieldStyle(.plain)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(Palette.paper)
-                    .padding(6)
-                    .background(Color(white: 0.14))
-                    .focused($editing)
+                PixelTextField(text: $name)
                 PixelLabel(text: "NOTES", scale: 2, color: Palette.dimPaper)
-                TextEditor(text: $notes)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(Palette.paper)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 90)
-                    .padding(4)
-                    .background(Color(white: 0.14))
-                    .focused($editing)
+                PixelTextEditor(text: $notes)
                 if dirty {
                     Button {
                         if let edited = specimen.edited(name: name, notes: notes) {
                             session.archive.update(edited)
                         }
-                        editing = false
                         onBack()
                     } label: {
                         PixelPanel { PixelLabel(text: "SAVE PAGE", scale: 2, color: Palette.highlight) }
@@ -219,6 +205,8 @@ struct SpecimenPage: View {
         }
         .confirmationDialog("Remove this page from the book?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive, action: onDelete)
+        }
+        .toolbar(.hidden, for: .navigationBar)
         }
     }
 }

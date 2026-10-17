@@ -131,6 +131,9 @@ pub struct CellRec {
     /// sourced from moist substrate, conducted along division bonds.
     #[serde(default = "hydration_default")]
     pub hydration: u8,
+    /// Last SENSOR reading (Phase 5 M2 net input); 0 without a SENSOR.
+    #[serde(default)]
+    pub sense: u8,
 }
 
 fn hydration_default() -> u8 {
@@ -179,6 +182,7 @@ impl CellRec {
             moved_dy: 0,
             warm: 0,
             hydration: 255,
+            sense: 0,
         }
     }
 
@@ -261,6 +265,11 @@ impl CellStore {
 
     pub fn len(&self) -> usize {
         self.live
+    }
+
+    /// Living organisms (free-list slots are not counted).
+    pub fn org_len(&self) -> usize {
+        self.orgs.iter().filter(|o| o.alive).count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -448,6 +457,9 @@ impl CellStore {
         tick: u64,
         seed: u64,
     ) -> Option<u32> {
+        if self.org_len() >= crate::consts::CREATURE_CAP {
+            return None;
+        }
         let idx = (py as usize) * (pixels.w as usize) + px as usize;
         if idx >= pixels.owner.len() || pixels.owner[idx] != EMPTY_OWNER {
             return None;
@@ -923,6 +935,9 @@ impl CellStore {
     /// Detach a brood daughter: her subtree becomes a new organism of the
     /// next generation. Returns the new organism id.
     pub fn detach(&mut self, genomes: &GenomeStore, id: u32, tick: u64) -> Option<u32> {
+        if self.org_len() >= crate::consts::CREATURE_CAP {
+            return None;
+        }
         let cell = *self.get(id)?;
         if cell.parent_cell == NONE {
             return None;

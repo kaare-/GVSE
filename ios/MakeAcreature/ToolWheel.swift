@@ -2,7 +2,7 @@ import SwiftUI
 
 enum BuildTool: Int, CaseIterable {
     case sand, rock, glass, erase, pour, drain, fill, undo
-    case look, scoop, remove, clean, feed, calcium, detritus
+    case look, scoop, seed, remove, clean, feed, calcium, detritus
     case topUp, cut, enclose
 
     var label: String {
@@ -17,6 +17,7 @@ enum BuildTool: Int, CaseIterable {
         case .undo: return "UNDO"
         case .look: return "LOOK"
         case .scoop: return "SCOOP"
+        case .seed: return "SEED"
         case .remove: return "TAKE"
         case .clean: return "CLEAN"
         case .feed: return "SUGAR"
@@ -31,7 +32,7 @@ enum BuildTool: Int, CaseIterable {
     /// Build tools on the first row, the selection loop on the second,
     /// Phase 4 land / enclosure tools on the third.
     static let buildRow: [BuildTool] = [.sand, .rock, .glass, .erase, .pour, .drain, .fill, .undo]
-    static let lifeRow: [BuildTool] = [.look, .scoop, .remove, .clean, .feed, .calcium, .detritus]
+    static let lifeRow: [BuildTool] = [.look, .scoop, .seed, .remove, .clean, .feed, .calcium, .detritus]
     static let landRow: [BuildTool] = [.topUp, .cut, .enclose]
 
     /// Tool event kind (`tank.h`); 0 for tools that are not strokes.
@@ -51,6 +52,7 @@ enum BuildTool: Int, CaseIterable {
         case .topUp: return 14
         case .cut: return 15
         case .enclose: return 16
+        case .seed: return 8
         case .look, .scoop: return 0
         }
     }
@@ -85,22 +87,30 @@ struct ToolWheel: View {
             row(BuildTool.buildRow)
             row(BuildTool.lifeRow)
             row(BuildTool.landRow)
+            if tool == .look || tool == .scoop {
+                sizeSlider
+            }
             HStack(spacing: 8) {
-                PixelLabel(text: tool == .scoop ? "BUCKET \(brush)" : "BRUSH \(brush)", scale: 2)
-                Button {
-                    brush = max(1, brush - 1)
-                } label: { PixelLabel(text: "-", scale: 3) }
-                .buttonStyle(.plain)
-                Button {
-                    brush = min(12, brush + 1)
-                } label: { PixelLabel(text: "+", scale: 3) }
-                .buttonStyle(.plain)
+                if tool != .look && tool != .scoop {
+                    PixelLabel(text: "BRUSH \(brush)", scale: 2)
+                    Button {
+                        brush = max(1, brush - 1)
+                    } label: { PixelLabel(text: "-", scale: 3) }
+                    .buttonStyle(.plain)
+                    .a11yButton("Smaller brush")
+                    Button {
+                        brush = min(12, brush + 1)
+                    } label: { PixelLabel(text: "+", scale: 3) }
+                    .buttonStyle(.plain)
+                    .a11yButton("Larger brush")
+                }
                 if tool == .sand || tool == .rock {
                     PixelLabel(text: "TONE \(variant + 1)", scale: 2)
                     Button {
                         variant = (variant + 1) % 4
                     } label: { PixelLabel(text: ">", scale: 3) }
                     .buttonStyle(.plain)
+                    .a11yButton("Next colour tone")
                 }
                 if tool == .enclose {
                     PixelLabel(text: encloseLabel, scale: 2)
@@ -108,6 +118,7 @@ struct ToolWheel: View {
                         encloseOp = (encloseOp + 1) % 4
                     } label: { PixelLabel(text: ">", scale: 3) }
                     .buttonStyle(.plain)
+                    .a11yButton("Next box action", hint: encloseLabel)
                 }
             }
             if tool == .fill {
@@ -115,11 +126,31 @@ struct ToolWheel: View {
                     PixelLabel(text: "LEVEL", scale: 2)
                     Slider(value: $fillLevel, in: 0...1)
                         .tint(Color(red: 0.4, green: 0.7, blue: 0.9))
+                        .accessibilityLabel("Water level")
                 }
                 .frame(maxWidth: 220)
             }
         }
         .padding(6)
+    }
+
+    /// Wide, labelled size control for the glass and the scoop.
+    private var sizeSlider: some View {
+        let title = tool == .scoop ? "SCOOP" : "GLASS"
+        return VStack(alignment: .leading, spacing: 2) {
+            PixelLabel(text: "\(title) \(brush)", scale: 2, color: Color(red: 1, green: 0.92, blue: 0.7))
+            Slider(
+                value: Binding(
+                    get: { Double(brush) },
+                    set: { brush = Int($0.rounded()) }
+                ),
+                in: 1...12,
+                step: 1
+            )
+            .tint(Color(red: 0.95, green: 0.82, blue: 0.45))
+            .accessibilityLabel(tool == .scoop ? "Scoop size" : "Looking glass size")
+        }
+        .frame(maxWidth: 280)
     }
 
     private var encloseLabel: String {
@@ -157,6 +188,7 @@ struct ToolWheel: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton(t.label, hint: "Tool", selected: tool == t)
                 }
             }
         }

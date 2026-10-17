@@ -46,6 +46,13 @@ pub const MIN_VISIBLE: u32 = 4;
 
 pub const SAVE_VERSION: u32 = 9;
 
+// ---- Phase 5 M0: soft bodies (verlet springs) ----
+
+/// Constraint iterations per soft-body step.
+pub const SOFT_ITERS: u32 = 3;
+/// Spring stiffness (fraction of length error corrected per iteration).
+pub const SOFT_STIFF: f32 = 0.45;
+
 // ---- biology (cell-language §a, §b, §c) ----
 
 /// Protein units per biology pixel (handoff §5).
@@ -132,6 +139,11 @@ pub const MAX_SLOTS: usize = 64;
 /// Live-cell soft cap (handoff lever).
 pub const LIVE_CAP: usize = 30_000;
 
+/// Living organisms. Each free algae speck is its own creature, so this
+/// is the cap the tank actually feels. Body parts of an existing creature
+/// still grow under [`LIVE_CAP`].
+pub const CREATURE_CAP: usize = 500;
+
 /// No mitosis below this tank temperature (°C).
 pub const MITOSIS_FLOOR_C: f32 = 4.0;
 
@@ -144,9 +156,10 @@ pub const BOND_SHARE_DIV: i32 = 8;
 /// Hard living pixels (of 9) that turn a physics cell solid to flow (§b.3).
 pub const TISSUE_DAM_PIXELS: u8 = 5;
 
-/// Light absorbed per PHOTO pixel row (×0.5) and per other tissue (×0.75), Q8.
-pub const TISSUE_PASS_PHOTO_Q8: u32 = 128;
-pub const TISSUE_PASS_OTHER_Q8: u32 = 192;
+/// Light kept per living pixel row, Q8. Near 1 so a mat does not black
+/// out the water; the bed is side-lit in `rebuild_light`.
+pub const TISSUE_PASS_PHOTO_Q8: u32 = 252;
+pub const TISSUE_PASS_OTHER_Q8: u32 = 254;
 
 // ---- Phase 4: thermal cycle (`evolution-system.md` §4), THERMO (§a.7) ----
 

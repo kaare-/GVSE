@@ -25,8 +25,8 @@ use wk_material::MaterialId;
 
 pub use crate::tools::ToolEvent;
 
-/// Light passing a corpse pixel (Q8): dead soft tissue, slightly murky.
-const CORPSE_PASS_Q8: u8 = 192;
+/// Light passing a corpse or dead secretion (Q8). Murky, not a shadow.
+const CORPSE_PASS_Q8: u8 = 248;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TankError {
@@ -225,6 +225,10 @@ pub struct Tank {
     evaporated_sat: u64,
     /// Scoop bucket filled by enclosure "release" (kind 16 / op 3).
     pending_enclosure_bucket: Option<Carried>,
+    /// Phase 5 M0 soft-body state (ephemeral; rebuilt on topology change).
+    soft: bio::soft::SoftStore,
+    /// Phase 5 M2 StudioNet controllers (only for orgs with NERVE).
+    nets: bio::neural::NetStore,
 }
 
 impl Tank {
@@ -275,6 +279,8 @@ impl Tank {
             humidity_primed: false,
             evaporated_sat: 0,
             pending_enclosure_bucket: None,
+            soft: bio::soft::SoftStore::default(),
+            nets: bio::neural::NetStore::default(),
         };
         tank.rebuild_light();
         Ok(tank)
@@ -1458,6 +1464,20 @@ impl Tank {
             self.tick_count,
             t_tank,
             self.lambda_scale_q8 as u32,
+            self.grav_x,
+        );
+        let _soft_moved = bio::soft::step(
+            &mut self.soft,
+            &mut self.cells,
+            &self.genomes,
+            &self.grid,
+            &mut self.pixels,
+        );
+        let _nets = bio::neural::step(
+            &mut self.nets,
+            &mut self.cells,
+            &self.genomes,
+            self.seed,
         );
         for ev in &bio.events {
             self.events.push_back(*ev);
@@ -2074,7 +2094,7 @@ impl Tank {
                     return 255;
                 }
                 if secretion_kind(owner).is_some() {
-                    return crate::consts::TISSUE_PASS_OTHER_Q8 as u8 / 2;
+                    return CORPSE_PASS_Q8;
                 }
                 match cells.get(owner - OWNER_BIAS) {
                     Some(c) => genomes.coeffs(c.genotype, c.mode).light_pass_q8,
