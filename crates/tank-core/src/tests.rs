@@ -2971,3 +2971,16 @@ fn eyed_body_fires_the_eye_milestone() {
     assert!(alive >= 3, "eyed body should grow window + two sensors (alive={alive})");
     assert!(eye, "geometric eye milestone should fire");
 }
+
+#[test]
+fn a_genotype_gap_still_has_coeffs() {
+    use crate::bio::genome::NONE;
+    use crate::bio::{Genome, GenomeStore};
+    let g = Genome::algae();
+    let store = GenomeStore::import(&[(0, NONE, 0, g.clone()), (2, 0, 1, g)]);
+    let gap = store.get(1).expect("gap id");
+    assert!(gap.tombstone);
+    assert!(!gap.coeffs.is_empty(), "a saved cell naming this id must be able to render");
+    let _ = store.coeffs(1, 0);
+    let _ = store.genome(1);
+}

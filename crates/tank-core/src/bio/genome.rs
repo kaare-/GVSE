@@ -1020,6 +1020,21 @@ pub struct GenotypeNode {
 
 pub const NONE: u32 = u32::MAX;
 
+fn fallback_genome() -> &'static Genome {
+    use std::sync::OnceLock;
+    static G: OnceLock<Genome> = OnceLock::new();
+    G.get_or_init(Genome::algae)
+}
+
+fn fallback_coeffs() -> &'static ModeCoeffs {
+    use std::sync::OnceLock;
+    static C: OnceLock<ModeCoeffs> = OnceLock::new();
+    C.get_or_init(|| {
+        let g = Genome::algae();
+        ModeCoeffs::compile(&g.modes[0], g.metab_eff)
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct GenomeStore {
     nodes: Vec<GenotypeNode>,
@@ -1189,11 +1204,20 @@ impl GenomeStore {
     }
 
     pub fn genome(&self, id: u32) -> &Genome {
+        if self.nodes.is_empty() {
+            return fallback_genome();
+        }
         &self.nodes[(id as usize).min(self.nodes.len() - 1)].genome
     }
 
     pub fn coeffs(&self, id: u32, mode: u8) -> &ModeCoeffs {
+        if self.nodes.is_empty() {
+            return fallback_coeffs();
+        }
         let n = &self.nodes[(id as usize).min(self.nodes.len() - 1)];
+        if n.coeffs.is_empty() {
+            return fallback_coeffs();
+        }
         let mi = (mode as usize).min(n.coeffs.len() - 1);
         &n.coeffs[mi]
     }
@@ -1377,10 +1401,18 @@ impl GenomeStore {
     pub fn import(rows: &[(u32, u32, u16, Genome)]) -> Self {
         let mut s = Self::new();
         let max_id = rows.iter().map(|r| r.0).max().map(|m| m as usize + 1).unwrap_or(0);
-        for i in 0..max_id {
+        for _i in 0..max_id {
+            // Gaps are tombstones. They still need compiled coeffs: a saved
+            // cell can name one, and an empty coeff list aborts the renderer.
+            let genome = Genome::algae();
+            let coeffs = genome
+                .modes
+                .iter()
+                .map(|m| ModeCoeffs::compile(m, genome.metab_eff))
+                .collect();
             let tomb = GenotypeNode {
-                genome: Genome::algae(),
-                coeffs: Vec::new(),
+                genome,
+                coeffs,
                 parent: NONE,
                 first_child: NONE,
                 next_sibling: NONE,
@@ -1391,7 +1423,6 @@ impl GenomeStore {
                 tombstone: true,
                 species: NO_SPECIES,
             };
-            let _ = i;
             s.nodes.push(tomb);
         }
         for (id, parent, depth, genome) in rows {
