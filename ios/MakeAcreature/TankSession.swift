@@ -399,7 +399,7 @@ final class TankSession: ObservableObject {
         var crop = [UInt8](repeating: 0, count: cw * ch * 4)
         for row in 0..<ch {
             let src = ptr.advanced(by: ((y0 + row) * pw + x0) * 4)
-            crop.withUnsafeMutableBytes { dst in
+            _ = crop.withUnsafeMutableBytes { dst in
                 memcpy(dst.baseAddress!.advanced(by: row * cw * 4), src, cw * 4)
             }
         }
@@ -851,7 +851,7 @@ final class TankSession: ObservableObject {
         accumulator += dt
         var steps = 0
         while accumulator >= step && steps < 4 {
-            var tools = pendingTools
+            let tools = pendingTools
             pendingTools.removeAll(keepingCapacity: true)
             let flash = tool.isFeed ? (0, 0, 0) : flashlightCell()
             tools.withUnsafeBufferPointer { buf in

@@ -1,4 +1,5 @@
 /target/
+/ios/build/
 **/*.rs.bk
 *.pdb
 

@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// The dressed room (Phase 6): aquarium, tree picture, archive book,
