@@ -10,6 +10,7 @@ struct MakeAcreatureApp: App {
     @State private var showSettings = false
     @State private var showPhoto = false
     @State private var showLog = false
+    @State private var confirmNewTank = false
 
     var body: some Scene {
         WindowGroup {
@@ -194,6 +195,15 @@ struct MakeAcreatureApp: App {
             }
         }
         .simultaneousGesture(zoomGesture(toRoom: true))
+        .confirmationDialog(
+            "Replace tank \(session.slot + 1) with an empty tank?",
+            isPresented: $confirmNewTank,
+            titleVisibility: .visible
+        ) {
+            Button("New tank", role: .destructive) {
+                session.newTank()
+            }
+        }
     }
 
     private var slotButtons: some View {
@@ -215,13 +225,13 @@ struct MakeAcreatureApp: App {
                 .buttonStyle(.plain)
                 .a11yButton("Tank \(i + 1)", selected: session.slot == i)
             }
-            Button { session.newTank() } label: {
+            Button { confirmNewTank = true } label: {
                 PixelPanel {
                     PixelLabel(text: "NEW", scale: 2)
                 }
             }
             .buttonStyle(.plain)
-            .a11yButton("New tank", hint: "Replace the active slot with an empty tank")
+            .a11yButton("New tank", hint: "Ask before replacing the active slot")
         }
     }
 }

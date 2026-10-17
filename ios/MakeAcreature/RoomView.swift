@@ -65,7 +65,10 @@ struct RoomView: View {
         }
         .onReceive(refresh) { _ in tree = session.speciesTree() }
         .sheet(isPresented: $editingSign) {
-            doorSignEditor
+            NavigationStack {
+                doorSignEditor
+                    .toolbar(.hidden, for: .navigationBar)
+            }
         }
     }
 

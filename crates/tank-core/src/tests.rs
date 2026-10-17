@@ -45,12 +45,18 @@ fn sand_falls_onto_the_bedrock_floor() {
 }
 
 #[test]
-fn stone_does_not_fall() {
+fn stone_falls_and_tumbles() {
     let mut tank = Tank::try_new(1, 8, 16).unwrap();
-    place(&mut tank, 3, 8, Cell::stone());
-    tick_n(&mut tank, 30);
-    assert_eq!(tank.cell_visible(3, 8).id(), MaterialId::Stone);
-    assert_ne!(tank.cell_visible(3, 0).id(), MaterialId::Stone);
+    place(&mut tank, 3, 6, Cell::stone());
+    assert_eq!(tank.cell_visible(3, 6).tumble(), 0);
+    // Two grain passes per tick: one tick drops it two cells and turns twice.
+    tick_n(&mut tank, 1);
+    assert_eq!(tank.cell_visible(3, 4).id(), MaterialId::Stone);
+    assert_eq!(tank.cell_visible(3, 4).tumble(), 2);
+    tick_n(&mut tank, 6);
+    assert_eq!(tank.cell_visible(3, 0).id(), MaterialId::Stone);
+    assert!(tank.cell_visible(3, 4).is_air());
+    assert_ne!(tank.cell_visible(3, 0).tumble(), 0);
 }
 
 #[test]
@@ -336,11 +342,65 @@ fn swirl_tilt_moves_water_downhill() {
 }
 
 #[test]
-fn loose_rock_stays_put() {
+fn loose_rock_falls_and_tumbles() {
     let mut tank = Tank::try_new(1, 8, 12).unwrap();
-    place(&mut tank, 3, 8, Cell::solid(MaterialId::LooseRock));
-    tick_n(&mut tank, 40);
-    assert_eq!(tank.cell_visible(3, 8).id(), MaterialId::LooseRock);
+    place(&mut tank, 3, 5, Cell::solid(MaterialId::LooseRock));
+    tick_n(&mut tank, 1);
+    assert_eq!(tank.cell_visible(3, 3).id(), MaterialId::LooseRock);
+    assert_eq!(tank.cell_visible(3, 3).tumble(), 2);
+    tick_n(&mut tank, 6);
+    assert_eq!(tank.cell_visible(3, 0).id(), MaterialId::LooseRock);
+    assert_eq!(tank.cell_visible(3, 0).tumble(), 1);
+    assert!(tank.cell_visible(3, 5).is_air());
+}
+
+#[test]
+fn wet_sand_renders_darker_and_grains_differ() {
+    let mut tank = Tank::try_new(1, 8, 8).unwrap();
+    let mut wet = Cell::sand();
+    wet.sat = crate::cell::water_capacity(MaterialId::Sand);
+    place(&mut tank, 2, 2, Cell::sand());
+    place(&mut tank, 5, 2, wet);
+    let dry = rgb_at(&mut tank, 2, 2, 0, 0);
+    let soaked = rgb_at(&mut tank, 5, 2, 0, 0);
+    let dry_sum = dry.0 as u16 + dry.1 as u16 + dry.2 as u16;
+    let wet_sum = soaked.0 as u16 + soaked.1 as u16 + soaked.2 as u16;
+    assert!(
+        wet_sum + 30 < dry_sum,
+        "wet sand should read darker (dry {dry:?} wet {soaked:?})"
+    );
+    let next = rgb_at(&mut tank, 2, 2, 1, 0);
+    assert_ne!(dry, next, "neighbouring sand pixels should not match");
+}
+
+#[test]
+fn creature_cap_stops_at_five_hundred() {
+    let mut tank = Tank::try_new(1, 24, 24).unwrap();
+    let mut n = 0u32;
+    'outer: for y in 0..72u16 {
+        for x in 0..72u16 {
+            if tank.seed_algae(x, y).is_some() {
+                n += 1;
+                if n == 500 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    assert_eq!(n, 500);
+    assert_eq!(tank.org_counts(1).0, 500);
+    assert!(tank.seed_algae(70, 70).is_none());
+}
+
+fn rgb_at(tank: &mut Tank, vx: u32, vy: u32, dx: u32, dy: u32) -> (u8, u8, u8) {
+    let mut rgba = Vec::new();
+    tank.write_rgba(&mut rgba);
+    let (pw, _ph) = tank.pixel_size();
+    let vis_h = tank.visible_size().1;
+    let px = vx * PX_PER_CELL + dx;
+    let py = (vis_h - 1 - vy) * PX_PER_CELL + dy;
+    let i = ((py * pw + px) * 4) as usize;
+    (rgba[i], rgba[i + 1], rgba[i + 2])
 }
 
 #[test]
@@ -1788,6 +1848,8 @@ fn glass_wall_holds_water_and_passes_light() {
     // The pane passes light. Stone is side-lit, and the water under it
     // stays readable — a roof no longer blacks out the bed.
     place(&mut tank, 1, 8, Cell::glass());
+    // Bedrock holds the sample stone; loose cobbles would drop on the tick.
+    place(&mut tank, 10, 7, Cell::bedrock());
     place(&mut tank, 10, 8, Cell::stone());
     tank.tick(&TankInput { always_day: true, ..TankInput::default() });
     let under_glass = tank.pixel_light_at(3 + 1, (12 - 1 - 7) * 3 + 1);
@@ -2253,8 +2315,10 @@ fn humidity_rises_over_water_and_dew_forms_on_glass_at_night() {
     for vy in 10..24 {
         place(&mut tank, 20, vy, Cell::glass());
     }
+    // Limestone stays put, so the block can hang in the humid air the
+    // way the old static stone did. Painted stone now falls.
     for vy in 12..15 {
-        place(&mut tank, 4, vy, Cell::stone());
+        place(&mut tank, 4, vy, Cell::solid(MaterialId::Limestone));
     }
     for _ in 0..1200 {
         tank.tick(&day());

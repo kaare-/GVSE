@@ -129,6 +129,7 @@ struct SpecimenPage: View {
     }
 
     var body: some View {
+        NavigationStack {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
@@ -204,6 +205,8 @@ struct SpecimenPage: View {
         }
         .confirmationDialog("Remove this page from the book?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive, action: onDelete)
+        }
+        .toolbar(.hidden, for: .navigationBar)
         }
     }
 }

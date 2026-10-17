@@ -23,25 +23,24 @@ struct PixelTextField: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        TextField(placeholder, text: $text)
-            .textFieldStyle(.plain)
-            .font(.system(.body, design: .monospaced))
-            .foregroundColor(Palette.paper)
-            .padding(6)
-            .background(Color(white: 0.14))
-            .focused($focused)
-            .toolbar {
-                ToolbarItemGroup(placement: .keyboard) {
-                    PixelLabel(text: "TYPE", scale: 1, color: Palette.dimPaper)
-                    Spacer()
-                    Button {
-                        focused = false
-                        onDone?()
-                    } label: {
-                        PixelLabel(text: "DONE", scale: 2, color: Palette.highlight)
-                    }
+        VStack(alignment: .leading, spacing: 6) {
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(.body, design: .monospaced))
+                .foregroundColor(Palette.paper)
+                .padding(6)
+                .background(Color(white: 0.14))
+                .focused($focused)
+            if focused {
+                Button {
+                    focused = false
+                    onDone?()
+                } label: {
+                    PixelLabel(text: "DONE", scale: 2, color: Palette.highlight)
                 }
+                .buttonStyle(.plain)
             }
+        }
     }
 }
 
@@ -53,25 +52,24 @@ struct PixelTextEditor: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        TextEditor(text: $text)
-            .font(.system(.body, design: .monospaced))
-            .foregroundColor(Palette.paper)
-            .scrollContentBackground(.hidden)
-            .frame(minHeight: minHeight)
-            .padding(4)
-            .background(Color(white: 0.14))
-            .focused($focused)
-            .toolbar {
-                ToolbarItemGroup(placement: .keyboard) {
-                    PixelLabel(text: "NOTES", scale: 1, color: Palette.dimPaper)
-                    Spacer()
-                    Button {
-                        focused = false
-                        onDone?()
-                    } label: {
-                        PixelLabel(text: "DONE", scale: 2, color: Palette.highlight)
-                    }
+        VStack(alignment: .leading, spacing: 6) {
+            TextEditor(text: $text)
+                .font(.system(.body, design: .monospaced))
+                .foregroundColor(Palette.paper)
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: minHeight)
+                .padding(4)
+                .background(Color(white: 0.14))
+                .focused($focused)
+            if focused {
+                Button {
+                    focused = false
+                    onDone?()
+                } label: {
+                    PixelLabel(text: "DONE", scale: 2, color: Palette.highlight)
                 }
+                .buttonStyle(.plain)
             }
+        }
     }
 }

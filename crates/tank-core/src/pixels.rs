@@ -258,6 +258,13 @@ pub fn write_rgba(
             } else {
                 albedo(cell)
             };
+            if owner == 0 && !cell.is_open() && !cell.is_glass() {
+                let (jr, jg, jb) = grain_speck(px, py);
+                let relief = rock_relief(cell, px, py);
+                r = shade(r, jr + relief);
+                g = shade(g, jg + relief);
+                b = shade(b, jb + relief);
+            }
             let li = pixels.light[i] as u32;
             r = ((r as u32) * li / 255) as u8;
             g = ((g as u32) * li / 255) as u8;
@@ -364,12 +371,27 @@ fn albedo(cell: Cell) -> [u8; 3] {
         return [mix(0x16, 0x4c, t), mix(0x32, 0x93, t), mix(0x4f, 0xd4, t)];
     }
     let (dry, wet) = palette(cell, v);
-    let t = cell.moisture() as i32;
+    let t = render_wetness(cell);
     [
         mix(dry[0], wet[0], t),
         mix(dry[1], wet[1], t),
         mix(dry[2], wet[2], t),
     ]
+}
+
+/// Pore water is a fraction of capacity, not of 255, so a soaked sand
+/// grain reaches the wet palette instead of stopping a third of the way.
+/// Rock film is already stored on the 0–255 scale.
+fn render_wetness(cell: Cell) -> i32 {
+    let m = cell.moisture() as i32;
+    if cell.is_rock() {
+        return m.min(255);
+    }
+    let cap = crate::cell::water_capacity(cell.id()) as i32;
+    if cap <= 0 {
+        return 0;
+    }
+    (m * 255 / cap).min(255)
 }
 
 fn palette(cell: Cell, variant: usize) -> ([u8; 3], [u8; 3]) {
@@ -420,4 +442,35 @@ fn mix(a: u8, b: u8, t: i32) -> u8 {
     let a = a as i32;
     let b = b as i32;
     (a + (b - a) * t / 255) as u8
+}
+
+fn shade(c: u8, d: i32) -> u8 {
+    (c as i32 + d).clamp(0, 255) as u8
+}
+
+/// Small per-pixel grain so a flat 3×3 cell is not one colour.
+/// Neighbours differ: the mix advances by 3 along x.
+fn grain_speck(px: usize, py: usize) -> (i32, i32, i32) {
+    let n = (px.wrapping_mul(3).wrapping_add(py.wrapping_mul(5))) & 15;
+    let j = n as i32 - 8;
+    let warm = ((px.wrapping_add(py.wrapping_mul(2))) & 3) as i32 - 1;
+    (j + warm, j, j - warm)
+}
+
+/// A lit corner on a cobble. The corner walks as [`Cell::tumble`] advances,
+/// so a falling rock reads as a turn.
+fn rock_relief(cell: Cell, px: usize, py: usize) -> i32 {
+    if !cell.tumbles() {
+        return 0;
+    }
+    let sx = (px as i32) % PX_PER_CELL as i32;
+    let sy = (py as i32) % PX_PER_CELL as i32;
+    let (hx, hy) = match cell.tumble() {
+        0 => (0, 0),
+        1 => (2, 0),
+        2 => (2, 2),
+        _ => (0, 2),
+    };
+    let dist = (sx - hx).abs() + (sy - hy).abs();
+    16 - dist * 8
 }

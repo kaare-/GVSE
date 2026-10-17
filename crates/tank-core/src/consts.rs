@@ -139,6 +139,11 @@ pub const MAX_SLOTS: usize = 64;
 /// Live-cell soft cap (handoff lever).
 pub const LIVE_CAP: usize = 30_000;
 
+/// Living organisms. Each free algae speck is its own creature, so this
+/// is the cap the tank actually feels. Body parts of an existing creature
+/// still grow under [`LIVE_CAP`].
+pub const CREATURE_CAP: usize = 500;
+
 /// No mitosis below this tank temperature (°C).
 pub const MITOSIS_FLOOR_C: f32 = 4.0;
 
