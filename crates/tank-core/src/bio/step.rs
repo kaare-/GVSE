@@ -46,7 +46,9 @@ pub struct BioStepResult {
 /// Share of a corpse's soft mass that drifts off as fines (Q8).
 pub const FINES_SHARE_Q8: u32 = 77; // 30 %
 /// Corpses settle one pixel per this many ticks.
-const CORPSE_SINK_EVERY: u64 = 2;
+/// Pixels a corpse drops per tick while the water under it is open.
+/// Faster than GvsE's slow settle (`vel_y` −0.15, then a 2400-tick rest).
+const CORPSE_SINK_PX: u16 = 3;
 /// Fungus-made soil is checked for this often (`fields::make_soil`).
 const SOIL_EVERY: u64 = 16;
 
@@ -223,7 +225,7 @@ fn step_corpses(
     cells: &mut CellStore,
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
-    tick: u64,
+    _tick: u64,
     out: &mut BioStepResult,
 ) {
     let vis_h = grid.visible_h() as u32;
@@ -235,16 +237,23 @@ fn step_corpses(
             crumble_corpse(cells, pixels, id, out);
             continue;
         }
-        if c.film || tick % CORPSE_SINK_EVERY != 0 {
+        if c.film {
             continue;
         }
-        let below_py = c.py + c.h as u16;
-        if below_py as u32 >= pixels.h {
-            continue;
+        let mut py = c.py;
+        for _ in 0..CORPSE_SINK_PX {
+            let below_py = py + c.h as u16;
+            if below_py as u32 >= pixels.h {
+                break;
+            }
+            let (bx, by) = pixel_to_phys(c.px, below_py, vis_h);
+            if !grid.get_visible(bx, by).is_open() {
+                break;
+            }
+            py += 1;
         }
-        let (bx, by) = pixel_to_phys(c.px, below_py, vis_h);
-        if grid.get_visible(bx, by).is_open() {
-            let _ = cells.move_corpse(pixels, id, c.px, c.py + 1);
+        if py != c.py {
+            let _ = cells.move_corpse(pixels, id, c.px, py);
         }
     }
 }
@@ -443,13 +452,21 @@ fn move_free_cell(
             }
         }
     } else {
-        let buoy_units = mc.buoy as i32 * 10;
-        let b = buoy as i32 + buoy_units;
+        // Genome buoy is a bias. Divide it down so a saved buoy of 20 does
+        // not climb every tick, then add a stable per-cell offset so a
+        // population occupies the column instead of the surface.
+        let personal = (hash_u64(world_seed, id as u64, 0xB0, 0x0B) % 11) as i32 - 5;
+        let bias = (buoy as i32 + mc.buoy as i32 * 4) / 4;
+        let b = (bias + personal).clamp(-6, 6);
         if in_water && b > 0 {
-            if h % 8 < (b as u64).clamp(0, 7) {
+            if h % 16 < b as u64 {
                 ny -= 1;
             }
-        } else if !in_water || b < 0 || h % 16 == 0 {
+        } else if in_water && b < 0 {
+            if h % 16 < (-b) as u64 {
+                ny += 1;
+            }
+        } else if !in_water || h % 24 == 0 {
             ny += 1;
         }
     }

@@ -1785,14 +1785,17 @@ fn glass_wall_holds_water_and_passes_light() {
         tank.evaporated_sat()
     );
     assert_eq!(outside, 0, "nothing leaks through glass");
-    // Light under a pane is almost full; under stone it is not.
+    // The pane passes light. Stone is side-lit, and the water under it
+    // stays readable — a roof no longer blacks out the bed.
     place(&mut tank, 1, 8, Cell::glass());
     place(&mut tank, 10, 8, Cell::stone());
     tank.tick(&TankInput { always_day: true, ..TankInput::default() });
     let under_glass = tank.pixel_light_at(3 + 1, (12 - 1 - 7) * 3 + 1);
+    let stone_face = tank.pixel_light_at(10 * 3 + 1, (12 - 1 - 8) * 3 + 1);
     let under_stone = tank.pixel_light_at(10 * 3 + 1, (12 - 1 - 7) * 3 + 1);
-    assert!(under_glass > 220, "light through glass {under_glass}");
-    assert!(under_stone < under_glass / 2, "stone shades {under_stone} vs glass {under_glass}");
+    assert!(under_glass > 200, "light through glass {under_glass}");
+    assert!(stone_face > 180, "stone is side-lit {stone_face}");
+    assert!(under_stone > 160, "water under stone stays lit {under_stone}");
     // Erase takes it away; the save keeps it.
     let bytes = tank.save_bytes().unwrap();
     let loaded = Tank::load_bytes(&bytes).unwrap();

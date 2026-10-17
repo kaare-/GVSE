@@ -524,7 +524,7 @@ final class TankSession: ObservableObject {
 
     private func scoop(at point: CGPoint) {
         guard let handle, carried == nil, let px = pixel(at: point) else { return }
-        let r = Int32(max(brush, 1) * 3)
+        let r = Int32(max(brush, 1) * 6)
         guard let bucket = tank_scoop(handle, Int32(px.x), Int32(px.y), r) else {
             showHint("EMPTY")
             return
@@ -616,7 +616,7 @@ final class TankSession: ObservableObject {
             return
         case .look:
             magnifierPoint = point
-            metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
+            metal?.magnifier = magnifier(at: point)
             inspect(at: point, ended: ended)
             if ended { clearLensSoon() }
             return
@@ -626,16 +626,25 @@ final class TankSession: ObservableObject {
                 if carried == nil { scoop(at: point) } else { release(at: point) }
             }
             magnifierPoint = point
-            metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
+            metal?.magnifier = magnifier(at: point)
             if ended { clearLensSoon() }
             return
         default:
             break
         }
         magnifierPoint = point
-        metal?.magnifier = MagnifierState(center: point, pinned: magnifierPinned)
+        metal?.magnifier = magnifier(at: point)
         queueStroke(at: point)
         if ended { clearLensSoon() }
+    }
+
+    /// Round glass under the finger. Radius follows the GLASS / SCOOP slider.
+    private func magnifier(at point: CGPoint) -> MagnifierState {
+        MagnifierState(
+            center: point,
+            pinned: magnifierPinned,
+            radius: 28 + CGFloat(max(brush, 1)) * 12
+        )
     }
 
     private func clearLensSoon() {
@@ -909,6 +918,8 @@ final class TankSession: ObservableObject {
 struct MagnifierState {
     var center: CGPoint
     var pinned: Bool
+    /// Glass radius in view points.
+    var radius: CGFloat
 }
 
 private final class DisplayPump: NSObject {

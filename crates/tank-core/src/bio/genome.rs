@@ -91,6 +91,9 @@ impl Genome {
     /// d.1 — the seed algae.
     pub fn algae() -> Self {
         let mut g = Self::base();
+        // Near-neutral. The free-cell step adds a per-cell offset, so a
+        // clutch spreads through the column instead of pinning to the lid.
+        g.buoy = 0;
         g.modes.push(Mode::algae());
         g
     }

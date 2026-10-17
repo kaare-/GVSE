@@ -151,9 +151,10 @@ pub const BOND_SHARE_DIV: i32 = 8;
 /// Hard living pixels (of 9) that turn a physics cell solid to flow (§b.3).
 pub const TISSUE_DAM_PIXELS: u8 = 5;
 
-/// Light absorbed per PHOTO pixel row (×0.5) and per other tissue (×0.75), Q8.
-pub const TISSUE_PASS_PHOTO_Q8: u32 = 128;
-pub const TISSUE_PASS_OTHER_Q8: u32 = 192;
+/// Light kept per living pixel row, Q8. Near 1 so a mat does not black
+/// out the water; the bed is side-lit in `rebuild_light`.
+pub const TISSUE_PASS_PHOTO_Q8: u32 = 252;
+pub const TISSUE_PASS_OTHER_Q8: u32 = 254;
 
 // ---- Phase 4: thermal cycle (`evolution-system.md` §4), THERMO (§a.7) ----
 

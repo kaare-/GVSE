@@ -136,10 +136,11 @@ pub struct Flashlight {
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Column light at pixel resolution. Water loses 0.1 % per pixel row,
-/// solid matter ~55 % per physics cell, and living tissue shades what is
-/// below it (`tissue_pass(owner)` in Q8; PHOTO ≈ ×0.5 per pixel row).
-/// `cloud[x]` (per pixel column, Q8) multiplies the light entering it.
+/// Column light at pixel resolution. Water loses 0.1 % per pixel row.
+/// Sand, rock, soil and other solids are lit from the side: their own
+/// pixels keep the column's incident light, and they only nick what is
+/// below them once per physics cell. Living tissue and corpses barely
+/// shade (`tissue_pass` near 255). `cloud[x]` still multiplies the column.
 pub fn rebuild_light(
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
@@ -181,12 +182,28 @@ pub fn rebuild_light(
         if let Some(&c) = cloud_q8.get(px) {
             incoming = incoming * c as u32 / 255;
         }
+        // Side light for the bed: the incident in this column, before
+        // anything in it casts a shadow.
+        let side = incoming / 256;
         let mut last_owner = 0u32;
         let mut last_pass = 255u32;
+        let mut last_solid_vy = i32::MIN;
         for py in 0..ph {
             let vy_top = (py / PX_PER_CELL as usize) as i32;
-            let cell = grid.get_visible(vx, vis_h - 1 - vy_top);
+            let vy = vis_h - 1 - vy_top;
+            let cell = grid.get_visible(vx, vy);
             let i = py * pw + px;
+            let solid = !cell.is_open() && !cell.is_glass();
+            if solid {
+                pixels.light[i] = side.min(255) as u8;
+                if vy != last_solid_vy {
+                    last_solid_vy = vy;
+                    // One mild step per physics cell, so a roof still
+                    // dims the water under it without blacking the grain.
+                    incoming = incoming * 236 / 256;
+                }
+                continue;
+            }
             pixels.light[i] = (incoming / 256).min(255) as u8;
             let owner = pixels.owner[i];
             if owner != 0 {
@@ -195,17 +212,12 @@ pub fn rebuild_light(
                     last_pass = tissue_pass(owner) as u32;
                 }
                 incoming = incoming * last_pass / 256;
-            } else if cell.is_open() {
-                if cell.sat >= WATER_SAT_RENDER {
-                    incoming = incoming * 999 / 1000;
-                }
+            } else if cell.sat >= WATER_SAT_RENDER {
+                incoming = incoming * 999 / 1000;
             } else if cell.is_glass() {
                 // A pane loses ≈ 7 % per physics cell; a holding tank is
                 // not a shadow.
                 incoming = incoming * 250 / 256;
-            } else {
-                // 0.45 per physics cell ≈ 0.766 per pixel row.
-                incoming = incoming * 196 / 256;
             }
         }
     }

@@ -25,8 +25,8 @@ use wk_material::MaterialId;
 
 pub use crate::tools::ToolEvent;
 
-/// Light passing a corpse pixel (Q8): dead soft tissue, slightly murky.
-const CORPSE_PASS_Q8: u8 = 192;
+/// Light passing a corpse or dead secretion (Q8). Murky, not a shadow.
+const CORPSE_PASS_Q8: u8 = 248;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TankError {
@@ -2094,7 +2094,7 @@ impl Tank {
                     return 255;
                 }
                 if secretion_kind(owner).is_some() {
-                    return crate::consts::TISSUE_PASS_OTHER_Q8 as u8 / 2;
+                    return CORPSE_PASS_Q8;
                 }
                 match cells.get(owner - OWNER_BIAS) {
                     Some(c) => genomes.coeffs(c.genotype, c.mode).light_pass_q8,
