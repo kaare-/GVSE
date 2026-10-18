@@ -15,9 +15,10 @@ enum RoomArt {
         var x, y, w, h: Int
     }
 
-    static let treeFrame = Spot(x: 16, y: 46, w: 50, h: 42)
-    static let treeInner = Spot(x: 20, y: 50, w: 42, h: 30)
-    static let treeHit = Spot(x: 16, y: 46, w: 50, h: 52)
+    /// Centered on the aquarium, larger than the old left-hand frame.
+    static let treeFrame = Spot(x: 24, y: 44, w: 72, h: 48)
+    static let treeInner = Spot(x: 28, y: 48, w: 64, h: 36)
+    static let treeHit = Spot(x: 24, y: 44, w: 72, h: 54)
 
     /// Small breaker panel, low on the right.
     static let fuseBox = Spot(x: 98, y: 214, w: 18, h: 24)
@@ -30,7 +31,7 @@ enum RoomArt {
 
     static let tank = Spot(x: 16, y: 100, w: 88, h: 60)
     /// The glass inside the frame. The live tank is drawn here.
-    static let tankGlass = Spot(x: 19, y: 103, w: 82, h: 54)
+    static let tankGlass = Spot(x: 20, y: 104, w: 80, h: 52)
 
     /// Three sample vials on the shelf. Tap one to look in; empty it from
     /// the long-press menu.
@@ -48,15 +49,20 @@ enum RoomArt {
     /// A jar of odd tools under the right end of the shelf.
     static let toolJar = Spot(x: 104, y: 44, w: 14, h: 18)
 
-    /// Where a vine leaves its pot. Length is not painted; it grows later.
+    /// Where a pot's foliage starts. Growth climbs toward the ceiling.
     struct Vine {
         var x, y, sway: Int
     }
 
     static let vines = [
-        Vine(x: 5, y: 40, sway: 5),
-        Vine(x: 88, y: 42, sway: 4),
+        Vine(x: 8, y: 16, sway: 4),
+        Vine(x: 99, y: 20, sway: 3),
     ]
+
+    /// Small frame on the wall under the scissor jar.
+    static let favFrame = Spot(x: 98, y: 68, w: 18, h: 24)
+    static let favInner = Spot(x: 100, y: 70, w: 14, h: 16)
+    static let favHit = Spot(x: 96, y: 66, w: 22, h: 28)
 
     static let book = Spot(x: 6, y: 200, w: 28, h: 30)
     static let bookHit = Spot(x: 4, y: 198, w: 36, h: 40)
@@ -163,6 +169,7 @@ private final class Pix {
         tree()
         lamps()
         tank()
+        favouriteFrame()
         bench()
         clutter()
         floor()
@@ -229,18 +236,6 @@ private final class Pix {
                 }
             }
         }
-        // Two beams leaving the window, so the light has a direction
-        // you can see, not only a slow fade.
-        for i in 0..<78 {
-            let x = 16 + i
-            let y0 = 50 + i / 4
-            sun(x, y0, 20)
-            sun(x, y0 + 1, 16)
-            sun(x, y0 + 2, 8)
-            let y1 = 86 + i / 6
-            sun(x, y1, 16)
-            sun(x, y1 + 1, 12)
-        }
         // Hard rims: light from the left leaves a dark edge on the right.
         rightRim(16, 100, 88, 60)
         rightRim(6, 156, 108, 12)
@@ -249,9 +244,9 @@ private final class Pix {
         for x in 2..<118 {
             shade(x, 40, 5 + x / 24)
         }
-        cone(cx: 66, cy: 30, reach: 24, power: 36)
-        cone(cx: 8, cy: 116, reach: 70, power: 42)
-        cone(cx: 112, cy: 116, reach: 70, power: 42)
+        cone(cx: 66, cy: 30, reach: 18, power: 22)
+        cone(cx: 8, cy: 118, reach: 36, power: 24)
+        cone(cx: 112, cy: 124, reach: 22, power: 18)
     }
 
     /// Light on the wall around a shade, then a widening pool beneath it.
@@ -315,13 +310,10 @@ private final class Pix {
         fill(65, 24, 2, 3, Ink.glowHot)
         fill(62, 31, 8, 2, Ink.brass)
 
-        // Little picture and a second trailing plant.
+        // A small landscape, sky over a far shore. No loose foliage.
         fill(76, 20, 14, 14, Ink.brassDk)
-        fill(78, 22, 10, 10, 0x163040)
-        fill(78, 29, 10, 3, 0x2A6840)
-        fill(80, 24, 2, 6, Ink.plantDk)
-        fill(83, 23, 2, 7, Ink.plant)
-        fill(86, 25, 2, 5, Ink.plantLt)
+        fill(78, 22, 10, 6, 0x163040)
+        fill(78, 28, 10, 4, 0x8A6844)
 
         fill(96, 28, 10, 6, Ink.pot)
         fill(95, 27, 12, 2, Ink.potLt)
@@ -358,7 +350,18 @@ private final class Pix {
 
     private func lamps() {
         deskLamp(2)
-        deskLamp(106)
+        candle(106)
+    }
+
+    /// The right-hand light. A short wax column and a flame, not a second lamp.
+    private func candle(_ x: Int) {
+        fill(x + 4, 130, 4, 22, Ink.ivory)
+        fill(x + 5, 132, 1, 16, 0xE7D3A4)
+        fill(x + 5, 126, 2, 4, Ink.glow)
+        set(x + 5, 124, Ink.glowHot)
+        set(x + 6, 127, Ink.glowHot)
+        fill(x + 2, 152, 8, 2, Ink.brass)
+        fill(x + 3, 154, 6, 2, Ink.brassDk)
     }
 
     private func deskLamp(_ x: Int) {
@@ -374,10 +377,22 @@ private final class Pix {
     private func tank() {
         let t = RoomArt.tank
         let g = RoomArt.tankGlass
-        fill(t.x, t.y, t.w, t.h, Ink.woodDk)
+        fill(t.x, t.y, t.w, t.h, Ink.ivory)
+        fill(t.x + 2, t.y + 2, t.w - 4, t.h - 4, Ink.woodDk)
+        fill(t.x + 3, t.y + 3, t.w - 6, t.h - 6, Ink.brassDk)
         fill(g.x, g.y, g.w, g.h, Ink.waterL)
-        fill(t.x, t.y, t.w, 1, Ink.ivory)
-        fill(t.x, t.y + t.h - 1, t.w, 1, Ink.wood)
+        fill(t.x, t.y, t.w, 2, Ink.ivory)
+        fill(t.x, t.y + t.h - 2, t.w, 2, Ink.wood)
+        fill(t.x, t.y, 2, t.h, Ink.woodLt)
+        fill(t.x + t.w - 2, t.y, 2, t.h, Ink.woodDk)
+    }
+
+    private func favouriteFrame() {
+        let f = RoomArt.favFrame
+        let inner = RoomArt.favInner
+        fill(f.x, f.y, f.w, f.h, Ink.wood)
+        fill(f.x, f.y, f.w, 1, Ink.woodLt)
+        fill(inner.x, inner.y, inner.w, inner.h, Ink.night)
     }
 
     private func bench() {

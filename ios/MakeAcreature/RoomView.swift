@@ -14,7 +14,7 @@ struct RoomView: View {
 
     @State private var tree: [SpeciesNode] = []
     @State private var confirmEmpty: Int?
-    @State private var vines: [CGFloat] = [22, 22]
+    @State private var vines: [CGFloat] = [6, 6]
     @State private var shears = false
     @State private var thumbs: [UIImage?] = [nil, nil, nil, nil]
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
@@ -48,7 +48,7 @@ struct RoomView: View {
                 }
                 place(RoomArt.bookHit, layout) { bookButton(layout) }
                 place(RoomArt.logHit, layout) { logButton }
-                place(RoomArt.crateHit, layout) { crateButton(layout) }
+                place(RoomArt.favHit, layout) { crateButton(layout) }
                 place(RoomArt.signHit, layout) { signButton }
                 place(RoomArt.toolJar, layout) { toolJarButton }
                 if shears {
@@ -218,8 +218,8 @@ struct RoomView: View {
     }
 
     private func crateButton(_ layout: RoomLayout) -> some View {
-        let inner = layout.rect(RoomArt.crateInner)
-        let hit = layout.rect(RoomArt.crateHit)
+        let inner = layout.rect(RoomArt.favInner)
+        let hit = layout.rect(RoomArt.favHit)
         return Button {
             session.cycleFavourite()
         } label: {
@@ -288,8 +288,8 @@ struct RoomView: View {
 
     private func vineHit(_ index: Int) -> RoomArt.Spot {
         let vine = RoomArt.vines[index]
-        let len = max(8, Int(vines[index]))
-        return RoomArt.Spot(x: vine.x - 3, y: vine.y, w: 10, h: len)
+        let len = max(4, Int(vines[index]))
+        return RoomArt.Spot(x: vine.x - 4, y: vine.y - len, w: 12, h: len + 2)
     }
 
     @ViewBuilder
@@ -309,22 +309,22 @@ struct RoomView: View {
         let s = layout.s
         return Canvas { ctx, _ in
             for (i, vine) in RoomArt.vines.enumerated() {
-                let len = vines.indices.contains(i) ? vines[i] : 22
+                let len = vines.indices.contains(i) ? vines[i] : 6
                 var x = CGFloat(vine.x)
                 var y = CGFloat(vine.y)
-                let end = y + len
+                let top = max(2, y - len)
                 var step = 0
-                while y < end {
+                while y > top {
                     let ink: Color = step % 3 == 0
                         ? Color(red: 0.635, green: 0.839, blue: 0.435)
                         : Color(red: 0.424, green: 0.722, blue: 0.290)
                     let rect = CGRect(x: x * s, y: y * s, width: max(s, 1), height: max(s, 1))
                     ctx.fill(Path(rect), with: .color(ink))
-                    if step % 4 == 0 {
+                    if step % 3 == 0 {
                         let leaf = CGRect(x: (x + 1) * s, y: y * s, width: max(s, 1), height: max(s, 1))
-                        ctx.fill(Path(leaf), with: .color(Color(red: 0.10, green: 0.30, blue: 0.13)))
+                        ctx.fill(Path(leaf), with: .color(Color(red: 0.18, green: 0.42, blue: 0.16)))
                     }
-                    y += 2
+                    y -= 2
                     let sway = max(vine.sway, 1)
                     x += (Int(y) / sway) % 2 == 0 ? 1 : -1
                     x = min(CGFloat(RoomArt.w - 2), max(1, x))
@@ -378,11 +378,11 @@ private enum LobbyGrowth {
             let seen = UserDefaults.standard.double(forKey: seenKey)
             var len = UserDefaults.standard.double(forKey: key)
             if seen <= 0, len <= 0 {
-                len = 22
+                len = 6
             } else if seen > 0 {
-                len += max(0, now - seen) / 3600 * 4
+                len += max(0, now - seen) / 3600 * 2
             }
-            len = min(110, max(6, len))
+            len = min(14, max(4, len))
             UserDefaults.standard.set(len, forKey: key)
             UserDefaults.standard.set(now, forKey: seenKey)
             lengths.append(CGFloat(len))
@@ -391,9 +391,9 @@ private enum LobbyGrowth {
     }
 
     static func trim(_ index: Int) -> CGFloat {
-        UserDefaults.standard.set(6.0, forKey: "lobbyVine\(index)")
+        UserDefaults.standard.set(4.0, forKey: "lobbyVine\(index)")
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "lobbySeen\(index)")
-        return 6
+        return 4
     }
 }
 
