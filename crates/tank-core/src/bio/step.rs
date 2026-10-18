@@ -25,7 +25,6 @@ use crate::hash::hash_u64;
 use crate::pixels::{CoarseField, PixelLayer};
 use crate::tank::SimEvent;
 
-const FILM_STUCK_AGE: u16 = 45;
 /// Lysis of a soft-litter *seat* (dry-air Organic cell) yields this much
 /// dissolved glucose; in water the dead leave pixel litter instead.
 const LITTER_GLUCOSE: u8 = 40;
@@ -1293,15 +1292,8 @@ fn metabolise(
         }
     }
 
-    // Stick to a wall / waterline → contribute film.
-    if age > FILM_STUCK_AGE
-        && cell.parent_cell == NONE
-        && near_solid(grid, cell.px, cell.py)
-        && pixels.film[idx] < 40
-    {
-        pixels.film[idx] = 40;
-    }
-
+    // Creatures used to paint the front pane here. That read as dirt on
+    // the glass, so the pane stays clear.
     if tick % 4 == (id as u64 % 4) && try_transition(cells, genomes, pixels, coarse, id, &scalars) {
         return;
     }
@@ -1345,7 +1337,7 @@ fn die(
     grid: &mut PhysicsGrid,
     pixels: &mut PixelLayer,
     id: u32,
-    age: u16,
+    _age: u16,
     tick: u64,
     out: &mut BioStepResult,
 ) {
@@ -1366,7 +1358,8 @@ fn die(
         let mass = structure as i32 + cell.energy.max(0);
         Some(corpse_split(mc, cell.area(), mass))
     };
-    let to_film = cell.film || age > FILM_STUCK_AGE && near_solid(grid, cell.px, cell.py);
+    // Dying against a surface used to leave a smear on the front pane.
+    let to_film = false;
     let fragments = cells.kill(genomes, pixels, id, to_film, tick, corpse);
     out.deaths += 1;
     out.events.push(SimEvent {

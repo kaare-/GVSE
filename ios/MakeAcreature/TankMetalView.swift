@@ -207,11 +207,11 @@ final class TankMetalView: UIView {
     }
 }
 
-/// Largest scale that fits the tank in the view. Not floored: a 1× floor
-/// on a retina phone left the tank as a small picture in a black frame.
+/// Scale that fills the width. Fitting the height left thick black bars
+/// on either side of a tall tank; the top and bottom clip instead.
 func tankFitScale(drawableW: CGFloat, drawableH: CGFloat, width: CGFloat, height: CGFloat) -> CGFloat {
-    guard width > 0, height > 0 else { return 1 }
-    return min(drawableW / width, drawableH / height)
+    guard width > 0, height > 0, drawableH > 0 else { return 1 }
+    return drawableW / width
 }
 
 struct TankScreen: UIViewRepresentable {

@@ -255,6 +255,7 @@ struct SpecimenPage: View {
             ShareSheet(items: [specimen.pageImage(), specimen.page])
         }
         .background(Palette.panel)
+        .ignoresSafeArea(.keyboard)
     }
 }
 

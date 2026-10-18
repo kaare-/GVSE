@@ -80,7 +80,7 @@ final class TankSession: ObservableObject {
     @Published var tool: BuildTool = .sand {
         didSet {
             if tool != .needle {
-                needleTip = nil
+                selectionRect = nil
                 if tool != oldValue { inspected = nil }
             }
         }
@@ -92,8 +92,8 @@ final class TankSession: ObservableObject {
     @Published var fillLevel = 0.55
     /// Main tank, or a shelf sample. Jar 1 is not the main tank.
     @Published private(set) var container: TankContainer = .main
-    /// Needle hot spot, above the finger so the tip stays visible.
-    @Published var needleTip: CGPoint?
+    /// Selection box above the finger. The creature inside it is the one selected.
+    @Published var selectionRect: CGRect?
     @Published var swirl = false
     /// System Reduce Motion. Swirl stays off while this is set.
     @Published private(set) var reduceMotion = UIAccessibility.isReduceMotionEnabled
@@ -110,7 +110,6 @@ final class TankSession: ObservableObject {
     @Published var lightSlider: Double = 1
     /// Enclosure op when BOX is selected: 0 walls · 1 drain · 2 fill · 3 release.
     @Published var encloseOp = 0
-    @Published var magnifierPinned = false
     @Published var magnifierPoint: CGPoint?
     @Published var cameraTiltDegrees: Double = 0
     @Published private(set) var inspected: InspectState?
@@ -145,6 +144,7 @@ final class TankSession: ObservableObject {
     private var lastGravY: Float = -1
     private var frame = 0
     private var hintToken = 0
+    private var lastTap: (time: CFTimeInterval, point: CGPoint)?
     private var reduceMotionObserver: NSObjectProtocol?
 
     private var docs: URL {
@@ -745,84 +745,112 @@ final class TankSession: ObservableObject {
     // MARK: touch
 
     private func handleTouch(point: CGPoint?, ended: Bool) {
-        guard let point else {
-            if ended && !magnifierPinned {
-                magnifierPoint = nil
-                metal?.magnifier = nil
-            }
-            return
-        }
+        guard let point else { return }
+        if ended, dismissLensIfDoubleTap(point) { return }
         switch tool {
         case .look:
+            // The glass stays where it is left. A double tap clears it.
             magnifierPoint = point
             metal?.magnifier = magnifier(at: point)
-            if ended { clearLensSoon() }
             return
         case .needle:
-            let tip = needleTipPoint(point)
-            needleTip = tip
-            // A pinned glass stays where Look left it.
-            if !magnifierPinned {
-                magnifierPoint = tip
-                metal?.magnifier = magnifier(at: tip)
-            }
-            inspect(at: tip, ended: ended)
-            if ended { clearLensSoon() }
+            let box = selectionBox(at: point)
+            selectionRect = box
+            inspect(in: box, ended: ended)
+            if ended { selectionRect = nil }
             return
         case .sample:
             if ended {
                 if carried == nil { scoop(at: point) } else { release(at: point) }
             }
-            magnifierPoint = point
-            metal?.magnifier = magnifier(at: point)
-            if ended { clearLensSoon() }
             return
         default:
-            break
+            queueStroke(at: point, ended: ended)
         }
-        magnifierPoint = point
-        metal?.magnifier = magnifier(at: point)
-        queueStroke(at: point, ended: ended)
-        if ended { clearLensSoon() }
     }
 
-    /// The hot spot sits above the finger so the tip is not covered.
-    private func needleTipPoint(_ touch: CGPoint) -> CGPoint {
-        CGPoint(x: touch.x, y: max(12, touch.y - 78))
+    /// Two quick taps put the looking glass away.
+    private func dismissLensIfDoubleTap(_ point: CGPoint) -> Bool {
+        let now = CACurrentMediaTime()
+        if let last = lastTap, now - last.time < 0.32, hypot(point.x - last.point.x, point.y - last.point.y) < 36 {
+            lastTap = nil
+            magnifierPoint = nil
+            metal?.magnifier = nil
+            return true
+        }
+        lastTap = (now, point)
+        return false
+    }
+
+    /// Box above the finger. The gap keeps the selection off the fingertip.
+    private func selectionBox(at touch: CGPoint) -> CGRect {
+        let side = CGFloat(34 + max(brush, 1) * 4)
+        return CGRect(x: touch.x - side / 2, y: touch.y - side - 28, width: side, height: side)
     }
 
     /// Round glass under the finger. Radius follows the size slider.
     private func magnifier(at point: CGPoint) -> MagnifierState {
         MagnifierState(
             center: point,
-            pinned: magnifierPinned,
+            pinned: true,
             radius: 28 + CGFloat(max(brush, 1)) * 12
         )
     }
 
-    private func clearLensSoon() {
-        guard !magnifierPinned else { return }
-        // Keep the last stroke; clear the lens after a short beat.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let self, !self.magnifierPinned else { return }
-            self.magnifierPoint = nil
-            self.metal?.magnifier = nil
+    /// Any living cell inside the box, centre first. Works while the sim is paused.
+    private func inspect(in rect: CGRect, ended: Bool) {
+        guard let handle, let b = blit() else { return }
+        func pix(_ p: CGPoint) -> (Int, Int) {
+            let x = (p.x * b.scale - b.ox) / b.k
+            let y = (p.y * b.scale - b.oy) / b.k
+            return (Int(x.rounded()), Int(y.rounded()))
         }
-    }
-
-    private func inspect(at point: CGPoint, ended: Bool) {
-        guard let handle, let px = pixel(at: point) else { return }
-        let rec = tank_inspect_cell(handle, UInt32(px.x), UInt32(px.y))
-        if rec.cell == UInt32(TANK_NO_CELL) {
-            // A tap on open water closes the card; a drag keeps the last hit.
-            guard ended else { return }
-            if let r = inspected?.rect, r.insetBy(dx: -24, dy: -24).contains(point) {
-                return
-            }
-            inspected = nil
+        let p0 = pix(CGPoint(x: rect.minX, y: rect.minY))
+        let p1 = pix(CGPoint(x: rect.maxX, y: rect.maxY))
+        let x0 = max(0, min(p0.0, p1.0))
+        let y0 = max(0, min(p0.1, p1.1))
+        let x1 = min(Int(b.w) - 1, max(p0.0, p1.0))
+        let y1 = min(Int(b.h) - 1, max(p0.1, p1.1))
+        guard x0 <= x1, y0 <= y1 else {
+            if ended { inspected = nil }
             return
         }
-        apply(rec)
+        let cx = (x0 + x1) / 2
+        let cy = (y0 + y1) / 2
+        if let hit = nearestCreature(handle, x0: x0, y0: y0, x1: x1, y1: y1, cx: cx, cy: cy) {
+            apply(hit)
+            return
+        }
+        if ended { inspected = nil }
+    }
+
+    /// Every buffer pixel in the box, closest to the centre first.
+    private func nearestCreature(
+        _ handle: OpaquePointer,
+        x0: Int, y0: Int, x1: Int, y1: Int,
+        cx: Int, cy: Int
+    ) -> CellInspectRec? {
+        let reach = max(x1 - x0, y1 - y0) / 2 + 1
+        for radius in 0...reach {
+            var y = max(y0, cy - radius)
+            let yEnd = min(y1, cy + radius)
+            while y <= yEnd {
+                var x = max(x0, cx - radius)
+                let xEnd = min(x1, cx + radius)
+                while x <= xEnd {
+                    let onRing = radius == 0 || abs(x - cx) == radius || abs(y - cy) == radius
+                    if onRing {
+                        let rec = tank_inspect_cell(handle, UInt32(x), UInt32(y))
+                        if rec.cell != UInt32(TANK_NO_CELL) {
+                            return rec
+                        }
+                    }
+                    x += 1
+                }
+                y += 1
+            }
+        }
+        return nil
     }
 
     private func apply(_ rec: CellInspectRec) {
@@ -958,7 +986,7 @@ final class TankSession: ObservableObject {
 
     /// Hold finger → flashlight cone (×2 light, no heat). Off while feeding.
     private func flashlightCell() -> (Int32, Int32, Int32) {
-        guard let point = magnifierPoint, let cell = physicsCell(at: point) else {
+        guard tool == .look, let point = magnifierPoint, let cell = physicsCell(at: point) else {
             return (0, 0, 0)
         }
         return (Int32(cell.0), Int32(cell.1), 8)

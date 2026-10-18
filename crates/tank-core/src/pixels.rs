@@ -330,13 +330,8 @@ pub fn write_rgba(
                     }
                 }
             }
-            let film = pixels.film[i];
-            if film > 0 {
-                let t = film as u32;
-                r = ((r as u32 * (255 - t) + 150 * t) / 255) as u8;
-                g = ((g as u32 * (255 - t) + 190 * t) / 255) as u8;
-                b = ((b as u32 * (255 - t) + 120 * t) / 255) as u8;
-            }
+            // Front-pane film stays in the buffer for the swipe tool, but
+            // it is not drawn. It was the dirt on the glass.
             let o = i * 4;
             out[o] = r;
             out[o + 1] = g;

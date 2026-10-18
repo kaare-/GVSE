@@ -42,10 +42,6 @@ struct RoomView: View {
                 place(RoomArt.logHit, layout) { logButton }
                 place(RoomArt.crateHit, layout) { crateButton(layout) }
                 place(RoomArt.signHit, layout) { signButton(layout) }
-
-                PixelLabel(text: "PINCH IN", scale: 1, color: Palette.dimPaper)
-                    .position(x: layout.rect(RoomArt.pinch).midX, y: layout.rect(RoomArt.pinch).midY)
-                    .allowsHitTesting(false)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -124,7 +120,7 @@ struct RoomView: View {
                 Color.clear.frame(width: hit.width, height: hit.height)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FullHit())
         .a11yButton("Settings")
     }
 
@@ -175,7 +171,7 @@ struct RoomView: View {
                 )
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FullHit())
         .a11yButton("Sample tank \(index + 1)", hint: "Open this sample, separate from the main tank", selected: open)
         .contextMenu {
             Button("Empty tank \(index + 1)", role: .destructive) {
@@ -306,6 +302,7 @@ struct RoomView: View {
         }
         .padding(16)
         .background(Palette.panel.ignoresSafeArea())
+        .ignoresSafeArea(.keyboard)
         .preferredColorScheme(.dark)
     }
 
@@ -313,6 +310,15 @@ struct RoomView: View {
         let up = name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         if up.isEmpty { return "????" }
         return up.count > 10 ? String(up.prefix(9)) + "." : up
+    }
+}
+
+/// Hits the whole frame, not only the opaque pixels of the label.
+private struct FullHit: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
     }
 }
 

@@ -87,8 +87,8 @@ struct MakeAcreatureApp: App {
                 if let rect = session.inspected?.rect {
                     TrackingBox(rect: rect)
                 }
-                if let tip = session.needleTip {
-                    NeedleCursor(tip: tip)
+                if let rect = session.selectionRect {
+                    SelectionBox(rect: rect)
                 }
                 if let state = session.inspected {
                     VStack {
@@ -158,14 +158,6 @@ struct MakeAcreatureApp: App {
                 .a11yButton("Room", hint: "Leave the tank and open the room")
                 textButton("PHOTO") { showPhoto = true }
                     .a11yButton("Photo", hint: "Save a picture of the tank")
-                textButton(session.magnifierPinned ? "PIN" : "LENS") {
-                    session.magnifierPinned.toggle()
-                }
-                .a11yButton(
-                    session.magnifierPinned ? "Lens pinned" : "Lens",
-                    hint: "Pin the magnifier",
-                    selected: session.magnifierPinned
-                )
             }
             ToolWheel(
                 tool: $session.tool,
@@ -190,7 +182,6 @@ struct MakeAcreatureApp: App {
             barButton("LOOK", icon: BuildTool.look.icon, on: session.tool == .look) { session.tool = .look }
             barButton("SAMPLE", icon: BuildTool.sample.icon, on: session.tool == .sample) { session.tool = .sample }
             barButton("NEEDLE", icon: BuildTool.needle.icon, on: session.tool == .needle) { session.tool = .needle }
-            barButton("UNDO", icon: BarIcon.undo, on: false, action: session.undo)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)

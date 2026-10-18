@@ -48,8 +48,6 @@ enum RoomArt {
     static let sign = Spot(x: 86, y: 214, w: 28, h: 14)
     static let signHit = Spot(x: 82, y: 210, w: 34, h: 36)
 
-    static let pinch = Spot(x: 28, y: 168, w: 64, h: 8)
-
     static func cgImage() -> CGImage {
         let pix = Pix(w: w, h: h)
         pix.paint()
