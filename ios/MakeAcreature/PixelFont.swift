@@ -193,10 +193,10 @@ extension GraphicsContext {
 }
 
 enum Palette {
-    static let paper = Color(red: 0.93, green: 0.89, blue: 0.78)
-    static let dimPaper = Color(red: 0.62, green: 0.6, blue: 0.54)
-    static let highlight = Color(red: 1, green: 0.92, blue: 0.7)
-    static let panel = Color(red: 0.09, green: 0.08, blue: 0.07)
+    static let paper = Color(red: 0.961, green: 0.910, blue: 0.796)
+    static let dimPaper = Color(red: 0.72, green: 0.68, blue: 0.58)
+    static let highlight = Color(red: 0.945, green: 0.824, blue: 0.482)
+    static let panel = Color(red: 0.161, green: 0.180, blue: 0.188)
     static let wall = Color(red: 0.16, green: 0.13, blue: 0.11)
     static let floor = Color(red: 0.24, green: 0.17, blue: 0.11)
     static let water = Color(red: 0.4, green: 0.7, blue: 0.9)

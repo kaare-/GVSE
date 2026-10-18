@@ -23,7 +23,7 @@ struct RoomView: View {
         GeometryReader { geo in
             let layout = RoomLayout(size: geo.size)
             ZStack {
-                Color(red: 0.07, green: 0.05, blue: 0.04)
+                Color(red: 0.16, green: 0.18, blue: 0.19)
                 Image(uiImage: RoomArt.image)
                     .resizable()
                     .interpolation(.none)
@@ -316,8 +316,8 @@ struct RoomView: View {
                 var step = 0
                 while y < end {
                     let ink: Color = step % 3 == 0
-                        ? Color(red: 0.42, green: 0.72, blue: 0.29)
-                        : Color(red: 0.18, green: 0.48, blue: 0.22)
+                        ? Color(red: 0.635, green: 0.839, blue: 0.435)
+                        : Color(red: 0.424, green: 0.722, blue: 0.290)
                     let rect = CGRect(x: x * s, y: y * s, width: max(s, 1), height: max(s, 1))
                     ctx.fill(Path(rect), with: .color(ink))
                     if step % 4 == 0 {

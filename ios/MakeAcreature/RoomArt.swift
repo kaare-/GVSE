@@ -15,9 +15,9 @@ enum RoomArt {
         var x, y, w, h: Int
     }
 
-    static let treeFrame = Spot(x: 8, y: 46, w: 52, h: 42)
-    static let treeInner = Spot(x: 12, y: 50, w: 44, h: 30)
-    static let treeHit = Spot(x: 8, y: 46, w: 52, h: 52)
+    static let treeFrame = Spot(x: 16, y: 46, w: 50, h: 42)
+    static let treeInner = Spot(x: 20, y: 50, w: 42, h: 30)
+    static let treeHit = Spot(x: 16, y: 46, w: 50, h: 52)
 
     /// Small breaker panel, low on the right.
     static let fuseBox = Spot(x: 98, y: 214, w: 18, h: 24)
@@ -95,50 +95,54 @@ enum RoomArt {
 }
 
 private enum Ink {
-    static let gap = 0x100C0A
-    static let wallA = 0x2C221A
-    static let wallB = 0x241C14
-    static let floorA = 0x3A2A1E
-    static let floorB = 0x2E2218
-    static let wood = 0x6B4A30
-    static let woodLt = 0x8A6240
-    static let woodDk = 0x3E2818
-    static let shelf = 0x5A3C26
-    static let plant = 0x2E7A38
-    static let plantDk = 0x184C22
-    static let plantLt = 0x6CB84A
-    static let pot = 0x6A4030
-    static let potLt = 0x8A5840
-    static let bookR = 0x7A2830
-    static let bookB = 0x243858
-    static let bookG = 0x3A4030
-    static let bookT = 0x8A5A28
-    static let glass = 0xC5D8DC
-    static let jar = 0x142022
-    static let liquid = 0x2A6844
-    static let brass = 0xC8A45A
-    static let brassDk = 0x8A682E
-    static let glow = 0xFFE2A0
-    static let glowHot = 0xFFF8DC
-    static let night = 0x12100E
-    static let metal = 0x8A9298
-    static let metalDk = 0x3E464C
-    static let metalLt = 0xC8CED0
-    static let lampOff = 0x1A1E18
-    static let waterD = 0x0C2034
-    static let waterM = 0x14304C
-    static let waterL = 0x2A6494
-    static let sand = 0xA07848
-    static let sandDk = 0x6E4C30
-    static let algae = 0x3CB44A
-    static let algaeLt = 0x9AE868
-    static let black = 0x101014
-    static let red = 0x8C2C28
-    static let redLt = 0xB4443C
-    static let redDk = 0x5C1C1C
-    static let page = 0xE6D8C0
-    static let gold = 0xE8C868
-    static let ivory = 0xE4DCC8
+    static let gap = 0x322C26
+    static let wallA = 0x5C5348
+    static let wallB = 0x4E463E
+    static let floorA = 0x6E5642
+    static let floorB = 0x5A4634
+    static let wood = 0x8A6240
+    static let woodLt = 0xC69E68
+    static let woodDk = 0x5A3C28
+    static let shelf = 0x7A5A3C
+    static let plant = 0x6CB84A
+    static let plantDk = 0x2E6A32
+    static let plantLt = 0xA2D66F
+    static let pot = 0x8A5840
+    static let potLt = 0xC69E68
+    static let bookR = 0xA84848
+    static let bookB = 0x3A6090
+    static let bookG = 0x4A6840
+    static let bookT = 0xC69E68
+    static let glass = 0xE4F2F6
+    static let jar = 0x6A90A4
+    static let liquid = 0x519FBE
+    static let brass = 0xE0C070
+    static let brassDk = 0xA88440
+    static let glow = 0xF1D27B
+    static let glowHot = 0xFFF4D0
+    static let night = 0x243038
+    static let metal = 0xA8B0B4
+    static let metalDk = 0x5A6468
+    static let metalLt = 0xE4E8EA
+    static let lampOff = 0x2A3028
+    static let waterD = 0x285F83
+    static let waterM = 0x3A7A9C
+    static let waterL = 0x519FBE
+    static let sand = 0xC69E68
+    static let sandDk = 0x8A6A40
+    static let algae = 0x6CB84A
+    static let algaeLt = 0xA2D66F
+    static let black = 0x292E30
+    static let red = 0xA84848
+    static let redLt = 0xD07068
+    static let redDk = 0x703028
+    static let page = 0xF5E8CB
+    static let gold = 0xF1D27B
+    static let ivory = 0xF5E8CB
+    static let sky = 0xC5E6F4
+    static let skyDeep = 0x7EB6D4
+    static let pine = 0x2F6A3A
+    static let pineDk = 0x1E4A28
 }
 
 private final class Pix {
@@ -155,6 +159,7 @@ private final class Pix {
     func paint() {
         planks()
         shafts()
+        window()
         shelf()
         tree()
         lamps()
@@ -167,6 +172,7 @@ private final class Pix {
         tankPlaque()
         fuse()
         toolJar()
+        daylight()
     }
 
     private func planks() {
@@ -175,13 +181,13 @@ private final class Pix {
             let alt = (x / 7) % 2 == 0
             for y in 0..<RoomArt.floorY {
                 var c = gap ? Ink.gap : (alt ? Ink.wallA : Ink.wallB)
-                if !gap && (x * 3 + y) % 53 == 0 { c = 0x1A140E }
+                if !gap && (x * 3 + y) % 53 == 0 { c = 0x3A342C }
                 set(x, y, c)
             }
         }
         for (x, y) in [(20, 70), (44, 130), (96, 90), (70, 160), (14, 150)] {
-            fill(x, y, 2, 2, 0x140E0C)
-            set(x + 2, y + 1, 0x403022)
+            fill(x, y, 2, 2, 0x3A342C)
+            set(x + 2, y + 1, 0x6A5844)
         }
     }
 
@@ -195,6 +201,40 @@ private final class Pix {
                 lighten(x, y, add)
                 lighten(x + 1, y, add)
                 if y % 2 == 0 { lighten(x + 2, y, add / 2) }
+            }
+        }
+    }
+
+    /// Daylight from the left. The cone is painted after the furniture
+    /// so the wall, not the sky, picks up the light.
+    private func window() {
+        fill(0, 46, 15, 56, Ink.woodDk)
+        fill(1, 47, 13, 54, Ink.sky)
+        fill(1, 78, 13, 23, Ink.skyDeep)
+        fill(7, 47, 1, 54, Ink.wood)
+        fill(1, 73, 13, 1, Ink.wood)
+        for x in 1..<14 {
+            let crown = 10 + (x * 5) % 12
+            fill(x, 101 - crown, 1, crown, x % 2 == 0 ? Ink.pine : Ink.pineDk)
+        }
+        fill(0, 46, 15, 1, Ink.woodLt)
+        fill(0, 100, 16, 2, Ink.woodLt)
+        fill(0, 102, 16, 2, Ink.woodDk)
+    }
+
+    private func daylight() {
+        for y in 40..<168 {
+            let reach = 16 + max(0, y - 46) / 5
+            for dx in 0..<reach {
+                let x = 16 + dx
+                if x >= w { break }
+                let add = max(0, 26 - dx / 2 - max(0, y - 130) / 10)
+                lighten(x, y, add)
+            }
+        }
+        for y in RoomArt.floorY..<(RoomArt.floorY + 30) {
+            for x in 0..<32 {
+                lighten(x, y, max(0, 18 - x / 2 - (y - RoomArt.floorY) / 3))
             }
         }
     }
@@ -294,10 +334,10 @@ private final class Pix {
     private func tank() {
         let t = RoomArt.tank
         let g = RoomArt.tankGlass
-        fill(t.x, t.y, t.w, t.h, Ink.black)
-        fill(g.x, g.y, g.w, g.h, 0x101820)
-        fill(t.x, t.y, t.w, 1, 0x9EC8D4)
-        fill(t.x, t.y + t.h - 1, t.w, 1, 0x203040)
+        fill(t.x, t.y, t.w, t.h, Ink.woodDk)
+        fill(g.x, g.y, g.w, g.h, 0x8EC4D8)
+        fill(t.x, t.y, t.w, 1, Ink.ivory)
+        fill(t.x, t.y + t.h - 1, t.w, 1, Ink.wood)
     }
 
     private func bench() {
@@ -339,7 +379,7 @@ private final class Pix {
             let alt = (x / 8) % 2 == 0
             for y in RoomArt.floorY..<h {
                 var c = gap ? Ink.gap : (alt ? Ink.floorA : Ink.floorB)
-                if !gap && (x + y * 2) % 29 == 0 { c = 0x4A3828 }
+                if !gap && (x + y * 2) % 29 == 0 { c = 0x7A624C }
                 set(x, y, c)
             }
         }
@@ -385,7 +425,7 @@ private final class Pix {
         fill(j.x + 3, j.y + 4, 8, 2, Ink.brass)
         fill(j.x + 1, j.y + 6, 1, 11, Ink.glass)
         fill(j.x + 12, j.y + 6, 1, 11, Ink.glass)
-        fill(j.x + 2, j.y + 6, 10, 11, 0x101820)
+        fill(j.x + 2, j.y + 6, 10, 11, 0x8EC4D8)
         fill(j.x + 1, j.y + 16, 12, 1, Ink.glass)
         // Scissors and a couple of other handles, sticking out of the mouth.
         set(j.x + 4, j.y, Ink.metalLt)
@@ -404,7 +444,7 @@ private final class Pix {
         fill(x + 2, y, 8, 2, Ink.brass)
         fill(x, y + 2, 1, 14, Ink.glass)
         fill(x + 11, y + 2, 1, 14, Ink.glass)
-        fill(x + 1, y + 2, 10, 14, 0x101820)
+        fill(x + 1, y + 2, 10, 14, 0x8EC4D8)
         set(x + 2, y + 4, Ink.glow)
         fill(x, y + 16, 12, 1, Ink.glass)
     }

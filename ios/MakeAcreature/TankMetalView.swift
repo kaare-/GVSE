@@ -53,7 +53,7 @@ final class TankMetalView: UIView {
                        constant Uniforms &u [[buffer(0)]]) {
         float2 p = (in.uv - u.window.xy) / u.window.zw;
         if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) {
-            return float4(0.0, 0.0, 0.0, 1.0);
+            return float4(0.16, 0.18, 0.19, 1.0);
         }
         float2 sampleUV = p;
         if (u.lensRadius > 0.0) {
@@ -203,7 +203,7 @@ final class TankMetalView: UIView {
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.16, green: 0.18, blue: 0.19, alpha: 1)
         return pass
     }
 }

@@ -129,7 +129,7 @@ struct MakeAcreatureApp: App {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
-            .background(Color.black)
+            .background(Palette.panel)
             bottomBar
         }
         .background(Palette.panel)
