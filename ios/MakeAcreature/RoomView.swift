@@ -1,9 +1,9 @@
 import Combine
 import SwiftUI
 
-/// The dressed room (Phase 6): aquarium, tree picture, archive book,
-/// fuse-box settings, favourite-creature frame, and a door sign with
-/// the player's name. Post-MVP spots stay dashed. The sim keeps running.
+/// The study. The picture is a low-res bitmap; the buttons sit on the
+/// painted objects and only the live bits (tree, fuse lamps, counts,
+/// portrait, door name) are drawn on top.
 struct RoomView: View {
     @ObservedObject var session: TankSession
     var onBack: () -> Void
@@ -19,46 +19,33 @@ struct RoomView: View {
 
     var body: some View {
         GeometryReader { geo in
+            let layout = RoomLayout(size: geo.size)
             ZStack {
-                wall
-                shelves
-                VStack(spacing: 0) {
-                    Spacer(minLength: 20)
-                    HStack(alignment: .bottom, spacing: 14) {
-                        treePicture
-                        Spacer(minLength: 0)
-                        fuseBox
-                    }
-                    .padding(.horizontal, 16)
-                    Spacer(minLength: 10)
-                    HStack(alignment: .center, spacing: 10) {
-                        lamp
-                        tankOnStand
-                        lamp
-                    }
-                    Spacer(minLength: 10)
-                    HStack(alignment: .bottom, spacing: 14) {
-                        book
-                        Spacer(minLength: 0)
-                        favouriteFrame
-                        doorSign
-                    }
-                    .padding(.horizontal, 16)
-                    HStack {
-                        Button(action: onOpenLog) {
-                            PixelLabel(text: "EVENT LOG", scale: 1, color: Palette.paper)
-                        }
-                        .buttonStyle(.plain)
-                        .a11yButton("Event log")
-                        Spacer()
-                        PixelLabel(text: "PINCH IN · TAP TANK", scale: 1, color: Palette.paper)
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 8)
-                    Spacer(minLength: geo.size.height * 0.08)
-                }
+                Color(red: 0.07, green: 0.05, blue: 0.04)
+                Image(uiImage: RoomArt.image)
+                    .resizable()
+                    .interpolation(.none)
+                    .frame(
+                        width: CGFloat(RoomArt.w) * layout.s,
+                        height: CGFloat(RoomArt.h) * layout.s
+                    )
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+
+                place(RoomArt.treeHit, layout) { treeButton(layout) }
+                place(RoomArt.fuseHit, layout) { fuseButton(layout) }
+                place(RoomArt.tank, layout) { tankButton }
+                place(RoomArt.bookHit, layout) { bookButton(layout) }
+                place(RoomArt.logHit, layout) { logButton }
+                place(RoomArt.crateHit, layout) { crateButton(layout) }
+                place(RoomArt.signHit, layout) { signButton(layout) }
+
+                PixelLabel(text: "PINCH IN", scale: 1, color: Palette.dimPaper)
+                    .position(x: layout.rect(RoomArt.pinch).midX, y: layout.rect(RoomArt.pinch).midY)
+                    .allowsHitTesting(false)
             }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
+        .ignoresSafeArea()
         .onAppear {
             tree = session.speciesTree()
             signDraft = session.doorName
@@ -72,117 +59,64 @@ struct RoomView: View {
         }
     }
 
-    private var wall: some View {
-        Canvas { ctx, size in
-            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Palette.wall))
-            // Soft vertical lamp wash.
-            for i in 0..<6 {
-                let x = size.width * (0.12 + CGFloat(i) * 0.15)
-                ctx.fill(
-                    Path(CGRect(x: x - 20, y: 0, width: 40, height: size.height * 0.55)),
-                    with: .color(Color(red: 1, green: 0.9, blue: 0.6).opacity(0.04))
-                )
-            }
-            let floorY = size.height * 0.82
-            ctx.fill(Path(CGRect(x: 0, y: floorY, width: size.width, height: size.height - floorY)), with: .color(Palette.floor))
-            ctx.fill(Path(CGRect(x: 0, y: floorY, width: size.width, height: 3)), with: .color(Color(white: 0.08)))
-            var x: CGFloat = 0
-            while x < size.width {
-                ctx.fill(Path(CGRect(x: x, y: floorY + 3, width: 2, height: size.height - floorY)), with: .color(Color(white: 0.06).opacity(0.5)))
-                x += 48
-            }
-        }
-        .ignoresSafeArea()
+    private func place<Content: View>(_ spot: RoomArt.Spot, _ layout: RoomLayout, @ViewBuilder _ content: () -> Content) -> some View {
+        let r = layout.rect(spot)
+        return content()
+            .frame(width: r.width, height: r.height)
+            .contentShape(Rectangle())
+            .position(x: r.midX, y: r.midY)
     }
 
-    private var shelves: some View {
-        VStack {
-            HStack(spacing: 0) {
-                Rectangle().fill(Color(red: 0.28, green: 0.2, blue: 0.12)).frame(height: 8)
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 36)
-            Spacer()
-        }
-        .allowsHitTesting(false)
-    }
-
-    private var lamp: some View {
-        VStack(spacing: 2) {
-            Circle().fill(Color(red: 1, green: 0.92, blue: 0.7).opacity(0.7)).frame(width: 10, height: 10)
-            Rectangle().fill(Color(white: 0.25)).frame(width: 2, height: 28)
-        }
-        .allowsHitTesting(false)
-    }
-
-    private var tankOnStand: some View {
-        Button(action: onBack) {
-            VStack(spacing: 0) {
-                ZStack {
-                    Rectangle().fill(Color(white: 0.2))
-                    VStack(spacing: 6) {
-                        PixelLabel(text: "TANK \(session.slot + 1)", scale: 3, color: Palette.highlight)
-                        PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 2, color: Palette.dimPaper)
-                        PixelLabel(text: "\(session.liveCells) CELLS", scale: 2)
-                        PixelLabel(text: "TAP TO LOOK IN", scale: 1, color: Palette.dimPaper)
-                    }
-                }
-                .frame(width: 220, height: 150)
-                .overlay(Rectangle().stroke(Color(white: 0.45), lineWidth: 3))
-                Rectangle().fill(Color(red: 0.3, green: 0.22, blue: 0.14)).frame(width: 240, height: 14)
-                HStack {
-                    Rectangle().fill(Color(red: 0.26, green: 0.18, blue: 0.11)).frame(width: 12, height: 44)
-                    Spacer()
-                    Rectangle().fill(Color(red: 0.26, green: 0.18, blue: 0.11)).frame(width: 12, height: 44)
-                }
-                .frame(width: 220)
-            }
-        }
-        .buttonStyle(.plain)
-        .a11yButton("Tank \(session.slot + 1), \(session.liveCells) cells", hint: "Look into the tank")
-    }
-
-    private var treePicture: some View {
-        Button(action: onOpenTree) {
-            VStack(spacing: 4) {
+    private func treeButton(_ layout: RoomLayout) -> some View {
+        let hit = layout.rect(RoomArt.treeHit)
+        let inner = layout.rect(RoomArt.treeInner)
+        let fit = min(inner.width / 180, inner.height / 120)
+        return Button(action: onOpenTree) {
+            ZStack(alignment: .topLeading) {
                 TreeOfLifeView(nodes: tree, compact: true)
-                    .overlay(Rectangle().stroke(Color(red: 0.5, green: 0.38, blue: 0.2), lineWidth: 4))
-                PixelLabel(text: "TREE OF LIFE", scale: 1, color: Palette.dimPaper)
+                    .scaleEffect(fit)
+                    .frame(width: inner.width, height: inner.height)
+                    .clipped()
+                    .offset(x: inner.minX - hit.minX, y: inner.minY - hit.minY)
+                VStack {
+                    Spacer(minLength: 0)
+                    PixelLabel(text: "TREE OF LIFE", scale: 1, color: Palette.dimPaper)
+                }
+                .frame(width: hit.width, height: hit.height)
             }
         }
         .buttonStyle(.plain)
         .a11yButton("Tree of life")
     }
 
-    private var fuseBox: some View {
-        Button(action: onOpenSettings) {
-            VStack(spacing: 4) {
-                ZStack {
-                    Rectangle().fill(Color(red: 0.07, green: 0.08, blue: 0.07))
-                    VStack(spacing: 4) {
-                        ForEach(0..<3, id: \.self) { i in
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(breakerOn(i) ? Color(red: 0.78, green: 1, blue: 0.35) : Color(white: 0.22))
-                                    .frame(width: 8, height: 8)
-                                    .overlay(Circle().stroke(Color(white: 0.85), lineWidth: 1))
-                                Rectangle()
-                                    .fill(Color(red: 0.96, green: 0.9, blue: 0.72))
-                                    .frame(width: 28, height: 5)
-                            }
-                        }
-                    }
+    private func fuseButton(_ layout: RoomLayout) -> some View {
+        let hit = layout.rect(RoomArt.fuseHit)
+        return Button(action: onOpenSettings) {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                ForEach(0..<3, id: \.self) { i in
+                    let lamp = RoomArt.fuseLamps[i]
+                    Circle()
+                        .fill(breakerOn(i) ? Color(red: 0.78, green: 1, blue: 0.35) : Color(white: 0.12))
+                        .overlay(Circle().stroke(Color(white: 0.75), lineWidth: 1))
+                        .frame(width: CGFloat(lamp.w) * layout.s, height: CGFloat(lamp.h) * layout.s)
+                        .position(
+                            x: (CGFloat(lamp.x - RoomArt.fuseHit.x) + CGFloat(lamp.w) / 2) * layout.s,
+                            y: (CGFloat(lamp.y - RoomArt.fuseHit.y) + CGFloat(lamp.h) / 2) * layout.s
+                        )
                 }
-                .frame(width: 56, height: 56)
-                .overlay(Rectangle().stroke(Color(red: 0.93, green: 0.86, blue: 0.62), lineWidth: 2))
-                PixelLabel(text: "FUSE BOX", scale: 1, color: Palette.paper)
+                VStack {
+                    Spacer(minLength: 0)
+                    PixelLabel(text: "FUSE BOX", scale: 1, color: Palette.paper)
+                }
+                .frame(width: hit.width, height: hit.height)
             }
         }
         .buttonStyle(.plain)
         .a11yButton("Fuse box", hint: "Settings")
     }
 
-    /// Sound, clock, and swirl lamps. Off is a dark well; on is a bright lamp.
+    /// Sound, clock, and swirl. Off is a dark well; on is a bright lamp.
     private func breakerOn(_ index: Int) -> Bool {
         switch index {
         case 0: return session.soundOn
@@ -191,38 +125,66 @@ struct RoomView: View {
         }
     }
 
-    private var book: some View {
-        Button(action: onOpenBook) {
+    private var tankButton: some View {
+        Button(action: onBack) {
             VStack(spacing: 4) {
-                ZStack {
-                    Rectangle().fill(Color(red: 0.45, green: 0.2, blue: 0.14))
-                    Rectangle().fill(Color(red: 0.55, green: 0.26, blue: 0.18)).frame(width: 54, height: 72).offset(x: 4)
-                    PixelLabel(text: "\(session.archive.specimens.count)", scale: 2, color: Palette.highlight).offset(x: 4)
+                PixelLabel(text: "TANK \(session.slot + 1)", scale: 2, color: Palette.highlight)
+                PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 1, color: Palette.dimPaper)
+                PixelLabel(text: "\(session.liveCells) CELLS", scale: 1)
+                PixelLabel(text: "TAP TO LOOK IN", scale: 1, color: Palette.dimPaper)
+            }
+        }
+        .buttonStyle(.plain)
+        .a11yButton("Tank \(session.slot + 1), \(session.liveCells) cells", hint: "Look into the tank")
+    }
+
+    private func bookButton(_ layout: RoomLayout) -> some View {
+        let cover = layout.rect(RoomArt.book)
+        let hit = layout.rect(RoomArt.bookHit)
+        return Button(action: onOpenBook) {
+            ZStack {
+                PixelLabel(
+                    text: "\(session.archive.specimens.count)",
+                    scale: 2,
+                    color: Palette.highlight
+                )
+                .offset(y: cover.midY - hit.midY)
+                VStack {
+                    Spacer(minLength: 0)
+                    PixelLabel(text: "THE BOOK", scale: 1, color: Palette.dimPaper)
                 }
-                .frame(width: 64, height: 80)
-                PixelLabel(text: "THE BOOK", scale: 1, color: Palette.dimPaper)
             }
         }
         .buttonStyle(.plain)
         .a11yButton("The book", hint: "Archive")
     }
 
-    private var favouriteFrame: some View {
-        Button {
+    private var logButton: some View {
+        Button(action: onOpenLog) {
+            PixelLabel(text: "EVENT LOG", scale: 1, color: Palette.paper)
+        }
+        .buttonStyle(.plain)
+        .a11yButton("Event log")
+    }
+
+    private func crateButton(_ layout: RoomLayout) -> some View {
+        let inner = layout.rect(RoomArt.crateInner)
+        let hit = layout.rect(RoomArt.crateHit)
+        return Button {
             session.cycleFavourite()
         } label: {
-            VStack(spacing: 4) {
-                ZStack {
-                    Rectangle().fill(Color(red: 0.35, green: 0.28, blue: 0.18))
-                    if let fav = session.favouriteSpecimen {
-                        portrait(fav, side: 48)
-                    } else {
-                        PixelLabel(text: "PICK", scale: 1, color: Color(white: 0.4))
-                    }
+            ZStack {
+                if let fav = session.favouriteSpecimen {
+                    portrait(fav, side: min(inner.width, inner.height))
+                        .offset(y: inner.midY - hit.midY)
+                } else {
+                    PixelLabel(text: "PICK", scale: 1, color: Palette.dimPaper)
+                        .offset(y: inner.midY - hit.midY)
                 }
-                .frame(width: 56, height: 56)
-                .overlay(Rectangle().stroke(Color(red: 0.55, green: 0.42, blue: 0.22), lineWidth: 3))
-                PixelLabel(text: "FAVOURITE", scale: 1, color: Palette.dimPaper)
+                VStack {
+                    Spacer(minLength: 0)
+                    PixelLabel(text: "FAVOURITE", scale: 1, color: Palette.dimPaper)
+                }
             }
         }
         .buttonStyle(.plain)
@@ -232,20 +194,21 @@ struct RoomView: View {
         }
     }
 
-    private var doorSign: some View {
-        Button { editingSign = true } label: {
-            VStack(spacing: 4) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 2).fill(Color(red: 0.55, green: 0.45, blue: 0.28))
-                    PixelLabel(
-                        text: shortSign(session.doorName),
-                        scale: 1,
-                        color: Color(red: 0.15, green: 0.1, blue: 0.05)
-                    )
+    private func signButton(_ layout: RoomLayout) -> some View {
+        let plaque = layout.rect(RoomArt.sign)
+        let hit = layout.rect(RoomArt.signHit)
+        return Button { editingSign = true } label: {
+            ZStack {
+                PixelLabel(
+                    text: shortSign(session.doorName),
+                    scale: 1,
+                    color: Color(red: 0.16, green: 0.1, blue: 0.04)
+                )
+                .offset(y: plaque.midY - hit.midY)
+                VStack {
+                    Spacer(minLength: 0)
+                    PixelLabel(text: "DOOR SIGN", scale: 1, color: Palette.dimPaper)
                 }
-                .frame(width: 72, height: 36)
-                .overlay(Rectangle().stroke(Color(red: 0.35, green: 0.28, blue: 0.15), lineWidth: 2))
-                PixelLabel(text: "DOOR SIGN", scale: 1, color: Palette.dimPaper)
             }
         }
         .buttonStyle(.plain)
@@ -287,6 +250,29 @@ struct RoomView: View {
         let up = name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         if up.isEmpty { return "????" }
         return up.count > 10 ? String(up.prefix(9)) + "." : up
+    }
+}
+
+/// Maps the 120×260 picture onto the phone, letterboxed, nearest pixel.
+private struct RoomLayout {
+    var s: CGFloat
+    var origin: CGPoint
+
+    init(size: CGSize) {
+        s = min(size.width / CGFloat(RoomArt.w), size.height / CGFloat(RoomArt.h))
+        origin = CGPoint(
+            x: (size.width - CGFloat(RoomArt.w) * s) / 2,
+            y: (size.height - CGFloat(RoomArt.h) * s) / 2
+        )
+    }
+
+    func rect(_ spot: RoomArt.Spot) -> CGRect {
+        CGRect(
+            x: origin.x + CGFloat(spot.x) * s,
+            y: origin.y + CGFloat(spot.y) * s,
+            width: CGFloat(spot.w) * s,
+            height: CGFloat(spot.h) * s
+        )
     }
 }
 
