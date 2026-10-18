@@ -17,7 +17,7 @@ pub fn fall(grid: &mut PhysicsGrid, active: &ActiveRect) {
     for y in active.y0..=active.y1 {
         for x in active.x0..=active.x1 {
             let cell = grid.get(x, y);
-            if !is_mobile_grain(cell.id()) || cell.is_bound() {
+            if !is_mobile_grain(cell.id()) || cell.is_bound() || cell.is_rigid() || cell.is_silhouette() {
                 continue;
             }
             let below = grid.get(x, y - 1);
@@ -38,7 +38,7 @@ pub fn repose(grid: &mut PhysicsGrid, active: &ActiveRect, seed: u64, tick: u64,
     for y in active.y0..=active.y1 {
         for x in active.x0..=active.x1 {
             let cell = grid.get(x, y);
-            if !is_mobile_grain(cell.id()) || cell.is_bound() {
+            if !is_mobile_grain(cell.id()) || cell.is_bound() || cell.is_rigid() || cell.is_silhouette() {
                 continue;
             }
             if grid.get(x, y - 1).is_air() {

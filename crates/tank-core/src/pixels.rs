@@ -138,11 +138,9 @@ pub struct Flashlight {
 
 #[allow(clippy::too_many_arguments)]
 /// Column light at pixel resolution. Water loses 0.1 % per pixel row,
-/// the same in every column, so a creature does not paint a dark streak
-/// down the glass. Sand, rock, soil and other solids are lit from the
-/// side: their own pixels keep the column's incident light, and a roof
-/// nicks what is below it once per physics cell. `cloud[x]` still
-/// multiplies the column.
+/// the same in every column. Solids and glass are lit where they sit
+/// and do not darken the pixels under them, so the tank has no vertical
+/// shade lines. Cloudiness dims only the water of that column.
 pub fn rebuild_light(
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
@@ -180,13 +178,10 @@ pub fn rebuild_light(
                 incoming = (incoming * boost / 256).min(255 * 256);
             }
         }
-        if let Some(&c) = cloud_q8.get(px) {
-            incoming = incoming * c as u32 / 255;
-        }
-        // Side light for the bed: the incident in this column, before
-        // anything in it casts a shadow.
+        // Side light for the bed. Nothing in the column paints a shaft:
+        // a creature, a rock, or a pane used to darken every pixel under
+        // it, and those streaks read as shadow columns rising off the tank.
         let side = incoming / 256;
-        let mut last_solid_vy = i32::MIN;
         for py in 0..ph {
             let vy_top = (py / PX_PER_CELL as usize) as i32;
             let vy = vis_h - 1 - vy_top;
@@ -195,22 +190,22 @@ pub fn rebuild_light(
             let solid = !cell.is_open() && !cell.is_glass();
             if solid {
                 pixels.light[i] = side.min(255) as u8;
-                if vy != last_solid_vy {
-                    last_solid_vy = vy;
-                    // One mild step per physics cell, so a roof still
-                    // dims the water under it without blacking the grain.
-                    incoming = incoming * 236 / 256;
-                }
                 continue;
             }
-            pixels.light[i] = (incoming / 256).min(255) as u8;
-            if cell.sat >= WATER_SAT_RENDER {
-                incoming = incoming * 999 / 1000;
-            } else if cell.is_glass() {
-                // A pane loses ≈ 7 % per physics cell; a holding tank is
-                // not a shadow.
-                incoming = incoming * 250 / 256;
+            let mut lit = incoming / 256;
+            if cell.is_glass() {
+                lit = lit * 250 / 256;
             }
+            // Cloud darkens the water it is suspended in. Dry air above
+            // the surface stays even, so fines do not draw stripes up
+            // out of the glass.
+            if cell.sat >= WATER_SAT_RENDER {
+                if let Some(&c) = cloud_q8.get(px) {
+                    lit = lit * c as u32 / 255;
+                }
+                incoming = incoming * 999 / 1000;
+            }
+            pixels.light[i] = lit.min(255) as u8;
         }
     }
 }

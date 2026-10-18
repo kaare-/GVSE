@@ -1193,18 +1193,57 @@ impl GenomeStore {
         sid
     }
 
-    /// Assign a species to a fresh node. The same body plan stays in the
-    /// parent, however far the numbers drift. A new block founds a species.
+    /// A fresh node keeps its parent's species. Only a lineage root
+    /// (the seed, an archive root) founds a row at birth. A new body
+    /// plan waits until that genotype has offspring — see
+    /// `promote_if_new_plan`.
     fn assign_species(&mut self, id: u32, parent: u32) -> u16 {
+        let parent_species = self.nodes.get(parent as usize).map(|p| p.species).unwrap_or(NO_SPECIES);
+        if parent != NONE && (parent_species as usize) < self.species.len() {
+            return parent_species;
+        }
+        self.found_species(id, NO_SPECIES)
+    }
+
+    /// Give `id` its own species when its body plan differs from the
+    /// species it currently sits in. No-op until the plan actually changed.
+    fn promote_if_new_plan(&mut self, id: u32) {
+        let (tomb, sp) = {
+            let Some(n) = self.nodes.get(id as usize) else {
+                return;
+            };
+            (n.tombstone, n.species)
+        };
+        if tomb {
+            return;
+        }
+        let Some(rec) = self.species.get(sp as usize) else {
+            return;
+        };
+        if rec.collapsed {
+            return;
+        }
+        let genome = self.nodes[id as usize].genome.clone();
+        if species::body_plan(&genome) == species::body_plan(&rec.founder_genome) {
+            return;
+        }
+        let new_sp = self.found_species(id, sp);
+        if new_sp == sp {
+            return;
+        }
+        if let Some(n) = self.nodes.get_mut(id as usize) {
+            n.species = new_sp;
+        }
+    }
+
+    /// Open a species row for `id` under `parent_species`. At the cap,
+    /// childless rows are folded first. If the table is still full, the
+    /// genotype stays in `parent_species`.
+    fn found_species(&mut self, id: u32, parent_species: u16) -> u16 {
         let genome = self.nodes[id as usize].genome.clone();
         let sig = species::signature(&genome);
-        let parent_species = self.nodes.get(parent as usize).map(|p| p.species).unwrap_or(NO_SPECIES);
-        if let Some(ps) = self.species.get(parent_species as usize) {
-            if species::body_plan(&genome) == species::body_plan(&ps.founder_genome) {
-                return parent_species;
-            }
-        }
         if self.visible_species() >= species::SPECIES_CAP {
+            self.cull_childless();
             self.collapse_same_body_plan();
         }
         if self.visible_species() >= species::SPECIES_CAP && self.species.iter().all(|s| !s.collapsed) {
@@ -1221,7 +1260,7 @@ impl GenomeStore {
         let same = self
             .species
             .iter()
-            .filter(|s| s.parent == parent_species && s.name.starts_with(&base))
+            .filter(|s| !s.collapsed && s.parent == parent_species && s.name.starts_with(&base))
             .count() as u32;
         let name = species::disambiguate(&base, same + 1);
         let sid = if let Some(slot) = self.species.iter().position(|s| s.collapsed) {
@@ -1229,7 +1268,7 @@ impl GenomeStore {
         } else {
             let sid = self.species.len() as u16;
             if sid == NO_SPECIES {
-                return parent_species;
+                return if (parent_species as usize) < self.species.len() { parent_species } else { 0 };
             }
             self.species.push(SpeciesRec {
                 founder: id,
@@ -1257,6 +1296,83 @@ impl GenomeStore {
         };
         self.new_species.push(sid);
         sid
+    }
+
+    /// Fold species that never reproduced into their parent. A row stays
+    /// when it is the root, archived, has a child species, or any of its
+    /// genotypes has a child genotype or a second organism. The slot
+    /// remains so saves keep their ids; the tree skips collapsed rows.
+    pub fn cull_childless(&mut self) {
+        let n = self.species.len();
+        if n == 0 {
+            return;
+        }
+        let mut has_child_species = vec![false; n];
+        for s in &self.species {
+            if s.collapsed || s.parent == NO_SPECIES {
+                continue;
+            }
+            if let Some(flag) = has_child_species.get_mut(s.parent as usize) {
+                *flag = true;
+            }
+        }
+        let mut drop = vec![false; n];
+        for i in 0..n {
+            let s = &self.species[i];
+            if s.collapsed || s.archived || s.parent == NO_SPECIES || has_child_species[i] {
+                continue;
+            }
+            let mut kids = false;
+            for node in &self.nodes {
+                if node.tombstone || node.species != i as u16 {
+                    continue;
+                }
+                if node.born >= 2 || node.first_child != NONE {
+                    kids = true;
+                    break;
+                }
+            }
+            if !kids {
+                drop[i] = true;
+            }
+        }
+        if drop.iter().all(|d| !*d) {
+            return;
+        }
+        let mut keep = vec![0u16; n];
+        for i in 0..n {
+            if !drop[i] {
+                keep[i] = i as u16;
+                continue;
+            }
+            let mut id = self.species[i].parent;
+            for _ in 0..64 {
+                if (id as usize) >= n || !drop[id as usize] {
+                    break;
+                }
+                id = self.species[id as usize].parent;
+            }
+            keep[i] = if (id as usize) < n { id } else { 0 };
+        }
+        for i in 0..n {
+            if drop[i] {
+                self.species[i].collapsed = true;
+                continue;
+            }
+            let parent = self.species[i].parent;
+            if parent != NO_SPECIES && (parent as usize) < n {
+                let next = keep[parent as usize];
+                if next != i as u16 {
+                    self.species[i].parent = next;
+                }
+            }
+        }
+        for node in &mut self.nodes {
+            let sp = node.species as usize;
+            if sp < n && drop[sp] {
+                node.species = keep[sp];
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -1363,6 +1479,11 @@ impl GenomeStore {
             p.first_child = id;
         }
         self.live_nodes += 1;
+        // The parent has offspring now. A new body plan earns its row
+        // here, not when a childless variant is first born.
+        if parent != NONE {
+            self.promote_if_new_plan(parent);
+        }
         let sp = self.assign_species(id, parent);
         self.nodes[id as usize].species = sp;
         id
@@ -1427,9 +1548,17 @@ impl GenomeStore {
     }
 
     pub fn on_birth(&mut self, id: u32) {
-        if let Some(n) = self.nodes.get_mut(id as usize) {
+        let born = if let Some(n) = self.nodes.get_mut(id as usize) {
             n.live_cells = n.live_cells.saturating_add(1);
             n.born = n.born.saturating_add(1);
+            n.born
+        } else {
+            return;
+        };
+        // The second organism is the first child. Until then the genotype
+        // stays in its parent species, so a dead-end never takes a row.
+        if born >= 2 {
+            self.promote_if_new_plan(id);
         }
     }
 

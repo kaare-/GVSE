@@ -123,6 +123,7 @@ struct SpecimenPage: View {
     @State private var share = false
     @State private var confirmDelete = false
     @State private var confirmNewTank = false
+    @State private var confirmAdd = false
 
     private var dirty: Bool {
         name != specimen.displayName || notes != specimen.notes
@@ -235,6 +236,18 @@ struct SpecimenPage: View {
                     }
                     .buttonStyle(.plain)
                 }
+                Button {
+                    confirmAdd.toggle()
+                } label: {
+                    PixelPanel {
+                        PixelLabel(
+                            text: confirmAdd ? "PICK A GLASS" : "ADD TO A TANK",
+                            scale: 1,
+                            color: confirmAdd ? Palette.highlight : Palette.paper
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
                 if confirmNewTank {
                     VStack(alignment: .leading, spacing: 8) {
                         replaceChoice("REPLACE MAIN", .main)
@@ -242,6 +255,16 @@ struct SpecimenPage: View {
                             replaceChoice("JAR 1", .sample(0))
                             replaceChoice("JAR 2", .sample(1))
                             replaceChoice("JAR 3", .sample(2))
+                        }
+                    }
+                }
+                if confirmAdd {
+                    VStack(alignment: .leading, spacing: 8) {
+                        addChoice("ADD TO MAIN", .main)
+                        HStack(spacing: 8) {
+                            addChoice("JAR 1", .sample(0))
+                            addChoice("JAR 2", .sample(1))
+                            addChoice("JAR 3", .sample(2))
                         }
                     }
                 }
@@ -265,6 +288,16 @@ struct SpecimenPage: View {
             onBack()
         } label: {
             PixelPanel { PixelLabel(text: title, scale: 1, color: Palette.highlight) }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func addChoice(_ title: String, _ target: TankContainer) -> some View {
+        Button {
+            session.addSpecimen(specimen, into: target)
+            onBack()
+        } label: {
+            PixelPanel { PixelLabel(text: title, scale: 1, color: Palette.paper) }
         }
         .buttonStyle(.plain)
     }

@@ -191,7 +191,9 @@ impl Cell {
 
     #[inline]
     pub fn set_rock_film(&mut self, film: u8) {
-        if self.is_rock() {
+        // A drawn rock keeps its body id in `pad`. Wetness must not
+        // overwrite it, or the stone splits when it meets water.
+        if self.is_rock() && !self.is_rigid() && !self.is_silhouette() {
             self.pad = film;
         }
     }

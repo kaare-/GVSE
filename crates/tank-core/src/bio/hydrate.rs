@@ -24,8 +24,8 @@ pub fn is_rootable(c: Cell) -> bool {
 }
 
 /// Whether a pixel is a habitable seat for a cell with the given coeffs.
-/// Free water always; moist air / moist substrate for any cell; moist
-/// sand/soil co-occupancy only for UPTAKE(water) ≥ 2.
+/// Free water always. Moist air only when `allow_air` (a rooted plant
+/// growing up). Moist sand/soil only for UPTAKE(water) ≥ 2.
 pub fn seat_ok(
     grid: &PhysicsGrid,
     coarse: &CoarseField,
@@ -33,6 +33,7 @@ pub fn seat_ok(
     nx: i32,
     ny: i32,
     mc: &ModeCoeffs,
+    allow_air: bool,
 ) -> bool {
     if nx < 0 || ny < 0 || nx >= pixels.w as i32 || ny >= pixels.h as i32 {
         return false;
@@ -48,6 +49,9 @@ pub fn seat_ok(
         return true;
     }
     if is_air_cell(seat) {
+        if !allow_air {
+            return false;
+        }
         let h = coarse
             .humidity
             .get(minerals::idx_of_pixel(coarse, nx as u16, ny as u16))

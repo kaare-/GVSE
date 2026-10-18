@@ -10,6 +10,8 @@ struct MakeAcreatureApp: App {
     @State private var showSettings = false
     @State private var showPhoto = false
     @State private var showLog = false
+    @State private var showCharts = false
+    @State private var showDeck = false
 
     var body: some Scene {
         WindowGroup {
@@ -25,7 +27,9 @@ struct MakeAcreatureApp: App {
                         onOpenBook: { showBook = true },
                         onOpenTree: { showTree = true },
                         onOpenSettings: { showSettings = true },
-                        onOpenLog: { showLog = true }
+                        onOpenLog: { showLog = true },
+                        onOpenCharts: { showCharts = true },
+                        onOpenDeck: { showDeck = true }
                     )
                     .transition(.opacity)
                 }
@@ -54,6 +58,12 @@ struct MakeAcreatureApp: App {
             }
             .fullScreenCover(isPresented: $showLog) {
                 EventLogView(session: session) { showLog = false }
+            }
+            .fullScreenCover(isPresented: $showCharts) {
+                ChartDrawer(session: session) { showCharts = false }
+            }
+            .fullScreenCover(isPresented: $showDeck) {
+                CassetteDeck(session: session) { showDeck = false }
             }
             .onAppear { session.resume() }
             .onChange(of: scenePhase) { phase in

@@ -199,6 +199,20 @@ uint32_t tank_species_name(const TankHandle *handle, uint16_t species, uint8_t *
 uint32_t tank_species_count(const TankHandle *handle);
 /* Saved species and the ancestors that connect them. Unsaved life is omitted. */
 uint32_t tank_species_tree(const TankHandle *handle, SpeciesNodeRec *out, uint32_t cap);
+/* Genetics card, UTF-8, two-call sizing. Portrait is RGBA of the founder. */
+uint32_t tank_species_card(const TankHandle *handle, uint16_t species, uint8_t *buf, uint32_t cap);
+size_t tank_species_portrait(const TankHandle *handle, uint16_t species, uint16_t *w, uint16_t *h,
+                             uint8_t *buf, size_t cap);
+/* Filing-cabinet sample. */
+typedef struct CensusRec {
+  uint32_t live;
+  uint32_t species;
+  uint32_t water;
+  uint32_t sand;
+  uint32_t stone;
+  uint32_t photo;
+} CensusRec;
+CensusRec tank_census(const TankHandle *handle);
 uint8_t tank_mark_species_archived(TankHandle *handle, uint16_t species, uint8_t on);
 
 /* Archive (Phase 3). A specimen is an opaque byte record the shell stores

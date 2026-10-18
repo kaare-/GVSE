@@ -72,6 +72,10 @@ enum RoomArt {
     static let crateInner = Spot(x: 52, y: 210, w: 22, h: 14)
     static let crateHit = Spot(x: 46, y: 204, w: 34, h: 40)
 
+    /// Cassette deck on the floor, between the cabinet and the fuse box.
+    static let deck = Spot(x: 80, y: 208, w: 16, h: 22)
+    static let deckHit = Spot(x: 78, y: 206, w: 20, h: 28)
+
     /// Plaque on the bench, directly under the main tank.
     static let sign = Spot(x: 36, y: 159, w: 48, h: 7)
     static let signHit = Spot(x: 28, y: 156, w: 64, h: 14)
@@ -175,6 +179,7 @@ private final class Pix {
         floor()
         archiveBook()
         favouriteCrate()
+        cassette()
         tankPlaque()
         fuse()
         toolJar()
@@ -241,6 +246,7 @@ private final class Pix {
         rightRim(6, 156, 108, 12)
         rightRim(6, 200, 28, 30)
         rightRim(48, 206, 30, 24)
+        rightRim(80, 208, 16, 22)
         for x in 2..<118 {
             shade(x, 40, 5 + x / 24)
         }
@@ -467,6 +473,24 @@ private final class Pix {
         fill(c.x + c.w - 3, c.y, 3, c.h, Ink.woodDk)
         fill(inner.x, inner.y, inner.w, inner.h, 0x2A1C12)
         fill(c.x + 1, c.y + c.h, c.w - 2, 2, 0x120C0E)
+    }
+
+    /// A small deck. Window, two reels, a tape band, two keys.
+    private func cassette() {
+        let d = RoomArt.deck
+        fill(d.x, d.y + 2, d.w, d.h - 2, Ink.metalDk)
+        fill(d.x, d.y, d.w, 2, Ink.metal)
+        fill(d.x, d.y + 2, 1, d.h - 4, 0x2A241C)
+        fill(d.x + 2, d.y + 4, d.w - 4, 8, 0x1A1410)
+        fill(d.x + 3, d.y + 5, d.w - 6, 6, Ink.page)
+        fill(d.x + 6, d.y + 7, d.w - 12, 2, 0x3A2418)
+        disc(d.x + 5, d.y + 8, 2, Ink.metal)
+        disc(d.x + d.w - 6, d.y + 8, 2, Ink.metal)
+        set(d.x + 5, d.y + 8, 0x1A1410)
+        set(d.x + d.w - 6, d.y + 8, 0x1A1410)
+        fill(d.x + 3, d.y + d.h - 5, 3, 2, Ink.metal)
+        fill(d.x + d.w - 6, d.y + d.h - 5, 3, 2, Ink.brass)
+        fill(d.x + 1, d.y + d.h, d.w - 1, 2, 0x120C0E)
     }
 
     private func tankPlaque() {

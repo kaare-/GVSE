@@ -11,6 +11,8 @@ struct RoomView: View {
     var onOpenTree: () -> Void
     var onOpenSettings: () -> Void
     var onOpenLog: () -> Void
+    var onOpenCharts: () -> Void
+    var onOpenDeck: () -> Void
 
     @State private var tree: [SpeciesNode] = []
     @State private var confirmEmpty: Int?
@@ -49,6 +51,8 @@ struct RoomView: View {
                 place(RoomArt.bookHit, layout) { bookButton(layout) }
                 place(RoomArt.logHit, layout) { logButton }
                 place(RoomArt.favHit, layout) { crateButton(layout) }
+                place(RoomArt.crateHit, layout) { drawerButton }
+                place(RoomArt.deckHit, layout) { deckButton }
                 place(RoomArt.signHit, layout) { signButton }
                 place(RoomArt.toolJar, layout) { toolJarButton }
                 if shears {
@@ -207,6 +211,22 @@ struct RoomView: View {
         }
         .buttonStyle(.plain)
         .a11yButton("The book", hint: "Archive")
+    }
+
+    private var drawerButton: some View {
+        Button(action: onOpenCharts) {
+            Color.clear
+        }
+        .buttonStyle(FullHit())
+        .a11yButton("Filing cabinet", hint: "Charts")
+    }
+
+    private var deckButton: some View {
+        Button(action: onOpenDeck) {
+            Color.clear
+        }
+        .buttonStyle(FullHit())
+        .a11yButton("Cassette deck")
     }
 
     private var logButton: some View {
@@ -420,29 +440,171 @@ private struct RoomLayout {
     }
 }
 
-/// Full-screen tree-of-life with names.
+/// Full-screen tree-of-life with names. A tap opens the genetics card.
 struct TreeScreen: View {
     @ObservedObject var session: TankSession
     var onClose: () -> Void
 
     @State private var tree: [SpeciesNode] = []
+    @State private var picked: UInt16?
+    @State private var card = ""
+    @State private var portrait: UIImage?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Palette.panel.ignoresSafeArea()
-            TreeOfLifeView(nodes: tree)
-                .padding(.top, 44)
+            TreeOfLifeView(nodes: tree, onPick: { id in
+                picked = id
+                card = session.speciesCard(id)
+                portrait = session.speciesPortrait(id)
+            })
+            .padding(.top, 44)
+            VStack {
+                HStack {
+                    PixelLabel(text: "TREE OF LIFE  \(tree.count) SPECIES", scale: 2, color: Palette.highlight)
+                    Spacer()
+                    Button(action: onClose) {
+                        PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer()
+                if picked != nil {
+                    speciesCard
+                }
+            }
+            .padding(10)
+        }
+        .onAppear { tree = session.speciesTree() }
+        .preferredColorScheme(.dark)
+    }
+
+    private var speciesCard: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Group {
+                if let portrait {
+                    Image(uiImage: portrait)
+                        .interpolation(.none)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    Rectangle().fill(Color(white: 0.12))
+                }
+            }
+            .frame(width: 96, height: 96)
+            .background(Color(white: 0.12))
+            VStack(alignment: .leading, spacing: 2) {
+                let name = tree.first { $0.id == picked }?.name ?? ""
+                PixelLabel(text: name.uppercased(), scale: 2, color: Palette.highlight, maxWidth: 200)
+                ForEach(Array(card.split(separator: "\n").prefix(8).enumerated()), id: \.offset) { _, line in
+                    PixelLabel(text: String(line), scale: 1, color: Palette.paper, maxWidth: 220)
+                }
+            }
+            Spacer(minLength: 0)
+            Button {
+                picked = nil
+            } label: {
+                PixelPanel { PixelLabel(text: "X", scale: 2) }
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(8)
+        .background(Palette.panel)
+        .overlay(Rectangle().stroke(Palette.highlight, lineWidth: 1))
+    }
+}
+
+/// Charts from the samples the open tank has been keeping.
+struct ChartDrawer: View {
+    @ObservedObject var session: TankSession
+    var onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                PixelLabel(text: "TREE OF LIFE  \(tree.count) SPECIES", scale: 2, color: Palette.highlight)
+                PixelLabel(text: "DRAWER", scale: 3, color: Palette.highlight)
                 Spacer()
                 Button(action: onClose) {
                     PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
                 }
                 .buttonStyle(.plain)
             }
-            .padding(10)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    chart("CREATURES", session.chart.map { Double($0.creatures) }, Palette.highlight)
+                    chart("LINEAGES", session.chart.map { Double($0.lineages) }, Palette.paper)
+                    chart("PREDATION", session.chart.map { Double($0.predation) }, Color(red: 0.7, green: 0.3, blue: 0.35))
+                    chart("PHOTOSYNTHESIS", session.chart.map { Double($0.photo) }, Color(red: 0.35, green: 0.62, blue: 0.32))
+                    chart("WATER", session.chart.map { Double($0.water) }, Color(red: 0.32, green: 0.55, blue: 0.7))
+                    chart("SAND", session.chart.map { Double($0.sand) }, Color(red: 0.72, green: 0.55, blue: 0.32))
+                    chart("STONE", session.chart.map { Double($0.stone) }, Color(red: 0.55, green: 0.52, blue: 0.48))
+                }
+            }
         }
-        .onAppear { tree = session.speciesTree() }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.panel.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+    }
+
+    private func chart(_ title: String, _ values: [Double], _ ink: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            let last = values.last.map { String(Int($0)) } ?? "0"
+            PixelLabel(text: "\(title)  \(last)", scale: 1, color: Palette.dimPaper)
+            Canvas { ctx, size in
+                let rect = CGRect(origin: .zero, size: size)
+                ctx.fill(Path(rect), with: .color(Color(white: 0.08)))
+                guard values.count >= 2 else { return }
+                let peak = max(values.max() ?? 1, 1)
+                var path = Path()
+                for (i, v) in values.enumerated() {
+                    let x = CGFloat(i) / CGFloat(values.count - 1) * size.width
+                    let y = size.height - CGFloat(v / peak) * (size.height - 2) - 1
+                    if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
+                }
+                ctx.stroke(path, with: .color(ink), lineWidth: 1)
+            }
+            .frame(height: 48)
+        }
+    }
+}
+
+/// A few generative tapes. Picking one sets the room's sound.
+struct CassetteDeck: View {
+    @ObservedObject var session: TankSession
+    var onClose: () -> Void
+
+    private let tapes = ["SLOW", "BRIGHT", "NIGHT"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                PixelLabel(text: "DECK", scale: 3, color: Palette.highlight)
+                Spacer()
+                Button(action: onClose) {
+                    PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
+                }
+                .buttonStyle(.plain)
+            }
+            PixelLabel(text: "A TAPE SETS THE ROOM", scale: 1, color: Palette.dimPaper)
+            ForEach(0..<tapes.count, id: \.self) { i in
+                Button {
+                    session.setTape(i)
+                } label: {
+                    PixelPanel {
+                        PixelLabel(
+                            text: session.tape == i ? "\(tapes[i])  IN" : tapes[i],
+                            scale: 2,
+                            color: session.tape == i ? Palette.highlight : Palette.paper
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.panel.ignoresSafeArea())
         .preferredColorScheme(.dark)
     }
 }

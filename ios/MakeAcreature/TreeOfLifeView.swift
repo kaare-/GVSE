@@ -7,6 +7,9 @@ import SwiftUI
 struct TreeOfLifeView: View {
     let nodes: [SpeciesNode]
     var compact = false
+    /// Set on the full tree. The lobby picture leaves this nil so the
+    /// whole frame stays one button.
+    var onPick: ((UInt16) -> Void)? = nil
 
     private let rowH: CGFloat = 22
     private let colW: CGFloat = 150
@@ -24,10 +27,41 @@ struct TreeOfLifeView: View {
                 picture(layout, size: size)
             } else {
                 ScrollView([.horizontal, .vertical]) {
-                    picture(layout, size: size)
+                    tappable(layout, size: size)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func tappable(_ layout: Layout, size: CGSize) -> some View {
+        let canvas = picture(layout, size: size)
+        if let onPick {
+            canvas.gesture(
+                SpatialTapGesture().onEnded { value in
+                    if let id = hit(layout, size: size, at: value.location) {
+                        onPick(id)
+                    }
+                }
+            )
+        } else {
+            canvas
+        }
+    }
+
+    private func hit(_ layout: Layout, size: CGSize, at point: CGPoint) -> UInt16? {
+        let sx: CGFloat = compact ? (size.width - 24) / CGFloat(max(layout.depthCount, 1)) : colW
+        let sy: CGFloat = compact ? (size.height - 16) / CGFloat(max(layout.rows, 1)) : rowH
+        func center(_ p: Layout.Pos) -> CGPoint {
+            CGPoint(x: 12 + CGFloat(p.depth) * sx + 6, y: 12 + (CGFloat(p.row) + 0.5) * sy)
+        }
+        for node in nodes.reversed() {
+            guard let p = layout.pos[node.id] else { continue }
+            let c = center(p)
+            let rect = CGRect(x: c.x - 8, y: c.y - sy / 2, width: max(sx - 8, 16), height: sy)
+            if rect.contains(point) { return node.id }
+        }
+        return nil
     }
 
     private func picture(_ layout: Layout, size: CGSize) -> some View {

@@ -468,6 +468,57 @@ fn a_paused_rock_falls_as_one_stone_and_turns() {
     assert_eq!(resting.iter().map(|(_, y, _)| *y).min(), Some(0), "it settles on the floor");
 }
 
+#[test]
+fn a_drawn_rock_falls_through_water_as_one_stone() {
+    let mut tank = Tank::try_new(2, 12, 20).unwrap();
+    for y in 0..10 {
+        for x in 0..12 {
+            place(&mut tank, x, y, Cell::water());
+        }
+    }
+    let paint = |x, y| ToolEvent {
+        kind: 1,
+        material: MaterialId::Stone as u8,
+        x,
+        y,
+        r: 0,
+        variant: 0,
+    };
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![paint(4, 16), paint(4, 17), paint(5, 16), paint(5, 17)],
+        ..TankInput::default()
+    });
+    let drawn = stone_cells(&tank);
+    assert!(drawn.len() > 1);
+    tick_n(&mut tank, 40);
+    let resting = stone_cells(&tank);
+    assert_eq!(resting.len(), drawn.len(), "water does not shatter the stone");
+    let id = resting[0].2.pad;
+    assert!(id != 0 && resting.iter().all(|(_, _, c)| c.is_rigid() && c.pad == id), "one body id");
+    assert_eq!(
+        resting.iter().map(|(_, y, _)| *y).min(),
+        Some(0),
+        "it rests on the floor, not in the column"
+    );
+}
+
+#[test]
+fn a_stone_does_not_cast_a_column_shadow() {
+    let mut tank = Tank::try_new(3, 8, 16).unwrap();
+    for y in 0..12 {
+        for x in 0..8 {
+            place(&mut tank, x, y, Cell::water());
+        }
+    }
+    place(&mut tank, 3, 10, Cell::stone());
+    tank.tick(&TankInput { always_day: true, ..TankInput::default() });
+    let under = tank.pixel_light_at(3 * 3 + 1, (16 - 1 - 6) * 3 + 1);
+    let beside = tank.pixel_light_at(1 * 3 + 1, (16 - 1 - 6) * 3 + 1);
+    let gap = (under as i32 - beside as i32).abs();
+    assert!(gap <= 2, "a rock should not darken the column under it ({under} vs {beside})");
+}
+
 fn stone_cells(tank: &Tank) -> Vec<(i32, i32, Cell)> {
     let (w, h) = tank.visible_size();
     let mut stones = Vec::new();
@@ -1003,7 +1054,7 @@ fn straw_breeds_true_for_ten_generations() {
 #[test]
 fn bitten_tail_regrows_into_its_slot() {
     use crate::bio::Genome;
-    let mut tank = water_box(5, 24, 24, 16);
+    let mut tank = water_box(5, 24, 24, 22);
     let mut g = Genome::straw();
     for m in g.modes.iter_mut() {
         m.regrow = true;
@@ -1978,8 +2029,11 @@ fn species_split_on_structure_or_drift_and_are_named() {
     pig.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
     assert_ne!(signature(&pig), signature(&tuned));
     let p = genomes.intern_child(t, pig.clone());
+    assert_eq!(genomes.species_of(p), root_sp, "a childless variant does not take a row");
+    genomes.on_birth(p);
+    genomes.on_birth(p);
     let p_sp = genomes.species_of(p);
-    assert_ne!(p_sp, root_sp);
+    assert_ne!(p_sp, root_sp, "offspring earns the new body plan a row");
     let rec = genomes.species(p_sp).unwrap();
     assert_eq!(rec.parent, root_sp);
     assert_eq!(rec.depth, 2);
@@ -2010,6 +2064,11 @@ fn species_split_on_structure_or_drift_and_are_named() {
     // Round trip through a tank save.
     let mut tank = water_box(61, 24, 24, 20);
     let id = tank.seed_genome_at(36, 36, pig.clone()).expect("seed");
+    let geno = tank.genotype_of_cell(id).unwrap();
+    tank.genomes_mut().on_birth(geno);
+    let mut heir = pig.clone();
+    heir.wall_key = heir.wall_key.wrapping_add(4);
+    tank.genomes_mut().intern_child(geno, heir);
     let sp = tank.inspect(36, 36).species;
     assert_ne!(sp, NO_SPECIES);
     let card = tank.lineage_card(id).expect("card");
@@ -2054,7 +2113,12 @@ fn same_body_plan_variants_collapse_on_load() {
     tank.genomes_mut().species_mut(archived).unwrap().archived = true;
     let mut pig = Genome::algae();
     pig.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
-    let pigment = tank.genomes_mut().intern_child(child, pig);
+    let pigment = tank.genomes_mut().intern_child(child, pig.clone());
+    tank.genomes_mut().on_birth(pigment);
+    tank.genomes_mut().on_birth(pigment);
+    let mut heir = pig.clone();
+    heir.temp_opt = 30;
+    tank.genomes_mut().intern_child(pigment, heir);
     let pigment_sp = tank.genomes().species_of(pigment);
     assert_eq!(tank.genomes().species(pigment_sp).unwrap().parent, variant);
     assert!(tank.species_tree().iter().any(|n| n.id == variant));
@@ -2271,8 +2335,10 @@ fn portraits_are_deterministic_and_show_the_body() {
     use crate::archive::portrait;
     use crate::bio::Genome;
     let (w, h, px) = portrait(&Genome::algae());
-    assert_eq!((w, h), (1, 1));
-    assert_eq!(px[3], 255, "the algae is one opaque pixel");
+    assert_eq!((w, h), (9, 9), "four pixels of air around the one cell");
+    let opaque = px.chunks(4).filter(|p| p[3] == 255).count();
+    assert_eq!(opaque, 1, "the algae is one opaque pixel");
+    assert_eq!(px[(4 * 9 + 4) * 4 + 3], 255, "the cell sits in the middle");
     let (w, h, straw) = portrait(&Genome::straw());
     let opaque = straw.chunks(4).filter(|p| p[3] == 255).count();
     assert!(opaque >= 3, "straw portrait has a chain ({w}×{h}, {opaque} px)");
@@ -2284,6 +2350,33 @@ fn portraits_are_deterministic_and_show_the_body() {
     let (sw, sh, spiny) = portrait(&Genome::spiny());
     let ivory = spiny.chunks(4).filter(|p| p[..3] == [0xEF, 0xE7, 0xDA]).count();
     assert!(ivory >= 1, "spiny portrait shows its bone ({sw}×{sh})");
+}
+
+#[test]
+fn species_card_names_the_blocks() {
+    let mut tank = water_box(9, 16, 16, 12);
+    tank.seed_algae(24, 24).unwrap();
+    let sp = tank.inspect(24, 24).species;
+    let page = tank.species_page(sp).expect("card");
+    assert!(page.contains("PHOTO"), "{page}");
+    assert!(page.contains("AGE"), "{page}");
+    assert!(page.contains("CELLS"), "{page}");
+    assert!(page.contains("KIN"), "{page}");
+    assert!(!page.contains("Block"), "{page}");
+}
+
+#[test]
+fn adding_a_specimen_keeps_what_is_already_alive() {
+    use crate::archive::Specimen;
+    let mut tank = water_box(4, 24, 24, 16);
+    let id = tank.seed_algae(30, 40).unwrap();
+    let before = tank.live_cells();
+    let sp = Specimen::starter(0).expect("moss");
+    let placed = tank.seed_specimen_copies(&sp, 1);
+    assert!(placed >= 1, "one copy lands in the open water");
+    assert!(tank.live_cells() > before);
+    assert!(tank.cell(id).is_some(), "the original cell stays");
+    assert_eq!(tank.visible_size(), (24, 24));
 }
 
 /// The pale-pink cilia trail is part of the swimmer: a tap on it selects

@@ -568,6 +568,69 @@ pub extern "C" fn tank_species_tree(handle: *const TankHandle, out: *mut Species
     tree.len() as u32
 }
 
+/// Readable genetics card (UTF-8). Two-call sizing, like `tank_species_name`.
+#[no_mangle]
+pub extern "C" fn tank_species_card(handle: *const TankHandle, species: u16, buf: *mut u8, cap: u32) -> u32 {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    let page = handle.tank.species_page(species).unwrap_or_default();
+    write_str(&page, buf, cap)
+}
+
+/// Studio portrait of a species. Writes width and height, returns the
+/// RGBA byte count. `cap == 0` measures. One call per tap — it grows
+/// the founder.
+#[no_mangle]
+pub extern "C" fn tank_species_portrait(
+    handle: *const TankHandle,
+    species: u16,
+    w_out: *mut u16,
+    h_out: *mut u16,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    let Some((w, h, px)) = handle.tank.species_portrait(species) else {
+        return 0;
+    };
+    unsafe {
+        if !w_out.is_null() {
+            *w_out = w;
+        }
+        if !h_out.is_null() {
+            *h_out = h;
+        }
+        if !buf.is_null() && cap >= px.len() {
+            ptr::copy_nonoverlapping(px.as_ptr(), buf, px.len());
+        }
+    }
+    px.len()
+}
+
+/// Chart sample: live, visible species, water cells, sand, stone, photo units.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CensusRec {
+    pub live: u32,
+    pub species: u32,
+    pub water: u32,
+    pub sand: u32,
+    pub stone: u32,
+    pub photo: u32,
+}
+
+#[no_mangle]
+pub extern "C" fn tank_census(handle: *const TankHandle) -> CensusRec {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
+        return CensusRec { live: 0, species: 0, water: 0, sand: 0, stone: 0, photo: 0 };
+    };
+    let c = handle.tank.census();
+    CensusRec { live: c[0], species: c[1], water: c[2], sand: c[3], stone: c[4], photo: c[5] }
+}
+
 #[no_mangle]
 pub extern "C" fn tank_mark_species_archived(handle: *mut TankHandle, species: u16, on: u8) -> u8 {
     let Some(handle) = (unsafe { handle.as_mut() }) else {
@@ -1291,6 +1354,9 @@ mod tests {
             "tank_lineage",
             "tank_species_name",
             "tank_species_tree",
+            "tank_species_card",
+            "tank_species_portrait",
+            "tank_census",
             "tank_discard",
             "tank_remove_at",
             "tank_specimen",

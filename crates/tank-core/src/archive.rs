@@ -19,6 +19,8 @@ pub const SPECIMEN_VERSION: u32 = 1;
 pub const PORTRAIT_TICKS: u32 = 900;
 /// Sandbox side in physics cells (water everywhere, always day).
 const PORTRAIT_CELLS: u32 = 20;
+/// Clear pixels around the body, so the picture is not cropped to the skin.
+const PORTRAIT_AIR: usize = 4;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecimenStats {
@@ -178,9 +180,14 @@ pub fn portrait(genome: &Genome) -> (u16, u16, Vec<u8>) {
             last_shape = shape;
         }
     }
-    let Some(bb) = tank.org_bbox(org) else {
-        return (1, 1, vec![0, 0, 0, 0]);
-    };
+    render_org(&tank, org).unwrap_or((1, 1, vec![0, 0, 0, 0]))
+}
+
+/// Tissue, bone, shell, both cilia beats and the eye pupil, unlit, with a
+/// margin of clear pixels. Shared by the studio portrait and the live
+/// archive pull so a dark tank cannot hide a part the glass is showing.
+fn render_org(tank: &Tank, org: u32) -> Option<(u16, u16, Vec<u8>)> {
+    let bb = tank.org_bbox(org)?;
     let w = (bb.2 - bb.0 + 1) as usize;
     let h = (bb.3 - bb.1 + 1) as usize;
     let mut out = vec![0u8; w * h * 4];
@@ -237,7 +244,196 @@ pub fn portrait(genome: &Genome) -> (u16, u16, Vec<u8>) {
         crate::bio::step::for_cilia_fringe(px, py, c.w, c.h, c.heading, false, &mut paint);
         crate::bio::step::for_cilia_fringe(px, py, c.w, c.h, c.heading, true, &mut paint);
     }
-    (w as u16, h as u16, out)
+    // The light-sensor pupil, the same dark pixel the tank draws on the
+    // heading side. It sits on tissue, so it overwrites that one pixel.
+    let pupil = [0x10u8, 0x14, 0x20];
+    for (_, c) in cells.iter_alive() {
+        if c.org != org {
+            continue;
+        }
+        let mc = genomes.coeffs(c.genotype, c.mode);
+        if mc.sensor == 0 || mc.sensor_kind != crate::bio::profile::SENSOR_LIGHT {
+            continue;
+        }
+        let (dx, dy) = crate::bio::program::heading_delta(c.heading);
+        let (x, y) = if dx != 0 {
+            (c.px as i32 + if dx > 0 { c.w as i32 - 1 } else { 0 }, c.py as i32 + c.h as i32 / 2)
+        } else {
+            (c.px as i32 + c.w as i32 / 2, c.py as i32 + if dy > 0 { c.h as i32 - 1 } else { 0 })
+        };
+        if x < bb.0 as i32 || y < bb.1 as i32 || x > bb.2 as i32 || y > bb.3 as i32 {
+            continue;
+        }
+        let lx = (x - bb.0 as i32) as usize;
+        let ly = (y - bb.1 as i32) as usize;
+        let i = (ly * w + lx) * 4;
+        out[i..i + 3].copy_from_slice(&pupil);
+        out[i + 3] = 255;
+    }
+    if !out.chunks(4).any(|p| p[3] == 255) {
+        return None;
+    }
+    let w2 = w + PORTRAIT_AIR * 2;
+    let h2 = h + PORTRAIT_AIR * 2;
+    let mut padded = vec![0u8; w2 * h2 * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let s = (y * w + x) * 4;
+            let d = ((y + PORTRAIT_AIR) * w2 + x + PORTRAIT_AIR) * 4;
+            padded[d..d + 4].copy_from_slice(&out[s..s + 4]);
+        }
+    }
+    Some((w2 as u16, h2 as u16, padded))
+}
+
+/// Plain words for the blocks a genome actually builds. One line each,
+/// units of at least 1, not the bytecode. Sensors and drinks are named
+/// for what they do.
+pub fn genetics_lines(genome: &crate::bio::Genome) -> Vec<String> {
+    use crate::bio::profile::{
+        Block, SENSOR_CHEM, SENSOR_COLOUR, SENSOR_GRAVITY, SENSOR_HUMIDITY, SENSOR_KIND_MOD, SENSOR_LIGHT,
+        SENSOR_TEMP, SENSOR_TOUCH, UPTAKE_GLUCOSE, UPTAKE_MINERAL, UPTAKE_WATER,
+    };
+    use crate::bio::species::reachable_modes;
+    let mut photo = false;
+    let mut chemo = false;
+    let mut drinks = [false; 3];
+    let mut store = false;
+    let mut enzyme = false;
+    let mut repair = false;
+    let mut wall = false;
+    let mut clear = false;
+    let mut glue = false;
+    let mut toxin = false;
+    let mut needle = false;
+    let mut signal = false;
+    let mut receptor = false;
+    let mut sensors = [false; 7];
+    let mut nerve = false;
+    let mut muscle = false;
+    let mut cilia = false;
+    let mut buoy = false;
+    let mut excrete = false;
+    let mut pigment = false;
+    let mut thermo = false;
+    for &mi in &reachable_modes(genome) {
+        let Some(m) = genome.modes.get(mi as usize) else {
+            continue;
+        };
+        for e in &m.entries[..m.n_entries as usize] {
+            if e.units < 1 {
+                continue;
+            }
+            match e.block {
+                Block::Photo => photo = true,
+                Block::Chemo => chemo = true,
+                Block::Uptake => {
+                    let k = e.param_a as usize;
+                    if k < drinks.len() {
+                        drinks[k] = true;
+                    }
+                }
+                Block::Store => store = true,
+                Block::Enzyme => enzyme = true,
+                Block::Repair => repair = true,
+                Block::Wall => wall = true,
+                Block::Transparent => clear = true,
+                Block::Glue => glue = true,
+                Block::Toxin => toxin = true,
+                Block::Needle => needle = true,
+                Block::Signal => signal = true,
+                Block::Receptor => receptor = true,
+                Block::Sensor => {
+                    let k = (e.param_a % SENSOR_KIND_MOD) as usize;
+                    if k < sensors.len() {
+                        sensors[k] = true;
+                    }
+                }
+                Block::Nerve => nerve = true,
+                Block::Muscle => muscle = true,
+                Block::Cilia => cilia = true,
+                Block::Buoy => buoy = true,
+                Block::Excrete => excrete = true,
+                Block::Pigment => pigment = true,
+                Block::Thermo => thermo = true,
+            }
+        }
+    }
+    let mut lines = Vec::new();
+    if photo {
+        lines.push("PHOTO".into());
+    }
+    if chemo {
+        lines.push("CHEMO".into());
+    }
+    if drinks[UPTAKE_GLUCOSE as usize] {
+        lines.push("DRINKS SUGAR".into());
+    }
+    if drinks[UPTAKE_MINERAL as usize] {
+        lines.push("DRINKS LIME".into());
+    }
+    if drinks[UPTAKE_WATER as usize] {
+        lines.push("DRINKS WATER".into());
+    }
+    if store {
+        lines.push("STORE".into());
+    }
+    if enzyme {
+        lines.push("ENZYME".into());
+    }
+    if repair {
+        lines.push("REPAIR".into());
+    }
+    if wall {
+        lines.push("WALL".into());
+    }
+    if clear {
+        lines.push("CLEAR".into());
+    }
+    if glue {
+        lines.push("GLUE".into());
+    }
+    if toxin {
+        lines.push("TOXIN".into());
+    }
+    if needle {
+        lines.push("NEEDLE".into());
+    }
+    if signal {
+        lines.push("SIGNAL".into());
+    }
+    if receptor {
+        lines.push("RECEPTOR".into());
+    }
+    const EYES: [&str; 7] = ["EYE", "TOUCH", "SMELL", "COLOUR", "WARMTH", "DAMP", "BALANCE"];
+    let _ = (SENSOR_LIGHT, SENSOR_TOUCH, SENSOR_CHEM, SENSOR_COLOUR, SENSOR_TEMP, SENSOR_HUMIDITY, SENSOR_GRAVITY);
+    for (on, name) in sensors.iter().zip(EYES) {
+        if *on {
+            lines.push(name.into());
+        }
+    }
+    if nerve {
+        lines.push("NERVE".into());
+    }
+    if muscle {
+        lines.push("MUSCLE".into());
+    }
+    if cilia {
+        lines.push("CILIA".into());
+    }
+    if buoy {
+        lines.push("BUOY".into());
+    }
+    if excrete {
+        lines.push("EXCRETE".into());
+    }
+    if pigment {
+        lines.push("PIGMENT".into());
+    }
+    if thermo {
+        lines.push("THERMO".into());
+    }
+    lines
 }
 
 /// Seed-mode colour of a genome (species swatch).
@@ -270,7 +466,8 @@ impl Tank {
         let mut id_bytes = postcard::to_allocvec(&genome).unwrap_or_default();
         id_bytes.extend_from_slice(&self.seed().to_le_bytes());
         id_bytes.extend_from_slice(&self.tick_count().to_le_bytes());
-        let (portrait_w, portrait_h, portrait) = portrait(&genome);
+        let org = rec.org;
+        let (portrait_w, portrait_h, portrait) = self.pull_organism(org).unwrap_or_else(|| portrait(&genome));
         if let Some(s) = self.genomes_mut().species_mut(card.species) {
             s.archived = true;
         }
@@ -355,6 +552,44 @@ impl Tank {
             break 'rows;
         }
         placed
+    }
+
+    /// Readable card for one species: the blocks it is made of, then age,
+    /// living cells, and how many of its genotypes are still alive.
+    pub fn species_page(&self, species: u16) -> Option<String> {
+        let s = self.genomes().species(species)?;
+        if s.collapsed {
+            return None;
+        }
+        let mut lines = genetics_lines(&s.founder_genome);
+        let age = self.tick_count().saturating_sub(s.first_tick) / crate::consts::TICK_HZ;
+        lines.push(format!("AGE {age}S"));
+        let cells = self.genomes().species_live_cells(species);
+        lines.push(format!("{cells} CELLS"));
+        let kin = self.genomes().species_live_genotypes(species);
+        if kin == 0 {
+            lines.push("KIN NONE".into());
+        } else {
+            lines.push(format!("KIN {kin} ALIVE"));
+        }
+        Some(lines.join("\n"))
+    }
+
+    /// Studio portrait of a species founder. Built once per tap, not per frame.
+    pub fn species_portrait(&self, species: u16) -> Option<(u16, u16, Vec<u8>)> {
+        let s = self.genomes().species(species)?;
+        if s.collapsed {
+            return None;
+        }
+        Some(portrait(&s.founder_genome))
+    }
+
+    /// The organism as the tank is drawing it right now: tissue, bone,
+    /// shell, cilia and the eye, with a margin of empty pixels. Colours
+    /// are the body's own, not the tank light, so a part in shadow still
+    /// shows. Pixels that are not this body stay clear.
+    pub fn pull_organism(&mut self, org: u32) -> Option<(u16, u16, Vec<u8>)> {
+        render_org(self, org)
     }
 
     /// The tree-of-life picture: every species the tank has founded, saved

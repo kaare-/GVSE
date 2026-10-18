@@ -302,6 +302,60 @@ pub fn pixel_to_phys(px: u16, py: u16, vis_h: u32) -> (i32, i32) {
     (vx, vy)
 }
 
+/// A plant may grow into air only while some cell of the body is a root
+/// sitting in solid ground. Free bodies stay in the water.
+fn org_is_rooted(cells: &CellStore, genomes: &GenomeStore, grid: &PhysicsGrid, org: u32) -> bool {
+    let Some(o) = cells.org(org) else {
+        return false;
+    };
+    let vis_h = grid.visible_h() as u32;
+    for s in o.slots.iter().filter(|s| s.cell != NONE) {
+        let Some(c) = cells.get(s.cell) else {
+            continue;
+        };
+        if genomes.coeffs(c.genotype, c.mode).uptake_water < 2 {
+            continue;
+        }
+        let (vx, vy) = pixel_to_phys(c.px, c.py, vis_h);
+        if !grid.get_visible(vx, vy).is_open() {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when shifting the body up by `dy` (negative) would put a cell in dry air.
+fn climb_would_leave_water(cells: &CellStore, grid: &PhysicsGrid, org_id: u32, dy: i32) -> bool {
+    let Some(o) = cells.org(org_id) else {
+        return false;
+    };
+    let vis_h = grid.visible_h() as u32;
+    o.slots.iter().filter(|s| s.cell != NONE).any(|s| {
+        let Some(c) = cells.get(s.cell) else {
+            return false;
+        };
+        let ny = c.py as i32 + dy;
+        if ny < 0 {
+            return true;
+        }
+        let (vx, vy) = pixel_to_phys(c.px, ny as u16, vis_h);
+        crate::humidity::is_air_cell(grid.get_visible(vx, vy))
+    })
+}
+
+/// True when the pixel row under this footprint is solid and not glass.
+fn supported_below(grid: &PhysicsGrid, px: u16, py: u16, h: u8) -> bool {
+    let vis_h = grid.visible_h() as u32;
+    let ph = vis_h.saturating_mul(crate::consts::PX_PER_CELL as u32);
+    let foot = py as u32 + h as u32;
+    if foot >= ph {
+        return true;
+    }
+    let (bx, by) = pixel_to_phys(px, py.saturating_add(h as u16), vis_h);
+    let below = grid.get_visible(bx, by);
+    !below.is_open() && !below.is_glass()
+}
+
 fn near_solid(grid: &PhysicsGrid, px: u16, py: u16) -> bool {
     let (vx, vy) = pixel_to_phys(px, py, grid.visible_h() as u32);
     for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
@@ -393,10 +447,6 @@ fn move_free_cell(
     if cell.film || cell.parent_cell != NONE {
         return;
     }
-    // A GLUE attachment holds the cell in its colony (bonds carry force).
-    if cell.glue_to != NONE {
-        return;
-    }
     // A root co-occupying moist sand/soil is static (§h.1).
     {
         let (vx, vy) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
@@ -407,6 +457,13 @@ fn move_free_cell(
     }
     // Multi-cell bodies drift as a unit in `drift_bodies`.
     if cells.org_slot_count(cell.org) > 1 {
+        return;
+    }
+    // Kin glue holds two organisms together. The lower id drifts for
+    // both, so the pair sinks and swims as one instead of freezing in
+    // the column or being pinned to the glass.
+    let partner = cell.glue_to;
+    if partner != NONE && partner < id {
         return;
     }
     let g = genomes.genome(cell.genotype);
@@ -474,12 +531,48 @@ fn move_free_cell(
     if solid_below && ny > cell.py as i32 {
         ny = cell.py as i32;
     }
+    // A free cell may ride the surface. It does not step up into dry air
+    // and hang there, and it does not keep dividing above the water.
+    // A swimmer that bumps the surface turns back into the water instead
+    // of sitting under the ceiling with its heading pointed at the air.
+    let mut bounced = false;
+    if ny < cell.py as i32 {
+        let (ax, ay) = pixel_to_phys(cell.px, ny.max(0) as u16, vis_h);
+        if crate::humidity::is_air_cell(grid.get_visible(ax, ay)) {
+            ny = cell.py as i32;
+            bounced = mc.cilia > 0;
+        }
+    }
     let pw = pixels.w as i32;
     let ph = pixels.h as i32;
     nx = nx.clamp(0, pw - cell.w as i32);
     ny = ny.clamp(0, ph - cell.h as i32);
+    if bounced && nx == cell.px as i32 && ny == cell.py as i32 {
+        if let Some(c) = cells.get_mut(id) {
+            c.heading = c.heading.wrapping_add(4) % 8;
+        }
+        return;
+    }
     if nx != cell.px as i32 || ny != cell.py as i32 {
+        let dx = nx - cell.px as i32;
+        let dy = ny - cell.py as i32;
+        if partner != NONE {
+            if let Some(other) = cells.get(partner) {
+                let ox = other.px as i32 + dx;
+                let oy = other.py as i32 + dy;
+                if ox < 0 || oy < 0 || ox + other.w as i32 > pw || oy + other.h as i32 > ph {
+                    return;
+                }
+            }
+        }
         let moved = cells.move_cell(pixels, id, nx as u16, ny as u16);
+        if moved && partner != NONE {
+            if let Some(other) = cells.get(partner) {
+                let ox = (other.px as i32 + dx).max(0) as u16;
+                let oy = (other.py as i32 + dy).max(0) as u16;
+                let _ = cells.move_cell(pixels, partner, ox, oy);
+            }
+        }
         if moved {
             if let Some((dx, dy)) = thrust {
                 if let Some(c) = cells.get_mut(id) {
@@ -679,7 +772,10 @@ fn body_env(cells: &CellStore, genomes: &GenomeStore, grid: &PhysicsGrid, org_id
             env.film = true;
             return Some(env);
         }
-        if near_solid(grid, c.px, c.py) {
+        // Resting means the footprint is sitting on sand, rock or the
+        // floor. A neighbour to the side, the pane, or the water surface
+        // does not freeze the body in the column.
+        if supported_below(grid, c.px, c.py, c.h) {
             env.touching = true;
         }
         if genomes.coeffs(c.genotype, c.mode).cilia > 0 {
@@ -746,6 +842,9 @@ fn drift_bodies(
         if all_water && h % 6 == 0 {
             dx = if (h >> 8) % 2 == 0 { 1 } else { -1 };
         }
+        if dy < 0 && climb_would_leave_water(cells, grid, org_id, dy) {
+            dy = 0;
+        }
         if dx != 0 || dy != 0 {
             let _ = cells.move_org(pixels, org_id, dx, dy);
         }
@@ -775,7 +874,7 @@ fn swim_bodies(
             continue;
         }
         let h = hash_u64(world_seed, tick, org_id as u64, 0xB2_D2);
-        body_thrust(cells, genomes, pixels, org_id, h);
+        body_thrust(cells, genomes, grid, pixels, org_id, h);
     }
 }
 
@@ -783,7 +882,14 @@ fn swim_bodies(
 /// own heading; adjacent running cilia cells beat in phase, thrust ×
 /// `(1 + 0.25·n_adjacent)` capped at ×2. The net vector moves the body
 /// one pixel along its dominant axis at the speed law's rate.
-fn body_thrust(cells: &mut CellStore, genomes: &GenomeStore, pixels: &mut PixelLayer, org_id: u32, h: u64) {
+fn body_thrust(
+    cells: &mut CellStore,
+    genomes: &GenomeStore,
+    grid: &PhysicsGrid,
+    pixels: &mut PixelLayer,
+    org_id: u32,
+    h: u64,
+) {
     let Some(o) = cells.org(org_id) else {
         return;
     };
@@ -833,6 +939,13 @@ fn body_thrust(cells: &mut CellStore, genomes: &GenomeStore, pixels: &mut PixelL
         return;
     }
     let seed = o.seed;
+    let mut dir = dir;
+    if dir.1 < 0 && climb_would_leave_water(cells, grid, org_id, dir.1) {
+        dir.1 = 0;
+        if dir.0 == 0 {
+            return;
+        }
+    }
     if cells.move_org(pixels, org_id, dir.0, dir.1) {
         if let Some(c) = cells.get_mut(seed) {
             c.moved_dx = c.moved_dx.saturating_add(dir.0 as i8);
@@ -1545,8 +1658,9 @@ fn try_divide(
     // (§h.1). A propagule that finds a blocked seat tries the other sides.
     let vis_h = grid.visible_h() as u32;
     let child_preview = *genomes.coeffs(genotype, spec.mode);
+    let allow_air = org_is_rooted(cells, genomes, grid, cell.org);
     let seat_ok = |nx: i32, ny: i32| -> bool {
-        hydrate::seat_ok(grid, coarse, pixels, nx, ny, &child_preview)
+        hydrate::seat_ok(grid, coarse, pixels, nx, ny, &child_preview, allow_air)
     };
     let (dx, dy) = spec.dir.delta(cell.heading);
     let mut nx = cell.px as i32 + side_offset(dx, cell.w);

@@ -34,6 +34,16 @@ struct InspectState: Equatable {
 }
 
 /// One species of the tree-of-life view with its name resolved.
+struct ChartPoint {
+    var creatures: UInt32
+    var lineages: UInt32
+    var predation: UInt32
+    var photo: UInt32
+    var water: UInt32
+    var sand: UInt32
+    var stone: UInt32
+}
+
 struct SpeciesNode: Identifiable {
     let rec: SpeciesNodeRec
     let name: String
@@ -126,6 +136,11 @@ final class TankSession: ObservableObject {
     @Published private(set) var showStartGuide = false
     /// Bumps when a tank file is replaced, so the lobby glass can refresh.
     @Published private(set) var savesChanged = 0
+    /// Samples for the filing-cabinet charts, oldest first.
+    @Published private(set) var chart: [ChartPoint] = []
+    /// Cassette in the deck: 0 slow, 1 bright, 2 night.
+    @Published private(set) var tape = 0
+    private var predationCount: UInt32 = 0
 
     let archive = ArchiveStore()
     private var eventLogSerial: UInt64 = 0
@@ -193,6 +208,8 @@ final class TankSession: ObservableObject {
             TelemetryClient.flushPendingCrash(handle: handle, consent: consent)
             AmbientAudio.shared.setTankSeed(tank_seed(handle))
         }
+        tape = min(2, max(0, UserDefaults.standard.integer(forKey: "tape")))
+        AmbientAudio.shared.setTape(tape)
         AmbientAudio.shared.setMuted(!soundOn)
         if soundOn { AmbientAudio.shared.startIfNeeded() }
         haptic.prepare()
@@ -419,6 +436,59 @@ final class TankSession: ObservableObject {
         return placed
     }
 
+    /// Drop one copy into a glass that already has a world. The open tank
+    /// is seeded in place. A closed jar is loaded, seeded, and written back.
+    @discardableResult
+    func addSpecimen(_ specimen: ArchivedSpecimen, into target: TankContainer) -> UInt32 {
+        let placed: UInt32
+        if target == container, let handle {
+            placed = specimen.bytes.withUnsafeBytes { raw -> UInt32 in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
+                return tank_seed_specimen_copies(handle, base, raw.count, 1)
+            }
+            saveCurrent()
+            refreshClock()
+        } else {
+            let loaded = loadHandle(for: target)
+            guard let loaded else {
+                showHint("NO ROOM")
+                return 0
+            }
+            if case .main = target {
+                tank_widen(loaded, tankMainCellsWide)
+            }
+            placed = specimen.bytes.withUnsafeBytes { raw -> UInt32 in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
+                return tank_seed_specimen_copies(loaded, base, raw.count, 1)
+            }
+            write(handle: loaded, to: target)
+            tank_free(loaded)
+        }
+        savesChanged += 1
+        showHint(placed > 0 ? "ADDED" : "NO ROOM")
+        return placed
+    }
+
+    func setTape(_ index: Int) {
+        tape = min(2, max(0, index))
+        UserDefaults.standard.set(tape, forKey: "tape")
+        AmbientAudio.shared.setTape(tape)
+        if soundOn { AmbientAudio.shared.startIfNeeded() }
+        showHint(["SLOW", "BRIGHT", "NIGHT"][tape])
+    }
+
+    private func loadHandle(for target: TankContainer) -> OpaquePointer? {
+        let url = saveURL(for: target)
+        if let data = try? Data(contentsOf: url), !data.isEmpty {
+            let loaded = data.withUnsafeBytes { raw -> OpaquePointer? in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
+                return tank_load(base, raw.count)
+            }
+            if loaded != nil { return loaded }
+        }
+        return freshGlass(for: target, salt: 9)
+    }
+
     func undo() {
         guard let handle else { return }
         _ = tank_undo(handle)
@@ -580,14 +650,15 @@ final class TankSession: ObservableObject {
         let pw = Int(w)
         let ph = Int(h)
         var x0u: UInt16 = 0, y0u: UInt16 = 0, x1u: UInt16 = 0, y1u: UInt16 = 0
-        guard tank_org_bbox(handle, inspected.org, &x0u, &y0u, &x1u, &y1u) != 0, x1u > x0u, y1u > y0u else {
+        guard tank_org_bbox(handle, inspected.org, &x0u, &y0u, &x1u, &y1u) != 0, x1u >= x0u, y1u >= y0u else {
             return tankSnapshot(scale: scale)
         }
         let pad = 4
         let x0 = max(0, Int(x0u) - pad)
         let y0 = max(0, Int(y0u) - pad)
-        let x1 = min(pw, Int(x1u) + pad)
-        let y1 = min(ph, Int(y1u) + pad)
+        // x1u/y1u are inclusive. Keep a full margin past that edge.
+        let x1 = min(pw, Int(x1u) + 1 + pad)
+        let y1 = min(ph, Int(y1u) + 1 + pad)
         let cw = max(1, x1 - x0)
         let ch = max(1, y1 - y0)
         var crop = [UInt8](repeating: 0, count: cw * ch * 4)
@@ -691,6 +762,34 @@ final class TankSession: ObservableObject {
         var buf = [UInt8](repeating: 0, count: Int(need) + 1)
         _ = tank_species_name(handle, species, &buf, UInt32(buf.count))
         return String(decoding: buf.prefix(Int(need)), as: UTF8.self)
+    }
+
+    func speciesCard(_ species: UInt16) -> String {
+        guard let handle, species != UInt16(TANK_NO_SPECIES) else { return "" }
+        let need = tank_species_card(handle, species, nil, 0)
+        var buf = [UInt8](repeating: 0, count: Int(need) + 1)
+        _ = tank_species_card(handle, species, &buf, UInt32(buf.count))
+        return String(decoding: buf.prefix(Int(need)), as: UTF8.self)
+    }
+
+    /// Grows the founder once. Call on a tap, not every frame.
+    func speciesPortrait(_ species: UInt16) -> UIImage? {
+        guard let handle, species != UInt16(TANK_NO_SPECIES) else { return nil }
+        var w: UInt16 = 0
+        var h: UInt16 = 0
+        let need = tank_species_portrait(handle, species, &w, &h, nil, 0)
+        guard need > 0, w > 0, h > 0 else { return nil }
+        var rgba = [UInt8](repeating: 0, count: need)
+        let got = tank_species_portrait(handle, species, &w, &h, &rgba, need)
+        guard got == need else { return nil }
+        return rgba.withUnsafeBytes { raw in
+            rgbaImage(
+                ptr: raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                width: Int(w),
+                height: Int(h),
+                scale: 4
+            )
+        }
     }
 
     // MARK: scoop
@@ -1172,6 +1271,9 @@ final class TankSession: ObservableObject {
                     }
                 }
             }
+            if ev.kind == 16 {
+                predationCount &+= 1
+            }
             if let sting = EventToast.soundTrigger(kind: ev.kind) {
                 AmbientAudio.shared.playSting(sting)
             }
@@ -1227,6 +1329,17 @@ final class TankSession: ObservableObject {
             refreshInspect()
             if frame % 30 == 0 {
                 liveCells = tank_live_cells(handle)
+                let census = tank_census(handle)
+                chart.append(ChartPoint(
+                    creatures: census.live,
+                    lineages: census.species,
+                    predation: predationCount,
+                    photo: census.photo,
+                    water: census.water,
+                    sand: census.sand,
+                    stone: census.stone
+                ))
+                if chart.count > 180 { chart.removeFirst(chart.count - 180) }
                 AmbientAudio.shared.setIntensity(liveCells: liveCells)
             }
             temperatureC = tank_temperature(handle)

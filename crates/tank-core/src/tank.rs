@@ -607,6 +607,39 @@ impl Tank {
         self.cells.len()
     }
 
+    /// Numbers for the filing-cabinet charts. `photo` is the sum of
+    /// photosynthetic units on living cells.
+    pub fn census(&self) -> [u32; 6] {
+        let (w, h) = self.visible_size();
+        let mut water = 0u32;
+        let mut sand = 0u32;
+        let mut stone = 0u32;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let c = self.grid.get_visible(x, y);
+                if c.is_open() && c.sat > 40 {
+                    water += 1;
+                } else if c.id() == wk_material::MaterialId::Sand {
+                    sand += 1;
+                } else if c.is_rock() {
+                    stone += 1;
+                }
+            }
+        }
+        let mut photo = 0u32;
+        for (_, c) in self.cells.iter_alive() {
+            photo = photo.saturating_add(self.genomes.coeffs(c.genotype, c.mode).photo as u32);
+        }
+        [
+            self.live_cells() as u32,
+            self.genomes.visible_species() as u32,
+            water,
+            sand,
+            stone,
+            photo,
+        ]
+    }
+
     pub fn genotype_count(&self) -> usize {
         self.genomes.len()
     }
@@ -2352,6 +2385,7 @@ impl Tank {
         // Older saves founded a species for every tuned algae. Fold those
         // back into the parent so the tree is the body plans, not the drift.
         tank.genomes.collapse_same_body_plan();
+        tank.genomes.cull_childless();
         tank.cells = CellStore::from_raw(blob.bio_cells, blob.orgs);
         tank.milestones = blob.milestones;
         tank.archive_roots = blob.archive_roots;
@@ -2384,7 +2418,14 @@ impl Tank {
     fn mark_tissue(&mut self) {
         for &(vx, vy) in &self.tissue_marks {
             let mut c = self.grid.get_visible(vx, vy);
+            // A drawn rock is bound so its cells stay one stone. Clearing
+            // that bit here let grain shatter it the tick it landed on a
+            // cell that had been tissue or rooted sand.
+            let rock = c.is_rigid() || c.is_silhouette();
             c.flags &= !(Cell::TISSUE | Cell::BOUND);
+            if rock {
+                c.flags |= Cell::BOUND;
+            }
             self.grid.set_visible(vx, vy, c);
         }
         self.tissue_marks.clear();
