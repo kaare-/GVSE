@@ -94,6 +94,25 @@ func roman(_ n: UInt16) -> String {
     return out
 }
 
+/// Needle shaft above the hot spot. The finger is below the tip.
+struct NeedleCursor: View {
+    var tip: CGPoint
+
+    var body: some View {
+        Canvas { ctx, _ in
+            var shaft = Path()
+            shaft.move(to: CGPoint(x: tip.x, y: tip.y - 34))
+            shaft.addLine(to: tip)
+            ctx.stroke(shaft, with: .color(Palette.highlight), lineWidth: 2)
+            let dot = CGRect(x: tip.x - 2, y: tip.y - 2, width: 4, height: 4)
+            ctx.fill(Path(ellipseIn: dot), with: .color(Palette.highlight))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 /// Corner-marked rectangle that follows the inspected body.
 struct TrackingBox: View {
     let rect: CGRect

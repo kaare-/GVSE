@@ -87,6 +87,9 @@ struct MakeAcreatureApp: App {
                 if let rect = session.inspected?.rect {
                     TrackingBox(rect: rect)
                 }
+                if let tip = session.needleTip {
+                    NeedleCursor(tip: tip)
+                }
                 if let state = session.inspected {
                     VStack {
                         InspectCard(

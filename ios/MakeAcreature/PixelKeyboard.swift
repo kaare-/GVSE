@@ -1,9 +1,9 @@
 import SwiftUI
 import UIKit
 
-/// Pixel-styled system keyboard appearance (§2.2 #7): dark keyboard +
-/// a pixel accessory bar. A full custom keyboard extension is deferred
-/// (needs founder / App Store entitlements).
+/// Dark system keyboard. Text is edited in a UIKit alert or page, never
+/// in a SwiftUI canvas: a field next to `PixelLabel` crashes on focus,
+/// and a text view inside the book page crashes as soon as it appears.
 enum PixelKeyboard {
     static func applyAppearance() {
         UITextField.appearance().keyboardAppearance = .dark
@@ -13,117 +13,114 @@ enum PixelKeyboard {
     }
 }
 
-/// Monospaced dark field. UIKit, with no input accessory, so the system
-/// keyboard bar cannot crash the pixel canvases around it.
-struct PixelTextField: View {
-    @Binding var text: String
-    var placeholder: String = ""
-    var onDone: (() -> Void)?
+enum PixelPrompt {
+    static func singleLine(title: String, text: String, placeholder: String, onDone: @escaping (String) -> Void) {
+        let alert = UIAlertController(title: title, message: nil, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = text
+            field.placeholder = placeholder
+            field.keyboardAppearance = .dark
+            field.autocorrectionType = .no
+            field.autocapitalizationType = .words
+            field.clearButtonMode = .whileEditing
+            field.inputAccessoryView = UIView(frame: .zero)
+            field.inputAssistantItem.leadingBarButtonGroups = []
+            field.inputAssistantItem.trailingBarButtonGroups = []
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Done", style: .default) { _ in
+            onDone(alert.textFields?.first?.text ?? "")
+        })
+        present(alert)
+    }
 
-    var body: some View {
-        PixelFieldRep(text: $text, placeholder: placeholder, onDone: onDone)
-            .frame(height: 36)
-            .padding(4)
-            .background(Color(white: 0.14))
+    static func notes(text: String, onDone: @escaping (String) -> Void) {
+        let editor = NoteController(text: text, onDone: onDone)
+        editor.modalPresentationStyle = .pageSheet
+        present(editor)
+    }
+
+    private static func present(_ vc: UIViewController) {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first,
+              let root = scene.windows.first(where: \.isKeyWindow)?.rootViewController ?? scene.windows.first?.rootViewController
+        else { return }
+        var top = root
+        while let next = top.presentedViewController, !next.isBeingDismissed {
+            top = next
+        }
+        top.present(vc, animated: true)
     }
 }
 
-private struct PixelFieldRep: UIViewRepresentable {
-    @Binding var text: String
-    var placeholder: String
-    var onDone: (() -> Void)?
+/// Notes editor with no SwiftUI and no keyboard accessory bar.
+private final class NoteController: UIViewController {
+    private let editor = UITextView()
+    private let onDone: (String) -> Void
 
-    func makeUIView(context: Context) -> UITextField {
-        let field = UITextField()
-        field.delegate = context.coordinator
-        field.keyboardAppearance = .dark
-        field.inputAccessoryView = nil
-        field.font = .monospacedSystemFont(ofSize: 16, weight: .regular)
-        field.textColor = UIColor(red: 0.93, green: 0.89, blue: 0.78, alpha: 1)
-        field.tintColor = UIColor(red: 1, green: 0.92, blue: 0.7, alpha: 1)
-        field.backgroundColor = .clear
-        field.autocorrectionType = .no
-        field.returnKeyType = .done
-        field.placeholder = placeholder
-        field.text = text
-        return field
+    init(text: String, onDone: @escaping (String) -> Void) {
+        self.onDone = onDone
+        super.init(nibName: nil, bundle: nil)
+        editor.text = text
     }
 
-    func updateUIView(_ uiView: UITextField, context: Context) {
-        context.coordinator.parent = self
-        uiView.inputAccessoryView = nil
-        if uiView.text != text {
-            uiView.text = text
-        }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor(red: 0.09, green: 0.08, blue: 0.07, alpha: 1)
+        editor.backgroundColor = UIColor(white: 0.14, alpha: 1)
+        editor.textColor = UIColor(red: 0.93, green: 0.89, blue: 0.78, alpha: 1)
+        editor.tintColor = UIColor(red: 1, green: 0.92, blue: 0.7, alpha: 1)
+        editor.font = .monospacedSystemFont(ofSize: 16, weight: .regular)
+        editor.keyboardAppearance = .dark
+        editor.autocorrectionType = .no
+        editor.inputAccessoryView = UIView(frame: .zero)
+        editor.inputAssistantItem.leadingBarButtonGroups = []
+        editor.inputAssistantItem.trailingBarButtonGroups = []
+        editor.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(editor)
+
+        let done = UIButton(type: .system)
+        done.setTitle("DONE", for: .normal)
+        done.titleLabel?.font = .monospacedSystemFont(ofSize: 16, weight: .bold)
+        done.tintColor = UIColor(red: 1, green: 0.92, blue: 0.7, alpha: 1)
+        done.addTarget(self, action: #selector(finish), for: .touchUpInside)
+        done.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(done)
+
+        let cancel = UIButton(type: .system)
+        cancel.setTitle("CANCEL", for: .normal)
+        cancel.titleLabel?.font = .monospacedSystemFont(ofSize: 16, weight: .regular)
+        cancel.tintColor = UIColor(red: 0.75, green: 0.72, blue: 0.65, alpha: 1)
+        cancel.addTarget(self, action: #selector(close), for: .touchUpInside)
+        cancel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(cancel)
+
+        NSLayoutConstraint.activate([
+            cancel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            cancel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            done.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            done.centerYAnchor.constraint(equalTo: cancel.centerYAnchor),
+            editor.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            editor.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            editor.topAnchor.constraint(equalTo: cancel.bottomAnchor, constant: 12),
+            editor.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+        ])
     }
 
-    func makeCoordinator() -> Coord { Coord(self) }
-
-    final class Coord: NSObject, UITextFieldDelegate {
-        var parent: PixelFieldRep
-        init(_ parent: PixelFieldRep) { self.parent = parent }
-
-        func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
-            guard let current = textField.text, let span = Range(range, in: current) else { return true }
-            parent.text = current.replacingCharacters(in: span, with: string)
-            return true
-        }
-
-        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-            textField.resignFirstResponder()
-            parent.onDone?()
-            return true
-        }
-    }
-}
-
-struct PixelTextEditor: View {
-    @Binding var text: String
-    var minHeight: CGFloat = 90
-    var onDone: (() -> Void)?
-
-    var body: some View {
-        PixelEditorRep(text: $text, onDone: onDone)
-            .frame(minHeight: minHeight)
-            .padding(4)
-            .background(Color(white: 0.14))
-    }
-}
-
-private struct PixelEditorRep: UIViewRepresentable {
-    @Binding var text: String
-    var onDone: (() -> Void)?
-
-    func makeUIView(context: Context) -> UITextView {
-        let view = UITextView()
-        view.delegate = context.coordinator
-        view.keyboardAppearance = .dark
-        view.inputAccessoryView = nil
-        view.font = .monospacedSystemFont(ofSize: 16, weight: .regular)
-        view.textColor = UIColor(red: 0.93, green: 0.89, blue: 0.78, alpha: 1)
-        view.tintColor = UIColor(red: 1, green: 0.92, blue: 0.7, alpha: 1)
-        view.backgroundColor = .clear
-        view.autocorrectionType = .no
-        view.text = text
-        return view
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        editor.becomeFirstResponder()
     }
 
-    func updateUIView(_ uiView: UITextView, context: Context) {
-        context.coordinator.parent = self
-        uiView.inputAccessoryView = nil
-        if uiView.text != text {
-            uiView.text = text
-        }
+    @objc private func finish() {
+        let text = editor.text ?? ""
+        dismiss(animated: true) { self.onDone(text) }
     }
 
-    func makeCoordinator() -> Coord { Coord(self) }
-
-    final class Coord: NSObject, UITextViewDelegate {
-        var parent: PixelEditorRep
-        init(_ parent: PixelEditorRep) { self.parent = parent }
-
-        func textViewDidChange(_ textView: UITextView) {
-            parent.text = textView.text
-        }
+    @objc private func close() {
+        dismiss(animated: true)
     }
 }

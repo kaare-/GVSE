@@ -165,10 +165,38 @@ struct SpecimenPage: View {
                     )
                     .fixedSize(horizontal: false, vertical: true)
                 }
-                PixelLabel(text: "NAME", scale: 2, color: Palette.dimPaper)
-                PixelTextField(text: $name)
-                PixelLabel(text: "NOTES", scale: 2, color: Palette.dimPaper)
-                PixelTextEditor(text: $notes)
+                Button {
+                    PixelPrompt.singleLine(title: "NAME", text: name, placeholder: "NAME") { entered in
+                        name = entered
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        PixelLabel(text: "NAME", scale: 2, color: Palette.dimPaper)
+                        PixelLabel(
+                            text: name.isEmpty ? "TAP TO NAME" : name.uppercased(),
+                            scale: 2,
+                            color: Palette.highlight,
+                            maxWidth: 260
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
+                Button {
+                    PixelPrompt.notes(text: notes) { entered in
+                        notes = entered
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        PixelLabel(text: "NOTES", scale: 2, color: Palette.dimPaper)
+                        PixelLabel(
+                            text: notes.isEmpty ? "TAP TO WRITE" : String(notes.uppercased().prefix(80)),
+                            scale: 1,
+                            color: Palette.paper,
+                            maxWidth: 260
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
                 if dirty {
                     Button {
                         if let edited = specimen.edited(name: name, notes: notes) {
@@ -181,13 +209,38 @@ struct SpecimenPage: View {
                     .buttonStyle(.plain)
                 }
                 HStack(spacing: 10) {
-                    Button { confirmNewTank = true } label: {
-                        PixelPanel { PixelLabel(text: "NEW TANK FROM THIS", scale: 2) }
+                    Button {
+                        confirmNewTank.toggle()
+                    } label: {
+                        PixelPanel {
+                            PixelLabel(
+                                text: confirmNewTank ? "REPLACE MAIN TANK" : "NEW TANK FROM THIS",
+                                scale: 1,
+                                color: confirmNewTank ? Palette.highlight : Palette.paper
+                            )
+                        }
                     }
                     .buttonStyle(.plain)
                     Spacer()
-                    Button { confirmDelete = true } label: {
-                        PixelPanel { PixelLabel(text: "DELETE", scale: 2, color: Palette.dimPaper) }
+                    Button {
+                        if confirmDelete { onDelete() } else { confirmDelete = true }
+                    } label: {
+                        PixelPanel {
+                            PixelLabel(
+                                text: confirmDelete ? "CONFIRM DELETE" : "DELETE",
+                                scale: 1,
+                                color: Palette.dimPaper
+                            )
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                if confirmNewTank {
+                    Button {
+                        session.newTank(from: specimen)
+                        onBack()
+                    } label: {
+                        PixelPanel { PixelLabel(text: "YES, REPLACE THE MAIN TANK", scale: 1, color: Palette.highlight) }
                     }
                     .buttonStyle(.plain)
                 }
@@ -200,15 +253,6 @@ struct SpecimenPage: View {
         }
         .sheet(isPresented: $share) {
             ShareSheet(items: [specimen.pageImage(), specimen.page])
-        }
-        .confirmationDialog("Replace tank \(session.slot + 1) with a new tank seeded from this creature?", isPresented: $confirmNewTank, titleVisibility: .visible) {
-            Button("New tank", role: .destructive) {
-                session.newTank(from: specimen)
-                onBack()
-            }
-        }
-        .confirmationDialog("Remove this page from the book?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete", role: .destructive, action: onDelete)
         }
         .background(Palette.panel)
     }

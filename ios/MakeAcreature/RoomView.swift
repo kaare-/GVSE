@@ -68,7 +68,7 @@ struct RoomView: View {
         ) {
             Button("Empty tank", role: .destructive) {
                 if let i = confirmEmpty {
-                    session.emptySlot(i)
+                    session.emptySample(i)
                 }
                 confirmEmpty = nil
             }
@@ -138,24 +138,32 @@ struct RoomView: View {
     }
 
     private var tankButton: some View {
-        Button(action: onBack) {
+        Button {
+            session.openMain()
+            onBack()
+        } label: {
             VStack(spacing: 3) {
-                PixelLabel(text: "TANK \(session.slot + 1)", scale: 2, color: Palette.highlight)
-                PixelLabel(
-                    text: "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)",
-                    scale: 1,
-                    color: Palette.dimPaper
-                )
-                PixelLabel(text: "\(session.liveCells) CELLS", scale: 1)
+                PixelLabel(text: "TANK", scale: 2, color: Palette.highlight)
+                if session.container.sampleIndex == nil {
+                    PixelLabel(
+                        text: "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)",
+                        scale: 1,
+                        color: Palette.dimPaper
+                    )
+                    PixelLabel(text: "\(session.liveCells) CELLS", scale: 1)
+                } else {
+                    PixelLabel(text: "MAIN", scale: 1, color: Palette.dimPaper)
+                }
             }
         }
         .buttonStyle(.plain)
-        .a11yButton("Tank \(session.slot + 1), \(session.liveCells) cells", hint: "Look into the tank")
+        .a11yButton("Main tank, \(session.liveCells) cells", hint: "Look into the main tank")
     }
 
     private func vialButton(_ index: Int) -> some View {
-        Button {
-            session.selectSlot(index)
+        let open = session.container.sampleIndex == index
+        return Button {
+            session.openSample(index)
             onBack()
         } label: {
             VStack {
@@ -163,12 +171,12 @@ struct RoomView: View {
                 PixelLabel(
                     text: "\(index + 1)",
                     scale: 1,
-                    color: session.slot == index ? Palette.highlight : Palette.paper
+                    color: open ? Palette.highlight : Palette.paper
                 )
             }
         }
         .buttonStyle(.plain)
-        .a11yButton("Sample tank \(index + 1)", hint: "Open this tank", selected: session.slot == index)
+        .a11yButton("Sample tank \(index + 1)", hint: "Open this sample, separate from the main tank", selected: open)
         .contextMenu {
             Button("Empty tank \(index + 1)", role: .destructive) {
                 confirmEmpty = index
@@ -257,10 +265,27 @@ struct RoomView: View {
         VStack(alignment: .leading, spacing: 12) {
             PixelLabel(text: "DOOR SIGN", scale: 3, color: Palette.highlight)
             PixelLabel(text: "YOUR NAME ON THE DOOR", scale: 1, color: Palette.dimPaper)
-            PixelTextField(text: $signDraft, placeholder: "NAME") {
-                session.setDoorName(signDraft)
-                editingSign = false
+            Button {
+                PixelPrompt.singleLine(title: "DOOR SIGN", text: signDraft, placeholder: "NAME") { entered in
+                    signDraft = String(entered.prefix(24))
+                    session.setDoorName(signDraft)
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    PixelLabel(text: "NAME", scale: 1, color: Palette.dimPaper)
+                    PixelLabel(
+                        text: signDraft.isEmpty ? "TAP TO NAME" : signDraft.uppercased(),
+                        scale: 2,
+                        color: Palette.highlight,
+                        maxWidth: 240
+                    )
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(white: 0.14))
+                .overlay(Rectangle().stroke(Palette.highlight, lineWidth: 1))
             }
+            .buttonStyle(.plain)
             HStack {
                 Button {
                     editingSign = false

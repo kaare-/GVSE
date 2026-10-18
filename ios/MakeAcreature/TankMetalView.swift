@@ -115,7 +115,7 @@ final class TankMetalView: UIView {
         let drawableW = max(bounds.width * scale, 1)
         let drawableH = max(bounds.height * scale, 1)
         metalLayer.drawableSize = CGSize(width: drawableW, height: drawableH)
-        let k = max(1, floor(min(drawableW / CGFloat(width), drawableH / CGFloat(height))))
+        let k = tankFitScale(drawableW: drawableW, drawableH: drawableH, width: CGFloat(width), height: CGFloat(height))
         let tw = CGFloat(width) * k
         let th = CGFloat(height) * k
         var uniforms = Uniforms(
@@ -205,6 +205,13 @@ final class TankMetalView: UIView {
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         return pass
     }
+}
+
+/// Largest scale that fits the tank in the view. Not floored: a 1× floor
+/// on a retina phone left the tank as a small picture in a black frame.
+func tankFitScale(drawableW: CGFloat, drawableH: CGFloat, width: CGFloat, height: CGFloat) -> CGFloat {
+    guard width > 0, height > 0 else { return 1 }
+    return min(drawableW / width, drawableH / height)
 }
 
 struct TankScreen: UIViewRepresentable {

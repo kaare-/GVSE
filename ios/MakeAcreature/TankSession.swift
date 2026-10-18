@@ -41,7 +41,33 @@ struct SpeciesNode: Identifiable {
     var parent: UInt16? { rec.parent == UInt16(TANK_NO_SPECIES) ? nil : rec.parent }
 }
 
-/// Owns the tank handle, the 30 Hz step, tools, slots, and save/resume.
+/// The big tank, or one of the three shelf vials. The vials are their own saves.
+enum TankContainer: Equatable {
+    case main
+    case sample(Int)
+
+    var sampleIndex: Int? {
+        if case .sample(let index) = self { return index }
+        return nil
+    }
+
+    var key: String {
+        switch self {
+        case .main: return "main"
+        case .sample(let index): return "sample-\(index)"
+        }
+    }
+
+    static func stored() -> TankContainer {
+        let raw = UserDefaults.standard.string(forKey: "openContainer") ?? "main"
+        if raw.hasPrefix("sample-"), let n = Int(raw.dropFirst("sample-".count)), (0..<3).contains(n) {
+            return .sample(n)
+        }
+        return .main
+    }
+}
+
+/// Owns the tank handle, the 30 Hz step, tools, and save/resume.
 /// Backgrounding saves and drops leftover frame time so the sim does
 /// not catch up the wall clock.
 final class TankSession: ObservableObject {
@@ -52,14 +78,22 @@ final class TankSession: ObservableObject {
     @Published private(set) var consent = false
     @Published private(set) var temperatureC: Float = 15
     @Published var tool: BuildTool = .sand {
-        didSet { if tool != .needle && tool != oldValue { inspected = nil } }
+        didSet {
+            if tool != .needle {
+                needleTip = nil
+                if tool != oldValue { inspected = nil }
+            }
+        }
     }
     /// Add lays the selected material down. Remove lifts only that material.
     @Published var strokeMode: StrokeMode = .add
     @Published var brush = 3
     @Published var variant = 0
     @Published var fillLevel = 0.55
-    @Published var slot = 0
+    /// Main tank, or a shelf sample. Jar 1 is not the main tank.
+    @Published private(set) var container: TankContainer = .main
+    /// Needle hot spot, above the finger so the tip stays visible.
+    @Published var needleTip: CGPoint?
     @Published var swirl = false
     /// System Reduce Motion. Swirl stays off while this is set.
     @Published private(set) var reduceMotion = UIAccessibility.isReduceMotionEnabled
@@ -117,13 +151,18 @@ final class TankSession: ObservableObject {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
-    private func saveURL(for slot: Int) -> URL {
-        docs.appendingPathComponent("tank-\(slot).postcard")
+    private func saveURL(for container: TankContainer) -> URL {
+        switch container {
+        case .main:
+            return docs.appendingPathComponent("tank-0.postcard")
+        case .sample(let index):
+            return docs.appendingPathComponent("sample-\(index).postcard")
+        }
     }
 
     init() {
         TelemetryClient.installCrashHook()
-        slot = UserDefaults.standard.integer(forKey: "activeSlot")
+        container = TankContainer.stored()
         swirl = UserDefaults.standard.bool(forKey: "swirlEnabled")
         pauseOnEvent = UserDefaults.standard.bool(forKey: "pauseOnEvent")
         soundOn = UserDefaults.standard.object(forKey: "soundOn") as? Bool ?? true
@@ -144,7 +183,7 @@ final class TankSession: ObservableObject {
         ) { [weak self] _ in
             self?.reduceMotion = UIAccessibility.isReduceMotionEnabled
         }
-        loadSlot(slot)
+        loadContainer()
         consent = UserDefaults.standard.bool(forKey: "telemetryConsent")
         if let handle {
             tank_set_consent(handle, consent ? 1 : 0)
@@ -252,14 +291,21 @@ final class TankSession: ObservableObject {
         }
     }
 
-    func selectSlot(_ index: Int) {
-        let next = max(0, min(2, index))
-        guard next != slot else { return }
-        // A sample stays in the bucket so it can be poured into another vial.
+    func openMain() {
+        switchTo(.main)
+    }
+
+    func openSample(_ index: Int) {
+        switchTo(.sample(max(0, min(2, index))))
+    }
+
+    /// A carried creature stays in the bucket so it can be poured into another vial.
+    private func switchTo(_ next: TankContainer) {
+        guard next != container else { return }
         saveCurrent()
-        slot = next
-        UserDefaults.standard.set(slot, forKey: "activeSlot")
-        loadSlot(slot)
+        container = next
+        UserDefaults.standard.set(next.key, forKey: "openContainer")
+        loadContainer()
     }
 
     func newTank() {
@@ -272,17 +318,18 @@ final class TankSession: ObservableObject {
         refreshClock()
     }
 
-    /// Wipe one shelf vial. The active tank is replaced in place. Another
+    /// Wipe one shelf vial. The open sample is replaced in place. Another
     /// vial is rewritten on disk and the sample bucket is left alone.
-    func emptySlot(_ index: Int) {
+    /// The main tank is not one of these vials.
+    func emptySample(_ index: Int) {
         let index = max(0, min(2, index))
-        if index == slot {
+        if container == .sample(index) {
             newTank()
             showHint("EMPTY")
             return
         }
         guard let fresh = tank_empty(UInt64(Date().timeIntervalSince1970)) else { return }
-        write(handle: fresh, to: index)
+        write(handle: fresh, to: .sample(index))
         tank_free(fresh)
         showHint("EMPTY")
     }
@@ -313,14 +360,15 @@ final class TankSession: ObservableObject {
         UserDefaults.standard.set(0, forKey: "favouriteId")
         UserDefaults.standard.set(false, forKey: "startGuideDone")
         AmbientAudio.shared.setMuted(false)
-        for i in 0..<3 {
+        let targets: [TankContainer] = [.main, .sample(0), .sample(1), .sample(2)]
+        for (i, target) in targets.enumerated() {
             guard let fresh = tank_empty(UInt64(Date().timeIntervalSince1970) &+ UInt64(i)) else { continue }
-            write(handle: fresh, to: i)
+            write(handle: fresh, to: target)
             tank_free(fresh)
         }
-        slot = 0
-        UserDefaults.standard.set(0, forKey: "activeSlot")
-        loadSlot(0)
+        container = .main
+        UserDefaults.standard.set(TankContainer.main.key, forKey: "openContainer")
+        loadContainer()
         showStartGuide = true
         showHint("RESET")
     }
@@ -329,6 +377,9 @@ final class TankSession: ObservableObject {
     /// few copies of an archived creature. Returns how many were placed.
     @discardableResult
     func newTank(from specimen: ArchivedSpecimen, copies: UInt32 = 3) -> UInt32 {
+        if container != .main {
+            switchTo(.main)
+        }
         dropBucket()
         inspected = nil
         tank_free(handle)
@@ -623,11 +674,11 @@ final class TankSession: ObservableObject {
 
     // MARK: persistence
 
-    private func loadSlot(_ index: Int) {
+    private func loadContainer() {
         inspected = nil
         tank_free(handle)
         handle = nil
-        let url = saveURL(for: index)
+        let url = saveURL(for: container)
         if let data = try? Data(contentsOf: url), !data.isEmpty {
             handle = data.withUnsafeBytes { raw in
                 guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
@@ -637,17 +688,22 @@ final class TankSession: ObservableObject {
             }
         }
         if handle == nil {
-            handle = index == 0 ? tank_preset(1) : tank_empty(UInt64(index + 1))
+            switch container {
+            case .main:
+                handle = tank_preset(1)
+            case .sample(let index):
+                handle = tank_empty(UInt64(index + 11))
+            }
         }
         refreshClock()
     }
 
     private func saveCurrent() {
         guard let handle else { return }
-        write(handle: handle, to: slot)
+        write(handle: handle, to: container)
     }
 
-    private func write(handle: OpaquePointer, to index: Int) {
+    private func write(handle: OpaquePointer, to container: TankContainer) {
         let needed = tank_save(handle, nil, 0)
         guard needed > 0 else { return }
         var data = Data(count: needed)
@@ -658,7 +714,7 @@ final class TankSession: ObservableObject {
             return tank_save(handle, base, needed)
         }
         guard wrote == needed else { return }
-        try? data.write(to: saveURL(for: index), options: .atomic)
+        try? data.write(to: saveURL(for: container), options: .atomic)
     }
 
     private func refreshClock() {
@@ -703,9 +759,14 @@ final class TankSession: ObservableObject {
             if ended { clearLensSoon() }
             return
         case .needle:
-            magnifierPoint = point
-            metal?.magnifier = magnifier(at: point)
-            inspect(at: point, ended: ended)
+            let tip = needleTipPoint(point)
+            needleTip = tip
+            // A pinned glass stays where Look left it.
+            if !magnifierPinned {
+                magnifierPoint = tip
+                metal?.magnifier = magnifier(at: tip)
+            }
+            inspect(at: tip, ended: ended)
             if ended { clearLensSoon() }
             return
         case .sample:
@@ -725,7 +786,12 @@ final class TankSession: ObservableObject {
         if ended { clearLensSoon() }
     }
 
-    /// Round glass under the finger. Radius follows the GLASS / SCOOP slider.
+    /// The hot spot sits above the finger so the tip is not covered.
+    private func needleTipPoint(_ touch: CGPoint) -> CGPoint {
+        CGPoint(x: touch.x, y: max(12, touch.y - 78))
+    }
+
+    /// Round glass under the finger. Radius follows the size slider.
     private func magnifier(at point: CGPoint) -> MagnifierState {
         MagnifierState(
             center: point,
@@ -855,7 +921,7 @@ final class TankSession: ObservableObject {
         let scale = metal.contentScale
         let drawableW = metal.bounds.width * scale
         let drawableH = metal.bounds.height * scale
-        let k = max(1, floor(min(drawableW / CGFloat(w), drawableH / CGFloat(h))))
+        let k = tankFitScale(drawableW: drawableW, drawableH: drawableH, width: CGFloat(w), height: CGFloat(h))
         let tw = CGFloat(w) * k
         let th = CGFloat(h) * k
         return Blit(w: CGFloat(w), h: CGFloat(h), k: k, ox: (drawableW - tw) * 0.5, oy: (drawableH - th) * 0.5, scale: scale)
@@ -948,9 +1014,10 @@ final class TankSession: ObservableObject {
     // MARK: frame
 
     private func advance(_ dt: CFTimeInterval) {
-        guard running, let handle else { return }
-        accumulator += dt
+        guard let handle else { return }
         var steps = 0
+        if running {
+        accumulator += dt
         while accumulator >= step && steps < 4 {
             let tools = pendingTools
             pendingTools.removeAll(keepingCapacity: true)
@@ -980,6 +1047,7 @@ final class TankSession: ObservableObject {
         if steps == 4 {
             accumulator = 0
         }
+        }
         // Enclosure release fills a pending scoop bucket.
         if carried == nil, let bucket = tank_take_enclosure_bucket(handle) {
             carried = bucket
@@ -992,8 +1060,8 @@ final class TankSession: ObservableObject {
         if let pixels = tank_pixels(handle, &w, &h) {
             metal?.present(pixels: pixels, width: Int(w), height: Int(h))
         }
-        if steps > 0 {
-            refreshInspect()
+        if steps > 0 || (!running && (tool == .needle || tool == .look)) {
+            if tool == .needle { refreshInspect() } else if steps > 0 { refreshInspect() }
             if frame % 30 == 0 {
                 liveCells = tank_live_cells(handle)
                 AmbientAudio.shared.setIntensity(liveCells: liveCells)
