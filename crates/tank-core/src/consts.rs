@@ -19,9 +19,13 @@ pub const NIGHT_FLOOR: f32 = 0.1;
 /// Default base temperature, °C.
 pub const T_BASE_DEFAULT: f32 = 15.0;
 
-/// Visible physics cells for the phone preset.
+/// Visible physics cells for a jar, and the height of every glass.
 pub const PRESET_W: u32 = 128;
 pub const PRESET_H: u32 = 256;
+
+/// The phone's main tank: three jar-widths side by side. Jars stay
+/// [`PRESET_W`] wide.
+pub const MAIN_W: u32 = PRESET_W * 3;
 
 /// Biology pixels per physics cell edge.
 pub const PX_PER_CELL: u32 = 3;
@@ -39,8 +43,8 @@ pub const WATER_SUBSTEPS: u32 = 2;
 /// Grain fall + repose passes per tick.
 pub const GRAIN_PASSES: u32 = 2;
 
-/// Hard cap on a visible tank. The phone preset is 128×256.
-pub const MAX_VISIBLE_W: u32 = 256;
+/// Hard cap on a visible tank. The main tank is [`MAIN_W`]×[`PRESET_H`].
+pub const MAX_VISIBLE_W: u32 = MAIN_W;
 pub const MAX_VISIBLE_H: u32 = 512;
 pub const MIN_VISIBLE: u32 = 4;
 

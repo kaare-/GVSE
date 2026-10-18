@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// What the brush lays down or lifts. Look, sample, and the needle live
-/// on the bottom bar; they are not strokes.
+/// What the brush lays down or lifts. Inspect and scoop live on the
+/// bottom bar; they are not strokes.
 enum BuildTool: Int, CaseIterable {
     case sand, rock, sugar, lime, mulch, water, seed, clean
-    case look, sample, needle
+    case sample, needle
 
     var label: String {
         switch self {
@@ -16,9 +16,8 @@ enum BuildTool: Int, CaseIterable {
         case .water: return "WATER"
         case .seed: return "SEED"
         case .clean: return "CLEAN"
-        case .look: return "LOOK"
-        case .sample: return "SAMPLE"
-        case .needle: return "NEEDLE"
+        case .sample: return "SCOOP"
+        case .needle: return "INSPECT"
         }
     }
 
@@ -114,17 +113,6 @@ enum BuildTool: Int, CaseIterable {
                 "#       ",
                 "        ",
             ]
-        case .look:
-            return [
-                "  ####  ",
-                " #    # ",
-                "#  ##  #",
-                "# #  # #",
-                "#  ##  #",
-                " #    # ",
-                "  ####  ",
-                "        ",
-            ]
         case .sample:
             return [
                 "  #  #  ",
@@ -157,7 +145,7 @@ enum BuildTool: Int, CaseIterable {
 
     var isStroke: Bool {
         switch self {
-        case .look, .sample, .needle: return false
+        case .sample, .needle: return false
         default: return true
         }
     }
@@ -183,7 +171,7 @@ enum BuildTool: Int, CaseIterable {
             return (8, 0, nil)
         case .clean:
             return (13, 0, nil)
-        case .look, .sample, .needle:
+        case .sample, .needle:
             return (0, 0, nil)
         }
     }
@@ -336,6 +324,26 @@ enum BarIcon {
         " ###### ",
         " ####   ",
         " ##     ",
+        "        ",
+    ]
+    static let room = [
+        " ###### ",
+        " #    # ",
+        " #    # ",
+        " # ## # ",
+        " # ## # ",
+        " # ## # ",
+        " ###### ",
+        "        ",
+    ]
+    static let photo = [
+        "        ",
+        " ###### ",
+        " #    # ",
+        " # ## # ",
+        " #    # ",
+        " ###### ",
+        "  #  #  ",
         "        ",
     ]
 }

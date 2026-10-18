@@ -110,7 +110,6 @@ final class TankSession: ObservableObject {
     @Published var lightSlider: Double = 1
     /// Enclosure op when BOX is selected: 0 walls · 1 drain · 2 fill · 3 release.
     @Published var encloseOp = 0
-    @Published var magnifierPoint: CGPoint?
     @Published var cameraTiltDegrees: Double = 0
     @Published private(set) var inspected: InspectState?
     /// Cells in the scoop bucket; 0 = empty.
@@ -146,7 +145,7 @@ final class TankSession: ObservableObject {
     private var lastGravY: Float = -1
     private var frame = 0
     private var hintToken = 0
-    private var lastTap: (time: CFTimeInterval, point: CGPoint)?
+    private var navigating = false
     private var reduceMotionObserver: NSObjectProtocol?
 
     private var docs: URL {
@@ -210,6 +209,9 @@ final class TankSession: ObservableObject {
         metal = view
         view.onTouch = { [weak self] point, ended in
             self?.handleTouch(point: point, ended: ended)
+        }
+        view.onNavigate = { [weak self] nav in
+            self?.handleNav(nav)
         }
     }
 
@@ -313,7 +315,7 @@ final class TankSession: ObservableObject {
         dropBucket()
         inspected = nil
         tank_free(handle)
-        handle = tank_empty(UInt64(Date().timeIntervalSince1970))
+        handle = freshGlass(for: container)
         pendingTools.removeAll()
         saveCurrent()
         refreshClock()
@@ -363,7 +365,7 @@ final class TankSession: ObservableObject {
         AmbientAudio.shared.setMuted(false)
         let targets: [TankContainer] = [.main, .sample(0), .sample(1), .sample(2)]
         for (i, target) in targets.enumerated() {
-            guard let fresh = tank_empty(UInt64(Date().timeIntervalSince1970) &+ UInt64(i)) else { continue }
+            guard let fresh = freshGlass(for: target, salt: UInt64(i)) else { continue }
             write(handle: fresh, to: target)
             tank_free(fresh)
         }
@@ -379,7 +381,7 @@ final class TankSession: ObservableObject {
     /// only rewritten on disk.
     @discardableResult
     func newTank(from specimen: ArchivedSpecimen, into target: TankContainer, copies: UInt32 = 3) -> UInt32 {
-        guard let fresh = tank_empty(UInt64(Date().timeIntervalSince1970)) else {
+        guard let fresh = freshGlass(for: target) else {
             showHint("NO ROOM")
             return 0
         }
@@ -754,12 +756,30 @@ final class TankSession: ObservableObject {
         if handle == nil {
             switch container {
             case .main:
-                handle = tank_preset(1)
+                handle = tank_main_preset(1)
             case .sample(let index):
                 handle = tank_empty(UInt64(index + 11))
             }
         }
+        if case .main = container, let handle {
+            tank_widen(handle, tankMainCellsWide)
+            if !UserDefaults.standard.bool(forKey: "wideTankHint") {
+                UserDefaults.standard.set(true, forKey: "wideTankHint")
+                showHint("TWO FINGERS SLIDE")
+            }
+        }
         refreshClock()
+    }
+
+    /// The main glass is three screens wide. A jar stays the small preset.
+    private func freshGlass(for target: TankContainer, salt: UInt64 = 0) -> OpaquePointer? {
+        let seed = UInt64(Date().timeIntervalSince1970) &+ salt
+        switch target {
+        case .main:
+            return tank_main_empty(seed)
+        case .sample:
+            return tank_empty(seed)
+        }
     }
 
     private func saveCurrent() {
@@ -809,14 +829,8 @@ final class TankSession: ObservableObject {
     // MARK: touch
 
     private func handleTouch(point: CGPoint?, ended: Bool) {
-        guard let point else { return }
-        if ended, dismissLensIfDoubleTap(point) { return }
+        guard let point, !navigating else { return }
         switch tool {
-        case .look:
-            // The glass stays where it is left. A double tap clears it.
-            magnifierPoint = point
-            metal?.magnifier = magnifier(at: point)
-            return
         case .needle:
             let box = selectionBox(at: point)
             selectionRect = box
@@ -833,17 +847,52 @@ final class TankSession: ObservableObject {
         }
     }
 
-    /// Two quick taps put the looking glass away.
-    private func dismissLensIfDoubleTap(_ point: CGPoint) -> Bool {
-        let now = CACurrentMediaTime()
-        if let last = lastTap, now - last.time < 0.32, hypot(point.x - last.point.x, point.y - last.point.y) < 36 {
-            lastTap = nil
-            magnifierPoint = nil
-            metal?.magnifier = nil
-            return true
+    /// Two fingers slide the window. A pinch zooms about the fingers.
+    private func handleNav(_ nav: TankNav) {
+        guard let metal else { return }
+        switch nav {
+        case .pinch(let scale, let anchor, let state):
+            if state == .began {
+                navigating = true
+                metal.camera.pinchStartW = metal.camera.visibleW
+            }
+            let before = pixelFloat(at: anchor)
+            let worldW = max(metal.camera.worldW, 1)
+            let worldH = max(metal.camera.worldH, 1)
+            let visW = min(max(metal.camera.pinchStartW / max(scale, 0.05), tankMinVisible), worldW)
+            let viewScale = metal.contentScale
+            let drawableW = max(metal.bounds.width * viewScale, 1)
+            let drawableH = max(metal.bounds.height * viewScale, 1)
+            let aspect = drawableW / drawableH
+            let visH = visW / max(aspect, 0.01)
+            let shownW = min(visW, worldW)
+            let shownH = min(visH, worldH)
+            let zoom = drawableW / max(visW, 1)
+            let ox = (drawableW - shownW * zoom) * 0.5
+            let oy = drawableH - shownH * zoom
+            metal.camera.visibleW = visW
+            if let before {
+                let dx = anchor.x * viewScale
+                let dy = anchor.y * viewScale
+                metal.camera.left = before.x - (dx - ox) / zoom
+                metal.camera.top = before.y - (dy - oy) / zoom
+            }
+            _ = viewFrame()
+            if state == .ended || state == .cancelled || state == .failed {
+                navigating = false
+            }
+        case .pan(let delta, let state):
+            if state == .began { navigating = true }
+            if let f = viewFrame() {
+                let tankPerPoint = f.viewScale / max(f.scale, 0.001)
+                metal.camera.left -= delta.x * tankPerPoint
+                metal.camera.top -= delta.y * tankPerPoint
+                _ = viewFrame()
+            }
+            if state == .ended || state == .cancelled || state == .failed {
+                navigating = false
+            }
         }
-        lastTap = (now, point)
-        return false
     }
 
     /// Box above the finger. The gap keeps the selection off the fingertip.
@@ -852,33 +901,21 @@ final class TankSession: ObservableObject {
         return CGRect(x: touch.x - side / 2, y: touch.y - side - 28, width: side, height: side)
     }
 
-    /// Round glass under the finger. Radius follows the size slider.
-    private func magnifier(at point: CGPoint) -> MagnifierState {
-        MagnifierState(
-            center: point,
-            pinned: true,
-            radius: 28 + CGFloat(max(brush, 1)) * 12
-        )
-    }
-
     /// Any living cell inside the box, centre first. Works while the sim is paused.
-    /// A box sitting on the looking glass reads the magnified pixels, not the
-    /// tank underneath.
     private func inspect(in rect: CGRect, ended: Bool) {
-        guard let handle, let b = blit() else { return }
+        guard let handle, let f = viewFrame() else { return }
         let center = CGPoint(x: rect.midX, y: rect.midY)
-        let onGlass = lensContains(center)
         func pix(_ p: CGPoint) -> (Int, Int) {
-            let seen = pixelSeen(at: p, blit: b, forceZoom: onGlass)
+            let seen = pixelFloat(at: p) ?? CGPoint(x: -1, y: -1)
             return (Int(seen.x.rounded()), Int(seen.y.rounded()))
         }
         let p0 = pix(CGPoint(x: rect.minX, y: rect.minY))
         let p1 = pix(CGPoint(x: rect.maxX, y: rect.maxY))
         var x0 = max(0, min(p0.0, p1.0))
         var y0 = max(0, min(p0.1, p1.1))
-        var x1 = min(Int(b.w) - 1, max(p0.0, p1.0))
-        var y1 = min(Int(b.h) - 1, max(p0.1, p1.1))
-        let mid = pixelSeen(at: center, blit: b, forceZoom: onGlass)
+        var x1 = min(Int(f.worldW) - 1, max(p0.0, p1.0))
+        var y1 = min(Int(f.worldH) - 1, max(p0.1, p1.1))
+        let mid = pixelFloat(at: center) ?? center
         let cap = 48
         x0 = max(x0, Int(mid.x.rounded()) - cap)
         y0 = max(y0, Int(mid.y.rounded()) - cap)
@@ -1002,107 +1039,56 @@ final class TankSession: ObservableObject {
 
     // MARK: coordinates
 
-    private struct Blit {
-        var w: CGFloat
-        var h: CGFloat
-        var k: CGFloat
-        var ox: CGFloat
-        var oy: CGFloat
-        var scale: CGFloat
-    }
-
-    /// The same letterbox the Metal view uses: integer scale `k`, centred.
-    private func blit() -> Blit? {
-        guard let metal, let handle else { return nil }
+    /// The same window the Metal view is drawing.
+    private func viewFrame() -> TankFrame? {
+        guard let metal, metal.bounds.width > 1, metal.bounds.height > 1, let handle else { return nil }
         var w: UInt32 = 0
         var h: UInt32 = 0
         _ = tank_pixels(handle, &w, &h)
         guard w > 0, h > 0 else { return nil }
-        let scale = metal.contentScale
-        let drawableW = metal.bounds.width * scale
-        let drawableH = metal.bounds.height * scale
-        let k = tankFitScale(drawableW: drawableW, drawableH: drawableH, width: CGFloat(w), height: CGFloat(h))
-        let tw = CGFloat(w) * k
-        let th = CGFloat(h) * k
-        let origin = tankContentOrigin(
-            drawableW: drawableW,
-            drawableH: drawableH,
-            contentW: tw,
-            contentH: th
-        )
-        return Blit(w: CGFloat(w), h: CGFloat(h), k: k, ox: origin.x, oy: origin.y, scale: scale)
-    }
-
-    /// The looking glass is a circle in view points.
-    private func lensContains(_ point: CGPoint) -> Bool {
-        guard let lens = metal?.magnifier else { return false }
-        return hypot(point.x - lens.center.x, point.y - lens.center.y) < lens.radius
-    }
-
-    /// Buffer pixel under a view point. Inside the glass (or when the
-    /// selection box is on the glass) this is the magnified sample.
-    private func pixelSeen(at point: CGPoint, blit b: Blit, forceZoom: Bool) -> CGPoint {
-        let plain = CGPoint(
-            x: (point.x * b.scale - b.ox) / b.k,
-            y: (point.y * b.scale - b.oy) / b.k
-        )
-        guard let lens = metal?.magnifier, forceZoom || lensContains(point) else { return plain }
-        let center = CGPoint(
-            x: (lens.center.x * b.scale - b.ox) / b.k,
-            y: (lens.center.y * b.scale - b.oy) / b.k
-        )
-        let zoom = CGFloat(tankLensScale)
-        return CGPoint(
-            x: center.x + (plain.x - center.x) / zoom,
-            y: center.y + (plain.y - center.y) / zoom
-        )
+        return metal.layoutFrame(worldW: CGFloat(w), worldH: CGFloat(h))
     }
 
     /// View point → tank pixel (top-left origin, as `tank_pixels`).
+    private func pixelFloat(at point: CGPoint) -> CGPoint? {
+        guard let f = viewFrame() else { return nil }
+        let dx = point.x * f.viewScale
+        let dy = point.y * f.viewScale
+        let px = f.left + (dx - f.ox) / max(f.scale, 0.001)
+        let py = f.top + (dy - f.oy) / max(f.scale, 0.001)
+        guard px >= 0, py >= 0, px < f.worldW, py < f.worldH else { return nil }
+        guard dx >= f.ox - 0.5, dy >= f.oy - 0.5 else { return nil }
+        guard dx <= f.ox + f.shownW * f.scale + 0.5, dy <= f.oy + f.shownH * f.scale + 0.5 else { return nil }
+        return CGPoint(x: px, y: py)
+    }
+
     private func pixel(at point: CGPoint) -> (x: Int, y: Int)? {
-        guard let b = blit() else { return nil }
-        let px = (point.x * b.scale - b.ox) / b.k
-        let py = (point.y * b.scale - b.oy) / b.k
-        guard px >= 0, py >= 0, px < b.w, py < b.h else { return nil }
-        return (Int(px), Int(py))
+        guard let p = pixelFloat(at: point) else { return nil }
+        return (Int(p.x), Int(p.y))
     }
 
     /// Inclusive pixel box → view rectangle in points.
     private func viewRect(x0: UInt16, y0: UInt16, x1: UInt16, y1: UInt16) -> CGRect? {
-        guard let b = blit() else { return nil }
-        let left = (CGFloat(x0) * b.k + b.ox) / b.scale
-        let top = (CGFloat(y0) * b.k + b.oy) / b.scale
-        let right = (CGFloat(Int(x1) + 1) * b.k + b.ox) / b.scale
-        let bottom = (CGFloat(Int(y1) + 1) * b.k + b.oy) / b.scale
-        let plain = CGRect(x: left, y: top, width: right - left, height: bottom - top)
-        guard let lens = metal?.magnifier else { return plain }
-        let zoom = CGFloat(tankLensScale)
-        let reach = lens.radius / zoom
-        guard hypot(plain.midX - lens.center.x, plain.midY - lens.center.y) < reach else { return plain }
-        return CGRect(
-            x: lens.center.x + (plain.minX - lens.center.x) * zoom,
-            y: lens.center.y + (plain.minY - lens.center.y) * zoom,
-            width: plain.width * zoom,
-            height: plain.height * zoom
-        )
+        guard let f = viewFrame() else { return nil }
+        func view(_ px: CGFloat, _ py: CGFloat) -> CGPoint {
+            CGPoint(
+                x: (f.ox + (px - f.left) * f.scale) / f.viewScale,
+                y: (f.oy + (py - f.top) * f.scale) / f.viewScale
+            )
+        }
+        let origin = view(CGFloat(x0), CGFloat(y0))
+        let far = view(CGFloat(Int(x1) + 1), CGFloat(Int(y1) + 1))
+        return CGRect(x: origin.x, y: origin.y, width: far.x - origin.x, height: far.y - origin.y)
     }
 
     /// Map a view touch to a visible physics cell (origin bottom-left).
     private func physicsCell(at point: CGPoint) -> (UInt16, UInt16)? {
-        guard let b = blit(), let px = pixel(at: point) else { return nil }
+        guard let f = viewFrame(), let px = pixel(at: point) else { return nil }
         let cellX = UInt16(px.x / 3)
         let cellYFromTop = UInt16(px.y / 3)
-        let cellsH = UInt16(Int(b.h) / 3)
+        let cellsH = UInt16(Int(f.worldH) / 3)
         let cellY = cellsH > 0 ? cellsH - 1 - cellYFromTop : 0
         return (cellX, cellY)
-    }
-
-    /// Hold finger → flashlight cone (×2 light, no heat). Off while feeding.
-    private func flashlightCell() -> (Int32, Int32, Int32) {
-        guard tool == .look, let point = magnifierPoint, let cell = physicsCell(at: point) else {
-            return (0, 0, 0)
-        }
-        return (Int32(cell.0), Int32(cell.1), 8)
     }
 
     private func showHint(_ text: String) {
@@ -1162,7 +1148,6 @@ final class TankSession: ObservableObject {
         while accumulator >= step && steps < 4 {
             let tools = pendingTools
             pendingTools.removeAll(keepingCapacity: true)
-            let flash = tool.isFeed ? (0, 0, 0) : flashlightCell()
             tools.withUnsafeBufferPointer { buf in
                 var input = TankInput(
                     grav_x: lastGravX,
@@ -1173,9 +1158,9 @@ final class TankSession: ObservableObject {
                     _pad1: 0,
                     light_slider: Float(lightSlider),
                     t_base: Float(tBase),
-                    flash_x: flash.0,
-                    flash_y: flash.1,
-                    flash_r: flash.2,
+                    flash_x: 0,
+                    flash_y: 0,
+                    flash_r: 0,
                     tools: buf.baseAddress,
                     tool_count: UInt32(buf.count)
                 )
@@ -1201,8 +1186,8 @@ final class TankSession: ObservableObject {
         if let pixels = tank_pixels(handle, &w, &h) {
             metal?.present(pixels: pixels, width: Int(w), height: Int(h))
         }
-        if steps > 0 || (!running && (tool == .needle || tool == .look)) {
-            if tool == .needle { refreshInspect() } else if steps > 0 { refreshInspect() }
+        if steps > 0 || (!running && tool == .needle) {
+            refreshInspect()
             if frame % 30 == 0 {
                 liveCells = tank_live_cells(handle)
                 AmbientAudio.shared.setIntensity(liveCells: liveCells)
@@ -1219,13 +1204,6 @@ final class TankSession: ObservableObject {
             isDay = sun
         }
     }
-}
-
-struct MagnifierState {
-    var center: CGPoint
-    var pinned: Bool
-    /// Glass radius in view points.
-    var radius: CGFloat
 }
 
 private final class DisplayPump: NSObject {

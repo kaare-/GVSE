@@ -1,7 +1,7 @@
 use wk_material::MaterialId;
 
 use crate::cell::Cell;
-use crate::consts::{PRESET_H, PRESET_W, PX_PER_CELL};
+use crate::consts::{MAIN_W, PRESET_H, PRESET_W, PX_PER_CELL};
 use crate::tank::{Tank, TankInput, ToolEvent};
 
 fn tick_n(tank: &mut Tank, n: u32) {
@@ -32,6 +32,72 @@ fn preset_pixel_buffer_is_the_phone_size() {
     tank.write_rgba(&mut rgba);
     assert_eq!(rgba.len(), 384 * 768 * 4);
     assert!(rgba.iter().any(|&b| b != 0));
+}
+
+#[test]
+fn main_tank_is_three_screens_and_a_jar_stays_narrow() {
+    let mut main = Tank::main_empty(1);
+    assert_eq!(main.visible_size(), (MAIN_W, PRESET_H));
+    tick_n(&mut main, 4);
+    let jar = Tank::empty(1);
+    assert_eq!(jar.visible_size(), (PRESET_W, PRESET_H));
+    assert_eq!(Tank::main_preset(1).visible_size().0, MAIN_W);
+}
+
+#[test]
+fn widening_keeps_the_old_tank_in_the_middle() {
+    let mut tank = Tank::try_new(2, 8, 16).unwrap();
+    place(&mut tank, 3, 4, Cell::stone());
+    place(&mut tank, 0, 2, Cell::water());
+    let id = tank.seed_algae(10, 20).unwrap();
+    let mut wide = tank.widened(24);
+    assert_eq!(wide.visible_size(), (24, 16));
+    assert_eq!(wide.cell_visible(11, 4).id(), MaterialId::Stone);
+    assert!(wide.cell_visible(0, 2).sat > 0);
+    assert!(wide.cell_visible(23, 4).is_air());
+    let px = wide.cell(id).unwrap().px;
+    let py = wide.cell(id).unwrap().py;
+    assert_eq!(px, 10 + 8 * PX_PER_CELL as u16);
+    assert_eq!(py, 20);
+    assert_eq!(wide.live_cells(), 1);
+    let loaded = Tank::load_bytes(&wide.save_bytes().unwrap()).unwrap();
+    assert_eq!(loaded.cell(id).unwrap().px, px);
+    assert_eq!(loaded.live_cells(), 1);
+}
+
+#[test]
+fn a_narrow_save_widens_without_losing_the_algae() {
+    let mut tank = Tank::empty(4);
+    let id = tank.seed_algae(30, 100).unwrap();
+    let wide = tank.widened(MAIN_W);
+    assert_eq!(wide.visible_size(), (MAIN_W, PRESET_H));
+    assert_eq!(
+        wide.cell(id).unwrap().px,
+        (30 + (MAIN_W - PRESET_W) / 2 * PX_PER_CELL) as u16
+    );
+    assert_eq!(wide.live_cells(), 1);
+    assert_eq!(wide.widened(MAIN_W).visible_size().0, MAIN_W);
+}
+
+#[test]
+fn creatures_do_not_cast_column_shadows() {
+    let mut tank = Tank::try_new(1, 16, 32).unwrap();
+    for vy in 0..28 {
+        for vx in 0..16 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    tank.seed_algae(24, 45).unwrap();
+    let mut rgba = Vec::new();
+    tank.write_rgba(&mut rgba);
+    let w = 16 * PX_PER_CELL as usize;
+    let at = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        (rgba[i], rgba[i + 2])
+    };
+    let under = at(24, 60);
+    let beside = at(6, 60);
+    assert_eq!(under, beside, "a body should not darken the water under it");
 }
 
 #[test]

@@ -3,14 +3,14 @@
 //! substep drops that water. Open lakes level; a gap at the bottom of
 //! a wall still equalises because lateral flow runs in the same tick.
 
-use crate::consts::STANDING_AIR_SAT;
+use crate::consts::{MAX_VISIBLE_W, STANDING_AIR_SAT};
 use crate::grid::PhysicsGrid;
 use crate::rules::plan::ActiveRect;
 
 pub fn apply(grid: &mut PhysicsGrid, active: &ActiveRect) {
-    // Visible width is at most 256, plus the border cell we index by
-    // absolute x. 260 covers the cap in `consts::MAX_VISIBLE_W`.
-    let mut surf = [i32::MIN; 260];
+    // Absolute x runs through the bedrock border. The array covers
+    // `MAX_VISIBLE_W` plus that frame.
+    let mut surf = [i32::MIN; (MAX_VISIBLE_W + 2) as usize];
     let floor = active.y0 - 1;
     for x in active.x0..=active.x1 {
         surf[x as usize] = surface_y(grid, x, active).unwrap_or(floor);

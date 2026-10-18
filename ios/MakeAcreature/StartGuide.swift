@@ -11,9 +11,9 @@ struct StartGuide: View {
         ("BUILD", "PAINT SAND AND ROCK ON THE FLOOR. USE THE TOOL WHEEL."),
         ("WATER", "TAP FILL OR POUR. SET THE LEVEL WITH THE SLIDER."),
         ("ALGAE", "LIFE SEEDS ITSELF — OR ARCHIVE A STARTER FROM THE BOOK."),
-        ("LOOK", "HOLD LOOK ON A CREATURE. THE CARD FOLLOWS IT."),
+        ("INSPECT", "TAP INSPECT, THEN A CREATURE. DRAG THE CARD ASIDE IF IT COVERS THE BODY. SCOOP IS UNDER INSPECT."),
         ("FEED", "SUGAR, LIME, MULCH. REMOVE CLEARS WHAT YOU DON'T WANT."),
-        ("ROOM", "PINCH OUT OR TAP ROOM. THE BOOK AND TREE LIVE THERE."),
+        ("SLIDE", "TWO FINGERS SLIDE THE TANK. PINCH TO ZOOM. ROOM IS ON THE BOTTOM BAR."),
     ]
 
     var body: some View {
@@ -71,11 +71,11 @@ struct StartGuide: View {
 enum GuideTip {
     static func contextual(kind: UInt32) -> String? {
         switch kind {
-        case 32: return "TIP: HOLD LOOK ON IT"
+        case 32: return "TIP: INSPECT IT"
         case 36: return "TIP: ARCHIVE FROM THE CARD"
         case 40: return "TIP: PREDATION — NOTES IN THE BOOK"
-        case 43, 50: return "TIP: FOLLOW IT WITH THE LENS"
-        case 49: return "TIP: AN EYE — SHINE THE FLASHLIGHT"
+        case 43, 50: return "TIP: INSPECT IT"
+        case 49: return "TIP: AN EYE — INSPECT IT"
         default: return nil
         }
     }

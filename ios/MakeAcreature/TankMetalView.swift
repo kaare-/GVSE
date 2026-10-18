@@ -2,15 +2,15 @@ import Metal
 import SwiftUI
 import UIKit
 
-/// Nearest-neighbour blit of the tank's RGBA buffer, with an optional
-/// circular ×3 magnifier and a small camera tilt for gyro swirl.
+/// Nearest-neighbour blit of the tank. The phone is a window: one screen
+/// wide at rest, dragged with two fingers, pinched to zoom. There is no
+/// looking glass.
 final class TankMetalView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
 
     var onTouch: ((CGPoint?, Bool) -> Void)?
-    var magnifier: MagnifierState? {
-        didSet { setNeedsDisplay() }
-    }
+    var onNavigate: ((TankNav) -> Void)?
+    var camera = TankCamera()
     var cameraTiltDegrees: Double = 0 {
         didSet {
             let radians = cameraTiltDegrees * .pi / 180
@@ -27,17 +27,15 @@ final class TankMetalView: UIView {
     private var texture: MTLTexture?
     private var textureWidth = 0
     private var textureHeight = 0
+    private var panOrigin = CGPoint.zero
+    private var multiTouch = false
     private let shader = """
     #include <metal_stdlib>
     using namespace metal;
     struct VOut { float4 pos [[position]]; float2 uv; };
     struct Uniforms {
         float4 window;
-        float2 lensCenter;
-        float lensRadius;
-        float lensScale;
-        float aspect;
-        float _pad;
+        float4 cam;
     };
     vertex VOut vs(uint vid [[vertex_id]]) {
         float2 p[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
@@ -55,24 +53,7 @@ final class TankMetalView: UIView {
         if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) {
             return float4(0.16, 0.18, 0.19, 1.0);
         }
-        float2 sampleUV = p;
-        if (u.lensRadius > 0.0) {
-            // Distance in screen pixels, not raw UV, so a tall phone
-            // does not stretch the glass into an oval.
-            float2 d = in.uv - u.lensCenter;
-            d.x *= max(u.aspect, 0.01);
-            float dist = length(d);
-            if (dist < u.lensRadius) {
-                float2 center = (u.lensCenter - u.window.xy) / u.window.zw;
-                // Zoom about the point under the finger. The centre of the
-                // glass shows that pixel; the rim shows the neighbourhood.
-                sampleUV = center + (p - center) / max(u.lensScale, 1.0);
-                sampleUV = clamp(sampleUV, float2(0.0), float2(1.0));
-                // Nearest sample, no frosted mix: the glass should read
-                // clearer than the tank around it.
-                return tex.sample(smp, sampleUV);
-            }
-        }
+        float2 sampleUV = u.cam.xy + p * u.cam.zw;
         return tex.sample(smp, sampleUV);
     }
     """
@@ -98,7 +79,25 @@ final class TankMetalView: UIView {
         sampler = device.makeSamplerState(descriptor: samp)
         backgroundColor = .black
         isOpaque = true
-        isMultipleTouchEnabled = false
+        isMultipleTouchEnabled = true
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+        pan.minimumNumberOfTouches = 2
+        pan.maximumNumberOfTouches = 2
+        addGestureRecognizer(pinch)
+        addGestureRecognizer(pan)
+    }
+
+    func layoutFrame(worldW: CGFloat, worldH: CGFloat) -> TankFrame {
+        let viewScale = contentScale
+        return tankFrame(
+            camera: &camera,
+            worldW: worldW,
+            worldH: worldH,
+            drawableW: max(bounds.width * viewScale, 1),
+            drawableH: max(bounds.height * viewScale, 1),
+            viewScale: viewScale
+        )
     }
 
     func present(pixels: UnsafePointer<UInt8>, width: Int, height: Int) {
@@ -111,38 +110,32 @@ final class TankMetalView: UIView {
             withBytes: pixels,
             bytesPerRow: width * 4
         )
-        let scale = contentScale
-        let drawableW = max(bounds.width * scale, 1)
-        let drawableH = max(bounds.height * scale, 1)
+        let viewScale = contentScale
+        let drawableW = max(bounds.width * viewScale, 1)
+        let drawableH = max(bounds.height * viewScale, 1)
         metalLayer.drawableSize = CGSize(width: drawableW, height: drawableH)
-        let k = tankFitScale(drawableW: drawableW, drawableH: drawableH, width: CGFloat(width), height: CGFloat(height))
-        let tw = CGFloat(width) * k
-        let th = CGFloat(height) * k
-        let origin = tankContentOrigin(drawableW: drawableW, drawableH: drawableH, contentW: tw, contentH: th)
+        let frame = tankFrame(
+            camera: &camera,
+            worldW: CGFloat(width),
+            worldH: CGFloat(height),
+            drawableW: drawableW,
+            drawableH: drawableH,
+            viewScale: viewScale
+        )
         var uniforms = Uniforms(
             window: SIMD4<Float>(
-                Float(origin.x / drawableW),
-                Float(origin.y / drawableH),
-                Float(tw / drawableW),
-                Float(th / drawableH)
+                Float(frame.ox / drawableW),
+                Float(frame.oy / drawableH),
+                Float(frame.shownW * frame.scale / drawableW),
+                Float(frame.shownH * frame.scale / drawableH)
             ),
-            lensCenter: SIMD2<Float>(0, 0),
-            lensRadius: 0,
-            lensScale: tankLensScale,
-            aspect: Float(drawableW / drawableH),
-            pad: 0
-        )
-        if let lens = magnifier {
-            // Shader uv.y is 0 at the top of the view, same as UIKit.
-            uniforms.lensCenter = SIMD2(
-                Float(lens.center.x * scale / drawableW),
-                Float(lens.center.y * scale / drawableH)
+            cam: SIMD4<Float>(
+                Float(frame.left / max(frame.worldW, 1)),
+                Float(frame.top / max(frame.worldH, 1)),
+                Float(frame.shownW / max(frame.worldW, 1)),
+                Float(frame.shownH / max(frame.worldH, 1))
             )
-            let radiusPx = max(lens.radius, 24) * scale
-            uniforms.lensRadius = Float(radiusPx / drawableH)
-            uniforms.lensScale = 6
-            uniforms.aspect = Float(drawableW / drawableH)
-        }
+        )
         guard let drawable = metalLayer.nextDrawable(),
               let buffer = queue.makeCommandBuffer(),
               let passDesc = descriptor(for: drawable)
@@ -159,29 +152,56 @@ final class TankMetalView: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if (event?.allTouches?.count ?? touches.count) > 1 {
+            multiTouch = true
+            return
+        }
+        multiTouch = false
         if let p = touches.first?.location(in: self) { onTouch?(p, false) }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if multiTouch || (event?.allTouches?.count ?? 0) > 1 {
+            multiTouch = true
+            return
+        }
         if let p = touches.first?.location(in: self) { onTouch?(p, false) }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if multiTouch {
+            let stillDown = event?.allTouches?.contains { $0.phase != .ended && $0.phase != .cancelled } ?? false
+            if !stillDown { multiTouch = false }
+            return
+        }
         if let p = touches.first?.location(in: self) { onTouch?(p, true) }
         else { onTouch?(nil, true) }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        multiTouch = false
         onTouch?(nil, true)
+    }
+
+    @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
+        onNavigate?(.pinch(
+            scale: gesture.scale,
+            anchor: gesture.location(in: self),
+            state: gesture.state
+        ))
+    }
+
+    @objc private func panned(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: self)
+        if gesture.state == .began { panOrigin = .zero }
+        let delta = CGPoint(x: translation.x - panOrigin.x, y: translation.y - panOrigin.y)
+        panOrigin = translation
+        onNavigate?(.pan(delta: delta, state: gesture.state))
     }
 
     private struct Uniforms {
         var window: SIMD4<Float>
-        var lensCenter: SIMD2<Float>
-        var lensRadius: Float
-        var lensScale: Float
-        var aspect: Float
-        var pad: Float
+        var cam: SIMD4<Float>
     }
 
     private func ensureTexture(device: MTLDevice, width: Int, height: Int) {
@@ -208,21 +228,90 @@ final class TankMetalView: UIView {
     }
 }
 
-/// How far the glass zooms. The needle uses the same number so a tap on
-/// the magnified creature hits that creature, not the tank behind it.
-let tankLensScale: Float = 6
-
-/// Scale that fills the width. Fitting the height left thick black bars
-/// on either side of a tall tank.
-func tankFitScale(drawableW: CGFloat, drawableH: CGFloat, width: CGFloat, height: CGFloat) -> CGFloat {
-    guard width > 0, height > 0, drawableH > 0 else { return 1 }
-    return drawableW / width
+enum TankNav {
+    case pinch(scale: CGFloat, anchor: CGPoint, state: UIGestureRecognizer.State)
+    case pan(delta: CGPoint, state: UIGestureRecognizer.State)
 }
 
-/// The tank sits on the bottom of the view, just above the tool bar.
-/// Extra height is clipped off the top, so the floor stays visible.
-func tankContentOrigin(drawableW: CGFloat, drawableH: CGFloat, contentW: CGFloat, contentH: CGFloat) -> CGPoint {
-    CGPoint(x: (drawableW - contentW) * 0.5, y: drawableH - contentH)
+struct TankCamera {
+    var left: CGFloat = 0
+    var top: CGFloat = 0
+    /// Width of the window in tank pixels. One old phone screen at rest.
+    var visibleW: CGFloat = tankScreenPixels
+    var worldW: CGFloat = 0
+    var worldH: CGFloat = 0
+    var pinchStartW: CGFloat = tankScreenPixels
+    var stickToFloor = true
+}
+
+struct TankFrame {
+    var left: CGFloat
+    var top: CGFloat
+    var shownW: CGFloat
+    var shownH: CGFloat
+    /// Drawable pixels per tank pixel.
+    var scale: CGFloat
+    var ox: CGFloat
+    var oy: CGFloat
+    var viewScale: CGFloat
+    var worldW: CGFloat
+    var worldH: CGFloat
+    var visibleW: CGFloat
+}
+
+/// One phone-width of the old tank, in tank pixels. The wide world shows
+/// this much until the player pinches.
+let tankScreenPixels: CGFloat = 384
+let tankMinVisible: CGFloat = 48
+/// Physics cells across the main tank (three screens).
+let tankMainCellsWide: UInt32 = 384
+
+func tankFrame(
+    camera: inout TankCamera,
+    worldW: CGFloat,
+    worldH: CGFloat,
+    drawableW: CGFloat,
+    drawableH: CGFloat,
+    viewScale: CGFloat
+) -> TankFrame {
+    if camera.worldW != worldW || camera.worldH != worldH {
+        camera.worldW = worldW
+        camera.worldH = worldH
+        camera.visibleW = min(tankScreenPixels, max(worldW, 1))
+        camera.pinchStartW = camera.visibleW
+        camera.left = max(0, (worldW - camera.visibleW) / 2)
+        camera.stickToFloor = true
+    }
+    let visW = min(max(camera.visibleW, tankMinVisible), max(worldW, 1))
+    camera.visibleW = visW
+    let aspect = drawableW / max(drawableH, 1)
+    let visH = visW / max(aspect, 0.01)
+    let shownW = min(visW, worldW)
+    let shownH = min(visH, worldH)
+    let scale = drawableW / max(visW, 1)
+    let contentW = shownW * scale
+    let contentH = shownH * scale
+    let ox = (drawableW - contentW) * 0.5
+    let oy = drawableH - contentH
+    if camera.stickToFloor {
+        camera.top = max(0, worldH - shownH)
+        camera.stickToFloor = false
+    }
+    camera.left = min(max(camera.left, 0), max(0, worldW - shownW))
+    camera.top = min(max(camera.top, 0), max(0, worldH - shownH))
+    return TankFrame(
+        left: camera.left,
+        top: camera.top,
+        shownW: shownW,
+        shownH: shownH,
+        scale: scale,
+        ox: ox,
+        oy: oy,
+        viewScale: viewScale,
+        worldW: worldW,
+        worldH: worldH,
+        visibleW: visW
+    )
 }
 
 struct TankScreen: UIViewRepresentable {

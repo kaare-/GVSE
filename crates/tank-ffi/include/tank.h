@@ -161,6 +161,11 @@ typedef struct SpecimenInfoRec {
 TankHandle *tank_new(uint64_t seed, uint32_t w_cells, uint32_t h_cells);
 TankHandle *tank_preset(uint64_t seed);
 TankHandle *tank_empty(uint64_t seed);
+/* Main glass: three jar-widths, same height. Jars stay on tank_empty. */
+TankHandle *tank_main_empty(uint64_t seed);
+TankHandle *tank_main_preset(uint64_t seed);
+/* Copy a narrower tank into the middle of visible_w. 1 if it grew. */
+uint8_t tank_widen(TankHandle *handle, uint32_t visible_w);
 uint32_t tank_seed_algae(TankHandle *handle, uint32_t px, uint32_t py);
 uint32_t tank_live_cells(const TankHandle *handle);
 uint32_t tank_swipe_film(TankHandle *handle, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t radius);

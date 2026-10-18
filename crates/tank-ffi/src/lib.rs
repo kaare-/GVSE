@@ -202,6 +202,40 @@ pub extern "C" fn tank_empty(seed: u64) -> *mut TankHandle {
 }
 
 #[no_mangle]
+pub extern "C" fn tank_main_empty(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::main_empty(seed),
+        rgba: Vec::new(),
+    }))
+}
+
+#[no_mangle]
+pub extern "C" fn tank_main_preset(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::main_preset(seed),
+        rgba: Vec::new(),
+    }))
+}
+
+/// Place a narrower tank in the middle of `visible_w`. Returns 1 when
+/// the width changed. Jars stay on `tank_empty`; only the main glass
+/// asks for this.
+#[no_mangle]
+pub extern "C" fn tank_widen(handle: *mut TankHandle, visible_w: u32) -> u8 {
+    let Some(handle) = (unsafe { handle.as_mut() }) else {
+        return 0;
+    };
+    if handle.tank.visible_size().0 >= visible_w {
+        return 0;
+    }
+    let old = std::mem::replace(&mut handle.tank, Tank::empty(0));
+    let before = old.visible_size().0;
+    handle.tank = old.widened(visible_w);
+    handle.rgba.clear();
+    u8::from(handle.tank.visible_size().0 != before)
+}
+
+#[no_mangle]
 pub extern "C" fn tank_seed_algae(handle: *mut TankHandle, px: u32, py: u32) -> u32 {
     let Some(handle) = (unsafe { handle.as_mut() }) else {
         return u32::MAX;

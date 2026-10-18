@@ -28,7 +28,6 @@ struct MakeAcreatureApp: App {
                         onOpenLog: { showLog = true }
                     )
                     .transition(.opacity)
-                    .simultaneousGesture(zoomGesture(toRoom: false))
                 }
                 if session.showStartGuide {
                     StartGuide(
@@ -67,18 +66,6 @@ struct MakeAcreatureApp: App {
         }
     }
 
-    /// Pinch out past minimum zoom → the room; pinch in → back to the tank.
-    private func zoomGesture(toRoom: Bool) -> some Gesture {
-        MagnificationGesture()
-            .onEnded { value in
-                if toRoom && value < 0.72 {
-                    withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
-                } else if !toRoom && value > 1.35 {
-                    withAnimation(.easeOut(duration: 0.2)) { inRoom = false }
-                }
-            }
-    }
-
     private var tankScreen: some View {
         VStack(spacing: 0) {
             topMenu
@@ -91,15 +78,25 @@ struct MakeAcreatureApp: App {
                     SelectionBox(rect: rect)
                 }
                 if let state = session.inspected {
-                    VStack {
+                    VStack(alignment: .leading, spacing: 0) {
                         InspectCard(
                             state: state,
                             onArchive: session.archiveInspected,
                             onClose: session.closeInspect
                         )
+                        .padding(6)
+                        .offset(x: cardHome.width + cardDrag.width, y: cardHome.height + cardDrag.height)
+                        .gesture(
+                            DragGesture(minimumDistance: 12)
+                                .onChanged { cardDrag = $0.translation }
+                                .onEnded { value in
+                                    cardHome.width = min(max(cardHome.width + value.translation.width, -24), 180)
+                                    cardHome.height = min(max(cardHome.height + value.translation.height, -8), 520)
+                                    cardDrag = .zero
+                                }
+                        )
                         Spacer(minLength: 0)
                     }
-                    .padding(6)
                 }
                 if session.carriedCells > 0 {
                     VStack {
@@ -133,8 +130,10 @@ struct MakeAcreatureApp: App {
             bottomBar
         }
         .background(Palette.panel)
-        .simultaneousGesture(zoomGesture(toRoom: true))
     }
+
+    @State private var cardHome = CGSize.zero
+    @State private var cardDrag = CGSize.zero
 
     private var clockLabel: String {
         "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)"
@@ -152,12 +151,6 @@ struct MakeAcreatureApp: App {
                 )
                 .accessibilityLabel(String(format: "Tank temperature %.0f degrees", session.temperatureC))
                 Spacer(minLength: 4)
-                textButton("ROOM", color: Palette.highlight) {
-                    withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
-                }
-                .a11yButton("Room", hint: "Leave the tank and open the room")
-                textButton("PHOTO") { showPhoto = true }
-                    .a11yButton("Photo", hint: "Save a picture of the tank")
             }
             ToolWheel(
                 tool: $session.tool,
@@ -175,16 +168,41 @@ struct MakeAcreatureApp: App {
         }
     }
 
+    private var inspecting: Bool {
+        session.tool == .needle || session.tool == .sample
+    }
+
     private var bottomBar: some View {
-        HStack(spacing: 3) {
-            barButton("PAUSE", icon: BarIcon.pause, on: !session.playing, action: session.pause)
-            barButton("PLAY", icon: BarIcon.play, on: session.playing, action: session.unpauseFromEvent)
-            barButton("LOOK", icon: BuildTool.look.icon, on: session.tool == .look) { session.tool = .look }
-            barButton("SAMPLE", icon: BuildTool.sample.icon, on: session.tool == .sample) { session.tool = .sample }
-            barButton("NEEDLE", icon: BuildTool.needle.icon, on: session.tool == .needle) { session.tool = .needle }
+        VStack(spacing: 0) {
+            if inspecting {
+                HStack(spacing: 3) {
+                    modeChip("INSPECT", on: session.tool == .needle) { session.tool = .needle }
+                    modeChip("SCOOP", on: session.tool == .sample) { session.tool = .sample }
+                }
+                .padding(.horizontal, 6)
+                .padding(.top, 4)
+            }
+            HStack(spacing: 3) {
+                barButton(
+                    session.playing ? "PAUSE" : "PLAY",
+                    icon: session.playing ? BarIcon.pause : BarIcon.play,
+                    on: session.playing
+                ) {
+                    if session.playing { session.pause() } else { session.unpauseFromEvent() }
+                }
+                barButton("INSPECT", icon: BuildTool.needle.icon, on: inspecting) {
+                    session.tool = .needle
+                }
+                barButton("ROOM", icon: BarIcon.room, on: false) {
+                    withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
+                }
+                barButton("PHOTO", icon: BarIcon.photo, on: false) {
+                    showPhoto = true
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
         .frame(maxWidth: .infinity)
         .background(Palette.panel)
         .overlay(alignment: .top) {
@@ -192,15 +210,16 @@ struct MakeAcreatureApp: App {
         }
     }
 
-    private func textButton(_ title: String, color: Color = Palette.paper, action: @escaping () -> Void) -> some View {
+    private func modeChip(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            PixelLabel(text: title, scale: 1, color: color)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 3)
-                .background(Color(white: 0.1))
-                .overlay(Rectangle().stroke(Color(white: 0.35), lineWidth: 1))
+            PixelLabel(text: title, scale: 1, color: on ? Palette.highlight : Palette.dimPaper)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+                .background(on ? Color(white: 0.18) : Color(white: 0.08))
+                .overlay(Rectangle().stroke(on ? Palette.highlight : Color(white: 0.28), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .a11yButton(title, selected: on)
     }
 
     private func barButton(_ title: String, icon: [String], on: Bool, action: @escaping () -> Void) -> some View {

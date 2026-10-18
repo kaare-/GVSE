@@ -74,7 +74,8 @@ impl PixelLayer {
             tile_active: vec![
                 0;
                 (w.div_ceil(crate::bio::fields::TILE as u32)
-                    * h.div_ceil(crate::bio::fields::TILE as u32)) as usize
+                    * h.div_ceil(crate::bio::fields::TILE as u32))
+                    as usize
             ],
             fields_active: false,
             lysis_fines: Vec::new(),
@@ -136,11 +137,12 @@ pub struct Flashlight {
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Column light at pixel resolution. Water loses 0.1 % per pixel row.
-/// Sand, rock, soil and other solids are lit from the side: their own
-/// pixels keep the column's incident light, and they only nick what is
-/// below them once per physics cell. Living tissue and corpses barely
-/// shade (`tissue_pass` near 255). `cloud[x]` still multiplies the column.
+/// Column light at pixel resolution. Water loses 0.1 % per pixel row,
+/// the same in every column, so a creature does not paint a dark streak
+/// down the glass. Sand, rock, soil and other solids are lit from the
+/// side: their own pixels keep the column's incident light, and a roof
+/// nicks what is below it once per physics cell. `cloud[x]` still
+/// multiplies the column.
 pub fn rebuild_light(
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
@@ -149,7 +151,6 @@ pub fn rebuild_light(
     light_slider: f32,
     flash: Option<Flashlight>,
     cloud_q8: &[u8],
-    tissue_pass: &dyn Fn(u32) -> u8,
 ) {
     let vis_h = grid.visible_h();
     let pw = pixels.w as usize;
@@ -185,8 +186,6 @@ pub fn rebuild_light(
         // Side light for the bed: the incident in this column, before
         // anything in it casts a shadow.
         let side = incoming / 256;
-        let mut last_owner = 0u32;
-        let mut last_pass = 255u32;
         let mut last_solid_vy = i32::MIN;
         for py in 0..ph {
             let vy_top = (py / PX_PER_CELL as usize) as i32;
@@ -205,14 +204,7 @@ pub fn rebuild_light(
                 continue;
             }
             pixels.light[i] = (incoming / 256).min(255) as u8;
-            let owner = pixels.owner[i];
-            if owner != 0 {
-                if owner != last_owner {
-                    last_owner = owner;
-                    last_pass = tissue_pass(owner) as u32;
-                }
-                incoming = incoming * last_pass / 256;
-            } else if cell.sat >= WATER_SAT_RENDER {
+            if cell.sat >= WATER_SAT_RENDER {
                 incoming = incoming * 999 / 1000;
             } else if cell.is_glass() {
                 // A pane loses ≈ 7 % per physics cell; a holding tank is
@@ -317,7 +309,10 @@ pub fn write_rgba(
             // Keyed-field haze on open pixels, in key-band colours (§a.4).
             if owner == 0 && pixels.fields_active {
                 let hazes = [
-                    (pixels.enzyme_amt[i], enzyme_band_colour(pixels.enzyme_key[i])),
+                    (
+                        pixels.enzyme_amt[i],
+                        enzyme_band_colour(pixels.enzyme_key[i]),
+                    ),
                     (pixels.toxin_amt[i], [0x7B, 0x3F, 0xA0]),
                     (pixels.signal_amt[i], [0x3B, 0xBF, 0xD3]),
                 ];
