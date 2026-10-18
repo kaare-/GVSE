@@ -23,7 +23,7 @@ struct RoomView: View {
         GeometryReader { geo in
             let layout = RoomLayout(size: geo.size)
             ZStack {
-                Color(red: 0.16, green: 0.18, blue: 0.19)
+                Color(red: 0.20, green: 0.14, blue: 0.10)
                 Image(uiImage: RoomArt.image)
                     .resizable()
                     .interpolation(.none)

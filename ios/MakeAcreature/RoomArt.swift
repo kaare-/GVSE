@@ -95,15 +95,15 @@ enum RoomArt {
 }
 
 private enum Ink {
-    static let gap = 0x322C26
-    static let wallA = 0x5C5348
-    static let wallB = 0x4E463E
-    static let floorA = 0x6E5642
-    static let floorB = 0x5A4634
-    static let wood = 0x8A6240
-    static let woodLt = 0xC69E68
-    static let woodDk = 0x5A3C28
-    static let shelf = 0x7A5A3C
+    static let gap = 0x3A2C22
+    static let wallA = 0x6A5344
+    static let wallB = 0x56483C
+    static let floorA = 0xC99B61
+    static let floorB = 0xA67C49
+    static let wood = 0xBB8553
+    static let woodLt = 0xF0C776
+    static let woodDk = 0x63432F
+    static let shelf = 0x8F6844
     static let plant = 0x6CB84A
     static let plantDk = 0x2E6A32
     static let plantLt = 0xA2D66F
@@ -121,15 +121,15 @@ private enum Ink {
     static let glow = 0xF1D27B
     static let glowHot = 0xFFF4D0
     static let night = 0x243038
-    static let metal = 0xA8B0B4
-    static let metalDk = 0x5A6468
-    static let metalLt = 0xE4E8EA
+    static let metal = 0x787E79
+    static let metalDk = 0x4A524C
+    static let metalLt = 0xB7C0B4
     static let lampOff = 0x2A3028
-    static let waterD = 0x285F83
-    static let waterM = 0x3A7A9C
-    static let waterL = 0x519FBE
-    static let sand = 0xC69E68
-    static let sandDk = 0x8A6A40
+    static let waterD = 0x316F96
+    static let waterM = 0x3E8AAD
+    static let waterL = 0x4DABC7
+    static let sand = 0xC99B61
+    static let sandDk = 0x8A6844
     static let algae = 0x6CB84A
     static let algaeLt = 0xA2D66F
     static let black = 0x292E30
@@ -158,7 +158,6 @@ private final class Pix {
 
     func paint() {
         planks()
-        shafts()
         window()
         shelf()
         tree()
@@ -172,7 +171,7 @@ private final class Pix {
         tankPlaque()
         fuse()
         toolJar()
-        daylight()
+        lighting()
     }
 
     private func planks() {
@@ -181,32 +180,16 @@ private final class Pix {
             let alt = (x / 7) % 2 == 0
             for y in 0..<RoomArt.floorY {
                 var c = gap ? Ink.gap : (alt ? Ink.wallA : Ink.wallB)
-                if !gap && (x * 3 + y) % 53 == 0 { c = 0x3A342C }
+                if !gap && (x * 3 + y) % 53 == 0 { c = 0x4A3428 }
                 set(x, y, c)
             }
         }
         for (x, y) in [(20, 70), (44, 130), (96, 90), (70, 160), (14, 150)] {
-            fill(x, y, 2, 2, 0x3A342C)
-            set(x + 2, y + 1, 0x6A5844)
+            fill(x, y, 2, 2, 0x4A3428)
+            set(x + 2, y + 1, 0x8A6848)
         }
     }
 
-    private func shafts() {
-        // Wide stepped beams, brighter at the ceiling, so the planks
-        // are not one flat brown.
-        for y in 0..<170 {
-            let add = max(18, (170 - y) / 3)
-            for base in [0, 16, 40, 74, 102] {
-                let x = base + y / 20
-                lighten(x, y, add)
-                lighten(x + 1, y, add)
-                if y % 2 == 0 { lighten(x + 2, y, add / 2) }
-            }
-        }
-    }
-
-    /// Daylight from the left. The cone is painted after the furniture
-    /// so the wall, not the sky, picks up the light.
     private func window() {
         fill(0, 46, 15, 56, Ink.woodDk)
         fill(1, 47, 13, 54, Ink.sky)
@@ -222,20 +205,82 @@ private final class Pix {
         fill(0, 102, 16, 2, Ink.woodDk)
     }
 
-    private func daylight() {
-        for y in 40..<168 {
-            let reach = 16 + max(0, y - 46) / 5
-            for dx in 0..<reach {
-                let x = 16 + dx
-                if x >= w { break }
-                let add = max(0, 26 - dx / 2 - max(0, y - 130) / 10)
-                lighten(x, y, add)
+    /// Window from the left, lamps from their shades. Painted last so
+    /// the light falls on the wall and the furniture, and it falls off
+    /// away from each source. Sun stays woody; lamps go gold.
+    private func lighting() {
+        let winMid = 74
+        for y in 0..<h {
+            let besideSky = y >= 46 && y < 102
+            for x in 0..<w {
+                if besideSky && x < 15 { continue }
+                let dx = max(0, x - 14)
+                let dy = abs(y - winMid)
+                let inBeam = y >= 40 && y <= 130
+                let vertical = inBeam ? dy / 12 : dy / 5
+                var sunAmt = 30 - dx / 3 - vertical
+                if y >= RoomArt.floorY && x < 78 {
+                    sunAmt = max(sunAmt, 14 - dx / 6 - (y - RoomArt.floorY) / 5)
+                }
+                if sunAmt > 0 { sun(x, y, sunAmt) }
+                if dx > 52 {
+                    let sh = min(18, (dx - 52) / 3 + (inBeam ? 0 : 3))
+                    shade(x, y, sh)
+                }
             }
         }
-        for y in RoomArt.floorY..<(RoomArt.floorY + 30) {
-            for x in 0..<32 {
-                lighten(x, y, max(0, 18 - x / 2 - (y - RoomArt.floorY) / 3))
+        // Two beams leaving the window, so the light has a direction
+        // you can see, not only a slow fade.
+        for i in 0..<78 {
+            let x = 16 + i
+            let y0 = 50 + i / 4
+            sun(x, y0, 20)
+            sun(x, y0 + 1, 16)
+            sun(x, y0 + 2, 8)
+            let y1 = 86 + i / 6
+            sun(x, y1, 16)
+            sun(x, y1 + 1, 12)
+        }
+        // Hard rims: light from the left leaves a dark edge on the right.
+        rightRim(16, 100, 88, 60)
+        rightRim(6, 156, 108, 12)
+        rightRim(6, 200, 28, 30)
+        rightRim(48, 206, 30, 24)
+        for x in 2..<118 {
+            shade(x, 40, 5 + x / 24)
+        }
+        cone(cx: 66, cy: 30, reach: 24, power: 36)
+        cone(cx: 8, cy: 116, reach: 70, power: 42)
+        cone(cx: 112, cy: 116, reach: 70, power: 42)
+    }
+
+    /// Light on the wall around a shade, then a widening pool beneath it.
+    private func cone(cx: Int, cy: Int, reach: Int, power: Int) {
+        for dy in -16...18 {
+            for dx in -14...14 where abs(dx) + abs(dy) / 2 < 18 {
+                lamp(cx + dx, cy + dy, 34 - abs(dx) - abs(dy) / 2)
             }
+        }
+        for dy in -28...6 {
+            let spread = 9 + abs(min(dy, 0)) / 2
+            let along = power - abs(dy) * 2 / 3
+            for dx in -spread...spread {
+                lamp(cx + dx, cy + dy, max(0, along - abs(dx)))
+            }
+        }
+        for dy in 0..<reach {
+            let half = 4 + dy / 2
+            let along = power - dy * power / reach
+            for dx in -half...half {
+                lamp(cx + dx, cy + dy, max(0, along - abs(dx) * 2 / 3))
+            }
+        }
+    }
+
+    private func rightRim(_ x: Int, _ y: Int, _ bw: Int, _ bh: Int) {
+        for yy in y..<(y + bh) {
+            shade(x + bw, yy, 16)
+            shade(x + bw + 1, yy, 9)
         }
     }
 
@@ -324,18 +369,13 @@ private final class Pix {
         fill(x + 5, 122, 2, 30, Ink.metalDk)
         fill(x + 2, 152, 8, 2, Ink.brass)
         fill(x + 1, 154, 10, 2, Ink.brassDk)
-        // Warm spill on the wall behind the shade.
-        for dy in 0..<10 {
-            lighten(x + 12, 110 + dy, 18 - dy)
-            lighten(x - 1, 110 + dy, 12)
-        }
     }
 
     private func tank() {
         let t = RoomArt.tank
         let g = RoomArt.tankGlass
         fill(t.x, t.y, t.w, t.h, Ink.woodDk)
-        fill(g.x, g.y, g.w, g.h, 0x8EC4D8)
+        fill(g.x, g.y, g.w, g.h, Ink.waterL)
         fill(t.x, t.y, t.w, 1, Ink.ivory)
         fill(t.x, t.y + t.h - 1, t.w, 1, Ink.wood)
     }
@@ -379,15 +419,15 @@ private final class Pix {
             let alt = (x / 8) % 2 == 0
             for y in RoomArt.floorY..<h {
                 var c = gap ? Ink.gap : (alt ? Ink.floorA : Ink.floorB)
-                if !gap && (x + y * 2) % 29 == 0 { c = 0x7A624C }
+                if !gap && (x + y * 2) % 29 == 0 { c = 0xD4AE78 }
                 set(x, y, c)
             }
         }
         fill(0, RoomArt.floorY, w, 2, 0x16100C)
         // Rug under the three floor objects.
-        fill(2, 246, 116, 14, 0x1A1216)
+        fill(2, 246, 116, 14, 0x2A1814)
         for x in stride(from: 4, to: 116, by: 6) {
-            set(x, 252, 0x2A2030)
+            set(x, 252, 0x4A3028)
         }
     }
 
@@ -425,7 +465,7 @@ private final class Pix {
         fill(j.x + 3, j.y + 4, 8, 2, Ink.brass)
         fill(j.x + 1, j.y + 6, 1, 11, Ink.glass)
         fill(j.x + 12, j.y + 6, 1, 11, Ink.glass)
-        fill(j.x + 2, j.y + 6, 10, 11, 0x8EC4D8)
+        fill(j.x + 2, j.y + 6, 10, 11, Ink.waterL)
         fill(j.x + 1, j.y + 16, 12, 1, Ink.glass)
         // Scissors and a couple of other handles, sticking out of the mouth.
         set(j.x + 4, j.y, Ink.metalLt)
@@ -444,7 +484,7 @@ private final class Pix {
         fill(x + 2, y, 8, 2, Ink.brass)
         fill(x, y + 2, 1, 14, Ink.glass)
         fill(x + 11, y + 2, 1, 14, Ink.glass)
-        fill(x + 1, y + 2, 10, 14, 0x8EC4D8)
+        fill(x + 1, y + 2, 10, 14, Ink.waterL)
         set(x + 2, y + 4, Ink.glow)
         fill(x, y + 16, 12, 1, Ink.glass)
     }
@@ -467,12 +507,47 @@ private final class Pix {
         }
     }
 
-    private func lighten(_ x: Int, _ y: Int, _ add: Int) {
-        guard x >= 0, y >= 0, x < w, y < h, add > 0 else { return }
+    /// Sky and the tree screen stay as painted. Lighting a blue-black
+    /// pixel just turns it gray.
+    private func holds(_ x: Int, _ y: Int) -> Bool {
+        if x < 15 && y >= 46 && y < 102 { return true }
+        let inner = RoomArt.treeInner
+        return x >= inner.x && y >= inner.y && x < inner.x + inner.w && y < inner.y + inner.h
+    }
+
+    /// Daylight. Extra red, a little green, almost no blue, so the
+    /// planks go sunlit wood instead of chalk. Stops short of white.
+    private func sun(_ x: Int, _ y: Int, _ amt: Int) {
+        warmAdd(x, y, amt, green: 2, blue: 5)
+    }
+
+    /// Lamp gold. A touch more green than daylight, still short on blue.
+    private func lamp(_ x: Int, _ y: Int, _ amt: Int) {
+        warmAdd(x, y, amt, green: 3, blue: 6)
+    }
+
+    /// `green` and `blue` are divisors: daylight adds 2/3 of the red to
+    /// green and 1/5 to blue; a lamp adds 3/4 and 1/6.
+    private func warmAdd(_ x: Int, _ y: Int, _ amt: Int, green: Int, blue: Int) {
+        guard x >= 0, y >= 0, x < w, y < h, amt > 0, !holds(x, y) else { return }
         let i = (y * w + x) * 4
-        for k in 0..<3 {
-            bytes[i + k] = UInt8(min(Int(bytes[i + k]) + add, 255))
-        }
+        let room = 232 - Int(bytes[i])
+        if room <= 0 { return }
+        let a = min(amt, min(room, 40))
+        bytes[i] = UInt8(Int(bytes[i]) + a)
+        bytes[i + 1] = UInt8(min(Int(bytes[i + 1]) + a * green / (green + 1), 255))
+        bytes[i + 2] = UInt8(min(Int(bytes[i + 2]) + a / blue, 255))
+    }
+
+    /// Shadow away from the window. Blue falls fastest, so the dark
+    /// stays brown.
+    private func shade(_ x: Int, _ y: Int, _ amt: Int) {
+        guard x >= 0, y >= 0, x < w, y < h, amt > 0, !holds(x, y) else { return }
+        let i = (y * w + x) * 4
+        let a = min(amt, 24)
+        bytes[i] = UInt8(max(Int(bytes[i]) - a, 0))
+        bytes[i + 1] = UInt8(max(Int(bytes[i + 1]) - a - a / 4, 0))
+        bytes[i + 2] = UInt8(max(Int(bytes[i + 2]) - a - a / 2, 0))
     }
 
     private func fill(_ x: Int, _ y: Int, _ bw: Int, _ bh: Int, _ rgb: Int) {
