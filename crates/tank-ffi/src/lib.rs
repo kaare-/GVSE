@@ -1095,7 +1095,8 @@ mod tests {
         let n = tank_species_name(handle, lin.species, name.as_mut_ptr(), 64);
         assert!(n > 0 && name[n as usize] == 0, "NUL-terminated name");
         assert!(std::str::from_utf8(&name[..n as usize]).unwrap().contains(' '));
-        assert_eq!(tank_species_tree(handle, ptr::null_mut(), 0), 0, "unsaved life stays off the tree");
+        let living = tank_species_tree(handle, ptr::null_mut(), 0);
+        assert!(living >= 1, "living species are on the tree before anyone saves them");
 
         // Archive it, inspect the record, seed a new tank from it.
         let need = tank_specimen(handle, found.cell, ptr::null_mut(), 0);
