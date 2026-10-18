@@ -94,8 +94,15 @@ impl Cell {
     /// behaves as a solid toward water and grains (§b.3 dam rule).
     pub const TISSUE: u8 = 0b1000_0000;
     /// `flags` bit 6: ≥5 root pixels co-occupy this sand/soil cell —
-    /// bound, so it neither falls nor slumps (§h.1).
+    /// bound, so it neither falls nor slumps (§h.1). A drawn rock is
+    /// bound too, so its cells do not fall one by one.
     pub const BOUND: u8 = 0b0100_0000;
+    /// `flags` bit 4: this stone cell belongs to one drawn rock. `pad`
+    /// is that rock's id (1..=255), not the wetness film.
+    pub const RIGID: u8 = 0b0001_0000;
+    /// `flags` bit 5: stone drawn and not yet released. It holds still
+    /// until play, then becomes one rigid rock.
+    pub const SILHOUETTE: u8 = 0b0010_0000;
 
     /// Fluid seat for the physics rules: air/water that is not dammed by
     /// hard tissue.
@@ -118,6 +125,18 @@ impl Cell {
     #[inline]
     pub fn is_bound(self) -> bool {
         self.flags & Self::BOUND != 0
+    }
+
+    /// One cell of a drawn rock that falls, turns, and settles as a whole.
+    #[inline]
+    pub fn is_rigid(self) -> bool {
+        self.flags & Self::RIGID != 0
+    }
+
+    /// Stone still being drawn. It does not fall until play.
+    #[inline]
+    pub fn is_silhouette(self) -> bool {
+        self.flags & Self::SILHOUETTE != 0
     }
 
     #[inline]
@@ -163,7 +182,7 @@ impl Cell {
     /// Rock surface film (0..=255) stored in `pad`. Sand uses `sat`.
     #[inline]
     pub fn rock_film(self) -> u8 {
-        if self.is_rock() {
+        if self.is_rock() && !self.is_rigid() {
             self.pad
         } else {
             0
@@ -194,7 +213,7 @@ impl Cell {
     /// Visible wetness for damp/dry rendering: pore sat for sand, film for rock.
     #[inline]
     pub fn moisture(self) -> u8 {
-        if self.is_rock() {
+        if self.is_rock() && !self.is_rigid() {
             self.pad.max(self.sat)
         } else {
             self.sat

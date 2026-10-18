@@ -429,6 +429,152 @@ fn swirl_tilt_moves_water_downhill() {
 }
 
 #[test]
+fn a_paused_rock_falls_as_one_stone_and_turns() {
+    let mut tank = Tank::try_new(1, 12, 16).unwrap();
+    let paint = |x, y| ToolEvent {
+        kind: 1,
+        material: MaterialId::Stone as u8,
+        x,
+        y,
+        r: 0,
+        variant: 0,
+    };
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![paint(3, 10), paint(3, 11), paint(3, 12)],
+        ..TankInput::default()
+    });
+    assert!(tank.cell_visible(3, 12).is_silhouette(), "a paused stroke stays a drawing");
+    assert_eq!(tank.cell_visible(3, 12).id(), MaterialId::Stone);
+    let drawn = stone_cells(&tank);
+    assert!(drawn.len() > 1, "the stroke is a shape");
+    let before = offsets(&drawn);
+    tick_n(&mut tank, 4);
+    let fallen = stone_cells(&tank);
+    assert_eq!(fallen.len(), drawn.len(), "the stroke does not break apart");
+    assert!(fallen.iter().all(|(_, _, c)| c.is_rigid()));
+    let id = fallen[0].2.pad;
+    assert!(fallen.iter().all(|(_, _, c)| c.pad == id));
+    let after = normalize(&fallen.iter().map(|(x, y, _)| (*x, *y)).collect::<Vec<_>>());
+    assert_eq!(after, rotate_offsets(&before), "it tips as it falls {after:?}");
+    assert!(
+        fallen.iter().map(|(_, y, _)| *y).min() < drawn.iter().map(|(_, y, _)| *y).min(),
+        "it has dropped"
+    );
+    tick_n(&mut tank, 24);
+    let resting = stone_cells(&tank);
+    assert_eq!(resting.len(), drawn.len(), "it is still one stone");
+    assert!(resting.iter().all(|(_, _, c)| c.pad == id && c.is_rigid()));
+    assert_eq!(resting.iter().map(|(_, y, _)| *y).min(), Some(0), "it settles on the floor");
+}
+
+fn stone_cells(tank: &Tank) -> Vec<(i32, i32, Cell)> {
+    let (w, h) = tank.visible_size();
+    let mut stones = Vec::new();
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let c = tank.cell_visible(x, y);
+            if c.id() == MaterialId::Stone {
+                stones.push((x, y, c));
+            }
+        }
+    }
+    stones
+}
+
+fn offsets(cells: &[(i32, i32, Cell)]) -> Vec<(i32, i32)> {
+    let pts: Vec<(i32, i32)> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+    normalize(&pts)
+}
+
+fn rotate_offsets(shape: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let maxx = shape.iter().map(|c| c.0).max().unwrap_or(0);
+    let turned: Vec<(i32, i32)> = shape.iter().map(|(x, y)| (*y, maxx - x)).collect();
+    normalize(&turned)
+}
+
+fn normalize(cells: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let minx = cells.iter().map(|c| c.0).min().unwrap_or(0);
+    let miny = cells.iter().map(|c| c.1).min().unwrap_or(0);
+    let mut v: Vec<(i32, i32)> = cells.iter().map(|(x, y)| (x - minx, y - miny)).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+#[test]
+fn a_drawn_rock_rests_on_sand() {
+    let mut tank = Tank::try_new(1, 8, 12).unwrap();
+    for x in 0..8 {
+        place(&mut tank, x, 0, Cell::sand());
+    }
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![
+            ToolEvent { kind: 1, material: MaterialId::Stone as u8, x: 4, y: 6, r: 0, variant: 0 },
+            ToolEvent { kind: 1, material: MaterialId::Stone as u8, x: 4, y: 7, r: 0, variant: 0 },
+        ],
+        ..TankInput::default()
+    });
+    let drawn = tank.count_material(MaterialId::Stone as u8);
+    tick_n(&mut tank, 20);
+    assert_eq!(tank.cell_visible(3, 0).id(), MaterialId::Sand);
+    assert_eq!(tank.count_material(MaterialId::Stone as u8), drawn);
+    let mut min_y = 99i32;
+    for y in 0..12 {
+        for x in 0..8 {
+            if tank.cell_visible(x, y).is_rigid() {
+                min_y = min_y.min(y);
+            }
+        }
+    }
+    assert_eq!(min_y, 1, "the stone sits on the sand");
+}
+
+#[test]
+fn a_sugar_cube_sinks_then_dissolves() {
+    let mut tank = Tank::try_new(1, 8, 16).unwrap();
+    let before = tank.glucose_total();
+    tank.tick(&TankInput {
+        tools: vec![ToolEvent { kind: 10, material: 0, x: 3, y: 10, r: 4, variant: 0 }],
+        ..TankInput::default()
+    });
+    assert_eq!(tank.glucose_total(), before, "the cube is still in the air");
+    tick_n(&mut tank, 2);
+    assert_eq!(tank.glucose_total(), before, "it has not reached the floor");
+    tick_n(&mut tank, 12);
+    assert!(tank.glucose_total() > before, "it dissolves into the sugar feed");
+}
+
+#[test]
+fn a_lime_cube_sinks_then_dissolves() {
+    let mut tank = Tank::try_new(1, 8, 16).unwrap();
+    let before = tank.mineral_total();
+    tank.tick(&TankInput {
+        tools: vec![ToolEvent { kind: 11, material: 0, x: 3, y: 10, r: 0, variant: 0 }],
+        ..TankInput::default()
+    });
+    assert_eq!(tank.mineral_total(), before);
+    tick_n(&mut tank, 16);
+    assert!(tank.mineral_total() > before, "lime joins the mineral field");
+}
+
+#[test]
+fn seed_adds_a_starter_to_a_living_tank() {
+    let mut tank = water_box(3, 16, 16, 8);
+    let first = tank.seed_algae(24, 24).unwrap();
+    let before = tank.live_cells();
+    let wide = tank.visible_size();
+    tank.tick(&TankInput {
+        tools: vec![ToolEvent { kind: 8, material: 0, x: 8, y: 8, r: 3, variant: 0 }],
+        ..day()
+    });
+    assert!(tank.live_cells() > before, "a second starter is added");
+    assert!(tank.cell(first).unwrap().alive);
+    assert_eq!(tank.visible_size(), wide, "the tank is not replaced");
+}
+
+#[test]
 fn loose_rock_falls_and_tumbles() {
     let mut tank = Tank::try_new(1, 8, 12).unwrap();
     place(&mut tank, 3, 5, Cell::solid(MaterialId::LooseRock));

@@ -251,11 +251,18 @@ pub fn write_rgba(
                 albedo(cell)
             };
             if owner == 0 && !cell.is_open() && !cell.is_glass() {
-                let (jr, jg, jb) = grain_speck(px, py);
-                let relief = rock_relief(cell, px, py);
-                r = shade(r, jr + relief);
-                g = shade(g, jg + relief);
-                b = shade(b, jb + relief);
+                if (cell.is_rigid() || cell.is_silhouette()) && rock_touches_body(grid, cell, vx, vy) {
+                    let relief = blob_shade(grid, cell, px, py, vis_h);
+                    r = shade(r, relief);
+                    g = shade(g, relief);
+                    b = shade(b, relief);
+                } else {
+                    let (jr, jg, jb) = grain_speck(px, py);
+                    let relief = rock_relief(cell, px, py);
+                    r = shade(r, jr + relief);
+                    g = shade(g, jg + relief);
+                    b = shade(b, jb + relief);
+                }
             }
             let li = pixels.light[i] as u32;
             r = ((r as u32) * li / 255) as u8;
@@ -449,8 +456,51 @@ fn grain_speck(px: usize, py: usize) -> (i32, i32, i32) {
     (j + warm, j, j - warm)
 }
 
+fn same_rock(a: Cell, b: Cell) -> bool {
+    if a.is_rigid() && b.is_rigid() {
+        return a.pad != 0 && a.pad == b.pad;
+    }
+    a.is_silhouette() && b.is_silhouette()
+}
+
+/// A drawn rock shares one light. Loose cobbles keep the per-cell corner.
+fn rock_touches_body(grid: &PhysicsGrid, cell: Cell, vx: i32, vy: i32) -> bool {
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        if same_rock(cell, grid.get_visible(vx + dx, vy + dy)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Edge of the whole stone, with a slow light from the upper left.
+/// It does not repeat inside every 3×3 cell.
+fn blob_shade(grid: &PhysicsGrid, cell: Cell, px: usize, py: usize, vis_h: i32) -> i32 {
+    let mut edge = false;
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let nx = px as i32 + dx;
+        let ny = py as i32 + dy;
+        if nx < 0 || ny < 0 {
+            edge = true;
+            break;
+        }
+        let nvx = nx / PX_PER_CELL as i32;
+        let nvy = vis_h - 1 - ny / PX_PER_CELL as i32;
+        if !same_rock(cell, grid.get_visible(nvx, nvy)) {
+            edge = true;
+            break;
+        }
+    }
+    let grad = 8 - ((px as i32 + py as i32) % 13) / 2;
+    if edge {
+        grad - 26
+    } else {
+        grad
+    }
+}
+
 /// A lit corner on a cobble. The corner walks as [`Cell::tumble`] advances,
-/// so a falling rock reads as a turn.
+/// so a falling loose rock reads as a turn.
 fn rock_relief(cell: Cell, px: usize, py: usize) -> i32 {
     if !cell.tumbles() {
         return 0;

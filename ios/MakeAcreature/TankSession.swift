@@ -1043,6 +1043,8 @@ final class TankSession: ObservableObject {
     }
 
     private func queueStroke(at point: CGPoint, ended: Bool) {
+        let oneDrop = tool == .sugar || tool == .lime || tool == .seed
+        if oneDrop && !ended { return }
         guard let cell = physicsCell(at: point) else { return }
         let stroke = tool.stroke(strokeMode)
         if stroke.kind == 0 {
@@ -1055,11 +1057,35 @@ final class TankSession: ObservableObject {
                 material: stroke.material,
                 x: cell.0,
                 y: cell.1,
-                r: UInt16(brush),
+                r: oneDrop ? 0 : UInt16(brush),
                 variant: UInt8(variant),
                 _pad: 0
             )
         )
+    }
+
+    /// One sim step. While paused the stroke is drawn and nothing falls.
+    private func submit(_ tools: [ToolEvent], paused: Bool) {
+        guard let handle else { return }
+        tools.withUnsafeBufferPointer { buf in
+            var input = TankInput(
+                grav_x: lastGravX,
+                grav_y: lastGravY,
+                paused: paused ? 1 : 0,
+                always_day: alwaysDay ? 1 : 0,
+                swirl: effectiveSwirl ? 1 : 0,
+                _pad1: 0,
+                light_slider: Float(lightSlider),
+                t_base: Float(tBase),
+                flash_x: 0,
+                flash_y: 0,
+                flash_r: 0,
+                tools: buf.baseAddress,
+                tool_count: UInt32(buf.count)
+            )
+            tank_tick(handle, &input)
+        }
+        drainEvents(handle)
     }
 
     // MARK: coordinates
@@ -1173,31 +1199,17 @@ final class TankSession: ObservableObject {
         while accumulator >= step && steps < 4 {
             let tools = pendingTools
             pendingTools.removeAll(keepingCapacity: true)
-            tools.withUnsafeBufferPointer { buf in
-                var input = TankInput(
-                    grav_x: lastGravX,
-                    grav_y: lastGravY,
-                    paused: 0,
-                    always_day: alwaysDay ? 1 : 0,
-                    swirl: effectiveSwirl ? 1 : 0,
-                    _pad1: 0,
-                    light_slider: Float(lightSlider),
-                    t_base: Float(tBase),
-                    flash_x: 0,
-                    flash_y: 0,
-                    flash_r: 0,
-                    tools: buf.baseAddress,
-                    tool_count: UInt32(buf.count)
-                )
-                tank_tick(handle, &input)
-            }
-            drainEvents(handle)
+            submit(tools, paused: false)
             accumulator -= step
             steps += 1
         }
         if steps == 4 {
             accumulator = 0
         }
+        } else if !pendingTools.isEmpty {
+            let tools = pendingTools
+            pendingTools.removeAll(keepingCapacity: true)
+            submit(tools, paused: true)
         }
         // Enclosure release fills a pending scoop bucket.
         if carried == nil, let bucket = tank_take_enclosure_bucket(handle) {

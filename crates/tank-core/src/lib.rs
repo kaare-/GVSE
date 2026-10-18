@@ -23,6 +23,7 @@ pub mod enclosure;
 pub mod humidity;
 pub mod milestones;
 pub mod pixels;
+pub mod rocks;
 pub mod rules;
 pub mod tank;
 pub mod telemetry;

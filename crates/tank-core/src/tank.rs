@@ -176,6 +176,16 @@ pub enum ReleaseError {
     OutOfBounds,
 }
 
+/// A sugar or lime cube falling toward the bed. It is not part of the
+/// save: a save dissolves whatever is still in the air.
+#[derive(Clone, Copy)]
+struct FeedCube {
+    x: i16,
+    y: i16,
+    /// Tool kind: 10 sugar, 11 lime.
+    kind: u8,
+}
+
 pub struct Tank {
     seed: u64,
     tick_count: u64,
@@ -227,6 +237,8 @@ pub struct Tank {
     soft: bio::soft::SoftStore,
     /// Phase 5 M2 StudioNet controllers (only for orgs with NERVE).
     nets: bio::neural::NetStore,
+    /// Sugar and lime cubes in flight. One tap, one cube.
+    feed_cubes: Vec<FeedCube>,
 }
 
 impl Tank {
@@ -279,6 +291,7 @@ impl Tank {
             pending_enclosure_bucket: None,
             soft: bio::soft::SoftStore::default(),
             nets: bio::neural::NetStore::default(),
+            feed_cubes: Vec::new(),
         };
         tank.rebuild_light();
         Ok(tank)
@@ -339,7 +352,11 @@ impl Tank {
         wide.evaporated_sat = self.evaporated_sat;
         wide.events = std::mem::take(&mut self.events);
 
+        wide.feed_cubes = std::mem::take(&mut self.feed_cubes);
         let dx = ((new_visible_w - old_w) / 2) as i32;
+        for cube in &mut wide.feed_cubes {
+            cube.x = cube.x.saturating_add(dx as i16);
+        }
         let dx_px = dx * PX_PER_CELL as i32;
         for vy in 0..old_h as i32 {
             let left = shore_cell(self.grid.get_visible(0, vy));
@@ -618,6 +635,141 @@ impl Tank {
         });
         self.light_dirty = true;
         Some(id)
+    }
+
+    /// Place the starter algae on an open pixel near `(vx, vy)`. Does not
+    /// clear the tank. `None` when the neighbourhood is solid or full.
+    fn seed_starter_near(&mut self, vx: i32, vy: i32) -> Option<u32> {
+        let vis_w = self.grid.visible_w();
+        let vis_h = self.grid.visible_h();
+        for r in 0..6i32 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if r > 0 && dx.abs() != r && dy.abs() != r {
+                        continue;
+                    }
+                    let x = vx + dx;
+                    let y = vy + dy;
+                    if x < 0 || y < 0 || x >= vis_w || y >= vis_h {
+                        continue;
+                    }
+                    if !self.grid.get_visible(x, y).is_open() {
+                        continue;
+                    }
+                    let px = (x as u32 * 3 + 1) as u16;
+                    let py_top = vis_h as u32 - 1 - y as u32;
+                    let py = (py_top * 3 + 1) as u16;
+                    if self.owner_at(px, py) != 0 {
+                        continue;
+                    }
+                    return self.seed_algae(px, py);
+                }
+            }
+        }
+        None
+    }
+
+    /// Drop cubes through air (two cells) and water (one cell). A solid
+    /// under the cube dissolves it into the feed that was already there.
+    fn step_feed_cubes(&mut self) {
+        let cubes = std::mem::take(&mut self.feed_cubes);
+        for mut cube in cubes {
+            let mut steps = 2;
+            let mut dissolved = false;
+            while steps > 0 {
+                let x = cube.x as i32;
+                let y = cube.y as i32;
+                let here = self.grid.get_visible(x, y);
+                let below_open = y > 0 && self.grid.get_visible(x, y - 1).is_air();
+                if !here.is_open() || !below_open {
+                    self.dissolve_cube(cube);
+                    dissolved = true;
+                    break;
+                }
+                let in_water = here.sat > 40;
+                cube.y -= 1;
+                steps -= 1;
+                if in_water {
+                    break;
+                }
+            }
+            if !dissolved {
+                self.feed_cubes.push(cube);
+            }
+        }
+    }
+
+    fn dissolve_feed_cubes(&mut self) {
+        let cubes = std::mem::take(&mut self.feed_cubes);
+        for cube in cubes {
+            self.dissolve_cube(cube);
+        }
+    }
+
+    fn dissolve_cube(&mut self, cube: FeedCube) {
+        let x = cube.x as i32;
+        let y = cube.y as i32;
+        if cube.kind == 11 {
+            self.add_calcium(x, y, 1, 96);
+            self.add_mineral_open(x, y, 96);
+        } else {
+            self.drip_glucose(x, y, 1, 180);
+        }
+    }
+
+    /// Lime that lands in air still leaves calcium in that cell.
+    fn add_mineral_open(&mut self, vx: i32, vy: i32, amount: u8) {
+        let w = self.grid.visible_w();
+        let h = self.grid.visible_h();
+        if vx < 0 || vy < 0 || vx >= w || vy >= h {
+            return;
+        }
+        if !self.grid.get_visible(vx, vy).is_open() {
+            return;
+        }
+        let i = (vy as usize) * (w as usize) + vx as usize;
+        if let Some(slot) = self.coarse.minerals.get_mut(i) {
+            *slot = slot.saturating_add(amount);
+        }
+    }
+
+    fn paint_feed_cubes(&self, out: &mut [u8]) {
+        let vis_h = self.grid.visible_h() as i32;
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        for cube in &self.feed_cubes {
+            let py0 = (vis_h - 1 - cube.y as i32) * 3;
+            let px0 = cube.x as i32 * 3;
+            let sugar = cube.kind != 11;
+            let body = if sugar { [0xF4, 0xF0, 0xE2] } else { [0xE2, 0xEC, 0xC0] };
+            let hi = if sugar { [0xFF, 0xFC, 0xF2] } else { [0xF4, 0xF8, 0xD8] };
+            let edge = if sugar { [0xC2, 0xB4, 0x96] } else { [0x8E, 0xA0, 0x70] };
+            for sy in 0..3 {
+                for sx in 0..3 {
+                    let x = px0 + sx;
+                    let y = py0 + sy;
+                    if x < 0 || y < 0 || x >= pw || y >= ph {
+                        continue;
+                    }
+                    let rgb = if sy == 0 && sx < 2 {
+                        hi
+                    } else if sx == 2 || sy == 2 {
+                        edge
+                    } else {
+                        body
+                    };
+                    let i = (y * pw + x) as usize;
+                    let li = self.pixels.light.get(i).copied().unwrap_or(255) as u32;
+                    let o = i * 4;
+                    if o + 3 >= out.len() {
+                        continue;
+                    }
+                    for k in 0..3 {
+                        out[o + k] = (rgb[k] as u32 * li / 255) as u8;
+                    }
+                }
+            }
+        }
     }
 
     /// Seed a cell whose mode targets `shape_w × shape_h` (growth tests).
@@ -1555,6 +1707,11 @@ impl Tank {
             return;
         }
         self.apply_tools(&input.tools);
+        // A paused stroke stays a silhouette. Play releases each connected
+        // stroke as one rock, then lets sugar and lime cubes sink.
+        crate::rocks::commit_silhouettes(&mut self.grid);
+        crate::rocks::step(&mut self.grid, self.tick_count);
+        self.step_feed_cubes();
         self.light_dirty = true;
         self.rebuild_light();
         // Thermal cycle (§4): base + solar heat + stored heat that carries
@@ -2047,6 +2204,7 @@ impl Tank {
                 }
             }
         }
+        self.paint_feed_cubes(out);
     }
 
     pub fn pixel_hash(&mut self) -> u64 {
@@ -2056,6 +2214,7 @@ impl Tank {
     }
 
     pub fn save_bytes(&mut self) -> Result<Vec<u8>, TankError> {
+        self.dissolve_feed_cubes();
         self.light_dirty = true;
         self.rebuild_light();
         let blob = SaveBlob {
@@ -2333,13 +2492,8 @@ impl Tank {
                 continue;
             }
             if tool.kind == 8 {
-                // Seed algae at a physics cell → pixel centre.
-                let px = tool.x as u32 * 3 + 1;
-                let py_phys = tool.y as u32;
-                let vis_h = self.grid.visible_h() as u32;
-                let py_top = vis_h.saturating_sub(1).saturating_sub(py_phys);
-                let py = py_top * 3 + 1;
-                let _ = self.seed_algae(px as u16, py as u16);
+                // One starter organism. A living tank keeps what it has.
+                let _ = self.seed_starter_near(tool.x as i32, tool.y as i32);
                 continue;
             }
             if tool.kind == 9 {
@@ -2347,14 +2501,13 @@ impl Tank {
                 let _ = self.remove_at(tool.x as i32, tool.y as i32, tool.r as i32);
                 continue;
             }
-            if tool.kind == 10 {
-                // Glucose drip into the dissolved field.
-                self.drip_glucose(tool.x as i32, tool.y as i32, tool.r as i32, 180);
-                continue;
-            }
-            if tool.kind == 11 {
-                // Calcium feed: raise the local mineral field (K2#1).
-                self.add_calcium(tool.x as i32, tool.y as i32, tool.r as i32, 96);
+            if tool.kind == 10 || tool.kind == 11 {
+                // One cube. It sinks, then joins the dissolved feed.
+                self.feed_cubes.push(FeedCube {
+                    x: tool.x as i16,
+                    y: tool.y as i16,
+                    kind: tool.kind,
+                });
                 continue;
             }
             if tool.kind == 12 {
