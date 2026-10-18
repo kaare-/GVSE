@@ -2100,3 +2100,28 @@ pub fn side_offset(d: i32, ext: u8) -> i32 {
         std::cmp::Ordering::Equal => 0,
     }
 }
+
+/// Pale-pink cilia fringe drawn just behind a cell (`long` is the beat
+/// frame: every other pixel trails one further). Coordinates may fall
+/// outside the tank; the caller clips.
+pub fn for_cilia_fringe(
+    px: i32,
+    py: i32,
+    w: u8,
+    h: u8,
+    heading: u8,
+    long: bool,
+    mut visit: impl FnMut(i32, i32),
+) {
+    let (bx, by) = heading_delta(heading.wrapping_add(4) % 8);
+    let n = if bx != 0 { h as i32 } else { w as i32 };
+    for k in 0..n {
+        let depth = if long && k % 2 == 1 { 2 } else { 1 };
+        let (x, y) = if bx != 0 {
+            (px + side_offset(bx, w) + bx * (depth - 1), py + k)
+        } else {
+            (px + k, py + side_offset(by, h) + by * (depth - 1))
+        };
+        visit(x, y);
+    }
+}

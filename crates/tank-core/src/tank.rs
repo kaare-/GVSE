@@ -1584,8 +1584,15 @@ impl Tank {
             cell: u32::MAX,
             ..Inspect::default()
         };
-        if owner >= OWNER_BIAS {
-            let id = owner - OWNER_BIAS;
+        let living = if owner >= OWNER_BIAS && secretion_kind(owner).is_none() {
+            self.cells.get(owner - OWNER_BIAS).map(|_| owner - OWNER_BIAS)
+        } else {
+            None
+        };
+        // The pink cilia trail is drawn on empty water, so a tap there
+        // still belongs to the cell that beats it.
+        let id = living.or_else(|| self.cilia_at(px, py));
+        if let Some(id) = id {
             if let Some(c) = self.cells.get(id) {
                 let mc = self.genomes.coeffs(c.genotype, c.mode);
                 let g = self.genomes.genome(c.genotype);
@@ -1607,6 +1614,73 @@ impl Tank {
             }
         }
         rec
+    }
+
+    /// Empty open water, where a cilia fringe is allowed to draw.
+    fn bare_pixel(&self, x: i32, y: i32) -> bool {
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        if x < 0 || y < 0 || x >= pw || y >= ph {
+            return false;
+        }
+        if self.pixels.owner[(y * pw + x) as usize] != 0 {
+            return false;
+        }
+        let (vx, vy) = bio::pixel_to_phys(x as u16, y as u16, self.grid.visible_h() as u32);
+        self.grid.get_visible(vx, vy).is_open()
+    }
+
+    /// Living cell whose cilia fringe covers `(px, py)`, nearest body first.
+    fn cilia_at(&self, px: u32, py: u32) -> Option<u32> {
+        let px = px as i32;
+        let py = py as i32;
+        if !self.bare_pixel(px, py) {
+            return None;
+        }
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        let mut best: Option<(u32, i32)> = None;
+        let mut seen = [u32::MAX; 25];
+        let mut nseen = 0usize;
+        for y in (py - 2).max(0)..=(py + 2).min(ph - 1) {
+            for x in (px - 2).max(0)..=(px + 2).min(pw - 1) {
+                let owner = self.pixels.owner[(y * pw + x) as usize];
+                if owner < OWNER_BIAS || secretion_kind(owner).is_some() {
+                    continue;
+                }
+                let id = owner - OWNER_BIAS;
+                if seen[..nseen].contains(&id) {
+                    continue;
+                }
+                if nseen < seen.len() {
+                    seen[nseen] = id;
+                    nseen += 1;
+                }
+                let Some(c) = self.cells.get(id) else {
+                    continue;
+                };
+                if self.genomes.coeffs(c.genotype, c.mode).cilia == 0 {
+                    continue;
+                }
+                let mut hit = false;
+                let mut visit = |fx: i32, fy: i32| {
+                    if fx == px && fy == py {
+                        hit = true;
+                    }
+                };
+                bio::step::for_cilia_fringe(c.px as i32, c.py as i32, c.w, c.h, c.heading, false, &mut visit);
+                bio::step::for_cilia_fringe(c.px as i32, c.py as i32, c.w, c.h, c.heading, true, &mut visit);
+                if !hit {
+                    continue;
+                }
+                let dist = (c.px as i32 - px).abs() + (c.py as i32 - py).abs();
+                match best {
+                    Some((_, d)) if dist >= d => {}
+                    _ => best = Some((id, dist)),
+                }
+            }
+        }
+        best.map(|(id, _)| id)
     }
 
     /// The lineage card of a living cell's organism.
@@ -1663,23 +1737,39 @@ impl Tank {
     }
 
     /// Pixel bounding box `(x0, y0, x1, y1)` (inclusive) of a living
-    /// organism's cells and secretions — the inspect tracking rectangle.
+    /// organism's cells, secretions, and cilia fringe — the inspect
+    /// tracking rectangle.
     pub fn org_bbox(&self, org: u32) -> Option<(u16, u16, u16, u16)> {
-        let o = self.cells.org(org)?;
-        let mut bb: Option<(u16, u16, u16, u16)> = None;
-        let mut add = |x0: u16, y0: u16, x1: u16, y1: u16| {
-            bb = Some(match bb {
+        fn enclose(bb: &mut Option<(u16, u16, u16, u16)>, x0: u16, y0: u16, x1: u16, y1: u16) {
+            *bb = Some(match *bb {
                 None => (x0, y0, x1, y1),
                 Some(b) => (b.0.min(x0), b.1.min(y0), b.2.max(x1), b.3.max(y1)),
             });
-        };
+        }
+        let o = self.cells.org(org)?;
+        let mut bb: Option<(u16, u16, u16, u16)> = None;
+        let pw = self.pixels.w;
+        let ph = self.pixels.h;
         for s in o.slots.iter().filter(|s| s.cell != bio::store::NONE) {
             if let Some(c) = self.cells.get(s.cell) {
-                add(c.px, c.py, c.px + c.w as u16 - 1, c.py + c.h as u16 - 1);
+                enclose(&mut bb, c.px, c.py, c.px + c.w as u16 - 1, c.py + c.h as u16 - 1);
+                if self.genomes.coeffs(c.genotype, c.mode).cilia > 0 {
+                    // Both beat frames, so the box covers the pink trail
+                    // whether the fringe is short or long this tick.
+                    let px = c.px as i32;
+                    let py = c.py as i32;
+                    let mut add_px = |x: i32, y: i32| {
+                        if x >= 0 && y >= 0 && (x as u32) < pw && (y as u32) < ph {
+                            enclose(&mut bb, x as u16, y as u16, x as u16, y as u16);
+                        }
+                    };
+                    bio::step::for_cilia_fringe(px, py, c.w, c.h, c.heading, false, &mut add_px);
+                    bio::step::for_cilia_fringe(px, py, c.w, c.h, c.heading, true, &mut add_px);
+                }
             }
         }
         for sec in &o.secretions {
-            add(sec.px, sec.py, sec.px, sec.py);
+            enclose(&mut bb, sec.px, sec.py, sec.px, sec.py);
         }
         bb
     }
@@ -1791,30 +1881,23 @@ impl Tank {
         for (_, c) in cells.iter_alive() {
             let mc = genomes.coeffs(c.genotype, c.mode);
             if mc.cilia > 0 {
-                let (bx, by) = bio::program::heading_delta(c.heading.wrapping_add(4) % 8);
                 let beat = c.running && (tick / 4) % 2 == 1;
-                let n = if bx != 0 { c.h } else { c.w } as i32;
-                for k in 0..n {
-                    // Every other pixel trails one further on the beat frame.
-                    let depth = if beat && k % 2 == 1 { 2 } else { 1 };
-                    let (x, y) = if bx != 0 {
-                        (c.px as i32 + bio::step::side_offset(bx, c.w) + bx * (depth - 1), c.py as i32 + k)
-                    } else {
-                        (c.px as i32 + k, c.py as i32 + bio::step::side_offset(by, c.h) + by * (depth - 1))
-                    };
-                    if x < 0 || y < 0 || x >= pw || y >= ph {
-                        continue;
-                    }
-                    let i = (y * pw + x) as usize;
-                    if self.pixels.owner[i] != 0 {
-                        continue;
-                    }
-                    let (vx, vy) = bio::pixel_to_phys(x as u16, y as u16, self.grid.visible_h() as u32);
-                    if !self.grid.get_visible(vx, vy).is_open() {
-                        continue;
-                    }
-                    put(out, i, [0xF0, 0xA6, 0xC0], self.pixels.light[i]);
-                }
+                let pink = bio::Block::Cilia.colour(0);
+                bio::step::for_cilia_fringe(
+                    c.px as i32,
+                    c.py as i32,
+                    c.w,
+                    c.h,
+                    c.heading,
+                    beat,
+                    |x, y| {
+                        if !self.bare_pixel(x, y) {
+                            return;
+                        }
+                        let i = (y * pw + x) as usize;
+                        put(out, i, pink, self.pixels.light[i]);
+                    },
+                );
             }
             if mc.sensor > 0 && mc.sensor_kind == bio::profile::SENSOR_LIGHT {
                 let (dx, dy) = bio::program::heading_delta(c.heading);

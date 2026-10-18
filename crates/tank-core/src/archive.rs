@@ -212,6 +212,31 @@ pub fn portrait(genome: &Genome) -> (u16, u16, Vec<u8>) {
             }
         }
     }
+    let pink = crate::bio::Block::Cilia.colour(0);
+    for (_, c) in cells.iter_alive() {
+        if c.org != org || genomes.coeffs(c.genotype, c.mode).cilia == 0 {
+            continue;
+        }
+        // The trail is this creature's, even when a daughter in the
+        // sandbox happens to be sitting on it. Skip only pixels we
+        // already painted as this body's own tissue.
+        let mut paint = |x: i32, y: i32| {
+            if x < bb.0 as i32 || y < bb.1 as i32 || x > bb.2 as i32 || y > bb.3 as i32 {
+                return;
+            }
+            let lx = (x - bb.0 as i32) as usize;
+            let ly = (y - bb.1 as i32) as usize;
+            let i = (ly * w + lx) * 4;
+            if out[i + 3] != 0 {
+                return;
+            }
+            out[i..i + 3].copy_from_slice(&pink);
+            out[i + 3] = 255;
+        };
+        let (px, py) = (c.px as i32, c.py as i32);
+        crate::bio::step::for_cilia_fringe(px, py, c.w, c.h, c.heading, false, &mut paint);
+        crate::bio::step::for_cilia_fringe(px, py, c.w, c.h, c.heading, true, &mut paint);
+    }
     (w as u16, h as u16, out)
 }
 

@@ -2038,6 +2038,29 @@ fn portraits_are_deterministic_and_show_the_body() {
     assert!(ivory >= 1, "spiny portrait shows its bone ({sw}×{sh})");
 }
 
+/// The pale-pink cilia trail is part of the swimmer: a tap on it selects
+/// the cell, the tracking box reaches it, and the book portrait draws it.
+#[test]
+fn cilia_fringe_is_part_of_the_swimmer() {
+    use crate::archive::portrait;
+    use crate::bio::Genome;
+    let (w, h, pic) = portrait(&Genome::swimmer());
+    let pink = pic.chunks(4).filter(|p| *p == [0xF0, 0xA6, 0xC0, 255]).count();
+    assert!(pink >= 1, "swimmer portrait includes its cilia ({w}×{h}, pink={pink})");
+
+    let mut tank = water_box(11, 16, 16, 14);
+    tank.set_lambda_scale_q8(0);
+    let id = tank.seed_genome_at(24, 24, Genome::swimmer()).expect("seed");
+    let c = *tank.cell(id).expect("alive");
+    // A placed seed heads up (heading 2); the fringe trails one pixel down.
+    let hit = tank.inspect(c.px as u32, c.py as u32 + 1);
+    assert_eq!(hit.cell, id, "a tap on the pink fringe selects the swimmer");
+    assert_eq!(hit.org, c.org);
+    let bb = tank.org_bbox(c.org).expect("bbox");
+    assert!(bb.3 >= c.py + 1, "the box reaches the fringe ({bb:?})");
+    assert!(bb.0 <= c.px && bb.2 >= c.px && bb.1 <= c.py);
+}
+
 /// Phase 3 — archive a creature, start a new tank from it: the record
 /// round-trips, the species is pinned, and the new tank's lineage
 /// continues the archived species by name and depth with the specimen
