@@ -118,16 +118,17 @@ final class TankMetalView: UIView {
         let k = tankFitScale(drawableW: drawableW, drawableH: drawableH, width: CGFloat(width), height: CGFloat(height))
         let tw = CGFloat(width) * k
         let th = CGFloat(height) * k
+        let origin = tankContentOrigin(drawableW: drawableW, drawableH: drawableH, contentW: tw, contentH: th)
         var uniforms = Uniforms(
             window: SIMD4<Float>(
-                Float((drawableW - tw) * 0.5 / drawableW),
-                Float((drawableH - th) * 0.5 / drawableH),
+                Float(origin.x / drawableW),
+                Float(origin.y / drawableH),
                 Float(tw / drawableW),
                 Float(th / drawableH)
             ),
             lensCenter: SIMD2<Float>(0, 0),
             lensRadius: 0,
-            lensScale: 6,
+            lensScale: tankLensScale,
             aspect: Float(drawableW / drawableH),
             pad: 0
         )
@@ -207,11 +208,21 @@ final class TankMetalView: UIView {
     }
 }
 
+/// How far the glass zooms. The needle uses the same number so a tap on
+/// the magnified creature hits that creature, not the tank behind it.
+let tankLensScale: Float = 6
+
 /// Scale that fills the width. Fitting the height left thick black bars
-/// on either side of a tall tank; the top and bottom clip instead.
+/// on either side of a tall tank.
 func tankFitScale(drawableW: CGFloat, drawableH: CGFloat, width: CGFloat, height: CGFloat) -> CGFloat {
     guard width > 0, height > 0, drawableH > 0 else { return 1 }
     return drawableW / width
+}
+
+/// The tank sits on the bottom of the view, just above the tool bar.
+/// Extra height is clipped off the top, so the floor stays visible.
+func tankContentOrigin(drawableW: CGFloat, drawableH: CGFloat, contentW: CGFloat, contentH: CGFloat) -> CGPoint {
+    CGPoint(x: (drawableW - contentW) * 0.5, y: drawableH - contentH)
 }
 
 struct TankScreen: UIViewRepresentable {

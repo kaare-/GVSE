@@ -32,7 +32,7 @@ enum PixelPrompt {
         show(page)
     }
 
-    private static func show(_ page: UIViewController) {
+    private static func show(_ page: EditorPage) {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else {
             return
@@ -43,6 +43,7 @@ enum PixelPrompt {
         window.backgroundColor = UIColor(red: 0.09, green: 0.08, blue: 0.07, alpha: 1)
         window.rootViewController = page
         let previous = scene.windows.first(where: \.isKeyWindow)
+        page.willEdit = { previous?.isHidden = true }
         host = PromptHost(window: window, previous: previous)
         window.makeKeyAndVisible()
     }
@@ -65,15 +66,23 @@ private final class PromptHost {
     func close() {
         window.isHidden = true
         window.rootViewController = nil
+        previous?.isHidden = false
         previous?.makeKey()
     }
 }
 
+/// The room is full of pixel canvases. Hide it before the keyboard
+/// appears, or the snapshot crashes the app.
+private protocol EditorPage: UIViewController {
+    var willEdit: (() -> Void)? { get set }
+}
+
 /// One line, no input accessory. A zero-size accessory crashed on focus.
-private final class LineController: UIViewController, UITextFieldDelegate {
+private final class LineController: UIViewController, UITextFieldDelegate, EditorPage {
     private let field = UITextField()
     private let heading: String
     private let onDone: (String?) -> Void
+    var willEdit: (() -> Void)?
 
     init(title: String, text: String, placeholder: String, onDone: @escaping (String?) -> Void) {
         self.heading = title
@@ -135,6 +144,8 @@ private final class LineController: UIViewController, UITextFieldDelegate {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        willEdit?()
+        willEdit = nil
         field.becomeFirstResponder()
     }
 
@@ -168,9 +179,10 @@ private final class LineController: UIViewController, UITextFieldDelegate {
 }
 
 /// Notes editor. Same isolated window, still with no accessory bar.
-private final class NoteController: UIViewController {
+private final class NoteController: UIViewController, EditorPage {
     private let editor = UITextView()
     private let onDone: (String?) -> Void
+    var willEdit: (() -> Void)?
 
     init(text: String, onDone: @escaping (String?) -> Void) {
         self.onDone = onDone
@@ -223,6 +235,8 @@ private final class NoteController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        willEdit?()
+        willEdit = nil
         editor.becomeFirstResponder()
     }
 

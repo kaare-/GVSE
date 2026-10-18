@@ -173,7 +173,7 @@ final class TankSession: ObservableObject {
         let savedLight = UserDefaults.standard.double(forKey: "lightSlider")
         lightSlider = savedLight == 0 ? 1 : min(1.5, max(0.25, savedLight))
         doorName = UserDefaults.standard.string(forKey: "doorName") ?? ""
-        favouriteId = UInt64(UserDefaults.standard.integer(forKey: "favouriteId"))
+        favouriteId = Self.storedFavourite()
         showStartGuide = !UserDefaults.standard.bool(forKey: "startGuideDone")
         PixelKeyboard.applyAppearance()
         reduceMotionObserver = NotificationCenter.default.addObserver(
@@ -357,7 +357,7 @@ final class TankSession: ObservableObject {
         UserDefaults.standard.set(15.0, forKey: "tBase")
         UserDefaults.standard.set(1.0, forKey: "lightSlider")
         UserDefaults.standard.set("", forKey: "doorName")
-        UserDefaults.standard.set(0, forKey: "favouriteId")
+        UserDefaults.standard.removeObject(forKey: "favouriteId")
         UserDefaults.standard.set(false, forKey: "startGuideDone")
         AmbientAudio.shared.setMuted(false)
         let targets: [TankContainer] = [.main, .sample(0), .sample(1), .sample(2)]
@@ -475,13 +475,22 @@ final class TankSession: ObservableObject {
         } else {
             favouriteId = list[0].id
         }
-        UserDefaults.standard.set(Int(favouriteId), forKey: "favouriteId")
-        showHint("FAVOURITE SET")
+        UserDefaults.standard.set(String(favouriteId), forKey: "favouriteId")
+    }
+
+    /// Specimen ids are full 64-bit hashes. `Int` truncates by trapping.
+    private static func storedFavourite() -> UInt64 {
+        let defaults = UserDefaults.standard
+        if let raw = defaults.string(forKey: "favouriteId"), let id = UInt64(raw) {
+            return id
+        }
+        let legacy = defaults.integer(forKey: "favouriteId")
+        return legacy > 0 ? UInt64(legacy) : 0
     }
 
     func clearFavourite() {
         favouriteId = 0
-        UserDefaults.standard.set(0, forKey: "favouriteId")
+        UserDefaults.standard.removeObject(forKey: "favouriteId")
     }
 
     func dismissStartGuide(skipped: Bool) {
@@ -503,6 +512,56 @@ final class TankSession: ObservableObject {
         var h: UInt32 = 0
         guard let ptr = tank_pixels(handle, &w, &h), w > 0, h > 0 else { return nil }
         return rgbaImage(ptr: ptr, width: Int(w), height: Int(h), scale: max(1, scale))
+    }
+
+    /// Tiny nearest-neighbour picture of a tank, for the lobby glass.
+    /// The open tank is read live. The others are loaded from their saves
+    /// and dropped again, so the running tank is left alone.
+    func lobbyPreview(_ container: TankContainer, width: Int, height: Int) -> UIImage? {
+        let dw = max(1, width)
+        let dh = max(1, height)
+        if container == self.container {
+            return downscale(handle, width: dw, height: dh)
+        }
+        let url = saveURL(for: container)
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        let loaded: OpaquePointer? = data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
+            return tank_load(base, raw.count)
+        }
+        guard let loaded else { return nil }
+        defer { tank_free(loaded) }
+        return downscale(loaded, width: dw, height: dh)
+    }
+
+    private func downscale(_ handle: OpaquePointer?, width: Int, height: Int) -> UIImage? {
+        guard let handle else { return nil }
+        var sw: UInt32 = 0
+        var sh: UInt32 = 0
+        guard let ptr = tank_pixels(handle, &sw, &sh), sw > 0, sh > 0 else { return nil }
+        let srcW = Int(sw)
+        let srcH = Int(sh)
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            let sy = min(srcH - 1, y * srcH / height)
+            for x in 0..<width {
+                let sx = min(srcW - 1, x * srcW / width)
+                let s = (sy * srcW + sx) * 4
+                let d = (y * width + x) * 4
+                rgba[d] = ptr[s]
+                rgba[d + 1] = ptr[s + 1]
+                rgba[d + 2] = ptr[s + 2]
+                rgba[d + 3] = 255
+            }
+        }
+        return rgba.withUnsafeBytes { raw in
+            rgbaImage(
+                ptr: raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                width: width,
+                height: height,
+                scale: 1
+            )
+        }
     }
 
     /// Crop around the inspected organism bbox.
@@ -798,26 +857,34 @@ final class TankSession: ObservableObject {
     }
 
     /// Any living cell inside the box, centre first. Works while the sim is paused.
+    /// A box sitting on the looking glass reads the magnified pixels, not the
+    /// tank underneath.
     private func inspect(in rect: CGRect, ended: Bool) {
         guard let handle, let b = blit() else { return }
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let onGlass = lensContains(center)
         func pix(_ p: CGPoint) -> (Int, Int) {
-            let x = (p.x * b.scale - b.ox) / b.k
-            let y = (p.y * b.scale - b.oy) / b.k
-            return (Int(x.rounded()), Int(y.rounded()))
+            let seen = pixelSeen(at: p, blit: b, forceZoom: onGlass)
+            return (Int(seen.x.rounded()), Int(seen.y.rounded()))
         }
         let p0 = pix(CGPoint(x: rect.minX, y: rect.minY))
         let p1 = pix(CGPoint(x: rect.maxX, y: rect.maxY))
-        let x0 = max(0, min(p0.0, p1.0))
-        let y0 = max(0, min(p0.1, p1.1))
-        let x1 = min(Int(b.w) - 1, max(p0.0, p1.0))
-        let y1 = min(Int(b.h) - 1, max(p0.1, p1.1))
+        var x0 = max(0, min(p0.0, p1.0))
+        var y0 = max(0, min(p0.1, p1.1))
+        var x1 = min(Int(b.w) - 1, max(p0.0, p1.0))
+        var y1 = min(Int(b.h) - 1, max(p0.1, p1.1))
+        let mid = pixelSeen(at: center, blit: b, forceZoom: onGlass)
+        let cap = 48
+        x0 = max(x0, Int(mid.x.rounded()) - cap)
+        y0 = max(y0, Int(mid.y.rounded()) - cap)
+        x1 = min(x1, Int(mid.x.rounded()) + cap)
+        y1 = min(y1, Int(mid.y.rounded()) + cap)
         guard x0 <= x1, y0 <= y1 else {
             if ended { inspected = nil }
             return
         }
-        let cx = (x0 + x1) / 2
-        let cy = (y0 + y1) / 2
-        if let hit = nearestCreature(handle, x0: x0, y0: y0, x1: x1, y1: y1, cx: cx, cy: cy) {
+        let focus = pix(center)
+        if let hit = nearestCreature(handle, x0: x0, y0: y0, x1: x1, y1: y1, cx: focus.0, cy: focus.1) {
             apply(hit)
             return
         }
@@ -952,7 +1019,38 @@ final class TankSession: ObservableObject {
         let k = tankFitScale(drawableW: drawableW, drawableH: drawableH, width: CGFloat(w), height: CGFloat(h))
         let tw = CGFloat(w) * k
         let th = CGFloat(h) * k
-        return Blit(w: CGFloat(w), h: CGFloat(h), k: k, ox: (drawableW - tw) * 0.5, oy: (drawableH - th) * 0.5, scale: scale)
+        let origin = tankContentOrigin(
+            drawableW: drawableW,
+            drawableH: drawableH,
+            contentW: tw,
+            contentH: th
+        )
+        return Blit(w: CGFloat(w), h: CGFloat(h), k: k, ox: origin.x, oy: origin.y, scale: scale)
+    }
+
+    /// The looking glass is a circle in view points.
+    private func lensContains(_ point: CGPoint) -> Bool {
+        guard let lens = metal?.magnifier else { return false }
+        return hypot(point.x - lens.center.x, point.y - lens.center.y) < lens.radius
+    }
+
+    /// Buffer pixel under a view point. Inside the glass (or when the
+    /// selection box is on the glass) this is the magnified sample.
+    private func pixelSeen(at point: CGPoint, blit b: Blit, forceZoom: Bool) -> CGPoint {
+        let plain = CGPoint(
+            x: (point.x * b.scale - b.ox) / b.k,
+            y: (point.y * b.scale - b.oy) / b.k
+        )
+        guard let lens = metal?.magnifier, forceZoom || lensContains(point) else { return plain }
+        let center = CGPoint(
+            x: (lens.center.x * b.scale - b.ox) / b.k,
+            y: (lens.center.y * b.scale - b.oy) / b.k
+        )
+        let zoom = CGFloat(tankLensScale)
+        return CGPoint(
+            x: center.x + (plain.x - center.x) / zoom,
+            y: center.y + (plain.y - center.y) / zoom
+        )
     }
 
     /// View point → tank pixel (top-left origin, as `tank_pixels`).
@@ -971,7 +1069,17 @@ final class TankSession: ObservableObject {
         let top = (CGFloat(y0) * b.k + b.oy) / b.scale
         let right = (CGFloat(Int(x1) + 1) * b.k + b.ox) / b.scale
         let bottom = (CGFloat(Int(y1) + 1) * b.k + b.oy) / b.scale
-        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
+        let plain = CGRect(x: left, y: top, width: right - left, height: bottom - top)
+        guard let lens = metal?.magnifier else { return plain }
+        let zoom = CGFloat(tankLensScale)
+        let reach = lens.radius / zoom
+        guard hypot(plain.midX - lens.center.x, plain.midY - lens.center.y) < reach else { return plain }
+        return CGRect(
+            x: lens.center.x + (plain.minX - lens.center.x) * zoom,
+            y: lens.center.y + (plain.minY - lens.center.y) * zoom,
+            width: plain.width * zoom,
+            height: plain.height * zoom
+        )
     }
 
     /// Map a view touch to a visible physics cell (origin bottom-left).

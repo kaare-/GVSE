@@ -19,15 +19,18 @@ enum RoomArt {
     static let treeInner = Spot(x: 12, y: 50, w: 44, h: 30)
     static let treeHit = Spot(x: 8, y: 46, w: 52, h: 52)
 
-    static let fuseBox = Spot(x: 78, y: 48, w: 36, h: 38)
-    static let fuseHit = Spot(x: 78, y: 48, w: 38, h: 50)
+    /// Small breaker panel, low on the right.
+    static let fuseBox = Spot(x: 98, y: 214, w: 18, h: 24)
+    static let fuseHit = Spot(x: 96, y: 212, w: 22, h: 28)
     static let fuseLamps = [
-        Spot(x: 84, y: 54, w: 6, h: 6),
-        Spot(x: 84, y: 66, w: 6, h: 6),
-        Spot(x: 84, y: 78, w: 6, h: 6),
+        Spot(x: 102, y: 218, w: 4, h: 4),
+        Spot(x: 102, y: 224, w: 4, h: 4),
+        Spot(x: 102, y: 230, w: 4, h: 4),
     ]
 
     static let tank = Spot(x: 16, y: 100, w: 88, h: 60)
+    /// The glass inside the frame. The live tank is drawn here.
+    static let tankGlass = Spot(x: 19, y: 103, w: 82, h: 54)
 
     /// Three sample vials on the shelf. Tap one to look in; empty it from
     /// the long-press menu.
@@ -35,6 +38,24 @@ enum RoomArt {
         Spot(x: 20, y: 17, w: 12, h: 17),
         Spot(x: 34, y: 17, w: 12, h: 17),
         Spot(x: 48, y: 17, w: 12, h: 17),
+    ]
+
+    static func vialGlass(_ index: Int) -> Spot {
+        let v = vials[index]
+        return Spot(x: v.x + 1, y: v.y + 2, w: 10, h: 13)
+    }
+
+    /// A jar of odd tools under the right end of the shelf.
+    static let toolJar = Spot(x: 104, y: 44, w: 14, h: 18)
+
+    /// Where a vine leaves its pot. Length is not painted; it grows later.
+    struct Vine {
+        var x, y, sway: Int
+    }
+
+    static let vines = [
+        Vine(x: 5, y: 40, sway: 5),
+        Vine(x: 88, y: 42, sway: 4),
     ]
 
     static let book = Spot(x: 6, y: 200, w: 28, h: 30)
@@ -45,8 +66,9 @@ enum RoomArt {
     static let crateInner = Spot(x: 52, y: 210, w: 22, h: 14)
     static let crateHit = Spot(x: 46, y: 204, w: 34, h: 40)
 
-    static let sign = Spot(x: 86, y: 214, w: 28, h: 14)
-    static let signHit = Spot(x: 82, y: 210, w: 34, h: 36)
+    /// Plaque on the bench, directly under the main tank.
+    static let sign = Spot(x: 36, y: 159, w: 48, h: 7)
+    static let signHit = Spot(x: 28, y: 156, w: 64, h: 14)
 
     static func cgImage() -> CGImage {
         let pix = Pix(w: w, h: h)
@@ -135,7 +157,6 @@ private final class Pix {
         shafts()
         shelf()
         tree()
-        fuse()
         lamps()
         tank()
         bench()
@@ -143,7 +164,9 @@ private final class Pix {
         floor()
         archiveBook()
         favouriteCrate()
-        doorPlaque()
+        tankPlaque()
+        fuse()
+        toolJar()
     }
 
     private func planks() {
@@ -194,8 +217,6 @@ private final class Pix {
         ], [
             "g": Ink.plantDk, "G": Ink.plant, " ": 0,
         ])
-        vine(5, 34, 58, sway: 5)
-        vine(9, 36, 50, sway: 4)
 
         for spot in RoomArt.vials {
             vial(spot.x, spot.y)
@@ -224,8 +245,6 @@ private final class Pix {
             "gGG Gg",
             " gG g ",
         ], ["g": Ink.plantDk, "G": Ink.plant, " ": 0])
-        vine(98, 36, 52, sway: 4)
-        vine(104, 38, 46, sway: 3)
     }
 
     private func tree() {
@@ -242,19 +261,14 @@ private final class Pix {
 
     private func fuse() {
         let b = RoomArt.fuseBox
-        fill(96, 38, 3, b.y - 36, Ink.metalDk)
         fill(b.x, b.y, b.w, b.h, Ink.metal)
-        fill(b.x + 2, b.y + 2, b.w - 4, b.h - 4, Ink.metalDk)
-        fill(b.x + 4, b.y + 4, b.w - 8, b.h - 8, 0x5A6268)
+        fill(b.x + 1, b.y + 1, b.w - 2, b.h - 2, Ink.metalDk)
+        fill(b.x + 2, b.y + 2, b.w - 4, b.h - 4, 0x5A6268)
         for lamp in RoomArt.fuseLamps {
-            disc(lamp.x + lamp.w / 2, lamp.y + lamp.h / 2, 3, Ink.lampOff)
-            fill(lamp.x + lamp.w + 2, lamp.y + 1, 12, 3, Ink.ivory)
-            fill(lamp.x + lamp.w + 2, lamp.y + 4, 12, 1, Ink.metalDk)
+            disc(lamp.x + lamp.w / 2, lamp.y + lamp.h / 2, 2, Ink.lampOff)
         }
         set(b.x + 2, b.y + 2, Ink.metalLt)
         set(b.x + b.w - 3, b.y + 2, Ink.metalLt)
-        set(b.x + 2, b.y + b.h - 3, Ink.metalLt)
-        set(b.x + b.w - 3, b.y + b.h - 3, Ink.metalLt)
     }
 
     private func lamps() {
@@ -279,50 +293,11 @@ private final class Pix {
 
     private func tank() {
         let t = RoomArt.tank
+        let g = RoomArt.tankGlass
         fill(t.x, t.y, t.w, t.h, Ink.black)
-        let ix = t.x + 3
-        let iy = t.y + 3
-        let iw = t.w - 6
-        let ih = t.h - 6
-        fill(ix, iy, iw, ih, Ink.waterD)
-        fill(ix, iy, iw, 2, Ink.waterL)
-        fill(ix, iy + 2, iw, 5, Ink.waterM)
-        fill(ix, iy + 18, iw, ih - 28, 0x10283C)
-        let sandY = iy + ih - 7
-        fill(ix, sandY, iw, 7, Ink.sand)
-        for x in stride(from: ix, to: ix + iw, by: 2) {
-            set(x, sandY + 2, Ink.sandDk)
-            set(x + 1, sandY + 5, 0xC49860)
-            if x % 5 == 0 { set(x, sandY + 7, 0x5A3C28) }
-        }
-        // Rock mound and a few stalks. Chunks, not curves.
-        fill(ix + 28, sandY - 6, 20, 6, 0x3A4038)
-        fill(ix + 32, sandY - 9, 12, 4, 0x2A322C)
-        stalk(ix + 16, iy + 16, sandY)
-        stalk(ix + 30, iy + 8, sandY - 6)
-        stalk(ix + 40, iy + 20, sandY - 4)
-        stalk(ix + 52, iy + 12, sandY)
-        stalk(ix + 64, iy + 22, sandY)
-        for (x, y, c) in [
-            (ix + 12, iy + 14, Ink.algaeLt),
-            (ix + 22, iy + 24, Ink.algae),
-            (ix + 48, iy + 18, Ink.glow),
-            (ix + 60, iy + 28, Ink.algaeLt),
-            (ix + 36, iy + 30, Ink.plantLt),
-            (ix + 70, iy + 16, Ink.algae),
-        ] {
-            set(x, y, c)
-        }
-        fill(ix, iy, iw, 1, 0x9EC8D4)
-    }
-
-    private func stalk(_ x: Int, _ top: Int, _ bottom: Int) {
-        guard bottom > top else { return }
-        for y in top..<bottom {
-            set(x, y, y % 3 == 0 ? Ink.algaeLt : Ink.algae)
-            if y % 4 == 0 { set(x + 1, y, Ink.plant) }
-            if y % 5 == 2 { set(x - 1, y, Ink.plantDk) }
-        }
+        fill(g.x, g.y, g.w, g.h, 0x101820)
+        fill(t.x, t.y, t.w, 1, 0x9EC8D4)
+        fill(t.x, t.y + t.h - 1, t.w, 1, 0x203040)
     }
 
     private func bench() {
@@ -399,39 +374,39 @@ private final class Pix {
         fill(c.x + 1, c.y + c.h, c.w - 2, 2, 0x120C0E)
     }
 
-    private func doorPlaque() {
+    private func tankPlaque() {
         let s = RoomArt.sign
         fill(s.x, s.y, s.w, s.h, Ink.brass)
-        fill(s.x + 2, s.y + 2, s.w - 4, s.h - 4, Ink.brassDk)
-        set(s.x + 2, s.y + 2, Ink.glow)
-        set(s.x + s.w - 3, s.y + 2, Ink.glow)
-        set(s.x + 2, s.y + s.h - 3, Ink.glow)
-        set(s.x + s.w - 3, s.y + s.h - 3, Ink.glow)
-        fill(s.x + 1, s.y + s.h, s.w - 2, 2, 0x120C0E)
+        fill(s.x + 1, s.y + 1, s.w - 2, s.h - 2, Ink.brassDk)
+    }
+
+    private func toolJar() {
+        let j = RoomArt.toolJar
+        fill(j.x + 3, j.y + 4, 8, 2, Ink.brass)
+        fill(j.x + 1, j.y + 6, 1, 11, Ink.glass)
+        fill(j.x + 12, j.y + 6, 1, 11, Ink.glass)
+        fill(j.x + 2, j.y + 6, 10, 11, 0x101820)
+        fill(j.x + 1, j.y + 16, 12, 1, Ink.glass)
+        // Scissors and a couple of other handles, sticking out of the mouth.
+        set(j.x + 4, j.y, Ink.metalLt)
+        set(j.x + 4, j.y + 1, Ink.metalLt)
+        set(j.x + 5, j.y + 2, Ink.metal)
+        set(j.x + 8, j.y, Ink.metalLt)
+        set(j.x + 8, j.y + 1, Ink.metal)
+        set(j.x + 7, j.y + 2, Ink.metal)
+        set(j.x + 6, j.y + 3, Ink.brass)
+        set(j.x + 9, j.y + 1, Ink.woodLt)
+        set(j.x + 10, j.y + 2, Ink.wood)
+        set(j.x + 3, j.y + 2, 0xC8D0D4)
     }
 
     private func vial(_ x: Int, _ y: Int) {
         fill(x + 2, y, 8, 2, Ink.brass)
         fill(x, y + 2, 1, 14, Ink.glass)
         fill(x + 11, y + 2, 1, 14, Ink.glass)
-        fill(x + 1, y + 2, 10, 14, Ink.jar)
-        fill(x + 1, y + 8, 10, 8, Ink.liquid)
+        fill(x + 1, y + 2, 10, 14, 0x101820)
         set(x + 2, y + 4, Ink.glow)
         fill(x, y + 16, 12, 1, Ink.glass)
-    }
-
-    private func vine(_ x0: Int, _ y0: Int, _ y1: Int, sway: Int) {
-        var x = x0
-        var y = y0
-        while y < y1 {
-            set(x, y, Ink.plant)
-            if y % 4 == 0 { set(x + 1, y, Ink.plantLt) }
-            if y % 6 == 0 { set(x - 1, y + 1, Ink.plantDk) }
-            y += 2
-            x += ((y / sway) % 2 == 0) ? 1 : -1
-            if x < 1 { x = 1 }
-            if x > w - 2 { x = w - 2 }
-        }
     }
 
     private func disc(_ cx: Int, _ cy: Int, _ r: Int, _ c: Int) {

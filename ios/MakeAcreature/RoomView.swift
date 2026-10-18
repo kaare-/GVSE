@@ -13,9 +13,10 @@ struct RoomView: View {
     var onOpenLog: () -> Void
 
     @State private var tree: [SpeciesNode] = []
-    @State private var editingSign = false
-    @State private var signDraft = ""
     @State private var confirmEmpty: Int?
+    @State private var vines: [CGFloat] = [22, 22]
+    @State private var shears = false
+    @State private var thumbs: [UIImage?] = [nil, nil, nil, nil]
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -32,6 +33,13 @@ struct RoomView: View {
                     )
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
 
+                glassThumb(thumbs[0], RoomArt.tankGlass, layout)
+                ForEach(0..<3, id: \.self) { i in
+                    glassThumb(thumbs[i + 1], RoomArt.vialGlass(i), layout)
+                }
+                vineLayer(layout)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+
                 place(RoomArt.treeHit, layout) { treeButton(layout) }
                 place(RoomArt.fuseHit, layout) { fuseButton(layout) }
                 place(RoomArt.tank, layout) { tankButton }
@@ -41,18 +49,25 @@ struct RoomView: View {
                 place(RoomArt.bookHit, layout) { bookButton(layout) }
                 place(RoomArt.logHit, layout) { logButton }
                 place(RoomArt.crateHit, layout) { crateButton(layout) }
-                place(RoomArt.signHit, layout) { signButton(layout) }
+                place(RoomArt.signHit, layout) { signButton }
+                place(RoomArt.toolJar, layout) { toolJarButton }
+                if shears {
+                    ForEach(0..<RoomArt.vines.count, id: \.self) { i in
+                        place(vineHit(i), layout) { vineButton(i) }
+                    }
+                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .ignoresSafeArea()
         .onAppear {
             tree = session.speciesTree()
-            signDraft = session.doorName
+            vines = LobbyGrowth.catchUp()
+            refreshThumbs(others: true)
         }
-        .onReceive(refresh) { _ in tree = session.speciesTree() }
-        .sheet(isPresented: $editingSign) {
-            doorSignEditor
+        .onReceive(refresh) { _ in
+            tree = session.speciesTree()
+            refreshThumbs(others: false)
         }
         .confirmationDialog(
             "Empty sample tank \((confirmEmpty ?? 0) + 1)? It goes back to a clean glass.",
@@ -65,6 +80,8 @@ struct RoomView: View {
             Button("Empty tank", role: .destructive) {
                 if let i = confirmEmpty {
                     session.emptySample(i)
+                    let g = RoomArt.vialGlass(i)
+                    thumbs[i + 1] = session.lobbyPreview(.sample(i), width: g.w, height: g.h)
                 }
                 confirmEmpty = nil
             }
@@ -138,21 +155,9 @@ struct RoomView: View {
             session.openMain()
             onBack()
         } label: {
-            VStack(spacing: 3) {
-                PixelLabel(text: "TANK", scale: 2, color: Palette.highlight)
-                if session.container.sampleIndex == nil {
-                    PixelLabel(
-                        text: "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)",
-                        scale: 1,
-                        color: Palette.dimPaper
-                    )
-                    PixelLabel(text: "\(session.liveCells) CELLS", scale: 1)
-                } else {
-                    PixelLabel(text: "MAIN", scale: 1, color: Palette.dimPaper)
-                }
-            }
+            Color.clear
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FullHit())
         .a11yButton("Main tank, \(session.liveCells) cells", hint: "Look into the main tank")
     }
 
@@ -217,8 +222,11 @@ struct RoomView: View {
         } label: {
             ZStack {
                 if let fav = session.favouriteSpecimen {
-                    portrait(fav, side: min(inner.width, inner.height))
-                        .offset(y: inner.midY - hit.midY)
+                    let side = min(inner.width, inner.height)
+                    if side >= 4 {
+                        portrait(fav, side: side)
+                            .offset(y: inner.midY - hit.midY)
+                    }
                 } else {
                     PixelLabel(text: "PICK", scale: 1, color: Palette.dimPaper)
                         .offset(y: inner.midY - hit.midY)
@@ -236,74 +244,108 @@ struct RoomView: View {
         }
     }
 
-    private func signButton(_ layout: RoomLayout) -> some View {
-        let plaque = layout.rect(RoomArt.sign)
-        let hit = layout.rect(RoomArt.signHit)
-        return Button { editingSign = true } label: {
-            ZStack {
-                PixelLabel(
-                    text: shortSign(session.doorName),
-                    scale: 1,
-                    color: Color(red: 0.16, green: 0.1, blue: 0.04)
-                )
-                .offset(y: plaque.midY - hit.midY)
-                VStack {
-                    Spacer(minLength: 0)
-                    PixelLabel(text: "DOOR SIGN", scale: 1, color: Palette.dimPaper)
-                }
+    private var signButton: some View {
+        let name = session.doorName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shown = name.isEmpty ? "MAIN TANK" : shortSign(name)
+        return Button {
+            PixelPrompt.singleLine(title: "TANK", text: name, placeholder: "MAIN TANK") { entered in
+                session.setDoorName(entered)
             }
+        } label: {
+            PixelLabel(
+                text: shown,
+                scale: 1,
+                color: Color(red: 0.16, green: 0.1, blue: 0.04)
+            )
         }
-        .buttonStyle(.plain)
-        .a11yButton("Door sign", hint: session.doorName.isEmpty ? "Set your name" : session.doorName)
+        .buttonStyle(FullHit())
+        .a11yButton("Tank sign", hint: shown)
     }
 
-    private var doorSignEditor: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            PixelLabel(text: "DOOR SIGN", scale: 3, color: Palette.highlight)
-            PixelLabel(text: "YOUR NAME ON THE DOOR", scale: 1, color: Palette.dimPaper)
-            Button {
-                PixelPrompt.singleLine(title: "DOOR SIGN", text: signDraft, placeholder: "NAME") { entered in
-                    signDraft = String(entered.prefix(24))
-                    session.setDoorName(signDraft)
-                }
-            } label: {
-                VStack(alignment: .leading, spacing: 4) {
-                    PixelLabel(text: "NAME", scale: 1, color: Palette.dimPaper)
-                    PixelLabel(
-                        text: signDraft.isEmpty ? "TAP TO NAME" : signDraft.uppercased(),
-                        scale: 2,
-                        color: Palette.highlight,
-                        maxWidth: 240
-                    )
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(white: 0.14))
-                .overlay(Rectangle().stroke(Palette.highlight, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            HStack {
-                Button {
-                    editingSign = false
-                } label: {
-                    PixelPanel { PixelLabel(text: "CANCEL", scale: 2) }
-                }
-                .buttonStyle(.plain)
-                Spacer()
-                Button {
-                    session.setDoorName(signDraft)
-                    editingSign = false
-                } label: {
-                    PixelPanel { PixelLabel(text: "HANG IT", scale: 2, color: Palette.highlight) }
-                }
-                .buttonStyle(.plain)
-            }
-            Spacer()
+    private var toolJarButton: some View {
+        Button {
+            shears.toggle()
+        } label: {
+            Color.clear
         }
-        .padding(16)
-        .background(Palette.panel.ignoresSafeArea())
-        .ignoresSafeArea(.keyboard)
-        .preferredColorScheme(.dark)
+        .buttonStyle(FullHit())
+        .a11yButton("Jar")
+    }
+
+    private func vineButton(_ index: Int) -> some View {
+        Button {
+            vines[index] = LobbyGrowth.trim(index)
+            shears = false
+        } label: {
+            Color.clear
+        }
+        .buttonStyle(FullHit())
+        .accessibilityHidden(true)
+    }
+
+    private func vineHit(_ index: Int) -> RoomArt.Spot {
+        let vine = RoomArt.vines[index]
+        let len = max(8, Int(vines[index]))
+        return RoomArt.Spot(x: vine.x - 3, y: vine.y, w: 10, h: len)
+    }
+
+    @ViewBuilder
+    private func glassThumb(_ image: UIImage?, _ spot: RoomArt.Spot, _ layout: RoomLayout) -> some View {
+        if let image {
+            let r = layout.rect(spot)
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.none)
+                .frame(width: r.width, height: r.height)
+                .position(x: r.midX, y: r.midY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func vineLayer(_ layout: RoomLayout) -> some View {
+        let s = layout.s
+        return Canvas { ctx, _ in
+            for (i, vine) in RoomArt.vines.enumerated() {
+                let len = vines.indices.contains(i) ? vines[i] : 22
+                var x = CGFloat(vine.x)
+                var y = CGFloat(vine.y)
+                let end = y + len
+                var step = 0
+                while y < end {
+                    let ink: Color = step % 3 == 0
+                        ? Color(red: 0.42, green: 0.72, blue: 0.29)
+                        : Color(red: 0.18, green: 0.48, blue: 0.22)
+                    let rect = CGRect(x: x * s, y: y * s, width: max(s, 1), height: max(s, 1))
+                    ctx.fill(Path(rect), with: .color(ink))
+                    if step % 4 == 0 {
+                        let leaf = CGRect(x: (x + 1) * s, y: y * s, width: max(s, 1), height: max(s, 1))
+                        ctx.fill(Path(leaf), with: .color(Color(red: 0.10, green: 0.30, blue: 0.13)))
+                    }
+                    y += 2
+                    let sway = max(vine.sway, 1)
+                    x += (Int(y) / sway) % 2 == 0 ? 1 : -1
+                    x = min(CGFloat(RoomArt.w - 2), max(1, x))
+                    step += 1
+                }
+            }
+        }
+        .frame(width: CGFloat(RoomArt.w) * s, height: CGFloat(RoomArt.h) * s)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func refreshThumbs(others: Bool) {
+        let glass = RoomArt.tankGlass
+        thumbs[0] = session.lobbyPreview(.main, width: glass.w, height: glass.h)
+        if others {
+            for i in 0..<3 {
+                let g = RoomArt.vialGlass(i)
+                thumbs[i + 1] = session.lobbyPreview(.sample(i), width: g.w, height: g.h)
+            }
+        } else if let i = session.container.sampleIndex {
+            let g = RoomArt.vialGlass(i)
+            thumbs[i + 1] = session.lobbyPreview(.sample(i), width: g.w, height: g.h)
+        }
     }
 
     private func shortSign(_ name: String) -> String {
@@ -319,6 +361,36 @@ private struct FullHit: ButtonStyle {
         configuration.label
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
+    }
+}
+
+/// Vines lengthen while the app is closed. Nothing in the tank cares.
+private enum LobbyGrowth {
+    static func catchUp() -> [CGFloat] {
+        let now = Date().timeIntervalSince1970
+        var lengths: [CGFloat] = []
+        for i in 0..<RoomArt.vines.count {
+            let key = "lobbyVine\(i)"
+            let seenKey = "lobbySeen\(i)"
+            let seen = UserDefaults.standard.double(forKey: seenKey)
+            var len = UserDefaults.standard.double(forKey: key)
+            if seen <= 0, len <= 0 {
+                len = 22
+            } else if seen > 0 {
+                len += max(0, now - seen) / 3600 * 4
+            }
+            len = min(110, max(6, len))
+            UserDefaults.standard.set(len, forKey: key)
+            UserDefaults.standard.set(now, forKey: seenKey)
+            lengths.append(CGFloat(len))
+        }
+        return lengths
+    }
+
+    static func trim(_ index: Int) -> CGFloat {
+        UserDefaults.standard.set(6.0, forKey: "lobbyVine\(index)")
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "lobbySeen\(index)")
+        return 6
     }
 }
 
