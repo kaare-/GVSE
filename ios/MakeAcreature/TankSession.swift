@@ -77,7 +77,7 @@ final class TankSession: ObservableObject {
     @Published private(set) var playing = true
     @Published private(set) var consent = false
     @Published private(set) var temperatureC: Float = 15
-    @Published var tool: BuildTool = .sand {
+    @Published var tool: BuildTool = .none {
         didSet {
             if tool != .needle {
                 selectionRect = nil
@@ -828,21 +828,38 @@ final class TankSession: ObservableObject {
 
     // MARK: touch
 
+    /// Last point of a one-finger slide, while no brush is in hand.
+    private var slidePoint: CGPoint?
+
     private func handleTouch(point: CGPoint?, ended: Bool) {
-        guard let point, !navigating else { return }
+        if navigating || point == nil {
+            slidePoint = nil
+            return
+        }
+        guard let point else { return }
         switch tool {
+        case .none:
+            if ended {
+                slidePoint = nil
+                return
+            }
+            if let prev = slidePoint {
+                slide(by: CGPoint(x: point.x - prev.x, y: point.y - prev.y))
+            }
+            slidePoint = point
         case .needle:
+            slidePoint = nil
             let box = selectionBox(at: point)
             selectionRect = box
             inspect(in: box, ended: ended)
             if ended { selectionRect = nil }
-            return
         case .sample:
+            slidePoint = nil
             if ended {
                 if carried == nil { scoop(at: point) } else { release(at: point) }
             }
-            return
         default:
+            slidePoint = nil
             queueStroke(at: point, ended: ended)
         }
     }
@@ -854,6 +871,7 @@ final class TankSession: ObservableObject {
         case .pinch(let scale, let anchor, let state):
             if state == .began {
                 navigating = true
+                slidePoint = nil
                 metal.camera.pinchStartW = metal.camera.visibleW
             }
             let before = pixelFloat(at: anchor)
@@ -882,17 +900,24 @@ final class TankSession: ObservableObject {
                 navigating = false
             }
         case .pan(let delta, let state):
-            if state == .began { navigating = true }
-            if let f = viewFrame() {
-                let tankPerPoint = f.viewScale / max(f.scale, 0.001)
-                metal.camera.left -= delta.x * tankPerPoint
-                metal.camera.top -= delta.y * tankPerPoint
-                _ = viewFrame()
+            if state == .began {
+                navigating = true
+                slidePoint = nil
             }
+            slide(by: delta)
             if state == .ended || state == .cancelled || state == .failed {
                 navigating = false
             }
         }
+    }
+
+    /// Move the window by a drag measured in view points.
+    private func slide(by delta: CGPoint) {
+        guard let metal, let f = viewFrame() else { return }
+        let tankPerPoint = f.viewScale / max(f.scale, 0.001)
+        metal.camera.left -= delta.x * tankPerPoint
+        metal.camera.top -= delta.y * tankPerPoint
+        _ = viewFrame()
     }
 
     /// Box above the finger. The gap keeps the selection off the fingertip.

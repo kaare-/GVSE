@@ -36,6 +36,8 @@ final class TankMetalView: UIView {
     struct Uniforms {
         float4 window;
         float4 cam;
+        float2 frame;
+        float2 pad;
     };
     vertex VOut vs(uint vid [[vertex_id]]) {
         float2 p[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
@@ -50,11 +52,26 @@ final class TankMetalView: UIView {
                        sampler smp [[sampler(0)]],
                        constant Uniforms &u [[buffer(0)]]) {
         float2 p = (in.uv - u.window.xy) / u.window.zw;
-        if (p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0) {
-            return float4(0.16, 0.18, 0.19, 1.0);
+        if (p.x >= 0.0 && p.y >= 0.0 && p.x <= 1.0 && p.y <= 1.0) {
+            float2 sampleUV = u.cam.xy + p * u.cam.zw;
+            return tex.sample(smp, sampleUV);
         }
-        float2 sampleUV = u.cam.xy + p * u.cam.zw;
-        return tex.sample(smp, sampleUV);
+        float2 lo = u.window.xy;
+        float2 hi = u.window.xy + u.window.zw;
+        float2 gap = max(max(lo - in.uv, in.uv - hi), float2(0.0));
+        float2 n = gap / max(u.frame, float2(1e-5));
+        if (n.x < 1.0 && n.y < 1.0) {
+            float t = max(n.x, n.y);
+            float3 brass = float3(0.941, 0.780, 0.463);
+            float3 recess = float3(0.388, 0.263, 0.184);
+            float3 wood = float3(0.733, 0.522, 0.325);
+            float3 lip = t < 0.18 ? brass : (t < 0.55 ? recess : wood);
+            return float4(lip, 1.0);
+        }
+        float3 wall = float3(0.337, 0.282, 0.235);
+        float3 sun = float3(0.733, 0.522, 0.325) * saturate(1.0 - in.uv.x) * 0.35;
+        float3 room = (wall + sun) * (0.88 + 0.12 * in.uv.y);
+        return float4(room, 1.0);
     }
     """
 
@@ -77,7 +94,7 @@ final class TankMetalView: UIView {
         samp.sAddressMode = .clampToEdge
         samp.tAddressMode = .clampToEdge
         sampler = device.makeSamplerState(descriptor: samp)
-        backgroundColor = .black
+        backgroundColor = UIColor(red: 0.337, green: 0.282, blue: 0.235, alpha: 1)
         isOpaque = true
         isMultipleTouchEnabled = true
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
@@ -134,7 +151,12 @@ final class TankMetalView: UIView {
                 Float(frame.top / max(frame.worldH, 1)),
                 Float(frame.shownW / max(frame.worldW, 1)),
                 Float(frame.shownH / max(frame.worldH, 1))
-            )
+            ),
+            frame: SIMD2<Float>(
+                Float(22 * viewScale / drawableW),
+                Float(22 * viewScale / drawableH)
+            ),
+            pad: .zero
         )
         guard let drawable = metalLayer.nextDrawable(),
               let buffer = queue.makeCommandBuffer(),
@@ -202,6 +224,8 @@ final class TankMetalView: UIView {
     private struct Uniforms {
         var window: SIMD4<Float>
         var cam: SIMD4<Float>
+        var frame: SIMD2<Float>
+        var pad: SIMD2<Float>
     }
 
     private func ensureTexture(device: MTLDevice, width: Int, height: Int) {
@@ -223,7 +247,7 @@ final class TankMetalView: UIView {
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.16, green: 0.18, blue: 0.19, alpha: 1)
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.337, green: 0.282, blue: 0.235, alpha: 1)
         return pass
     }
 }

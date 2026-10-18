@@ -191,7 +191,7 @@ struct MakeAcreatureApp: App {
                     if session.playing { session.pause() } else { session.unpauseFromEvent() }
                 }
                 barButton("INSPECT", icon: BuildTool.needle.icon, on: inspecting) {
-                    session.tool = .needle
+                    session.tool = inspecting ? .none : .needle
                 }
                 barButton("ROOM", icon: BarIcon.room, on: false) {
                     withAnimation(.easeOut(duration: 0.2)) { inRoom = true }

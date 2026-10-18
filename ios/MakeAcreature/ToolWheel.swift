@@ -5,6 +5,8 @@ import SwiftUI
 enum BuildTool: Int, CaseIterable {
     case sand, rock, sugar, lime, mulch, water, seed, clean
     case sample, needle
+    /// Nothing in hand. One finger slides the tank instead of painting.
+    case none
 
     var label: String {
         switch self {
@@ -18,6 +20,7 @@ enum BuildTool: Int, CaseIterable {
         case .clean: return "CLEAN"
         case .sample: return "SCOOP"
         case .needle: return "INSPECT"
+        case .none: return "SLIDE"
         }
     }
 
@@ -135,6 +138,17 @@ enum BuildTool: Int, CaseIterable {
                 "      # ",
                 "       #",
             ]
+        case .none:
+            return [
+                "   #    ",
+                "  # #   ",
+                " #   #  ",
+                "#     # ",
+                " #   #  ",
+                "  # #   ",
+                "   #    ",
+                "        ",
+            ]
         }
     }
 
@@ -145,7 +159,7 @@ enum BuildTool: Int, CaseIterable {
 
     var isStroke: Bool {
         switch self {
-        case .sample, .needle: return false
+        case .sample, .needle, .none: return false
         default: return true
         }
     }
@@ -171,7 +185,7 @@ enum BuildTool: Int, CaseIterable {
             return (8, 0, nil)
         case .clean:
             return (13, 0, nil)
-        case .sample, .needle:
+        case .sample, .needle, .none:
             return (0, 0, nil)
         }
     }
@@ -216,7 +230,9 @@ struct ToolWheel: View {
         VStack(alignment: .leading, spacing: 4) {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 4), spacing: 3) {
                 ForEach(BuildTool.materials, id: \.rawValue) { t in
-                    iconButton(t.label, icon: t.icon, on: tool == t) { tool = t }
+                    iconButton(t.label, icon: t.icon, on: tool == t) {
+                        tool = tool == t ? .none : t
+                    }
                 }
             }
             HStack(spacing: 6) {

@@ -2190,6 +2190,9 @@ impl Tank {
             genomes.on_birth(c.genotype);
         }
         tank.genomes = genomes;
+        // Older saves founded a species for every tuned algae. Fold those
+        // back into the parent so the tree is the body plans, not the drift.
+        tank.genomes.collapse_same_body_plan();
         tank.cells = CellStore::from_raw(blob.bio_cells, blob.orgs);
         tank.milestones = blob.milestones;
         tank.archive_roots = blob.archive_roots;

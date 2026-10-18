@@ -358,14 +358,15 @@ impl Tank {
     }
 
     /// The tree-of-life picture: every species the tank has founded, saved
-    /// or not. Extinct ones stay, dimmed. The species cap keeps this from
-    /// growing without bound. Id order (parents before children).
+    /// or not. Same-plan variants are omitted (they folded into a parent).
+    /// Extinct ones stay, dimmed. Id order (parents before children).
     pub fn species_tree(&self) -> Vec<SpeciesNode> {
         let genomes = self.genomes();
         let mut nodes: Vec<SpeciesNode> = genomes
             .species_table()
             .iter()
             .enumerate()
+            .filter(|(_, s)| !s.collapsed)
             .map(|(i, s)| SpeciesNode {
                 id: i as u16,
                 parent: s.parent,
@@ -381,6 +382,10 @@ impl Tank {
                 extinct: true,
             })
             .collect();
+        let mut slot_of = vec![usize::MAX; genomes.species_count()];
+        for (slot, node) in nodes.iter().enumerate() {
+            slot_of[node.id as usize] = slot;
+        }
         for i in 0..genomes.node_count() as u32 {
             let Some(n) = genomes.get(i) else {
                 continue;
@@ -388,7 +393,10 @@ impl Tank {
             if n.tombstone {
                 continue;
             }
-            let Some(node) = nodes.get_mut(n.species as usize) else {
+            let Some(&slot) = slot_of.get(n.species as usize) else {
+                continue;
+            };
+            let Some(node) = nodes.get_mut(slot) else {
                 continue;
             };
             node.live_cells += n.live_cells;

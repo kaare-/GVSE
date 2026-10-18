@@ -1090,6 +1090,69 @@ impl GenomeStore {
         std::mem::take(&mut self.new_species)
     }
 
+    /// Species that still occupy a row on the tree.
+    pub fn visible_species(&self) -> usize {
+        self.species.iter().filter(|s| !s.collapsed).count()
+    }
+
+    /// Fold species that share their parent's body plan into that parent.
+    /// Archived species stay, so a saved creature keeps its row. A bush of
+    /// tuned starter algae becomes one node; a new block (cilia, muscle,
+    /// pigment) still branches. Genotypes and child links move to the
+    /// surviving ancestor. Idempotent.
+    pub fn collapse_same_body_plan(&mut self) {
+        let n = self.species.len();
+        if n == 0 {
+            return;
+        }
+        let keep: Vec<u16> = (0..n).map(|i| self.plan_ancestor(i as u16)).collect();
+        for i in 0..n {
+            let collapsed = keep[i] != i as u16;
+            self.species[i].collapsed = collapsed;
+            if collapsed {
+                continue;
+            }
+            let parent = self.species[i].parent;
+            if parent != species::NO_SPECIES && (parent as usize) < n {
+                let next = keep[parent as usize];
+                if next != i as u16 {
+                    self.species[i].parent = next;
+                }
+            }
+        }
+        for node in &mut self.nodes {
+            let sp = node.species as usize;
+            if sp < n {
+                node.species = keep[sp];
+            }
+        }
+    }
+
+    /// Nearest ancestor whose body plan differs, or self when this species
+    /// is archived or is the root of its plan.
+    fn plan_ancestor(&self, start: u16) -> u16 {
+        let mut id = start;
+        for _ in 0..64 {
+            let Some(s) = self.species.get(id as usize) else {
+                return start;
+            };
+            if s.archived || s.parent == species::NO_SPECIES {
+                return id;
+            }
+            let Some(parent) = self.species.get(s.parent as usize) else {
+                return id;
+            };
+            if species::body_plan(&s.founder_genome) != species::body_plan(&parent.founder_genome) {
+                return id;
+            }
+            if s.parent == id {
+                return id;
+            }
+            id = s.parent;
+        }
+        id
+    }
+
     /// Live cells across all genotypes of a species.
     pub fn species_live_cells(&self, species: u16) -> u32 {
         self.nodes
@@ -1107,19 +1170,44 @@ impl GenomeStore {
             .count() as u32
     }
 
-    /// Assign a species to a fresh node (§c.4): the parent's species while
-    /// the structural signature matches and the parametric distance to
-    /// the founder stays within `D`, else a new species under it.
+    /// Record a same-plan child species and point `genotype` at it, the
+    /// way an older save did before variants folded into their parent.
+    #[cfg(test)]
+    pub fn plant_same_plan_child_for_test(&mut self, parent: u16, genotype: u32) -> u16 {
+        let founder = self.species[parent as usize].founder_genome.clone();
+        let depth = self.species[parent as usize].depth.saturating_add(1);
+        let sig = self.species[parent as usize].sig;
+        let sid = self.species.len() as u16;
+        self.species.push(SpeciesRec {
+            founder: genotype,
+            founder_genome: founder,
+            parent,
+            depth,
+            sig,
+            name: format!("variant {sid}"),
+            first_tick: 0,
+            archived: false,
+            collapsed: false,
+        });
+        self.nodes[genotype as usize].species = sid;
+        sid
+    }
+
+    /// Assign a species to a fresh node. The same body plan stays in the
+    /// parent, however far the numbers drift. A new block founds a species.
     fn assign_species(&mut self, id: u32, parent: u32) -> u16 {
         let genome = self.nodes[id as usize].genome.clone();
         let sig = species::signature(&genome);
         let parent_species = self.nodes.get(parent as usize).map(|p| p.species).unwrap_or(NO_SPECIES);
         if let Some(ps) = self.species.get(parent_species as usize) {
-            if ps.sig == sig && species::param_distance_q8(&genome, &ps.founder_genome) <= species::SPECIES_D_Q8 {
+            if species::body_plan(&genome) == species::body_plan(&ps.founder_genome) {
                 return parent_species;
             }
         }
-        if self.species.len() >= species::SPECIES_CAP {
+        if self.visible_species() >= species::SPECIES_CAP {
+            self.collapse_same_body_plan();
+        }
+        if self.visible_species() >= species::SPECIES_CAP && self.species.iter().all(|s| !s.collapsed) {
             if (parent_species as usize) < self.species.len() {
                 return parent_species;
             }
@@ -1136,11 +1224,27 @@ impl GenomeStore {
             .filter(|s| s.parent == parent_species && s.name.starts_with(&base))
             .count() as u32;
         let name = species::disambiguate(&base, same + 1);
-        let sid = self.species.len() as u16;
-        if sid == NO_SPECIES {
-            return parent_species;
-        }
-        self.species.push(SpeciesRec {
+        let sid = if let Some(slot) = self.species.iter().position(|s| s.collapsed) {
+            slot as u16
+        } else {
+            let sid = self.species.len() as u16;
+            if sid == NO_SPECIES {
+                return parent_species;
+            }
+            self.species.push(SpeciesRec {
+                founder: id,
+                founder_genome: genome.clone(),
+                parent: parent_species,
+                depth,
+                sig,
+                name: name.clone(),
+                first_tick: self.now,
+                archived: false,
+                collapsed: false,
+            });
+            sid
+        };
+        self.species[sid as usize] = SpeciesRec {
             founder: id,
             founder_genome: genome,
             parent: parent_species,
@@ -1149,7 +1253,8 @@ impl GenomeStore {
             name,
             first_tick: self.now,
             archived: false,
-        });
+            collapsed: false,
+        };
         self.new_species.push(sid);
         sid
     }

@@ -1801,10 +1801,10 @@ fn colour_heterotroph_and_glass_detectors_work_on_the_model() {
     assert_eq!(kinds(&mut out), vec![ev::GLASS], "a cleaned pane re-arms the detector");
 }
 
-/// Phase 3 — the species layer (§c.4): tuning mutations stay in the
-/// founder's species, a structural change or a long parametric drift
-/// founds a new one, names are a pure function of the tree, and the
-/// layer survives a save/load round trip.
+/// Phase 3 — the species layer: tuning and long parametric drift stay
+/// in the founder's species, a structural change founds a new one, names
+/// are a pure function of the tree, and the layer survives a save/load
+/// round trip.
 #[test]
 fn species_split_on_structure_or_drift_and_are_named() {
     use crate::bio::species::{param_distance_q8, signature, SPECIES_D_Q8};
@@ -1840,7 +1840,8 @@ fn species_split_on_structure_or_drift_and_are_named() {
     assert!(rec.name.contains("ros"), "a red pigment adds its syllable ({})", rec.name);
     assert!(rec.name.ends_with(" II"), "numeral is the species depth ({})", rec.name);
 
-    // Drift only: same structure, keys walked far → a sibling-named species.
+    // Drift only: same body plan, keys walked far. The distance is still
+    // measured, but it no longer founds a species.
     let mut drift = tuned.clone();
     drift.wall_key = 180;
     drift.glue_key = drift.glue_key.wrapping_add(90);
@@ -1849,25 +1850,16 @@ fn species_split_on_structure_or_drift_and_are_named() {
     assert_eq!(signature(&drift), signature(&tuned));
     assert!(param_distance_q8(&drift, &Genome::algae()) > SPECIES_D_Q8, "{}", param_distance_q8(&drift, &Genome::algae()));
     let d = genomes.intern_child(t, drift.clone());
-    let d_sp = genomes.species_of(d);
-    assert_ne!(d_sp, root_sp);
-    assert_ne!(d_sp, p_sp);
-    let drec = genomes.species(d_sp).unwrap();
-    assert_eq!(drec.parent, root_sp);
-    assert_eq!(drec.name, format!("{} II", root_name.trim_end_matches(" I")), "pure drift keeps the stem");
-    // A second drifted sibling with the same name gets a letter.
+    assert_eq!(genomes.species_of(d), root_sp, "numeric drift stays with the starter");
     let mut drift2 = drift.clone();
     drift2.temp_opt = 10;
     drift2.wall_key = 70;
     let d2 = genomes.intern_child(t, drift2);
-    let d2_sp = genomes.species_of(d2);
-    assert_ne!(d2_sp, d_sp);
-    assert!(genomes.species(d2_sp).unwrap().name.ends_with("II-b"), "{}", genomes.species(d2_sp).unwrap().name);
-    // Children of the drifted species measure against *its* founder.
+    assert_eq!(genomes.species_of(d2), root_sp);
     let mut near = drift.clone();
     near.temp_width = near.temp_width.wrapping_add(3);
     let n = genomes.intern_child(d, near);
-    assert_eq!(genomes.species_of(n), d_sp);
+    assert_eq!(genomes.species_of(n), root_sp);
 
     // Round trip through a tank save.
     let mut tank = water_box(61, 24, 24, 20);
@@ -1893,6 +1885,50 @@ fn species_split_on_structure_or_drift_and_are_named() {
     let after = loaded.lineage_card(id).expect("card after load");
     assert_eq!(after.species_name, card.species_name);
     assert_eq!(after.species, card.species);
+}
+
+/// A saved bush of tuned starter algae folds into the parent on load.
+/// A real new block stays, and its parent link skips the folded row.
+/// An archived copy of the same plan keeps its own row.
+#[test]
+fn same_body_plan_variants_collapse_on_load() {
+    use crate::bio::{Block, Entry, Genome};
+    let mut tank = water_box(61, 24, 24, 8);
+    let root = tank.genomes_mut().seed_algae();
+    let root_sp = tank.genomes().species_of(root);
+    let mut drift = Genome::algae();
+    drift.wall_key = 180;
+    drift.temp_opt = 200;
+    let child = tank.genomes_mut().intern_child(root, drift);
+    let variant = tank.genomes_mut().plant_same_plan_child_for_test(root_sp, child);
+    let mut twin = Genome::algae();
+    twin.temp_opt = 40;
+    let twin_g = tank.genomes_mut().intern_child(root, twin);
+    let archived = tank.genomes_mut().plant_same_plan_child_for_test(root_sp, twin_g);
+    tank.genomes_mut().species_mut(archived).unwrap().archived = true;
+    let mut pig = Genome::algae();
+    pig.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
+    let pigment = tank.genomes_mut().intern_child(child, pig);
+    let pigment_sp = tank.genomes().species_of(pigment);
+    assert_eq!(tank.genomes().species(pigment_sp).unwrap().parent, variant);
+    assert!(tank.species_tree().iter().any(|n| n.id == variant));
+
+    let bytes = tank.save_bytes().unwrap();
+    let mut loaded = Tank::load_bytes(&bytes).unwrap();
+    assert!(loaded.genomes().species(variant).unwrap().collapsed);
+    assert_eq!(loaded.genomes().species_of(child), root_sp);
+    assert!(!loaded.genomes().species(pigment_sp).unwrap().collapsed);
+    assert_eq!(loaded.genomes().species(pigment_sp).unwrap().parent, root_sp);
+    assert!(!loaded.genomes().species(archived).unwrap().collapsed);
+    assert_eq!(loaded.genomes().species_of(twin_g), archived);
+    let tree = loaded.species_tree();
+    assert!(tree.iter().all(|n| n.id != variant));
+    assert!(tree.iter().any(|n| n.id == root_sp));
+    assert!(tree.iter().any(|n| n.id == pigment_sp));
+    assert!(tree.iter().any(|n| n.id == archived));
+    loaded.genomes_mut().collapse_same_body_plan();
+    assert_eq!(loaded.genomes().species_of(child), root_sp);
+    assert_eq!(loaded.genomes().species(pigment_sp).unwrap().parent, root_sp);
 }
 
 /// Phase 3 — glass walls: solid to water and grains, light goes through,
