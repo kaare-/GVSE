@@ -21,6 +21,9 @@ use crate::hash::hash_bytes;
 /// Parametric distance (Q8: 256 = 1.0) from the species founder beyond
 /// which a genotype founds a new species (§c.4 proposal `D = 1.5`).
 pub const SPECIES_D_Q8: u32 = 384;
+/// Past this many species, a diverging genotype stays in its parent.
+/// A long run was founding tens of thousands and the tree stalled.
+pub const SPECIES_CAP: usize = 384;
 /// Blocks with fewer units than this are tuning, not structure.
 pub const STRUCTURAL_UNITS: u8 = 2;
 

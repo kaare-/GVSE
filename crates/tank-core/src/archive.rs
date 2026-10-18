@@ -332,15 +332,45 @@ impl Tank {
         placed
     }
 
-    /// The species tree for the tree-of-life view, id order (parents
-    /// before children).
+    /// The tree-of-life picture: species the player saved, plus the
+    /// ancestors that connect them. Unsaved life stays off the wall so a
+    /// long run does not copy tens of thousands of nodes every refresh.
+    /// Id order (parents before children).
     pub fn species_tree(&self) -> Vec<SpeciesNode> {
         let genomes = self.genomes();
-        let mut nodes: Vec<SpeciesNode> = genomes
-            .species_table()
-            .iter()
-            .enumerate()
-            .map(|(i, s)| SpeciesNode {
+        let table = genomes.species_table();
+        let n = table.len();
+        let mut keep = vec![false; n];
+        for (i, s) in table.iter().enumerate() {
+            if !s.archived {
+                continue;
+            }
+            let mut cur = i;
+            let mut hops = 0;
+            while cur < n && hops <= n {
+                if keep[cur] {
+                    break;
+                }
+                keep[cur] = true;
+                let parent = table[cur].parent;
+                if parent == NO_SPECIES {
+                    break;
+                }
+                cur = parent as usize;
+                hops += 1;
+            }
+        }
+        if !keep.iter().any(|k| *k) {
+            return Vec::new();
+        }
+        let mut index_of = vec![usize::MAX; n];
+        let mut nodes = Vec::new();
+        for (i, s) in table.iter().enumerate() {
+            if !keep[i] {
+                continue;
+            }
+            index_of[i] = nodes.len();
+            nodes.push(SpeciesNode {
                 id: i as u16,
                 parent: s.parent,
                 depth: s.depth,
@@ -353,8 +383,8 @@ impl Tank {
                 first_tick: s.first_tick,
                 archived: s.archived,
                 extinct: true,
-            })
-            .collect();
+            });
+        }
         for i in 0..genomes.node_count() as u32 {
             let Some(n) = genomes.get(i) else {
                 continue;
@@ -362,9 +392,11 @@ impl Tank {
             if n.tombstone {
                 continue;
             }
-            let Some(node) = nodes.get_mut(n.species as usize) else {
+            let sid = n.species as usize;
+            if sid >= keep.len() || !keep[sid] {
                 continue;
-            };
+            }
+            let node = &mut nodes[index_of[sid]];
             node.live_cells += n.live_cells;
             node.live_genotypes += u32::from(n.live_cells > 0);
             node.forms += 1 + n.folded_nodes;

@@ -129,7 +129,6 @@ struct SpecimenPage: View {
     }
 
     var body: some View {
-        NavigationStack {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
@@ -158,8 +157,13 @@ struct SpecimenPage: View {
                     }
                 }
                 if !specimen.lineage.isEmpty {
-                    PixelLabel(text: specimen.lineage.uppercased(), scale: 1, color: Palette.dimPaper)
-                        .fixedSize(horizontal: false, vertical: true)
+                    PixelLabel(
+                        text: String(specimen.lineage.uppercased().prefix(240)),
+                        scale: 1,
+                        color: Palette.dimPaper,
+                        maxWidth: 280
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 PixelLabel(text: "NAME", scale: 2, color: Palette.dimPaper)
                 PixelTextField(text: $name)
@@ -206,8 +210,7 @@ struct SpecimenPage: View {
         .confirmationDialog("Remove this page from the book?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive, action: onDelete)
         }
-        .toolbar(.hidden, for: .navigationBar)
-        }
+        .background(Palette.panel)
     }
 }
 

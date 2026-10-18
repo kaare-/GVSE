@@ -307,7 +307,8 @@ fn near_solid(grid: &PhysicsGrid, px: u16, py: u16) -> bool {
     let (vx, vy) = pixel_to_phys(px, py, grid.visible_h() as u32);
     for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
         let n = grid.get_visible(vx + dx, vy + dy);
-        if !n.is_open() {
+        // The pane is a window. Treating it as a bed let film coat the glass.
+        if !n.is_open() && !n.is_glass() {
             return true;
         }
     }

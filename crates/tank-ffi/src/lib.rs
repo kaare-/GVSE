@@ -517,8 +517,9 @@ pub extern "C" fn tank_species_count(handle: *const TankHandle) -> u32 {
     unsafe { handle.as_ref() }.map(|h| h.tank.species_count() as u32).unwrap_or(0)
 }
 
-/// Fill `out` with up to `cap` species nodes (id order, parents first);
-/// returns the total count so a second call can size the buffer.
+/// Fill `out` with up to `cap` saved species and their ancestors (id
+/// order, parents first). Unsaved life is omitted. Returns the total
+/// count so a second call can size the buffer.
 #[no_mangle]
 pub extern "C" fn tank_species_tree(handle: *const TankHandle, out: *mut SpeciesNodeRec, cap: u32) -> u32 {
     let Some(handle) = (unsafe { handle.as_ref() }) else {
@@ -1094,9 +1095,15 @@ mod tests {
         let n = tank_species_name(handle, lin.species, name.as_mut_ptr(), 64);
         assert!(n > 0 && name[n as usize] == 0, "NUL-terminated name");
         assert!(std::str::from_utf8(&name[..n as usize]).unwrap().contains(' '));
-        // Species tree lists that species.
+        assert_eq!(tank_species_tree(handle, ptr::null_mut(), 0), 0, "unsaved life stays off the tree");
+
+        // Archive it, inspect the record, seed a new tank from it.
+        let need = tank_specimen(handle, found.cell, ptr::null_mut(), 0);
+        assert!(need > 0);
+        let mut buf = vec![0u8; need];
+        assert_eq!(tank_specimen(handle, found.cell, buf.as_mut_ptr(), need), need);
         let count = tank_species_tree(handle, ptr::null_mut(), 0);
-        assert!(count >= 1);
+        assert!(count >= 1, "saving a creature puts its species on the tree");
         let mut nodes = vec![
             SpeciesNodeRec {
                 id: 0,
@@ -1117,13 +1124,7 @@ mod tests {
             count as usize
         ];
         assert_eq!(tank_species_tree(handle, nodes.as_mut_ptr(), count), count);
-        assert!(nodes.iter().any(|n| n.id == lin.species && n.live_cells > 0));
-
-        // Archive it, inspect the record, seed a new tank from it.
-        let need = tank_specimen(handle, found.cell, ptr::null_mut(), 0);
-        assert!(need > 0);
-        let mut buf = vec![0u8; need];
-        assert_eq!(tank_specimen(handle, found.cell, buf.as_mut_ptr(), need), need);
+        assert!(nodes.iter().any(|n| n.id == lin.species && n.live_cells > 0 && n.archived != 0));
         let info = tank_specimen_info(buf.as_ptr(), need);
         assert!(info.cells >= 1 && info.portrait_w >= 1);
         let mut text = vec![0u8; 512];

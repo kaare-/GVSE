@@ -1,74 +1,220 @@
 import SwiftUI
 
+/// What the brush lays down or lifts. Look, sample, and the needle live
+/// on the bottom bar; they are not strokes.
 enum BuildTool: Int, CaseIterable {
-    case sand, rock, glass, erase, pour, drain, fill, undo
-    case look, scoop, seed, remove, clean, feed, calcium, detritus
-    case topUp, cut, enclose
+    case sand, rock, sugar, lime, mulch, water, seed, clean
+    case look, sample, needle
 
     var label: String {
         switch self {
         case .sand: return "SAND"
         case .rock: return "ROCK"
-        case .glass: return "GLASS"
-        case .erase: return "DIG"
-        case .pour: return "POUR"
-        case .drain: return "DRAIN"
-        case .fill: return "FILL"
-        case .undo: return "UNDO"
-        case .look: return "LOOK"
-        case .scoop: return "SCOOP"
+        case .sugar: return "SUGAR"
+        case .lime: return "LIME"
+        case .mulch: return "MULCH"
+        case .water: return "WATER"
         case .seed: return "SEED"
-        case .remove: return "TAKE"
         case .clean: return "CLEAN"
-        case .feed: return "SUGAR"
-        case .calcium: return "LIME"
-        case .detritus: return "MULCH"
-        case .topUp: return "TOP UP"
-        case .cut: return "CUT"
-        case .enclose: return "BOX"
+        case .look: return "LOOK"
+        case .sample: return "SAMPLE"
+        case .needle: return "NEEDLE"
         }
     }
 
-    /// Build tools on the first row, the selection loop on the second,
-    /// Phase 4 land / enclosure tools on the third.
-    static let buildRow: [BuildTool] = [.sand, .rock, .glass, .erase, .pour, .drain, .fill, .undo]
-    static let lifeRow: [BuildTool] = [.look, .scoop, .seed, .remove, .clean, .feed, .calcium, .detritus]
-    static let landRow: [BuildTool] = [.topUp, .cut, .enclose]
+    static let materials: [BuildTool] = [.sand, .rock, .sugar, .lime, .mulch, .water, .seed, .clean]
 
-    /// Tool event kind (`tank.h`); 0 for tools that are not strokes.
-    var kind: UInt8 {
+    var icon: [String] {
         switch self {
-        case .sand, .rock, .glass: return 1
-        case .erase: return 2
-        case .pour: return 3
-        case .drain: return 4
-        case .fill: return 5
-        case .undo: return 6
-        case .remove: return 9
-        case .feed: return 10
-        case .calcium: return 11
-        case .detritus: return 12
-        case .clean: return 13
-        case .topUp: return 14
-        case .cut: return 15
-        case .enclose: return 16
-        case .seed: return 8
-        case .look, .scoop: return 0
+        case .sand:
+            return [
+                "        ",
+                "        ",
+                "   ##   ",
+                "  ####  ",
+                " ###### ",
+                "########",
+                " ###### ",
+                "        ",
+            ]
+        case .rock:
+            return [
+                "        ",
+                "  ####  ",
+                " ###### ",
+                "########",
+                " ###### ",
+                "  ####  ",
+                "   ##   ",
+                "        ",
+            ]
+        case .sugar:
+            return [
+                " #  #   ",
+                "  #   # ",
+                " #  #   ",
+                "   #  # ",
+                " #    # ",
+                "  #  #  ",
+                " #   #  ",
+                "        ",
+            ]
+        case .lime:
+            return [
+                "        ",
+                "   ##   ",
+                "  #  #  ",
+                " #    # ",
+                " # ## # ",
+                "  #  #  ",
+                " ###### ",
+                "        ",
+            ]
+        case .mulch:
+            return [
+                " # # # #",
+                "# # # # ",
+                " # # # #",
+                "# # # # ",
+                " # # # #",
+                "# # # # ",
+                "        ",
+                "        ",
+            ]
+        case .water:
+            return [
+                "        ",
+                "##  ##  ",
+                "  ##  ##",
+                "##  ##  ",
+                "  ##  ##",
+                "##  ##  ",
+                "        ",
+                "        ",
+            ]
+        case .seed:
+            return [
+                "   #    ",
+                "   #    ",
+                "  # #   ",
+                " #   #  ",
+                "   #    ",
+                "   #    ",
+                "  ###   ",
+                "        ",
+            ]
+        case .clean:
+            return [
+                "      # ",
+                "     ## ",
+                "    ##  ",
+                "   ##   ",
+                "  ##    ",
+                " ##     ",
+                "#       ",
+                "        ",
+            ]
+        case .look:
+            return [
+                "  ####  ",
+                " #    # ",
+                "#  ##  #",
+                "# #  # #",
+                "#  ##  #",
+                " #    # ",
+                "  ####  ",
+                "        ",
+            ]
+        case .sample:
+            return [
+                "  #  #  ",
+                "  #  #  ",
+                "  ####  ",
+                " #    # ",
+                " # ## # ",
+                " # ## # ",
+                "  ####  ",
+                "        ",
+            ]
+        case .needle:
+            return [
+                "#       ",
+                " #      ",
+                "  #     ",
+                "   #    ",
+                "    #   ",
+                "     #  ",
+                "      # ",
+                "       #",
+            ]
         }
     }
 
-    var material: UInt8 {
-        switch self {
-        case .sand: return 2 // Sand
-        case .rock: return 1 // Stone
-        case .glass: return UInt8(TANK_GLASS)
-        default: return 0
-        }
-    }
-
-    /// Feeding tools switch the fingertip flashlight off (hold = pour).
+    /// Sugar, lime, and mulch are dissolved feeds. The fingertip light stays off.
     var isFeed: Bool {
-        self == .feed || self == .calcium || self == .detritus
+        self == .sugar || self == .lime || self == .mulch
+    }
+
+    var isStroke: Bool {
+        switch self {
+        case .look, .sample, .needle: return false
+        default: return true
+        }
+    }
+
+    /// Kind and material for one dab. `hint` is set when remove has nothing
+    /// to lift (sugar and lime are pours).
+    func stroke(_ mode: StrokeMode) -> (kind: UInt8, material: UInt8, hint: String?) {
+        switch self {
+        case .sand:
+            return mode == .add ? (1, 2, nil) : (2, 2, nil)
+        case .rock:
+            return mode == .add ? (1, 1, nil) : (2, 1, nil)
+        case .sugar:
+            return mode == .add ? (10, 0, nil) : (0, 0, "POUR ONLY")
+        case .lime:
+            return mode == .add ? (11, 0, nil) : (0, 0, "POUR ONLY")
+        case .mulch:
+            // Add drops litter. Remove lifts organic sediment only.
+            return mode == .add ? (12, 0, nil) : (2, 4, nil)
+        case .water:
+            return mode == .add ? (3, 0, nil) : (4, 0, nil)
+        case .seed:
+            return (8, 0, nil)
+        case .clean:
+            return (13, 0, nil)
+        case .look, .sample, .needle:
+            return (0, 0, nil)
+        }
+    }
+}
+
+enum StrokeMode: Int {
+    case add, remove
+
+    var label: String { self == .add ? "ADD" : "REMOVE" }
+}
+
+struct PixelIcon: View {
+    var rows: [String]
+    var ink: Color
+    var scale: CGFloat = 2
+
+    var body: some View {
+        Canvas { ctx, _ in
+            for (y, row) in rows.enumerated() {
+                for (x, ch) in row.enumerated() where ch != " " {
+                    let rect = CGRect(
+                        x: CGFloat(x) * scale,
+                        y: CGFloat(y) * scale,
+                        width: scale,
+                        height: scale
+                    )
+                    ctx.fill(Path(rect), with: .color(ink))
+                }
+            }
+        }
+        .frame(width: 8 * scale, height: 8 * scale)
     }
 }
 
@@ -76,121 +222,130 @@ struct ToolWheel: View {
     @Binding var tool: BuildTool
     @Binding var brush: Int
     @Binding var variant: Int
-    @Binding var fillLevel: Double
-    /// Enclosure op when `tool == .enclose`: 0 walls, 1 drain, 2 fill, 3 release.
-    @Binding var encloseOp: Int
-    var onUndo: () -> Void
-    var onTopUp: () -> Void
+    @Binding var strokeMode: StrokeMode
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            row(BuildTool.buildRow)
-            row(BuildTool.lifeRow)
-            row(BuildTool.landRow)
-            if tool == .look || tool == .scoop {
-                sizeSlider
+        VStack(alignment: .leading, spacing: 4) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 4), spacing: 3) {
+                ForEach(BuildTool.materials, id: \.rawValue) { t in
+                    iconButton(t.label, icon: t.icon, on: tool == t) { tool = t }
+                }
             }
-            HStack(spacing: 8) {
-                if tool != .look && tool != .scoop {
-                    PixelLabel(text: "BRUSH \(brush)", scale: 2)
-                    Button {
-                        brush = max(1, brush - 1)
-                    } label: { PixelLabel(text: "-", scale: 3) }
-                    .buttonStyle(.plain)
-                    .a11yButton("Smaller brush")
-                    Button {
-                        brush = min(12, brush + 1)
-                    } label: { PixelLabel(text: "+", scale: 3) }
-                    .buttonStyle(.plain)
-                    .a11yButton("Larger brush")
+            HStack(spacing: 6) {
+                iconButton("ADD", icon: StrokeMode.add.mark, on: strokeMode == .add) {
+                    strokeMode = .add
+                }
+                iconButton("REMOVE", icon: StrokeMode.remove.mark, on: strokeMode == .remove) {
+                    strokeMode = .remove
                 }
                 if tool == .sand || tool == .rock {
-                    PixelLabel(text: "TONE \(variant + 1)", scale: 2)
                     Button {
                         variant = (variant + 1) % 4
-                    } label: { PixelLabel(text: ">", scale: 3) }
-                    .buttonStyle(.plain)
-                    .a11yButton("Next colour tone")
-                }
-                if tool == .enclose {
-                    PixelLabel(text: encloseLabel, scale: 2)
-                    Button {
-                        encloseOp = (encloseOp + 1) % 4
-                    } label: { PixelLabel(text: ">", scale: 3) }
-                    .buttonStyle(.plain)
-                    .a11yButton("Next box action", hint: encloseLabel)
-                }
-            }
-            if tool == .fill {
-                HStack {
-                    PixelLabel(text: "LEVEL", scale: 2)
-                    Slider(value: $fillLevel, in: 0...1)
-                        .tint(Color(red: 0.4, green: 0.7, blue: 0.9))
-                        .accessibilityLabel("Water level")
-                }
-                .frame(maxWidth: 220)
-            }
-        }
-        .padding(6)
-    }
-
-    /// Wide, labelled size control for the glass and the scoop.
-    private var sizeSlider: some View {
-        let title = tool == .scoop ? "SCOOP" : "GLASS"
-        return VStack(alignment: .leading, spacing: 2) {
-            PixelLabel(text: "\(title) \(brush)", scale: 2, color: Color(red: 1, green: 0.92, blue: 0.7))
-            Slider(
-                value: Binding(
-                    get: { Double(brush) },
-                    set: { brush = Int($0.rounded()) }
-                ),
-                in: 1...12,
-                step: 1
-            )
-            .tint(Color(red: 0.95, green: 0.82, blue: 0.45))
-            .accessibilityLabel(tool == .scoop ? "Scoop size" : "Looking glass size")
-        }
-        .frame(maxWidth: 280)
-    }
-
-    private var encloseLabel: String {
-        switch encloseOp {
-        case 1: return "DRAIN"
-        case 2: return "FILL"
-        case 3: return "FREE"
-        default: return "WALLS"
-        }
-    }
-
-    /// Rows scroll sideways on narrow phones; the selected tool stays put.
-    private func row(_ tools: [BuildTool]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(tools, id: \.rawValue) { t in
-                    Button {
-                        if t == .undo {
-                            onUndo()
-                        } else if t == .topUp {
-                            tool = t
-                            onTopUp()
-                        } else {
-                            tool = t
-                        }
                     } label: {
-                        PixelPanel {
-                            PixelLabel(
-                                text: t.label,
-                                scale: 2,
-                                color: tool == t
-                                    ? Color(red: 1, green: 0.92, blue: 0.7)
-                                    : Color(red: 0.75, green: 0.72, blue: 0.65)
-                            )
-                        }
+                        PixelLabel(text: "TONE \(variant + 1)", scale: 1, color: Palette.highlight)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 6)
+                            .background(Color(white: 0.12))
+                            .overlay(Rectangle().stroke(Color(white: 0.4), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
-                    .a11yButton(t.label, hint: "Tool", selected: tool == t)
+                    .a11yButton("Tone \(variant + 1)", hint: "Next colour tone")
                 }
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                PixelLabel(text: "SIZE \(brush)", scale: 1, color: Palette.highlight)
+                Slider(
+                    value: Binding(
+                        get: { Double(brush) },
+                        set: { brush = Int($0.rounded()) }
+                    ),
+                    in: 1...12,
+                    step: 1
+                )
+                .tint(Color(red: 0.95, green: 0.82, blue: 0.45))
+                .accessibilityLabel("Tool size")
             }
         }
     }
+
+    private func iconButton(_ title: String, icon: [String], on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 1) {
+                PixelIcon(rows: icon, ink: on ? Palette.highlight : Color(red: 0.72, green: 0.68, blue: 0.58), scale: 2)
+                PixelLabel(
+                    text: title,
+                    scale: 1,
+                    color: on ? Palette.highlight : Color(red: 0.72, green: 0.68, blue: 0.58)
+                )
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 3)
+            .background(on ? Color(white: 0.22) : Color(white: 0.08))
+            .overlay(Rectangle().stroke(on ? Palette.highlight : Color(white: 0.32), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .a11yButton(title, selected: on)
+    }
+}
+
+extension StrokeMode {
+    var mark: [String] {
+        switch self {
+        case .add:
+            return [
+                "        ",
+                "   ##   ",
+                "   ##   ",
+                " ###### ",
+                " ###### ",
+                "   ##   ",
+                "   ##   ",
+                "        ",
+            ]
+        case .remove:
+            return [
+                "        ",
+                "        ",
+                "        ",
+                " ###### ",
+                " ###### ",
+                "        ",
+                "        ",
+                "        ",
+            ]
+        }
+    }
+}
+
+enum BarIcon {
+    static let pause = [
+        "        ",
+        " ##  ## ",
+        " ##  ## ",
+        " ##  ## ",
+        " ##  ## ",
+        " ##  ## ",
+        "        ",
+        "        ",
+    ]
+    static let play = [
+        "        ",
+        " ##     ",
+        " ####   ",
+        " ###### ",
+        " ###### ",
+        " ####   ",
+        " ##     ",
+        "        ",
+    ]
+    static let undo = [
+        "  ####  ",
+        " #      ",
+        "#       ",
+        "#  ###  ",
+        "#    #  ",
+        " #   #  ",
+        "  ####  ",
+        "        ",
+    ]
 }

@@ -15,6 +15,7 @@ struct RoomView: View {
     @State private var tree: [SpeciesNode] = []
     @State private var editingSign = false
     @State private var signDraft = ""
+    @State private var confirmEmpty: Int?
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -34,6 +35,9 @@ struct RoomView: View {
                 place(RoomArt.treeHit, layout) { treeButton(layout) }
                 place(RoomArt.fuseHit, layout) { fuseButton(layout) }
                 place(RoomArt.tank, layout) { tankButton }
+                ForEach(0..<3, id: \.self) { i in
+                    place(RoomArt.vials[i], layout) { vialButton(i) }
+                }
                 place(RoomArt.bookHit, layout) { bookButton(layout) }
                 place(RoomArt.logHit, layout) { logButton }
                 place(RoomArt.crateHit, layout) { crateButton(layout) }
@@ -52,9 +56,21 @@ struct RoomView: View {
         }
         .onReceive(refresh) { _ in tree = session.speciesTree() }
         .sheet(isPresented: $editingSign) {
-            NavigationStack {
-                doorSignEditor
-                    .toolbar(.hidden, for: .navigationBar)
+            doorSignEditor
+        }
+        .confirmationDialog(
+            "Empty sample tank \((confirmEmpty ?? 0) + 1)? It goes back to a clean glass.",
+            isPresented: Binding(
+                get: { confirmEmpty != nil },
+                set: { if !$0 { confirmEmpty = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Empty tank", role: .destructive) {
+                if let i = confirmEmpty {
+                    session.emptySlot(i)
+                }
+                confirmEmpty = nil
             }
         }
     }
@@ -105,15 +121,11 @@ struct RoomView: View {
                             y: (CGFloat(lamp.y - RoomArt.fuseHit.y) + CGFloat(lamp.h) / 2) * layout.s
                         )
                 }
-                VStack {
-                    Spacer(minLength: 0)
-                    PixelLabel(text: "FUSE BOX", scale: 1, color: Palette.paper)
-                }
-                .frame(width: hit.width, height: hit.height)
+                Color.clear.frame(width: hit.width, height: hit.height)
             }
         }
         .buttonStyle(.plain)
-        .a11yButton("Fuse box", hint: "Settings")
+        .a11yButton("Settings")
     }
 
     /// Sound, clock, and swirl. Off is a dark well; on is a bright lamp.
@@ -127,15 +139,41 @@ struct RoomView: View {
 
     private var tankButton: some View {
         Button(action: onBack) {
-            VStack(spacing: 4) {
+            VStack(spacing: 3) {
                 PixelLabel(text: "TANK \(session.slot + 1)", scale: 2, color: Palette.highlight)
-                PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 1, color: Palette.dimPaper)
+                PixelLabel(
+                    text: "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)",
+                    scale: 1,
+                    color: Palette.dimPaper
+                )
                 PixelLabel(text: "\(session.liveCells) CELLS", scale: 1)
-                PixelLabel(text: "TAP TO LOOK IN", scale: 1, color: Palette.dimPaper)
             }
         }
         .buttonStyle(.plain)
         .a11yButton("Tank \(session.slot + 1), \(session.liveCells) cells", hint: "Look into the tank")
+    }
+
+    private func vialButton(_ index: Int) -> some View {
+        Button {
+            session.selectSlot(index)
+            onBack()
+        } label: {
+            VStack {
+                Spacer(minLength: 0)
+                PixelLabel(
+                    text: "\(index + 1)",
+                    scale: 1,
+                    color: session.slot == index ? Palette.highlight : Palette.paper
+                )
+            }
+        }
+        .buttonStyle(.plain)
+        .a11yButton("Sample tank \(index + 1)", hint: "Open this tank", selected: session.slot == index)
+        .contextMenu {
+            Button("Empty tank \(index + 1)", role: .destructive) {
+                confirmEmpty = index
+            }
+        }
     }
 
     private func bookButton(_ layout: RoomLayout) -> some View {

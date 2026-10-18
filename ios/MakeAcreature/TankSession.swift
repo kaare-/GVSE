@@ -46,11 +46,16 @@ struct SpeciesNode: Identifiable {
 /// not catch up the wall clock.
 final class TankSession: ObservableObject {
     @Published private(set) var isDay = true
+    /// Day 1 covers that day's night as well. The counter advances at dawn.
+    @Published private(set) var dayNumber = 1
+    @Published private(set) var playing = true
     @Published private(set) var consent = false
     @Published private(set) var temperatureC: Float = 15
     @Published var tool: BuildTool = .sand {
-        didSet { if tool != .look && tool != oldValue { inspected = nil } }
+        didSet { if tool != .needle && tool != oldValue { inspected = nil } }
     }
+    /// Add lays the selected material down. Remove lifts only that material.
+    @Published var strokeMode: StrokeMode = .add
     @Published var brush = 3
     @Published var variant = 0
     @Published var fillLevel = 0.55
@@ -171,6 +176,7 @@ final class TankSession: ObservableObject {
     func resume() {
         accumulator = 0
         running = true
+        playing = true
         startMotion()
         if soundOn { AmbientAudio.shared.startIfNeeded() }
         guard link == nil else { return }
@@ -188,6 +194,7 @@ final class TankSession: ObservableObject {
     /// fits, before the file is written.
     func pauseAndSave() {
         running = false
+        playing = false
         accumulator = 0
         link?.invalidate()
         link = nil
@@ -198,13 +205,26 @@ final class TankSession: ObservableObject {
         saveCurrent()
     }
 
-    /// Resume after pause-on-event (also used from the HUD).
+    /// Freeze the sim without dropping a sample or writing the save.
+    func pause() {
+        guard running else { return }
+        running = false
+        playing = false
+        AmbientAudio.shared.stop()
+        showHint("PAUSED")
+    }
+
+    /// Resume after pause-on-event (also the PLAY button).
     func unpauseFromEvent() {
-        if !running {
+        guard !running else { return }
+        running = true
+        playing = true
+        if link == nil {
             resume()
-            if soundOn { AmbientAudio.shared.startIfNeeded() }
-            showHint("RUNNING")
+        } else if soundOn {
+            AmbientAudio.shared.startIfNeeded()
         }
+        showHint("RUNNING")
     }
 
     func toggleConsent() {
@@ -233,9 +253,11 @@ final class TankSession: ObservableObject {
     }
 
     func selectSlot(_ index: Int) {
-        dropBucket()
+        let next = max(0, min(2, index))
+        guard next != slot else { return }
+        // A sample stays in the bucket so it can be poured into another vial.
         saveCurrent()
-        slot = max(0, min(2, index))
+        slot = next
         UserDefaults.standard.set(slot, forKey: "activeSlot")
         loadSlot(slot)
     }
@@ -247,6 +269,60 @@ final class TankSession: ObservableObject {
         handle = tank_empty(UInt64(Date().timeIntervalSince1970))
         pendingTools.removeAll()
         saveCurrent()
+        refreshClock()
+    }
+
+    /// Wipe one shelf vial. The active tank is replaced in place. Another
+    /// vial is rewritten on disk and the sample bucket is left alone.
+    func emptySlot(_ index: Int) {
+        let index = max(0, min(2, index))
+        if index == slot {
+            newTank()
+            showHint("EMPTY")
+            return
+        }
+        guard let fresh = tank_empty(UInt64(Date().timeIntervalSince1970)) else { return }
+        write(handle: fresh, to: index)
+        tank_free(fresh)
+        showHint("EMPTY")
+    }
+
+    /// Three empty tanks and the room's default breakers. The book stays.
+    func resetGame() {
+        dropBucket()
+        inspected = nil
+        alwaysDay = false
+        swirl = false
+        pauseOnEvent = false
+        soundOn = true
+        hapticsOn = true
+        tBase = 15
+        lightSlider = 1
+        doorName = ""
+        favouriteId = 0
+        cameraTiltDegrees = 0
+        metal?.cameraTiltDegrees = 0
+        UserDefaults.standard.set(false, forKey: "swirlEnabled")
+        UserDefaults.standard.set(false, forKey: "pauseOnEvent")
+        UserDefaults.standard.set(true, forKey: "soundOn")
+        UserDefaults.standard.set(true, forKey: "hapticsOn")
+        UserDefaults.standard.set(false, forKey: "alwaysDay")
+        UserDefaults.standard.set(15.0, forKey: "tBase")
+        UserDefaults.standard.set(1.0, forKey: "lightSlider")
+        UserDefaults.standard.set("", forKey: "doorName")
+        UserDefaults.standard.set(0, forKey: "favouriteId")
+        UserDefaults.standard.set(false, forKey: "startGuideDone")
+        AmbientAudio.shared.setMuted(false)
+        for i in 0..<3 {
+            guard let fresh = tank_empty(UInt64(Date().timeIntervalSince1970) &+ UInt64(i)) else { continue }
+            write(handle: fresh, to: i)
+            tank_free(fresh)
+        }
+        slot = 0
+        UserDefaults.standard.set(0, forKey: "activeSlot")
+        loadSlot(0)
+        showStartGuide = true
+        showHint("RESET")
     }
 
     /// Replace the current slot with a fresh half-full tank seeded with a
@@ -280,6 +356,7 @@ final class TankSession: ObservableObject {
             return tank_seed_specimen_copies(fresh, base, raw.count, copies)
         }
         saveCurrent()
+        refreshClock()
         showHint(placed > 0 ? "\(placed) PLACED" : "NO ROOM")
         return placed
     }
@@ -562,10 +639,15 @@ final class TankSession: ObservableObject {
         if handle == nil {
             handle = index == 0 ? tank_preset(1) : tank_empty(UInt64(index + 1))
         }
+        refreshClock()
     }
 
     private func saveCurrent() {
         guard let handle else { return }
+        write(handle: handle, to: slot)
+    }
+
+    private func write(handle: OpaquePointer, to index: Int) {
         let needed = tank_save(handle, nil, 0)
         guard needed > 0 else { return }
         var data = Data(count: needed)
@@ -576,7 +658,16 @@ final class TankSession: ObservableObject {
             return tank_save(handle, base, needed)
         }
         guard wrote == needed else { return }
-        try? data.write(to: saveURL(for: slot), options: .atomic)
+        try? data.write(to: saveURL(for: index), options: .atomic)
+    }
+
+    private func refreshClock() {
+        guard let handle else { return }
+        let tick = tank_tick_count(handle)
+        dayNumber = Int(tick / 72_000) + 1
+        isDay = tank_is_day(handle) != 0
+        temperatureC = tank_temperature(handle)
+        liveCells = tank_live_cells(handle)
     }
 
     private func startMotion() {
@@ -606,22 +697,18 @@ final class TankSession: ObservableObject {
             return
         }
         switch tool {
-        case .fill:
-            // Vertical position sets the fill level.
-            if let metal {
-                let frac = 1.0 - Double(point.y / max(metal.bounds.height, 1))
-                fillLevel = max(0, min(1, frac))
-                applyFillSlider()
-            }
-            return
         case .look:
+            magnifierPoint = point
+            metal?.magnifier = magnifier(at: point)
+            if ended { clearLensSoon() }
+            return
+        case .needle:
             magnifierPoint = point
             metal?.magnifier = magnifier(at: point)
             inspect(at: point, ended: ended)
             if ended { clearLensSoon() }
             return
-        case .scoop:
-            // Empty bucket: a tap scoops. Full bucket: a tap releases.
+        case .sample:
             if ended {
                 if carried == nil { scoop(at: point) } else { release(at: point) }
             }
@@ -634,7 +721,7 @@ final class TankSession: ObservableObject {
         }
         magnifierPoint = point
         metal?.magnifier = magnifier(at: point)
-        queueStroke(at: point)
+        queueStroke(at: point, ended: ended)
         if ended { clearLensSoon() }
     }
 
@@ -727,13 +814,17 @@ final class TankSession: ObservableObject {
         inspected = state
     }
 
-    private func queueStroke(at point: CGPoint) {
+    private func queueStroke(at point: CGPoint, ended: Bool) {
         guard let cell = physicsCell(at: point) else { return }
-        let material: UInt8 = tool == .enclose ? UInt8(encloseOp) : tool.material
+        let stroke = tool.stroke(strokeMode)
+        if stroke.kind == 0 {
+            if ended, let hint = stroke.hint { showHint(hint) }
+            return
+        }
         pendingTools.append(
             ToolEvent(
-                kind: tool.kind,
-                material: material,
+                kind: stroke.kind,
+                material: stroke.material,
                 x: cell.0,
                 y: cell.1,
                 r: UInt16(brush),
@@ -849,6 +940,7 @@ final class TankSession: ObservableObject {
         }
         if pause {
             running = false
+            playing = false
             showHint(hint.map { "\($0) · PAUSED" } ?? "PAUSED")
         }
     }
@@ -908,9 +1000,14 @@ final class TankSession: ObservableObject {
             }
             temperatureC = tank_temperature(handle)
         }
-        let day = tank_is_day(handle) != 0
-        if day != isDay {
-            isDay = day
+        let tick = tank_tick_count(handle)
+        let day = Int(tick / 72_000) + 1
+        if day != dayNumber {
+            dayNumber = day
+        }
+        let sun = tank_is_day(handle) != 0
+        if sun != isDay {
+            isDay = sun
         }
     }
 }

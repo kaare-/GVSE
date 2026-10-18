@@ -29,6 +29,14 @@ enum RoomArt {
 
     static let tank = Spot(x: 16, y: 100, w: 88, h: 60)
 
+    /// Three sample vials on the shelf. Tap one to look in; empty it from
+    /// the long-press menu.
+    static let vials = [
+        Spot(x: 20, y: 17, w: 12, h: 17),
+        Spot(x: 34, y: 17, w: 12, h: 17),
+        Spot(x: 48, y: 17, w: 12, h: 17),
+    ]
+
     static let book = Spot(x: 6, y: 200, w: 28, h: 30)
     static let bookHit = Spot(x: 4, y: 198, w: 36, h: 40)
     static let logHit = Spot(x: 4, y: 240, w: 40, h: 14)
@@ -191,20 +199,9 @@ private final class Pix {
         vine(5, 34, 58, sway: 5)
         vine(9, 36, 50, sway: 4)
 
-        spine(24, 20, 4, 14, Ink.bookR, Ink.gold)
-        spine(29, 18, 5, 16, Ink.bookB, Ink.brass)
-        spine(35, 22, 4, 12, Ink.bookG, Ink.woodLt)
-        spine(40, 19, 5, 15, Ink.bookT, Ink.bookR)
-
-        // Specimen jar.
-        fill(50, 20, 8, 2, Ink.brass)
-        fill(51, 22, 6, 12, Ink.jar)
-        for y in 22..<34 {
-            set(50, y, Ink.glass)
-            set(57, y, Ink.glass)
+        for spot in RoomArt.vials {
+            vial(spot.x, spot.y)
         }
-        fill(51, 27, 6, 7, Ink.liquid)
-        set(52, 24, Ink.glowHot)
 
         // Lantern.
         fill(64, 16, 2, 3, Ink.brassDk)
@@ -415,10 +412,14 @@ private final class Pix {
         fill(s.x + 1, s.y + s.h, s.w - 2, 2, 0x120C0E)
     }
 
-    private func spine(_ x: Int, _ y: Int, _ bw: Int, _ bh: Int, _ c: Int, _ band: Int) {
-        fill(x, y, bw, bh, c)
-        fill(x, y, 1, bh, light(c))
-        fill(x, y + bh / 2, bw, 1, band)
+    private func vial(_ x: Int, _ y: Int) {
+        fill(x + 2, y, 8, 2, Ink.brass)
+        fill(x, y + 2, 1, 14, Ink.glass)
+        fill(x + 11, y + 2, 1, 14, Ink.glass)
+        fill(x + 1, y + 2, 10, 14, Ink.jar)
+        fill(x + 1, y + 8, 10, 8, Ink.liquid)
+        set(x + 2, y + 4, Ink.glow)
+        fill(x, y + 16, 12, 1, Ink.glass)
     }
 
     private func vine(_ x0: Int, _ y0: Int, _ y1: Int, sway: Int) {
@@ -451,13 +452,6 @@ private final class Pix {
                 if let c = map[ch] { set(x + dx, y + dy, c) }
             }
         }
-    }
-
-    private func light(_ rgb: Int) -> Int {
-        let r = min(((rgb >> 16) & 255) + 28, 255)
-        let g = min(((rgb >> 8) & 255) + 24, 255)
-        let b = min((rgb & 255) + 18, 255)
-        return (r << 16) | (g << 8) | b
     }
 
     private func lighten(_ x: Int, _ y: Int, _ add: Int) {

@@ -29,8 +29,14 @@ struct PixelLabel: View {
         let advance = 6 * s
         let glyphs = Array(text.unicodeScalars)
         let columns: Int = {
-            guard let maxWidth, maxWidth >= advance else { return max(glyphs.count, 1) }
-            return max(1, Int(maxWidth / advance))
+            let hardCap = 42
+            let raw: Int
+            if let maxWidth, maxWidth >= advance {
+                raw = Int(maxWidth / advance)
+            } else {
+                raw = glyphs.count
+            }
+            return min(hardCap, max(raw, 1))
         }()
         let laid = wrap(glyphs, columns: columns)
         let widest = laid.map(\.count).max() ?? 1
@@ -110,7 +116,18 @@ struct PixelLabel: View {
         }
         flushWord()
         if !line.isEmpty { lines.append(line) }
-        return lines.isEmpty ? [[]] : lines
+        if lines.isEmpty { return [[]] }
+        // A saved lineage can be thousands of names. An uncapped canvas
+        // crashes the book and the door sign.
+        let maxLines = 8
+        guard lines.count > maxLines else { return lines }
+        var trimmed = Array(lines.prefix(maxLines))
+        if var last = trimmed.last, !last.isEmpty {
+            last.removeLast()
+            last.append(contentsOf: "..".unicodeScalars)
+            trimmed[trimmed.count - 1] = last
+        }
+        return trimmed
     }
 }
 

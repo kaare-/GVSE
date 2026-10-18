@@ -1,17 +1,17 @@
 import SwiftUI
 
-/// Settings live in the room's fuse box (Phase 6) — not on the tank HUD.
+/// Settings, opened from the fuse box in the room.
 struct FuseBoxSettings: View {
     @ObservedObject var session: TankSession
     var onClose: () -> Void
-    @State private var confirmReset = false
+    @State private var confirmGame = false
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.55).ignoresSafeArea().onTapGesture(perform: onClose)
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    PixelLabel(text: "FUSE BOX", scale: 3, color: Palette.highlight)
+                    PixelLabel(text: "SETTINGS", scale: 3, color: Palette.highlight)
                     Spacer()
                     Button(action: onClose) {
                         PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
@@ -19,7 +19,7 @@ struct FuseBoxSettings: View {
                     .buttonStyle(.plain)
                     .a11yButton("Close settings")
                 }
-                PixelLabel(text: "THE ROOM'S BREAKERS", scale: 1, color: Palette.dimPaper)
+                PixelLabel(text: "THE ROOM", scale: 1, color: Palette.dimPaper)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
@@ -71,15 +71,16 @@ struct FuseBoxSettings: View {
                             session.toggleConsent,
                             hint: "Telemetry stays off until this is on"
                         )
-                        Button { confirmReset = true } label: {
-                            PixelPanel { PixelLabel(text: "RESET THIS TANK", scale: 2, color: Palette.paper) }
+                        Button { confirmGame = true } label: {
+                            PixelPanel { PixelLabel(text: "RESET GAME", scale: 2, color: Palette.paper) }
                         }
                         .buttonStyle(.plain)
-                        .a11yButton("Reset this tank")
+                        .a11yButton("Reset game", hint: "Empty every tank and restore the default settings")
                         PixelLabel(
-                            text: "RESET CLEARS THE ACTIVE SLOT. ARCHIVE IS KEPT.",
+                            text: "STARTS OVER. THE BOOK STAYS. A SINGLE TANK IS EMPTIED FROM ITS VIAL.",
                             scale: 1,
-                            color: Palette.dimPaper
+                            color: Palette.dimPaper,
+                            maxWidth: 280
                         )
                         .fixedSize(horizontal: false, vertical: true)
                     }
@@ -90,9 +91,13 @@ struct FuseBoxSettings: View {
             .background(Palette.panel)
             .overlay(Rectangle().stroke(Color(white: 0.78), lineWidth: 3))
         }
-        .confirmationDialog("Wipe tank \(session.slot + 1) and start empty?", isPresented: $confirmReset, titleVisibility: .visible) {
-            Button("Reset tank", role: .destructive) {
-                session.newTank()
+        .confirmationDialog(
+            "Start from the beginning? All three tanks empty and the settings return to their defaults. The book stays.",
+            isPresented: $confirmGame,
+            titleVisibility: .visible
+        ) {
+            Button("Reset game", role: .destructive) {
+                session.resetGame()
                 onClose()
             }
         }

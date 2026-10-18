@@ -68,9 +68,9 @@ final class TankMetalView: UIView {
                 // glass shows that pixel; the rim shows the neighbourhood.
                 sampleUV = center + (p - center) / max(u.lensScale, 1.0);
                 sampleUV = clamp(sampleUV, float2(0.0), float2(1.0));
-                float4 c = tex.sample(smp, sampleUV);
-                float rim = smoothstep(u.lensRadius, u.lensRadius * 0.9, dist);
-                return mix(c, float4(0.9, 0.95, 1.0, 1.0), rim * 0.35);
+                // Nearest sample, no frosted mix: the glass should read
+                // clearer than the tank around it.
+                return tex.sample(smp, sampleUV);
             }
         }
         return tex.sample(smp, sampleUV);
@@ -127,7 +127,7 @@ final class TankMetalView: UIView {
             ),
             lensCenter: SIMD2<Float>(0, 0),
             lensRadius: 0,
-            lensScale: 3,
+            lensScale: 6,
             aspect: Float(drawableW / drawableH),
             pad: 0
         )
@@ -139,7 +139,7 @@ final class TankMetalView: UIView {
             )
             let radiusPx = max(lens.radius, 24) * scale
             uniforms.lensRadius = Float(radiusPx / drawableH)
-            uniforms.lensScale = 3
+            uniforms.lensScale = 6
             uniforms.aspect = Float(drawableW / drawableH)
         }
         guard let drawable = metalLayer.nextDrawable(),

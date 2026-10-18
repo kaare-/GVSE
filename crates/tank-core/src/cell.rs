@@ -274,13 +274,9 @@ impl MatInfo {
             (props.permeability / 16).max(1)
         };
         let retain = ((capacity as u16) * (props.field_capacity as u16) / 255).min(255) as u8;
-        // Painted stone is a cobble in the tank, not a cliff. A step of 1
-        // lets a pile slump instead of stacking in a perfect column.
-        let step = if id == MaterialId::Stone {
-            1
-        } else {
-            stable_step_of(props.repose_rise_m)
-        };
+        // Stone keeps its natural repose. An infinite rise means a cobble
+        // falls and tumbles, then stacks, instead of flowing like powder.
+        let step = stable_step_of(props.repose_rise_m);
         Self {
             capacity,
             rate,
@@ -308,8 +304,8 @@ pub fn retained_sat(id: MaterialId) -> u8 {
 /// GvsE computes `(repose_rise_m / 0.25 m).floor()`, which is 0 for
 /// sand because a column there is a quarter-metre wide. Tank cells are
 /// about a millimetre, so a finite repose becomes one cell of drop
-/// (a readable ~45° pile). Stone is forced to that same step so painted
-/// rock piles. Bedrock and the other infinite-repose rocks never slump.
+/// (a readable ~45° pile). Stone and the other infinite-repose rocks
+/// never slump: a painted cobble drops, tumbles, and stacks.
 pub fn stable_step(id: MaterialId) -> i32 {
     mat_info(id).step
 }

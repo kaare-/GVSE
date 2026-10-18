@@ -192,6 +192,7 @@ uint8_t tank_org_bbox(const TankHandle *handle, uint32_t org, uint16_t *x0, uint
 LineageRec tank_lineage(const TankHandle *handle, uint32_t cell);
 uint32_t tank_species_name(const TankHandle *handle, uint16_t species, uint8_t *buf, uint32_t cap);
 uint32_t tank_species_count(const TankHandle *handle);
+/* Saved species and the ancestors that connect them. Unsaved life is omitted. */
 uint32_t tank_species_tree(const TankHandle *handle, SpeciesNodeRec *out, uint32_t cap);
 uint8_t tank_mark_species_archived(TankHandle *handle, uint16_t species, uint8_t on);
 

@@ -10,7 +10,6 @@ struct MakeAcreatureApp: App {
     @State private var showSettings = false
     @State private var showPhoto = false
     @State private var showLog = false
-    @State private var confirmNewTank = false
 
     var body: some Scene {
         WindowGroup {
@@ -81,157 +80,151 @@ struct MakeAcreatureApp: App {
     }
 
     private var tankScreen: some View {
-        ZStack(alignment: .top) {
-            TankScreen(session: session)
-                .ignoresSafeArea()
-            if let rect = session.inspected?.rect {
-                TrackingBox(rect: rect).ignoresSafeArea()
-            }
-            ChromeScroll {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        PixelPanel {
-                            PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 3)
-                        }
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(session.isDay ? "Day" : "Night")
-                        PixelPanel {
-                            PixelLabel(
-                                text: String(format: "%.0f C", session.temperatureC),
-                                scale: 2,
-                                color: Palette.highlight
-                            )
-                        }
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(String(format: "Tank temperature %.0f degrees", session.temperatureC))
-                    }
-                    Spacer()
-                    slotButtons
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Button {
-                            withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
-                        } label: {
-                            PixelLabel(text: "ROOM", scale: 2, color: Palette.highlight)
-                        }
-                        .buttonStyle(.plain)
-                        .a11yButton("Room", hint: "Leave the tank and open the room")
-                        Button { showPhoto = true } label: {
-                            PixelLabel(text: "PHOTO", scale: 2)
-                        }
-                        .buttonStyle(.plain)
-                        .a11yButton("Photo", hint: "Save a picture of the tank")
-                        Button { showSettings = true } label: {
-                            PixelLabel(text: "SETTINGS", scale: 2)
-                        }
-                        .buttonStyle(.plain)
-                        .a11yButton("Settings", hint: "Open the fuse box")
-                        Button(action: session.unpauseFromEvent) {
-                            PixelLabel(text: "PLAY", scale: 2, color: Palette.dimPaper)
-                        }
-                        .buttonStyle(.plain)
-                        .a11yButton("Play", hint: "Resume the tank")
-                        Button {
-                            session.magnifierPinned.toggle()
-                        } label: {
-                            PixelLabel(
-                                text: session.magnifierPinned ? "LENS PIN" : "LENS",
-                                scale: 2
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .a11yButton(
-                            session.magnifierPinned ? "Lens pinned" : "Lens",
-                            hint: "Pin the magnifier",
-                            selected: session.magnifierPinned
-                        )
-                    }
-                }
-                ToolWheel(
-                    tool: $session.tool,
-                    brush: $session.brush,
-                    variant: $session.variant,
-                    fillLevel: $session.fillLevel,
-                    encloseOp: $session.encloseOp,
-                    onUndo: session.undo,
-                    onTopUp: session.topUp
-                )
-                .onChange(of: session.fillLevel) { _ in
-                    if session.tool == .fill {
-                        session.applyFillSlider()
-                    }
-                }
-                if session.carriedCells > 0 {
-                    HStack(spacing: 8) {
-                        PixelPanel {
-                            PixelLabel(text: "BUCKET \(session.carriedCells) CELLS  TAP TO POUR", scale: 2, color: Palette.highlight)
-                        }
-                        Button(action: session.discardBucket) {
-                            PixelPanel { PixelLabel(text: "DUMP", scale: 2, color: Palette.dimPaper) }
-                        }
-                        .buttonStyle(.plain)
-                        .a11yButton("Dump bucket", hint: "Throw away what you scooped")
-                    }
+        VStack(spacing: 0) {
+            topMenu
+            ZStack {
+                TankScreen(session: session)
+                if let rect = session.inspected?.rect {
+                    TrackingBox(rect: rect)
                 }
                 if let state = session.inspected {
-                    InspectCard(
-                        state: state,
-                        onArchive: session.archiveInspected,
-                        onClose: session.closeInspect
-                    )
+                    VStack {
+                        InspectCard(
+                            state: state,
+                            onArchive: session.archiveInspected,
+                            onClose: session.closeInspect
+                        )
+                        Spacer(minLength: 0)
+                    }
+                    .padding(6)
+                }
+                if session.carriedCells > 0 {
+                    VStack {
+                        Spacer(minLength: 0)
+                        HStack(spacing: 6) {
+                            PixelPanel {
+                                PixelLabel(text: "SAMPLE \(session.carriedCells)", scale: 1, color: Palette.highlight)
+                            }
+                            Button(action: session.discardBucket) {
+                                PixelPanel { PixelLabel(text: "DUMP", scale: 1, color: Palette.dimPaper) }
+                            }
+                            .buttonStyle(.plain)
+                            .a11yButton("Dump sample", hint: "Throw away what you sampled")
+                        }
+                        .padding(.bottom, 6)
+                    }
+                }
+                if let hint = session.hint {
+                    VStack {
+                        Spacer()
+                        HintToast(text: hint)
+                        Spacer().frame(height: 24)
+                    }
+                    .animation(.easeOut(duration: 0.2), value: hint)
+                    .accessibilityElement(children: .combine)
                 }
             }
-            .padding(10)
-            }
-            if let hint = session.hint {
-                VStack {
-                    Spacer()
-                    HintToast(text: hint)
-                    Spacer().frame(height: 80)
-                }
-                .animation(.easeOut(duration: 0.2), value: hint)
-                .accessibilityElement(children: .combine)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .background(Color.black)
+            bottomBar
         }
+        .background(Palette.panel)
         .simultaneousGesture(zoomGesture(toRoom: true))
-        .confirmationDialog(
-            "Replace tank \(session.slot + 1) with an empty tank?",
-            isPresented: $confirmNewTank,
-            titleVisibility: .visible
-        ) {
-            Button("New tank", role: .destructive) {
-                session.newTank()
+    }
+
+    private var clockLabel: String {
+        "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)"
+    }
+
+    private var topMenu: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 6) {
+                PixelLabel(text: clockLabel, scale: 1)
+                    .accessibilityLabel("\(session.isDay ? "Day" : "Night") \(session.dayNumber)")
+                PixelLabel(
+                    text: String(format: "%.0f C", session.temperatureC),
+                    scale: 1,
+                    color: Palette.highlight
+                )
+                .accessibilityLabel(String(format: "Tank temperature %.0f degrees", session.temperatureC))
+                Spacer(minLength: 4)
+                textButton("ROOM", color: Palette.highlight) {
+                    withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
+                }
+                .a11yButton("Room", hint: "Leave the tank and open the room")
+                textButton("PHOTO") { showPhoto = true }
+                    .a11yButton("Photo", hint: "Save a picture of the tank")
+                textButton(session.magnifierPinned ? "PIN" : "LENS") {
+                    session.magnifierPinned.toggle()
+                }
+                .a11yButton(
+                    session.magnifierPinned ? "Lens pinned" : "Lens",
+                    hint: "Pin the magnifier",
+                    selected: session.magnifierPinned
+                )
             }
+            ToolWheel(
+                tool: $session.tool,
+                brush: $session.brush,
+                variant: $session.variant,
+                strokeMode: $session.strokeMode
+            )
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.panel)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color(white: 0.35)).frame(height: 1)
         }
     }
 
-    private var slotButtons: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { i in
-                Button {
-                    session.selectSlot(i)
-                } label: {
-                    PixelPanel {
-                        PixelLabel(
-                            text: "T\(i + 1)",
-                            scale: 2,
-                            color: session.slot == i
-                                ? Palette.highlight
-                                : Color(red: 0.7, green: 0.68, blue: 0.6)
-                        )
-                    }
-                }
-                .buttonStyle(.plain)
-                .a11yButton("Tank \(i + 1)", selected: session.slot == i)
-            }
-            Button { confirmNewTank = true } label: {
-                PixelPanel {
-                    PixelLabel(text: "NEW", scale: 2)
-                }
-            }
-            .buttonStyle(.plain)
-            .a11yButton("New tank", hint: "Ask before replacing the active slot")
+    private var bottomBar: some View {
+        HStack(spacing: 3) {
+            barButton("PAUSE", icon: BarIcon.pause, on: !session.playing, action: session.pause)
+            barButton("PLAY", icon: BarIcon.play, on: session.playing, action: session.unpauseFromEvent)
+            barButton("LOOK", icon: BuildTool.look.icon, on: session.tool == .look) { session.tool = .look }
+            barButton("SAMPLE", icon: BuildTool.sample.icon, on: session.tool == .sample) { session.tool = .sample }
+            barButton("NEEDLE", icon: BuildTool.needle.icon, on: session.tool == .needle) { session.tool = .needle }
+            barButton("UNDO", icon: BarIcon.undo, on: false, action: session.undo)
         }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity)
+        .background(Palette.panel)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color(white: 0.35)).frame(height: 1)
+        }
+    }
+
+    private func textButton(_ title: String, color: Color = Palette.paper, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            PixelLabel(text: title, scale: 1, color: color)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 3)
+                .background(Color(white: 0.1))
+                .overlay(Rectangle().stroke(Color(white: 0.35), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func barButton(_ title: String, icon: [String], on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 1) {
+                PixelIcon(rows: icon, ink: on ? Palette.highlight : Color(red: 0.72, green: 0.68, blue: 0.58), scale: 2)
+                PixelLabel(
+                    text: title,
+                    scale: 1,
+                    color: on ? Palette.highlight : Color(red: 0.72, green: 0.68, blue: 0.58)
+                )
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 2)
+            .background(on ? Color(white: 0.2) : Color(white: 0.08))
+            .overlay(Rectangle().stroke(on ? Palette.highlight : Color(white: 0.28), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .a11yButton(title, selected: on)
     }
 }

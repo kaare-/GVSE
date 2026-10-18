@@ -60,6 +60,27 @@ fn stone_falls_and_tumbles() {
 }
 
 #[test]
+fn erase_lifts_one_material_and_leaves_the_rock() {
+    let mut tank = Tank::try_new(3, 8, 8).unwrap();
+    place(&mut tank, 2, 2, Cell::sand());
+    place(&mut tank, 6, 2, Cell::stone());
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 2,
+            material: MaterialId::Sand as u8,
+            x: 2,
+            y: 2,
+            r: 0,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert!(tank.cell_visible(2, 2).is_air(), "sand lifts");
+    assert_eq!(tank.cell_visible(6, 2).id(), MaterialId::Stone, "rock stays");
+}
+
+#[test]
 fn water_pools_and_levels_and_is_conserved() {
     let mut tank = Tank::try_new(2, 12, 16).unwrap();
     for vx in 0..6 {

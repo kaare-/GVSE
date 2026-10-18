@@ -1119,6 +1119,12 @@ impl GenomeStore {
                 return parent_species;
             }
         }
+        if self.species.len() >= species::SPECIES_CAP {
+            if (parent_species as usize) < self.species.len() {
+                return parent_species;
+            }
+            return 0;
+        }
         let (depth, parent_genome) = match self.species.get(parent_species as usize) {
             Some(ps) => (ps.depth.saturating_add(1), Some(ps.founder_genome.clone())),
             None => (1, None),
