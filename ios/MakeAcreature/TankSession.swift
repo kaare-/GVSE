@@ -125,6 +125,8 @@ final class TankSession: ObservableObject {
     /// Session event log (newest first).
     @Published private(set) var eventLog: [EventLogEntry] = []
     @Published private(set) var showStartGuide = false
+    /// Bumps when a tank file is replaced, so the lobby glass can refresh.
+    @Published private(set) var savesChanged = 0
 
     let archive = ArchiveStore()
     private var eventLogSerial: UInt64 = 0
@@ -175,7 +177,6 @@ final class TankSession: ObservableObject {
         doorName = UserDefaults.standard.string(forKey: "doorName") ?? ""
         favouriteId = Self.storedFavourite()
         showStartGuide = !UserDefaults.standard.bool(forKey: "startGuideDone")
-        PixelKeyboard.applyAppearance()
         reduceMotionObserver = NotificationCenter.default.addObserver(
             forName: UIAccessibility.reduceMotionStatusDidChangeNotification,
             object: nil,
@@ -373,22 +374,15 @@ final class TankSession: ObservableObject {
         showHint("RESET")
     }
 
-    /// Replace the current slot with a fresh half-full tank seeded with a
-    /// few copies of an archived creature. Returns how many were placed.
+    /// Replace one glass with a fresh half-full tank seeded from the archive.
+    /// The open tank is swapped in place. A shelf jar that is not open is
+    /// only rewritten on disk.
     @discardableResult
-    func newTank(from specimen: ArchivedSpecimen, copies: UInt32 = 3) -> UInt32 {
-        if container != .main {
-            switchTo(.main)
+    func newTank(from specimen: ArchivedSpecimen, into target: TankContainer, copies: UInt32 = 3) -> UInt32 {
+        guard let fresh = tank_empty(UInt64(Date().timeIntervalSince1970)) else {
+            showHint("NO ROOM")
+            return 0
         }
-        dropBucket()
-        inspected = nil
-        tank_free(handle)
-        let fresh = tank_empty(UInt64(Date().timeIntervalSince1970))
-        handle = fresh
-        pendingTools.removeAll()
-        guard let fresh else { return 0 }
-        // Fill to the default level before the first tick so the copies
-        // land in standing water.
         var w: UInt32 = 0
         var h: UInt32 = 0
         _ = tank_pixels(fresh, &w, &h)
@@ -406,8 +400,19 @@ final class TankSession: ObservableObject {
             let base = raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
             return tank_seed_specimen_copies(fresh, base, raw.count, copies)
         }
-        saveCurrent()
-        refreshClock()
+        if target == container {
+            dropBucket()
+            inspected = nil
+            tank_free(handle)
+            handle = fresh
+            pendingTools.removeAll()
+            saveCurrent()
+            refreshClock()
+        } else {
+            write(handle: fresh, to: target)
+            tank_free(fresh)
+        }
+        savesChanged += 1
         showHint(placed > 0 ? "\(placed) PLACED" : "NO ROOM")
         return placed
     }

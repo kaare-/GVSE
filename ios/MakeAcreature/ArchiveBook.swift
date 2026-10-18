@@ -214,7 +214,7 @@ struct SpecimenPage: View {
                     } label: {
                         PixelPanel {
                             PixelLabel(
-                                text: confirmNewTank ? "REPLACE MAIN TANK" : "NEW TANK FROM THIS",
+                                text: confirmNewTank ? "PICK A GLASS" : "NEW TANK FROM THIS",
                                 scale: 1,
                                 color: confirmNewTank ? Palette.highlight : Palette.paper
                             )
@@ -236,13 +236,14 @@ struct SpecimenPage: View {
                     .buttonStyle(.plain)
                 }
                 if confirmNewTank {
-                    Button {
-                        session.newTank(from: specimen)
-                        onBack()
-                    } label: {
-                        PixelPanel { PixelLabel(text: "YES, REPLACE THE MAIN TANK", scale: 1, color: Palette.highlight) }
+                    VStack(alignment: .leading, spacing: 8) {
+                        replaceChoice("REPLACE MAIN", .main)
+                        HStack(spacing: 8) {
+                            replaceChoice("JAR 1", .sample(0))
+                            replaceChoice("JAR 2", .sample(1))
+                            replaceChoice("JAR 3", .sample(2))
+                        }
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(12)
@@ -256,6 +257,16 @@ struct SpecimenPage: View {
         }
         .background(Palette.panel)
         .ignoresSafeArea(.keyboard)
+    }
+
+    private func replaceChoice(_ title: String, _ target: TankContainer) -> some View {
+        Button {
+            session.newTank(from: specimen, into: target)
+            onBack()
+        } label: {
+            PixelPanel { PixelLabel(text: title, scale: 1, color: Palette.highlight) }
+        }
+        .buttonStyle(.plain)
     }
 }
 

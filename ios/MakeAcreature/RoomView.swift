@@ -69,6 +69,9 @@ struct RoomView: View {
             tree = session.speciesTree()
             refreshThumbs(others: false)
         }
+        .onChange(of: session.savesChanged) { _ in
+            refreshThumbs(others: true)
+        }
         .confirmationDialog(
             "Empty sample tank \((confirmEmpty ?? 0) + 1)? It goes back to a clean glass.",
             isPresented: Binding(
