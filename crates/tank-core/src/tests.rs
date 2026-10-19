@@ -696,12 +696,7 @@ fn wet_sand_renders_darker_and_each_block_is_flat() {
     place(&mut tank, 5, 2, wet);
     let dry = rgb_at(&mut tank, 2, 2, 0, 0);
     let soaked = rgb_at(&mut tank, 5, 2, 0, 0);
-    let dry_sum = dry.0 as u16 + dry.1 as u16 + dry.2 as u16;
-    let wet_sum = soaked.0 as u16 + soaked.1 as u16 + soaked.2 as u16;
-    assert!(
-        wet_sum + 30 < dry_sum,
-        "wet sand should read darker (dry {dry:?} wet {soaked:?})"
-    );
+    assert_eq!(dry, soaked, "wet sand stays the same flat colour (dry {dry:?} wet {soaked:?})");
     place(&mut tank, 3, 2, Cell::sand());
     assert_eq!(dry, rgb_at(&mut tank, 2, 2, 2, 1), "one sand block is one colour");
     assert_eq!(dry, rgb_at(&mut tank, 2, 2, 1, 2), "a block has no border or grain");

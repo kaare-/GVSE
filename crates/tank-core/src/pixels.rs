@@ -333,7 +333,6 @@ pub fn enzyme_band_colour(key: u8) -> [u8; 3] {
 }
 
 fn albedo(cell: Cell) -> [u8; 3] {
-    let v = cell.colour_variant() as usize;
     if cell.is_glass() {
         // Night dew fogs the pane toward white (Phase 4 condensation).
         let t = (cell.pad as i32) / 2;
@@ -348,13 +347,32 @@ fn albedo(cell: Cell) -> [u8; 3] {
         // Deep #285F83 toward shallow #519FBE.
         return [mix(0x28, 0x51, t), mix(0x5F, 0x9F, t), mix(0x83, 0xBE, t)];
     }
-    let (dry, wet) = palette(cell, v);
+    // Sand and stone are one colour for the whole material. Wetness and
+    // the tone nib stay on the cell; they do not paint a second shade.
+    if is_flat_bed(cell) {
+        return palette(cell, 0).0;
+    }
+    let (dry, wet) = palette(cell, cell.colour_variant() as usize);
     let t = render_wetness(cell);
     [
         mix(dry[0], wet[0], t),
         mix(dry[1], wet[1], t),
         mix(dry[2], wet[2], t),
     ]
+}
+
+fn is_flat_bed(cell: Cell) -> bool {
+    matches!(
+        cell.id(),
+        wk_material::MaterialId::Sand
+            | wk_material::MaterialId::Stone
+            | wk_material::MaterialId::Limestone
+            | wk_material::MaterialId::Sandstone
+            | wk_material::MaterialId::Conglomerate
+            | wk_material::MaterialId::Flowstone
+            | wk_material::MaterialId::LooseRock
+            | wk_material::MaterialId::Gravel
+    )
 }
 
 /// Pore water is a fraction of capacity, not of 255, so a soaked sand
