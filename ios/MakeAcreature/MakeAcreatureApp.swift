@@ -92,6 +92,7 @@ struct MakeAcreatureApp: App {
                 let stage: GlassStage? = session.container == .glass ? GlassStage(size: geo.size) : nil
                 ZStack {
                     if let stage {
+                        Color(red: 0.20, green: 0.14, blue: 0.10)
                         GlassBackdrop(stage: stage)
                         Color.clear
                             .contentShape(Rectangle())
@@ -106,19 +107,10 @@ struct MakeAcreatureApp: App {
                             width: stage?.water.width ?? geo.size.width,
                             height: stage?.water.height ?? geo.size.height
                         )
-                        .clipShape(
-                            RoundedRectangle(
-                                cornerRadius: stage.map { max(4, $0.s * 1.4) } ?? 0,
-                                style: .continuous
-                            )
-                        )
                         .position(
                             x: stage?.water.midX ?? geo.size.width / 2,
                             y: stage?.water.midY ?? geo.size.height / 2
                         )
-                    if let stage {
-                        TumblerChrome(stage: stage)
-                    }
                     if let rect = session.inspected?.rect {
                         TrackingBox(rect: shifted(rect, stage))
                     }
@@ -294,7 +286,7 @@ struct MakeAcreatureApp: App {
     }
 }
 
-/// The study, cropped so the tumbler sits on the table.
+/// The study, fitted in the tank view so the glass sits on the table.
 private struct GlassBackdrop: View {
     var stage: GlassStage
     @State private var mood = RoomMood(
@@ -321,31 +313,5 @@ private struct GlassBackdrop: View {
                 mood.candleLit = RoomMood.storedCandle
             }
             .allowsHitTesting(false)
-    }
-}
-
-/// Rim, highlight, and base so the live water reads as a tumbler.
-private struct TumblerChrome: View {
-    var stage: GlassStage
-
-    var body: some View {
-        let g = stage.rect(RoomArt.openingGlass)
-        let water = stage.water
-        ZStack {
-            Capsule()
-                .fill(Color(red: 0.93, green: 0.97, blue: 0.98).opacity(0.92))
-                .frame(width: g.width * 0.94, height: max(6, stage.s * 2.2))
-                .position(x: g.midX, y: g.minY + stage.s * 1.1)
-            Rectangle()
-                .fill(Color.white.opacity(0.5))
-                .frame(width: max(2, stage.s * 0.55), height: water.height * 0.7)
-                .position(x: water.minX + stage.s * 0.35, y: water.midY)
-            Capsule()
-                .fill(Color(red: 0.75, green: 0.86, blue: 0.89))
-                .frame(width: g.width, height: max(7, stage.s * 2.8))
-                .position(x: g.midX, y: g.maxY - stage.s * 1.5)
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }

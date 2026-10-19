@@ -139,14 +139,13 @@ struct GlassStage {
     var water: CGRect
 
     init(size: CGSize) {
-        let across: CGFloat = 46
-        let scale = size.width / max(across, 1)
-        let g = RoomArt.openingGlass
-        let focusX = CGFloat(g.x) + CGFloat(g.w) / 2
-        let focusY = CGFloat(g.y) + CGFloat(g.h) / 2
+        let scale = min(
+            size.width / CGFloat(RoomArt.w),
+            size.height / CGFloat(RoomArt.h)
+        )
         let origin = CGPoint(
-            x: size.width / 2 - focusX * scale,
-            y: size.height * 0.40 - focusY * scale
+            x: (size.width - CGFloat(RoomArt.w) * scale) / 2,
+            y: (size.height - CGFloat(RoomArt.h) * scale) / 2
         )
         let spot = RoomArt.openingWater
         s = scale
@@ -698,20 +697,21 @@ private final class Pix {
         fill(t.x + t.w - 2, t.y, 2, t.h, Ink.woodDk)
     }
 
-    /// A drinking glass: rim, two thin walls, water, a heavy base.
-    /// The water rectangle matches `openingWater`.
+    /// A glass of water. One-pixel walls, water up to the lip, a small foot.
+    /// No white brim. The water rectangle matches `openingWater`.
     private func tumbler() {
         let g = RoomArt.openingGlass
         let water = RoomArt.openingWater
-        fill(g.x, g.y + g.h - 4, g.w, 4, Ink.glass)
-        fill(g.x + 2, g.y + g.h - 6, g.w - 4, 2, 0xC9DDE3)
-        fill(g.x + 1, g.y + 3, 2, g.h - 8, Ink.glass)
-        fill(g.x + g.w - 3, g.y + 3, 2, g.h - 8, Ink.glass)
+        let edge = 0x8AA8B4
+        let foot = 0x6C8C98
         fill(water.x, water.y, water.w, water.h, Ink.waterL)
-        fill(water.x, water.y, water.w, 3, Ink.waterM)
-        fill(water.x, water.y + 2, 1, water.h - 4, 0xE7F6FA)
-        fill(g.x + 2, g.y, g.w - 4, 2, 0xF7FCFE)
-        fill(g.x + 1, g.y + 2, g.w - 2, 2, Ink.glass)
+        fill(water.x, water.y, water.w, 2, Ink.waterM)
+        fill(water.x, water.y + 2, 1, water.h - 4, 0x7EC4D4)
+        fill(g.x + 2, water.y - 1, g.w - 4, 1, edge)
+        fill(water.x - 1, water.y, 1, water.h, edge)
+        fill(water.x + water.w, water.y, 1, water.h, edge)
+        fill(g.x + 1, water.y + water.h, g.w - 2, 2, foot)
+        fill(g.x, water.y + water.h + 2, g.w, 2, edge)
     }
 
     /// Bright stem from inside the pot, through the shelf, into the live vine.
