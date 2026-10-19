@@ -58,21 +58,21 @@ enum RoomArt {
     }
 
     static let vines = [
-        Vine(x: 8, y: 40, sway: 4, hangs: true),
+        Vine(x: 9, y: 30, sway: 4, hangs: true),
         Vine(x: 99, y: 20, sway: 3, hangs: false),
     ]
 
     /// A taller upright plant in the bottom right. The shelf pots stay.
-    static let ficus = Spot(x: 100, y: 160, w: 16, h: 42)
+    static let ficus = Spot(x: 98, y: 148, w: 20, h: 54)
 
-    /// Wall switch for the desk lamp, just beside its shade.
-    static let lampSwitch = Spot(x: 16, y: 124, w: 6, h: 10)
+    /// The desk lamp. A double tap turns it on or off.
+    static let deskLampHit = Spot(x: 1, y: 110, w: 14, h: 46)
 
-    /// Matchbox on the wall under the candle. A tap lights the wick.
-    static let matchbox = Spot(x: 92, y: 144, w: 10, h: 6)
+    /// The lantern on the top shelf. A double tap turns it on or off.
+    static let shelfLamp = Spot(x: 60, y: 14, w: 12, h: 20)
 
-    /// The candle flame. A swipe across it blows the candle out.
-    static let flame = Spot(x: 108, y: 118, w: 10, h: 14)
+    /// The candle. A double tap lights or puts it out. A swipe blows it out.
+    static let candleHit = Spot(x: 104, y: 118, w: 16, h: 40)
 
     /// Small frame on the wall under the scissor jar.
     static let favFrame = Spot(x: 98, y: 68, w: 18, h: 24)
@@ -98,7 +98,8 @@ enum RoomArt {
     static let signHit = Spot(x: 28, y: 156, w: 64, h: 14)
 
     /// The opening glass. One tumbler, not the big tank.
-    static let openingGlass = Spot(x: 52, y: 168, w: 16, h: 26)
+    /// Sits on the aquarium stand, in the space the big tank leaves open.
+    static let openingGlass = Spot(x: 52, y: 132, w: 16, h: 26)
 
     static func cgImage(cast: RoomCast = RoomCast(), mood: RoomMood = RoomMood()) -> CGImage {
         let pix = Pix(w: w, h: h, cast: cast, mood: mood)
@@ -149,7 +150,7 @@ struct LobbyBeat {
 
 enum LobbyScript {
     static let beats: [LobbyBeat] = [
-        LobbyBeat(name: "opening", tank: false, jars: false, bench: false, glass: "glass", sound: "move"),
+        LobbyBeat(name: "opening", tank: false, jars: false, bench: true, glass: "glass", sound: "move"),
         LobbyBeat(name: "bench", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
         LobbyBeat(name: "tank", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
         LobbyBeat(name: "jars", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
@@ -174,6 +175,7 @@ enum LobbyScript {
 struct RoomMood: Equatable {
     var phase: Double = 0.12
     var lampOn: Bool = true
+    var shelfOn: Bool = true
     var candleLit: Bool = false
 
     static let period: TimeInterval = 180
@@ -189,6 +191,11 @@ struct RoomMood: Equatable {
     static var storedLamp: Bool {
         if UserDefaults.standard.object(forKey: "lobbyLamp") == nil { return true }
         return UserDefaults.standard.bool(forKey: "lobbyLamp")
+    }
+
+    static var storedShelf: Bool {
+        if UserDefaults.standard.object(forKey: "lobbyShelfLamp") == nil { return true }
+        return UserDefaults.standard.bool(forKey: "lobbyShelfLamp")
     }
 
     static var storedCandle: Bool {
@@ -467,7 +474,7 @@ private final class Pix {
         for x in 2..<118 {
             shade(x, 40, 5 + x / 24)
         }
-        cone(cx: 66, cy: 30, reach: 18, power: 22)
+        if mood.shelfOn { cone(cx: 66, cy: 30, reach: 18, power: 22) }
         if mood.lampOn { cone(cx: 8, cy: 118, reach: 36, power: 24) }
         if mood.candleLit { cone(cx: 112, cy: 124, reach: 22, power: 18) }
     }
@@ -509,34 +516,34 @@ private final class Pix {
         fill(18, 38, 3, 5, Ink.woodDk)
         fill(100, 38, 3, 5, Ink.woodDk)
 
-        // The window plant. The pot stays; the trailer hangs and grows down.
+        // The window plant. The stem starts in the soil and hangs from the rim.
         fill(4, 26, 12, 8, Ink.pot)
         fill(3, 25, 14, 2, Ink.potLt)
-        sprite(4, 22, [
+        fill(7, 28, 6, 3, 0x3E2818)
+        sprite(4, 21, [
             " gGGg ",
             "gG  Gg",
         ], [
             "g": Ink.plantDk, "G": Ink.plant, " ": 0,
         ])
-        sprite(6, 34, [
-            "g ",
-            " G",
-            "g ",
-            " G",
-        ], [
-            "g": Ink.plantDk, "G": Ink.plant, " ": 0,
-        ])
+        fill(9, 29, 2, 16, Ink.plantDk)
+        fill(8, 36, 1, 6, Ink.plant)
+        fill(11, 40, 1, 5, Ink.plant)
 
         for spot in RoomArt.vials where cast.jars {
             vial(spot.x, spot.y)
         }
 
-        // Lantern.
+        // Lantern. A double tap on the shelf light turns this on or off.
         fill(64, 16, 2, 3, Ink.brassDk)
         fill(62, 19, 8, 2, Ink.brass)
         fill(63, 21, 6, 10, Ink.brassDk)
-        fill(64, 23, 4, 6, Ink.glow)
-        fill(65, 24, 2, 3, Ink.glowHot)
+        if mood.shelfOn {
+            fill(64, 23, 4, 6, Ink.glow)
+            fill(65, 24, 2, 3, Ink.glowHot)
+        } else {
+            fill(64, 23, 4, 6, Ink.lampOff)
+        }
         fill(62, 31, 8, 2, Ink.brass)
 
         // A small landscape, sky over a far shore. No loose foliage.
@@ -585,9 +592,7 @@ private final class Pix {
 
     private func lamps() {
         deskLamp(2)
-        lightSwitch()
         candle(106)
-        matchbox()
     }
 
     /// The right-hand light. A short wax column and a flame, not a second lamp.
@@ -617,33 +622,25 @@ private final class Pix {
         fill(x + 1, 154, 10, 2, Ink.brassDk)
     }
 
-    private func lightSwitch() {
-        let s = RoomArt.lampSwitch
-        fill(s.x, s.y, s.w, s.h, Ink.ivory)
-        fill(s.x + 1, s.y + 1, s.w - 2, s.h - 2, Ink.metalDk)
-        let nib = mood.lampOn ? s.y + 2 : s.y + s.h - 4
-        fill(s.x + 2, nib, 2, 2, mood.lampOn ? Ink.glowHot : Ink.metal)
-    }
-
-    private func matchbox() {
-        let m = RoomArt.matchbox
-        fill(m.x, m.y, m.w, m.h, Ink.red)
-        fill(m.x, m.y + 2, m.w, 2, Ink.sand)
-        fill(m.x + 1, m.y, m.w - 2, 1, Ink.redLt)
-    }
-
-    /// Taller than the shelf pots: a trunk and a head of leaves, standing
-    /// on the floor in the bottom right.
+    /// Taller than the shelf pots. The trunk comes out of the soil and
+    /// runs up into the crown, with a couple of side branches.
     private func ficus() {
         let p = RoomArt.ficus
-        let potH = 8
-        let potY = p.y + p.h - potH
-        fill(p.x + p.w / 2 - 1, p.y + 16, 2, potY - (p.y + 16), Ink.woodDk)
-        fill(p.x + 1, p.y + 8, p.w - 2, 18, Ink.plant)
-        fill(p.x + 3, p.y, p.w - 6, 12, Ink.plantLt)
-        fill(p.x, p.y + 18, p.w, 8, Ink.plantDk)
-        fill(p.x + 2, potY, p.w - 4, potH, Ink.pot)
-        fill(p.x + 1, potY, p.w - 2, 2, Ink.potLt)
+        let potTop = p.y + p.h - 10
+        let cx = p.x + p.w / 2
+        fill(p.x + 1, potTop + 2, p.w - 2, 8, Ink.pot)
+        fill(p.x, potTop, p.w, 3, Ink.potLt)
+        fill(p.x + 3, potTop + 1, p.w - 6, 2, 0x3E2818)
+        fill(cx - 1, p.y + 18, 3, potTop + 4 - (p.y + 18), Ink.woodDk)
+        fill(cx, p.y + 20, 1, potTop + 2 - (p.y + 20), Ink.wood)
+        fill(cx - 4, p.y + 28, 4, 2, Ink.woodDk)
+        fill(cx + 2, p.y + 34, 5, 2, Ink.woodDk)
+        fill(p.x + 2, p.y + 22, p.w - 4, 12, Ink.plantDk)
+        fill(p.x, p.y + 10, p.w, 16, Ink.plant)
+        fill(p.x + 2, p.y + 2, p.w - 4, 12, Ink.plantLt)
+        fill(p.x + 5, p.y, p.w - 10, 6, Ink.plant)
+        fill(p.x - 2, p.y + 24, 5, 4, Ink.plantDk)
+        fill(p.x + p.w - 3, p.y + 16, 6, 5, Ink.plant)
     }
 
     private func tank() {

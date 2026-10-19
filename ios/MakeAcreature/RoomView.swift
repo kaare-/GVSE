@@ -22,13 +22,14 @@ struct RoomView: View {
     @State private var pinchEntered = false
     @State private var skyPhase = RoomMood.phase()
     @State private var lampOn = RoomMood.storedLamp
+    @State private var shelfOn = RoomMood.storedShelf
     @State private var candleLit = RoomMood.storedCandle
     private let cast = LobbyScript.cast
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private let skyClock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var roomMood: RoomMood {
-        RoomMood(phase: skyPhase, lampOn: lampOn, candleLit: candleLit)
+        RoomMood(phase: skyPhase, lampOn: lampOn, shelfOn: shelfOn, candleLit: candleLit)
     }
 
     var body: some View {
@@ -85,11 +86,9 @@ struct RoomView: View {
                 place(RoomArt.deckHit, layout) { deckButton }
                 place(RoomArt.deckPower, layout) { deckPowerButton }
                 place(RoomArt.favHit, layout) { crateButton(layout) }
-                place(RoomArt.lampSwitch, layout) { lampSwitchButton }
-                place(RoomArt.matchbox, layout) { matchboxButton }
-                if candleLit {
-                    place(RoomArt.flame, layout) { flameControl }
-                }
+                place(RoomArt.deskLampHit, layout) { deskLampControl }
+                place(RoomArt.shelfLamp, layout) { shelfLampControl }
+                place(RoomArt.candleHit, layout) { candleControl }
                 if cast.openingGlass {
                     place(RoomArt.openingGlass, layout) { openingButton }
                 }
@@ -162,20 +161,13 @@ struct RoomView: View {
                     .offset(x: inner.minX - hit.minX, y: inner.minY - hit.minY)
                 VStack {
                     Spacer(minLength: 0)
-                    if !creatureName.isEmpty {
-                        PixelLabel(
-                            text: creatureName,
-                            scale: 1,
-                            color: Color(red: 0.16, green: 0.10, blue: 0.04)
-                        )
-                    }
+                    PixelLabel(text: "TREE OF LIFE", scale: 1, color: Palette.dimPaper)
                 }
-                .padding(.bottom, layout.s * CGFloat(RoomArt.treeHit.h - RoomArt.treeFrame.h))
                 .frame(width: hit.width, height: hit.height)
             }
         }
         .buttonStyle(.plain)
-        .a11yButton("Tree of life", hint: creatureName.isEmpty ? "Open the tree" : creatureName)
+        .a11yButton("Tree of life")
     }
 
     /// The name on the bottom edge of the tree frame.
@@ -373,10 +365,21 @@ struct RoomView: View {
                     PixelLabel(text: "PICK", scale: 1, color: Palette.dimPaper)
                         .offset(y: inner.midY - hit.midY)
                 }
+                VStack {
+                    Spacer(minLength: 0)
+                    if !creatureName.isEmpty {
+                        PixelLabel(
+                            text: creatureName,
+                            scale: 1,
+                            color: Color(red: 0.16, green: 0.10, blue: 0.04)
+                        )
+                        .fixedSize()
+                    }
+                }
             }
         }
         .buttonStyle(.plain)
-        .a11yButton("Framed creature", hint: "Cycle the framed creature")
+        .a11yButton("Framed creature", hint: creatureName.isEmpty ? "Cycle the framed creature" : creatureName)
         .contextMenu {
             Button("Clear favourite") { session.clearFavourite() }
         }
@@ -421,39 +424,49 @@ struct RoomView: View {
         .accessibilityHidden(true)
     }
 
-    private var lampSwitchButton: some View {
-        Button {
-            lampOn.toggle()
-            UserDefaults.standard.set(lampOn, forKey: "lobbyLamp")
-        } label: {
-            Color.clear
-        }
-        .buttonStyle(FullHit())
-        .a11yButton(lampOn ? "Light switch, on" : "Light switch, off", hint: "Electrical light")
-    }
-
-    private var matchboxButton: some View {
-        Button {
-            guard !candleLit else { return }
-            candleLit = true
-            UserDefaults.standard.set(true, forKey: "lobbyCandle")
-        } label: {
-            Color.clear
-        }
-        .buttonStyle(FullHit())
-        .a11yButton("Matchbox", hint: "Light the candle")
-    }
-
-    private var flameControl: some View {
+    private var deskLampControl: some View {
         Color.clear
             .contentShape(Rectangle())
-            .gesture(
+            .onTapGesture(count: 2) { toggleLamp() }
+            .accessibilityAction(named: lampOn ? "Turn off" : "Turn on") { toggleLamp() }
+            .a11yButton(lampOn ? "Desk lamp, on" : "Desk lamp, off", hint: "Double tap to turn the light on or off")
+    }
+
+    private var shelfLampControl: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { toggleShelf() }
+            .accessibilityAction(named: shelfOn ? "Turn off" : "Turn on") { toggleShelf() }
+            .a11yButton(shelfOn ? "Shelf lamp, on" : "Shelf lamp, off", hint: "Double tap to turn the light on or off")
+    }
+
+    private var candleControl: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { toggleCandle() }
+            .simultaneousGesture(
                 DragGesture(minimumDistance: 8).onEnded { value in
                     if abs(value.translation.width) > 12 { blowOutCandle() }
                 }
             )
+            .accessibilityAction(named: candleLit ? "Put out" : "Light") { toggleCandle() }
             .accessibilityAction(named: "Blow out") { blowOutCandle() }
-            .a11yButton("Candle flame", hint: "Swipe across the flame to blow it out")
+            .a11yButton(candleLit ? "Candle, lit" : "Candle", hint: "Double tap to light or put out. Swipe to blow it out")
+    }
+
+    private func toggleLamp() {
+        lampOn.toggle()
+        UserDefaults.standard.set(lampOn, forKey: "lobbyLamp")
+    }
+
+    private func toggleShelf() {
+        shelfOn.toggle()
+        UserDefaults.standard.set(shelfOn, forKey: "lobbyShelfLamp")
+    }
+
+    private func toggleCandle() {
+        candleLit.toggle()
+        UserDefaults.standard.set(candleLit, forKey: "lobbyCandle")
     }
 
     private func blowOutCandle() {
