@@ -8,6 +8,19 @@ final class AmbientAudio {
     static let shared = AmbientAudio()
 
     static let tapeNames = ["SLOW", "BRIGHT", "NIGHT", "TIDE", "DRIFT", "REED", "GLASS", "HEARTH"]
+    /// How long each voice plays before the playlist fades into the next.
+    static let tapeDurations: [TimeInterval] = [48, 36, 72, 40, 56, 34, 80, 44]
+
+    struct PlaySlot {
+        var voice: Int
+        var duration: Double
+    }
+
+    private let gate = NSLock()
+    private var slots: [PlaySlot] = []
+    private var slot = 0
+    private var into: Double = 0
+    private var deckOn = false
 
     private var engine: AVAudioEngine?
     private var source: AVAudioSourceNode?
@@ -27,6 +40,29 @@ final class AmbientAudio {
 
     func setTape(_ index: Int) {
         tape = min(Self.tapeNames.count - 1, max(0, index))
+    }
+
+    /// Left to right is the playlist. `resetHead` restarts the fade-in.
+    func setDeck(on: Bool, slots: [PlaySlot], start: Int, resetHead: Bool) {
+        gate.lock()
+        deckOn = on
+        self.slots = slots
+        if slots.isEmpty {
+            slot = 0
+            into = 0
+        } else {
+            let next = min(max(0, start), slots.count - 1)
+            if resetHead { into = 0 }
+            slot = next
+            tape = min(max(0, slots[next].voice), Self.tapes.count - 1)
+        }
+        gate.unlock()
+    }
+
+    var playingSlot: Int {
+        gate.lock()
+        defer { gate.unlock() }
+        return slot
     }
 
     private init() {}
@@ -75,21 +111,47 @@ final class AmbientAudio {
             guard let data = buf[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
             let n = Int(frameCount)
             let now = CFAbsoluteTimeGetCurrent()
-            let tape = min(self.tape, Self.tapes.count - 1)
-            let part = Self.tapes[tape]
             let rate: Float = 22_050
+            let sting: Float = now < self.stingUntil ? self.stingFreq : 0
+            self.gate.lock()
+            let playing = self.deckOn && !self.slots.isEmpty
+            var slot = self.slot
+            var into = self.into
+            var voiceIndex = self.tape
+            let slots = self.slots
             for i in 0..<n {
                 self.tick &+= 1
                 let t = Float(self.tick) / rate
-                let sample = self.voice(
-                    t: t,
-                    tape: tape,
-                    part: part,
-                    sting: now < self.stingUntil ? self.stingFreq : 0
-                )
+                var sample: Float = 0
+                if playing, !slots.isEmpty {
+                    let safeSlot = min(slot, slots.count - 1)
+                    voiceIndex = min(max(0, slots[safeSlot].voice), Self.tapes.count - 1)
+                    let part = Self.tapes[voiceIndex]
+                    let dur = max(slots[safeSlot].duration, 1)
+                    let fade = min(1.6, dur / 3)
+                    var gain = 1.0
+                    if into < fade { gain = into / fade }
+                    let left = dur - into
+                    if left < fade { gain = min(gain, max(0, left) / fade) }
+                    sample = self.voice(t: t, tape: voiceIndex, part: part, sting: 0) * Float(max(0, gain))
+                    into += 1 / Double(rate)
+                    if into >= dur {
+                        into = 0
+                        slot = (safeSlot + 1) % slots.count
+                    }
+                }
+                if sting > 0 {
+                    sample += sin(2 * .pi * sting * t) * 0.08
+                }
                 self.warm += (sample - self.warm) * 0.18
                 data[i] = max(-1, min(1, self.warm))
             }
+            if playing {
+                self.slot = slot
+                self.into = into
+                self.tape = voiceIndex
+            }
+            self.gate.unlock()
             return noErr
         }
         eng.attach(node)

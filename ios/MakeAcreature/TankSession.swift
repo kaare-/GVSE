@@ -80,6 +80,14 @@ enum TankContainer: Equatable {
 /// Owns the tank handle, the 30 Hz step, tools, and save/resume.
 /// Backgrounding saves and drops leftover frame time so the sim does
 /// not catch up the wall clock.
+/// One cassette on the lobby shelf. `voice` picks the generated tape.
+struct ShelfTape: Identifiable, Codable, Equatable {
+    var id: UUID
+    var name: String
+    var voice: Int
+    var duration: Double
+}
+
 final class TankSession: ObservableObject {
     @Published private(set) var isDay = true
     /// Day 1 covers that day's night as well. The counter advances at dawn.
@@ -140,8 +148,13 @@ final class TankSession: ObservableObject {
     @Published private(set) var savesChanged = 0
     /// Samples for the filing-cabinet charts, oldest first.
     @Published private(set) var chart: [ChartPoint] = []
-    /// Cassette in the deck. Index into `AmbientAudio.tapeNames`.
+    /// Cassette in the deck. Index into `shelf`, left to right.
     @Published private(set) var tape = 0
+    /// Red while off, green while the current tape is playing.
+    @Published private(set) var deckOn = false
+    @Published private(set) var shelf: [ShelfTape] = []
+
+    var tapePlaying: Bool { deckOn && soundOn }
     private var predationCount: UInt32 = 0
 
     let archive = ArchiveStore()
@@ -210,10 +223,10 @@ final class TankSession: ObservableObject {
             TelemetryClient.flushPendingCrash(handle: handle, consent: consent)
             AmbientAudio.shared.setTankSeed(tank_seed(handle))
         }
-        tape = min(AmbientAudio.tapeNames.count - 1, max(0, UserDefaults.standard.integer(forKey: "tape")))
-        AmbientAudio.shared.setTape(tape)
-        AmbientAudio.shared.setMuted(!soundOn)
-        if soundOn { AmbientAudio.shared.startIfNeeded() }
+        loadShelf()
+        deckOn = UserDefaults.standard.object(forKey: "deckOn") as? Bool ?? soundOn
+        tape = min(max(0, shelf.count - 1), max(0, UserDefaults.standard.integer(forKey: "tape")))
+        pushDeck(resetHead: false)
         haptic.prepare()
     }
 
@@ -472,12 +485,87 @@ final class TankSession: ObservableObject {
     }
 
     func setTape(_ index: Int) {
-        let names = AmbientAudio.tapeNames
-        tape = min(names.count - 1, max(0, index))
+        guard shelf.indices.contains(index) else { return }
+        tape = index
         UserDefaults.standard.set(tape, forKey: "tape")
-        AmbientAudio.shared.setTape(tape)
-        if soundOn { AmbientAudio.shared.startIfNeeded() }
-        showHint(names[tape])
+        pushDeck(resetHead: true)
+        showHint(shelf[tape].name)
+    }
+
+    func toggleDeck() {
+        deckOn.toggle()
+        UserDefaults.standard.set(deckOn, forKey: "deckOn")
+        pushDeck(resetHead: false)
+    }
+
+    func renameTape(_ id: UUID, to name: String) {
+        guard let i = shelf.firstIndex(where: { $0.id == id }) else { return }
+        let up = name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !up.isEmpty else { return }
+        shelf[i].name = String(up.prefix(12))
+        saveShelf()
+    }
+
+    func moveTape(from: Int, to: Int) {
+        guard shelf.indices.contains(from) else { return }
+        let dest = min(max(0, to), shelf.count - 1)
+        guard from != dest else { return }
+        let item = shelf.remove(at: from)
+        shelf.insert(item, at: dest)
+        if tape == from {
+            tape = dest
+        } else if from < tape && dest >= tape {
+            tape -= 1
+        } else if from > tape && dest <= tape {
+            tape += 1
+        }
+        UserDefaults.standard.set(tape, forKey: "tape")
+        saveShelf()
+        pushDeck(resetHead: false)
+    }
+
+    /// The playlist advanced on its own. Keep the shelf mark in step.
+    func followPlaylist() {
+        let i = AmbientAudio.shared.playingSlot
+        guard shelf.indices.contains(i), i != tape else { return }
+        tape = i
+        UserDefaults.standard.set(tape, forKey: "tape")
+    }
+
+    private func loadShelf() {
+        if let data = UserDefaults.standard.data(forKey: "lobbyShelf"),
+           let saved = try? JSONDecoder().decode([ShelfTape].self, from: data),
+           !saved.isEmpty {
+            shelf = saved
+            return
+        }
+        shelf = Self.freshShelf()
+        saveShelf()
+    }
+
+    private func saveShelf() {
+        if let data = try? JSONEncoder().encode(shelf) {
+            UserDefaults.standard.set(data, forKey: "lobbyShelf")
+        }
+    }
+
+    private func pushDeck(resetHead: Bool) {
+        let slots = shelf.map { AmbientAudio.PlaySlot(voice: $0.voice, duration: $0.duration) }
+        AmbientAudio.shared.setDeck(on: deckOn && soundOn, slots: slots, start: tape, resetHead: resetHead)
+        AmbientAudio.shared.setMuted(!(deckOn && soundOn))
+    }
+
+    private static func freshShelf() -> [ShelfTape] {
+        let names = AmbientAudio.tapeNames
+        let durations = AmbientAudio.tapeDurations
+        return names.indices.map { i in
+            ShelfTape(
+                id: UUID(),
+                name: names[i],
+                voice: i,
+                duration: i < durations.count ? durations[i] : 45
+            )
+        }
     }
 
     private func loadHandle(for target: TankContainer) -> OpaquePointer? {
@@ -527,7 +615,7 @@ final class TankSession: ObservableObject {
     func toggleSound() {
         soundOn.toggle()
         UserDefaults.standard.set(soundOn, forKey: "soundOn")
-        AmbientAudio.shared.setMuted(!soundOn)
+        pushDeck(resetHead: false)
     }
 
     func toggleHaptics() {

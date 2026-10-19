@@ -62,8 +62,12 @@ struct MakeAcreatureApp: App {
             .fullScreenCover(isPresented: $showCharts) {
                 ChartDrawer(session: session) { showCharts = false }
             }
-            .fullScreenCover(isPresented: $showDeck) {
-                CassetteDeck(session: session) { showDeck = false }
+            .overlay {
+                if showDeck {
+                    CassetteDeck(session: session) { showDeck = false }
+                        .zIndex(12)
+                        .transition(.opacity)
+                }
             }
             .onAppear { session.resume() }
             .onChange(of: session.leaveForLobby) { leave in

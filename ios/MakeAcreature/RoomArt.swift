@@ -90,6 +90,8 @@ enum RoomArt {
     /// Cassette deck on the floor, between the cabinet and the fuse box.
     static let deck = Spot(x: 80, y: 208, w: 16, h: 22)
     static let deckHit = Spot(x: 78, y: 206, w: 20, h: 28)
+    /// Power key on the deck. Red while off, green while a tape plays.
+    static let deckPower = Spot(x: 81, y: 221, w: 6, h: 6)
 
     /// Plaque on the bench, directly under the main tank.
     static let sign = Spot(x: 36, y: 159, w: 48, h: 7)
@@ -332,10 +334,10 @@ private final class Pix {
             clutter()
         }
         floor()
+        cassette()
         if cast.bench {
             archiveBook()
             favouriteCrate()
-            cassette()
             tankPlaque()
             toolJar()
         }
@@ -460,8 +462,8 @@ private final class Pix {
             rightRim(6, 156, 108, 12)
             rightRim(6, 200, 28, 30)
             rightRim(48, 206, 30, 24)
-            rightRim(80, 208, 16, 22)
         }
+        rightRim(80, 208, 16, 22)
         for x in 2..<118 {
             shade(x, 40, 5 + x / 24)
         }

@@ -74,7 +74,6 @@ struct RoomView: View {
                     place(RoomArt.bookHit, layout) { bookButton(layout) }
                     place(RoomArt.logHit, layout) { logButton }
                     place(RoomArt.crateHit, layout) { drawerButton }
-                    place(RoomArt.deckHit, layout) { deckButton }
                     place(RoomArt.signHit, layout) { signButton }
                     place(RoomArt.toolJar, layout) { toolJarButton }
                     if shears {
@@ -83,6 +82,8 @@ struct RoomView: View {
                         }
                     }
                 }
+                place(RoomArt.deckHit, layout) { deckButton }
+                place(RoomArt.deckPower, layout) { deckPowerButton }
                 place(RoomArt.favHit, layout) { crateButton(layout) }
                 place(RoomArt.lampSwitch, layout) { lampSwitchButton }
                 place(RoomArt.matchbox, layout) { matchboxButton }
@@ -104,6 +105,7 @@ struct RoomView: View {
         }
         .onReceive(skyClock) { date in
             skyPhase = RoomMood.phase(at: date)
+            session.followPlaylist()
         }
         .onReceive(refresh) { _ in
             tree = session.speciesTree()
@@ -324,7 +326,18 @@ struct RoomView: View {
             Color.clear
         }
         .buttonStyle(FullHit())
-        .a11yButton("Cassette deck")
+        .a11yButton("Cassette", hint: "Open the desk")
+    }
+
+    private var deckPowerButton: some View {
+        Button(action: session.toggleDeck) {
+            Rectangle()
+                .fill(session.tapePlaying
+                    ? Color(red: 0.22, green: 0.72, blue: 0.28)
+                    : Color(red: 0.78, green: 0.16, blue: 0.14))
+        }
+        .buttonStyle(FullHit())
+        .a11yButton(session.tapePlaying ? "Deck power, on" : "Deck power, off")
     }
 
     private var logButton: some View {
@@ -724,46 +737,145 @@ struct ChartDrawer: View {
     }
 }
 
-/// Generative tapes. Picking one sets the room's sound.
+/// The cassette desk, over the lobby. The room stays visible around it.
+/// Left to right on the shelf is the playlist.
 struct CassetteDeck: View {
     @ObservedObject var session: TankSession
     var onClose: () -> Void
 
-    private var tapes: [String] { AmbientAudio.tapeNames }
+    @State private var pulled: [UUID] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                PixelLabel(text: "DECK", scale: 3, color: Palette.highlight)
-                Spacer()
-                Button(action: onClose) {
-                    PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
-                }
-                .buttonStyle(.plain)
-            }
-            PixelLabel(text: "A TAPE SETS THE ROOM", scale: 1, color: Palette.dimPaper)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(0..<tapes.count, id: \.self) { i in
-                        Button {
-                            session.setTape(i)
-                        } label: {
-                            PixelPanel {
-                                PixelLabel(
-                                    text: session.tape == i ? "\(tapes[i])  IN" : tapes[i],
-                                    scale: 2,
-                                    color: session.tape == i ? Palette.highlight : Palette.paper
-                                )
-                            }
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onClose)
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    PixelLabel(text: "SHELF", scale: 2, color: Palette.highlight)
+                    Spacer()
+                    Button(action: session.toggleDeck) {
+                        PixelPanel {
+                            PixelLabel(
+                                text: session.tapePlaying ? "ON" : "OFF",
+                                scale: 2,
+                                color: session.tapePlaying
+                                    ? Color(red: 0.22, green: 0.72, blue: 0.28)
+                                    : Color(red: 0.78, green: 0.16, blue: 0.14)
+                            )
                         }
-                        .buttonStyle(.plain)
+                    }
+                    .buttonStyle(.plain)
+                    .a11yButton(session.tapePlaying ? "Deck power, on" : "Deck power, off")
+                    Button(action: onClose) {
+                        PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
+                    }
+                    .buttonStyle(.plain)
+                }
+                shelf
+                pile
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color(red: 0.16, green: 0.11, blue: 0.08).opacity(0.94))
+            .padding(.horizontal, 28)
+            .padding(.vertical, 48)
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var shelf: some View {
+        HStack(alignment: .bottom, spacing: 4) {
+            ForEach(Array(session.shelf.enumerated()), id: \.element.id) { index, tape in
+                shelfTape(tape, index: index)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: 78)
+    }
+
+    private func shelfTape(_ tape: ShelfTape, index: Int) -> some View {
+        let playing = session.tape == index && session.tapePlaying
+        let edge = index % 2 == 1
+        return VStack(spacing: 4) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color(red: 0.12, green: 0.1, blue: 0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 2)
+                            .stroke(playing ? Color(red: 0.22, green: 0.72, blue: 0.28) : Color(white: 0.35), lineWidth: 1)
+                    )
+                if edge {
+                    Rectangle()
+                        .fill(Color(white: 0.22))
+                        .frame(width: 4)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                PixelLabel(text: tape.name, scale: 1, color: Palette.paper)
+                    .padding(4)
+            }
+            .frame(width: edge ? 28 : 36, height: 48)
+        }
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0).onEnded { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                if abs(dx) < 12, abs(dy) < 12 {
+                    pull(tape.id)
+                } else if abs(dx) > abs(dy) {
+                    let shift = Int((dx / 48).rounded())
+                    if shift != 0 {
+                        session.moveTape(from: index, to: index + shift)
                     }
                 }
             }
+        )
+        .a11yButton(tape.name, hint: "Pull it out. Drag sideways to reorder")
+        .accessibilityAction(named: "Pull out") { pull(tape.id) }
+    }
+
+    private var pile: some View {
+        ZStack(alignment: .topLeading) {
+            if pulled.isEmpty {
+                PixelLabel(text: "PULL A TAPE", scale: 1, color: Palette.dimPaper)
+            }
+            ForEach(Array(pulled.enumerated()), id: \.element) { i, id in
+                if let tape = session.shelf.first(where: { $0.id == id }) {
+                    frontTape(tape)
+                        .offset(x: CGFloat(i) * 14, y: CGFloat(i) * 10)
+                }
+            }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Palette.panel.ignoresSafeArea())
-        .preferredColorScheme(.dark)
+        .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+    }
+
+    private func frontTape(_ tape: ShelfTape) -> some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 16) {
+                Circle().stroke(Palette.dimPaper, lineWidth: 2).frame(width: 22, height: 22)
+                Circle().stroke(Palette.dimPaper, lineWidth: 2).frame(width: 22, height: 22)
+            }
+            Button {
+                PixelPrompt.singleLine(title: "TAPE", text: tape.name, placeholder: "NAME") { entered in
+                    session.renameTape(tape.id, to: entered)
+                }
+            } label: {
+                PixelPanel {
+                    PixelLabel(text: tape.name, scale: 2, color: Palette.highlight)
+                }
+            }
+            .buttonStyle(.plain)
+            .a11yButton("Name tag \(tape.name)", hint: "Rename")
+        }
+        .padding(10)
+        .background(Color(red: 0.42, green: 0.28, blue: 0.16))
+        .overlay(Rectangle().stroke(Color(red: 0.85, green: 0.7, blue: 0.4), lineWidth: 2))
+    }
+
+    private func pull(_ id: UUID) {
+        guard !pulled.contains(id) else { return }
+        pulled.append(id)
     }
 }
