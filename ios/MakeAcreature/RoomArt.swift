@@ -50,15 +50,29 @@ enum RoomArt {
     /// A jar of odd tools under the right end of the shelf.
     static let toolJar = Spot(x: 104, y: 44, w: 14, h: 18)
 
-    /// Where a pot's foliage starts. Growth climbs toward the ceiling.
+    /// Where a plant's live growth starts. The window plant hangs and
+    /// lengthens downward. The other still climbs.
     struct Vine {
         var x, y, sway: Int
+        var hangs: Bool
     }
 
     static let vines = [
-        Vine(x: 8, y: 16, sway: 4),
-        Vine(x: 99, y: 20, sway: 3),
+        Vine(x: 8, y: 40, sway: 4, hangs: true),
+        Vine(x: 99, y: 20, sway: 3, hangs: false),
     ]
+
+    /// A taller upright plant in the bottom right. The shelf pots stay.
+    static let ficus = Spot(x: 100, y: 160, w: 16, h: 42)
+
+    /// Wall switch for the desk lamp, just beside its shade.
+    static let lampSwitch = Spot(x: 16, y: 124, w: 6, h: 10)
+
+    /// Matchbox on the wall under the candle. A tap lights the wick.
+    static let matchbox = Spot(x: 92, y: 144, w: 10, h: 6)
+
+    /// The candle flame. A swipe across it blows the candle out.
+    static let flame = Spot(x: 108, y: 118, w: 10, h: 14)
 
     /// Small frame on the wall under the scissor jar.
     static let favFrame = Spot(x: 98, y: 68, w: 18, h: 24)
@@ -84,8 +98,8 @@ enum RoomArt {
     /// The opening glass. One tumbler, not the big tank.
     static let openingGlass = Spot(x: 52, y: 168, w: 16, h: 26)
 
-    static func cgImage(cast: RoomCast = RoomCast()) -> CGImage {
-        let pix = Pix(w: w, h: h, cast: cast)
+    static func cgImage(cast: RoomCast = RoomCast(), mood: RoomMood = RoomMood()) -> CGImage {
+        let pix = Pix(w: w, h: h, cast: cast, mood: mood)
         pix.paint()
         let provider = CGDataProvider(data: Data(pix.bytes) as CFData)!
         return CGImage(
@@ -105,7 +119,9 @@ enum RoomArt {
 
     #if canImport(UIKit)
     static let image: UIImage = UIImage(cgImage: cgImage())
-    static func picture(_ cast: RoomCast) -> UIImage { UIImage(cgImage: cgImage(cast: cast)) }
+    static func picture(_ cast: RoomCast, mood: RoomMood = RoomMood()) -> UIImage {
+        UIImage(cgImage: cgImage(cast: cast, mood: mood))
+    }
     #endif
 }
 
@@ -151,6 +167,53 @@ enum LobbyScript {
 }
 
 /// A short cue for a beat. It does not start or stop the cassette.
+/// Day, night, and weather for the left window, plus the two lights.
+/// `phase` runs 0...1 across `period` so the cycle is visible in the room.
+struct RoomMood: Equatable {
+    var phase: Double = 0.12
+    var lampOn: Bool = true
+    var candleLit: Bool = false
+
+    static let period: TimeInterval = 180
+
+    enum DayPart { case day, dusk, night }
+
+    static func phase(at date: Date = Date()) -> Double {
+        let t = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period)
+        let wrapped = t < 0 ? t + period : t
+        return wrapped / period
+    }
+
+    static var storedLamp: Bool {
+        if UserDefaults.standard.object(forKey: "lobbyLamp") == nil { return true }
+        return UserDefaults.standard.bool(forKey: "lobbyLamp")
+    }
+
+    static var storedCandle: Bool {
+        UserDefaults.standard.bool(forKey: "lobbyCandle")
+    }
+
+    var dayPart: DayPart {
+        switch phase {
+        case 0.58..<0.72, 0.92..<1: return .dusk
+        case 0.72..<0.92: return .night
+        default: return .day
+        }
+    }
+
+    var cloudy: Bool { phase >= 0.28 && phase < 0.58 }
+    var raining: Bool { phase >= 0.40 && phase < 0.58 }
+
+    /// How hard the window light pushes into the room.
+    var sunPower: Int {
+        switch dayPart {
+        case .night: return 0
+        case .dusk: return raining ? 6 : 12
+        case .day: return raining ? 8 : (cloudy ? 16 : 30)
+        }
+    }
+}
+
 enum SystemCue {
     private static var played = Set<String>()
     private static var player: AVAudioPlayer?
@@ -245,12 +308,14 @@ private final class Pix {
     let w: Int
     let h: Int
     let cast: RoomCast
+    let mood: RoomMood
     var bytes: [UInt8]
 
-    init(w: Int, h: Int, cast: RoomCast = RoomCast()) {
+    init(w: Int, h: Int, cast: RoomCast = RoomCast(), mood: RoomMood = RoomMood()) {
         self.w = w
         self.h = h
         self.cast = cast
+        self.mood = mood
         bytes = [UInt8](repeating: 0, count: w * h * 4)
     }
 
@@ -276,6 +341,7 @@ private final class Pix {
         }
         fuse()
         if cast.openingGlass { tumbler() }
+        ficus()
         lighting()
     }
 
@@ -297,17 +363,62 @@ private final class Pix {
 
     private func window() {
         fill(0, 46, 15, 56, Ink.woodDk)
-        fill(1, 47, 13, 54, Ink.sky)
-        fill(1, 78, 13, 23, Ink.skyDeep)
+        let top = skyTop()
+        let bot = skyBot()
+        for y in 47..<101 {
+            let t = y < 78 ? 0 : (y - 78)
+            fill(1, y, 13, 1, t == 0 ? top : blend(top, bot, t, 23))
+        }
+        if mood.cloudy {
+            let cloud = mood.raining ? 0xD8DEE4 : 0xF2F6F8
+            fill(2, 52, 8, 2, cloud)
+            fill(6, 58, 7, 2, cloud)
+            fill(2, 64, 6, 1, cloud)
+        }
+        if mood.raining {
+            let shift = Int(mood.phase * 180) % 4
+            for x in stride(from: 2, to: 13, by: 3) {
+                fill(x, 60 + (x + shift) % 5, 1, 4, 0xD6E6F0)
+            }
+        }
+        if mood.dayPart == .night {
+            fill(10, 52, 2, 2, 0xF4F0E4)
+        }
         fill(7, 47, 1, 54, Ink.wood)
         fill(1, 73, 13, 1, Ink.wood)
         for x in 1..<14 {
             let crown = 10 + (x * 5) % 12
-            fill(x, 101 - crown, 1, crown, x % 2 == 0 ? Ink.pine : Ink.pineDk)
+            let pine = mood.dayPart == .night ? Ink.pineDk : (x % 2 == 0 ? Ink.pine : Ink.pineDk)
+            fill(x, 101 - crown, 1, crown, pine)
         }
         fill(0, 46, 15, 1, Ink.woodLt)
         fill(0, 100, 16, 2, Ink.woodLt)
         fill(0, 102, 16, 2, Ink.woodDk)
+    }
+
+    private func skyTop() -> Int {
+        switch mood.dayPart {
+        case .night: return 0x1A2438
+        case .dusk: return 0xC47858
+        case .day: return mood.raining ? 0x6E8494 : (mood.cloudy ? 0xB7C6D2 : Ink.sky)
+        }
+    }
+
+    private func skyBot() -> Int {
+        switch mood.dayPart {
+        case .night: return 0x101820
+        case .dusk: return 0x3A3458
+        case .day: return mood.raining ? 0x4A6270 : (mood.cloudy ? 0x8AA0AE : Ink.skyDeep)
+        }
+    }
+
+    private func blend(_ a: Int, _ b: Int, _ t: Int, _ n: Int) -> Int {
+        func mix(_ shift: Int) -> Int {
+            let av = (a >> shift) & 255
+            let bv = (b >> shift) & 255
+            return av + (bv - av) * t / max(n, 1)
+        }
+        return (mix(16) << 16) | (mix(8) << 8) | mix(0)
     }
 
     /// Window from the left, lamps from their shades. Painted last so
@@ -323,11 +434,20 @@ private final class Pix {
                 let dy = abs(y - winMid)
                 let inBeam = y >= 40 && y <= 130
                 let vertical = inBeam ? dy / 12 : dy / 5
-                var sunAmt = 30 - dx / 3 - vertical
-                if y >= RoomArt.floorY && x < 78 {
+                var sunAmt = mood.sunPower - dx / 3 - vertical
+                if y >= RoomArt.floorY && x < 78 && mood.dayPart == .day && !mood.raining {
                     sunAmt = max(sunAmt, 14 - dx / 6 - (y - RoomArt.floorY) / 5)
                 }
                 if sunAmt > 0 { sun(x, y, sunAmt) }
+                if mood.dayPart == .night {
+                    if dx < 36 { cool(x, y, (36 - dx) / 5) }
+                    shade(x, y, 6)
+                } else if mood.dayPart == .dusk {
+                    shade(x, y, 3)
+                } else if mood.raining {
+                    if dx < 28 { cool(x, y, (28 - dx) / 6) }
+                    shade(x, y, 3)
+                }
                 if dx > 52 {
                     let sh = min(18, (dx - 52) / 3 + (inBeam ? 0 : 3))
                     shade(x, y, sh)
@@ -346,8 +466,8 @@ private final class Pix {
             shade(x, 40, 5 + x / 24)
         }
         cone(cx: 66, cy: 30, reach: 18, power: 22)
-        cone(cx: 8, cy: 118, reach: 36, power: 24)
-        cone(cx: 112, cy: 124, reach: 22, power: 18)
+        if mood.lampOn { cone(cx: 8, cy: 118, reach: 36, power: 24) }
+        if mood.candleLit { cone(cx: 112, cy: 124, reach: 22, power: 18) }
     }
 
     /// Light on the wall around a shade, then a widening pool beneath it.
@@ -387,14 +507,20 @@ private final class Pix {
         fill(18, 38, 3, 5, Ink.woodDk)
         fill(100, 38, 3, 5, Ink.woodDk)
 
-        // Trailing plant, left. Foliage stays clear of the island.
+        // The window plant. The pot stays; the trailer hangs and grows down.
         fill(4, 26, 12, 8, Ink.pot)
         fill(3, 25, 14, 2, Ink.potLt)
-        sprite(2, 16, [
-            "  ggGG  ",
-            " gGGGgg ",
-            "gGG  gGg",
-            " gG  Gg ",
+        sprite(4, 22, [
+            " gGGg ",
+            "gG  Gg",
+        ], [
+            "g": Ink.plantDk, "G": Ink.plant, " ": 0,
+        ])
+        sprite(6, 34, [
+            "g ",
+            " G",
+            "g ",
+            " G",
         ], [
             "g": Ink.plantDk, "G": Ink.plant, " ": 0,
         ])
@@ -428,11 +554,17 @@ private final class Pix {
     private func tree() {
         let f = RoomArt.treeFrame
         let inner = RoomArt.treeInner
-        fill(f.x, f.y, f.w, f.h, Ink.wood)
-        fill(f.x + 1, f.y + 1, f.w - 2, 1, Ink.woodLt)
-        fill(inner.x - 1, inner.y - 1, inner.w + 2, inner.h + 2, Ink.woodDk)
+        fill(f.x - 1, f.y - 1, f.w + 2, f.h + 2, Ink.woodDk)
+        fill(f.x, f.y, f.w, f.h, Ink.brassDk)
+        fill(f.x + 2, f.y + 2, f.w - 4, f.h - 4, Ink.wood)
+        fill(f.x + 3, f.y + 3, f.w - 6, 1, Ink.woodLt)
+        fill(f.x + 3, f.y + f.h - 4, f.w - 6, 1, Ink.brass)
+        fill(inner.x - 1, inner.y - 1, inner.w + 2, inner.h + 2, Ink.black)
         fill(inner.x, inner.y, inner.w, inner.h, Ink.night)
-        for (x, y) in [(f.x + 2, f.y + 2), (f.x + f.w - 3, f.y + 2), (f.x + 2, f.y + f.h - 3), (f.x + f.w - 3, f.y + f.h - 3)] {
+        for (x, y) in [
+            (f.x + 1, f.y + 1), (f.x + f.w - 2, f.y + 1),
+            (f.x + 1, f.y + f.h - 2), (f.x + f.w - 2, f.y + f.h - 2),
+        ] {
             set(x, y, Ink.gold)
         }
     }
@@ -451,16 +583,22 @@ private final class Pix {
 
     private func lamps() {
         deskLamp(2)
+        lightSwitch()
         candle(106)
+        matchbox()
     }
 
     /// The right-hand light. A short wax column and a flame, not a second lamp.
     private func candle(_ x: Int) {
         fill(x + 4, 130, 4, 22, Ink.ivory)
         fill(x + 5, 132, 1, 16, 0xE7D3A4)
-        fill(x + 5, 126, 2, 4, Ink.glow)
-        set(x + 5, 124, Ink.glowHot)
-        set(x + 6, 127, Ink.glowHot)
+        if mood.candleLit {
+            fill(x + 5, 126, 2, 4, Ink.glow)
+            set(x + 5, 124, Ink.glowHot)
+            set(x + 6, 127, Ink.glowHot)
+        } else {
+            set(x + 5, 128, 0x2A241C)
+        }
         fill(x + 2, 152, 8, 2, Ink.brass)
         fill(x + 3, 154, 6, 2, Ink.brassDk)
     }
@@ -468,11 +606,42 @@ private final class Pix {
     private func deskLamp(_ x: Int) {
         fill(x, 112, 12, 2, Ink.brass)
         fill(x + 1, 114, 10, 8, Ink.brassDk)
-        fill(x + 3, 116, 6, 4, Ink.glow)
-        fill(x + 4, 117, 4, 2, Ink.glowHot)
+        fill(x + 3, 116, 6, 4, mood.lampOn ? Ink.glow : Ink.lampOff)
+        if mood.lampOn {
+            fill(x + 4, 117, 4, 2, Ink.glowHot)
+        }
         fill(x + 5, 122, 2, 30, Ink.metalDk)
         fill(x + 2, 152, 8, 2, Ink.brass)
         fill(x + 1, 154, 10, 2, Ink.brassDk)
+    }
+
+    private func lightSwitch() {
+        let s = RoomArt.lampSwitch
+        fill(s.x, s.y, s.w, s.h, Ink.ivory)
+        fill(s.x + 1, s.y + 1, s.w - 2, s.h - 2, Ink.metalDk)
+        let nib = mood.lampOn ? s.y + 2 : s.y + s.h - 4
+        fill(s.x + 2, nib, 2, 2, mood.lampOn ? Ink.glowHot : Ink.metal)
+    }
+
+    private func matchbox() {
+        let m = RoomArt.matchbox
+        fill(m.x, m.y, m.w, m.h, Ink.red)
+        fill(m.x, m.y + 2, m.w, 2, Ink.sand)
+        fill(m.x + 1, m.y, m.w - 2, 1, Ink.redLt)
+    }
+
+    /// Taller than the shelf pots: a trunk and a head of leaves, standing
+    /// on the floor in the bottom right.
+    private func ficus() {
+        let p = RoomArt.ficus
+        let potH = 8
+        let potY = p.y + p.h - potH
+        fill(p.x + p.w / 2 - 1, p.y + 16, 2, potY - (p.y + 16), Ink.woodDk)
+        fill(p.x + 1, p.y + 8, p.w - 2, 18, Ink.plant)
+        fill(p.x + 3, p.y, p.w - 6, 12, Ink.plantLt)
+        fill(p.x, p.y + 18, p.w, 8, Ink.plantDk)
+        fill(p.x + 2, potY, p.w - 4, potH, Ink.pot)
+        fill(p.x + 1, potY, p.w - 2, 2, Ink.potLt)
     }
 
     private func tank() {
@@ -682,6 +851,14 @@ private final class Pix {
         bytes[i] = UInt8(Int(bytes[i]) + a)
         bytes[i + 1] = UInt8(min(Int(bytes[i + 1]) + a * green / (green + 1), 255))
         bytes[i + 2] = UInt8(min(Int(bytes[i + 2]) + a / blue, 255))
+    }
+
+    /// Night and rain. A little blue near the window, red falls off.
+    private func cool(_ x: Int, _ y: Int, _ amt: Int) {
+        guard x >= 0, y >= 0, x < w, y < h, amt > 0, !holds(x, y) else { return }
+        let i = (y * w + x) * 4
+        bytes[i] = UInt8(max(Int(bytes[i]) - amt / 2, 0))
+        bytes[i + 2] = UInt8(min(Int(bytes[i + 2]) + amt, 255))
     }
 
     /// Shadow away from the window. Blue falls fastest, so the dark

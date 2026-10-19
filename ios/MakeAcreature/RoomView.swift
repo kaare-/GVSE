@@ -20,16 +20,23 @@ struct RoomView: View {
     @State private var shears = false
     @State private var thumbs: [UIImage?] = [nil, nil, nil, nil]
     @State private var pinchEntered = false
+    @State private var skyPhase = RoomMood.phase()
+    @State private var lampOn = RoomMood.storedLamp
+    @State private var candleLit = RoomMood.storedCandle
     private let cast = LobbyScript.cast
-    private static let lobbyPicture = RoomArt.picture(LobbyScript.cast)
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    private let skyClock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private var roomMood: RoomMood {
+        RoomMood(phase: skyPhase, lampOn: lampOn, candleLit: candleLit)
+    }
 
     var body: some View {
         GeometryReader { geo in
             let layout = RoomLayout(size: geo.size)
             ZStack {
                 Color(red: 0.20, green: 0.14, blue: 0.10)
-                Image(uiImage: Self.lobbyPicture)
+                Image(uiImage: RoomArt.picture(cast, mood: roomMood))
                     .resizable()
                     .interpolation(.none)
                     .frame(
@@ -77,6 +84,11 @@ struct RoomView: View {
                     }
                 }
                 place(RoomArt.favHit, layout) { crateButton(layout) }
+                place(RoomArt.lampSwitch, layout) { lampSwitchButton }
+                place(RoomArt.matchbox, layout) { matchboxButton }
+                if candleLit {
+                    place(RoomArt.flame, layout) { flameControl }
+                }
                 if cast.openingGlass {
                     place(RoomArt.openingGlass, layout) { openingButton }
                 }
@@ -89,6 +101,9 @@ struct RoomView: View {
             vines = LobbyGrowth.catchUp()
             refreshThumbs(others: true)
             SystemCue.play(LobbyScript.opening.sound)
+        }
+        .onReceive(skyClock) { date in
+            skyPhase = RoomMood.phase(at: date)
         }
         .onReceive(refresh) { _ in
             tree = session.speciesTree()
@@ -137,13 +152,30 @@ struct RoomView: View {
                     .offset(x: inner.minX - hit.minX, y: inner.minY - hit.minY)
                 VStack {
                     Spacer(minLength: 0)
-                    PixelLabel(text: "TREE OF LIFE", scale: 1, color: Palette.dimPaper)
+                    if !creatureName.isEmpty {
+                        PixelLabel(
+                            text: creatureName,
+                            scale: 1,
+                            color: Color(red: 0.16, green: 0.10, blue: 0.04)
+                        )
+                    }
                 }
+                .padding(.bottom, layout.s * CGFloat(RoomArt.treeHit.h - RoomArt.treeFrame.h))
                 .frame(width: hit.width, height: hit.height)
             }
         }
         .buttonStyle(.plain)
-        .a11yButton("Tree of life")
+        .a11yButton("Tree of life", hint: creatureName.isEmpty ? "Open the tree" : creatureName)
+    }
+
+    /// The name on the bottom edge of the tree frame.
+    private var creatureName: String {
+        guard let fav = session.favouriteSpecimen else { return "" }
+        let raw = fav.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallback = fav.speciesName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let up = (raw.isEmpty ? fallback : raw).uppercased()
+        if up.isEmpty { return "" }
+        return up.count > 12 ? String(up.prefix(11)) + "." : up
     }
 
     private func fuseButton(_ layout: RoomLayout) -> some View {
@@ -320,14 +352,10 @@ struct RoomView: View {
                     PixelLabel(text: "PICK", scale: 1, color: Palette.dimPaper)
                         .offset(y: inner.midY - hit.midY)
                 }
-                VStack {
-                    Spacer(minLength: 0)
-                    PixelLabel(text: "FAVOURITE", scale: 1, color: Palette.dimPaper)
-                }
             }
         }
         .buttonStyle(.plain)
-        .a11yButton("Favourite frame", hint: "Cycle the framed creature")
+        .a11yButton("Framed creature", hint: "Cycle the framed creature")
         .contextMenu {
             Button("Clear favourite") { session.clearFavourite() }
         }
@@ -372,9 +400,53 @@ struct RoomView: View {
         .accessibilityHidden(true)
     }
 
+    private var lampSwitchButton: some View {
+        Button {
+            lampOn.toggle()
+            UserDefaults.standard.set(lampOn, forKey: "lobbyLamp")
+        } label: {
+            Color.clear
+        }
+        .buttonStyle(FullHit())
+        .a11yButton(lampOn ? "Light switch, on" : "Light switch, off", hint: "Electrical light")
+    }
+
+    private var matchboxButton: some View {
+        Button {
+            guard !candleLit else { return }
+            candleLit = true
+            UserDefaults.standard.set(true, forKey: "lobbyCandle")
+        } label: {
+            Color.clear
+        }
+        .buttonStyle(FullHit())
+        .a11yButton("Matchbox", hint: "Light the candle")
+    }
+
+    private var flameControl: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 8).onEnded { value in
+                    if abs(value.translation.width) > 12 { blowOutCandle() }
+                }
+            )
+            .accessibilityAction(named: "Blow out") { blowOutCandle() }
+            .a11yButton("Candle flame", hint: "Swipe across the flame to blow it out")
+    }
+
+    private func blowOutCandle() {
+        guard candleLit else { return }
+        candleLit = false
+        UserDefaults.standard.set(false, forKey: "lobbyCandle")
+    }
+
     private func vineHit(_ index: Int) -> RoomArt.Spot {
         let vine = RoomArt.vines[index]
         let len = max(4, Int(vines[index]))
+        if vine.hangs {
+            return RoomArt.Spot(x: vine.x - 4, y: vine.y, w: 12, h: len + 2)
+        }
         return RoomArt.Spot(x: vine.x - 4, y: vine.y - len, w: 12, h: len + 2)
     }
 
@@ -398,22 +470,29 @@ struct RoomView: View {
                 let len = vines.indices.contains(i) ? vines[i] : 6
                 var x = CGFloat(vine.x)
                 var y = CGFloat(vine.y)
-                let top = max(2, y - len)
+                let limit = vine.hangs
+                    ? min(CGFloat(RoomArt.floorY - 8), y + len)
+                    : max(2, y - len)
                 var step = 0
-                while y > top {
+                while vine.hangs ? y < limit : y > limit {
                     let ink: Color = step % 3 == 0
                         ? Color(red: 0.635, green: 0.839, blue: 0.435)
                         : Color(red: 0.424, green: 0.722, blue: 0.290)
                     let rect = CGRect(x: x * s, y: y * s, width: max(s, 1), height: max(s, 1))
                     ctx.fill(Path(rect), with: .color(ink))
                     if step % 3 == 0 {
-                        let leaf = CGRect(x: (x + 1) * s, y: y * s, width: max(s, 1), height: max(s, 1))
+                        let leafX = vine.hangs ? x - 1 : x + 1
+                        let leaf = CGRect(x: leafX * s, y: y * s, width: max(s, 1), height: max(s, 1))
                         ctx.fill(Path(leaf), with: .color(Color(red: 0.18, green: 0.42, blue: 0.16)))
                     }
-                    y -= 2
+                    y += vine.hangs ? 2 : -2
                     let sway = max(vine.sway, 1)
                     x += (Int(y) / sway) % 2 == 0 ? 1 : -1
-                    x = min(CGFloat(RoomArt.w - 2), max(1, x))
+                    if vine.hangs {
+                        x = min(CGFloat(14), max(CGFloat(2), x))
+                    } else {
+                        x = min(CGFloat(RoomArt.w - 2), max(1, x))
+                    }
                     step += 1
                 }
             }
@@ -467,12 +546,13 @@ private enum LobbyGrowth {
             let seenKey = "lobbySeen\(i)"
             let seen = UserDefaults.standard.double(forKey: seenKey)
             var len = UserDefaults.standard.double(forKey: key)
+            let cap = RoomArt.vines[i].hangs ? 56.0 : 14.0
             if seen <= 0, len <= 0 {
-                len = 6
+                len = RoomArt.vines[i].hangs ? 10 : 6
             } else if seen > 0 {
                 len += max(0, now - seen) / 3600 * 2
             }
-            len = min(14, max(4, len))
+            len = min(cap, max(4, len))
             UserDefaults.standard.set(len, forKey: key)
             UserDefaults.standard.set(now, forKey: seenKey)
             lengths.append(CGFloat(len))
