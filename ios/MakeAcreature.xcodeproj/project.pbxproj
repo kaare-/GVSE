@@ -26,6 +26,9 @@
 		B10000000000000000000014 /* PixelKeyboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000014 /* PixelKeyboard.swift */; };
 		B10000000000000000000015 /* EventLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000015 /* EventLog.swift */; };
 		B10000000000000000000016 /* RoomArt.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000016 /* RoomArt.swift */; };
+		B10000000000000000000017 /* SpriteSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000017 /* SpriteSheet.swift */; };
+		B10000000000000000000018 /* scissors.png in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000018 /* scissors.png */; };
+		B10000000000000000000019 /* power.png in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000019 /* power.png */; };
 		B10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -49,6 +52,9 @@
 		F10000000000000000000014 /* PixelKeyboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelKeyboard.swift; sourceTree = "<group>"; };
 		F10000000000000000000015 /* EventLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventLog.swift; sourceTree = "<group>"; };
 		F10000000000000000000016 /* RoomArt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomArt.swift; sourceTree = "<group>"; };
+		F10000000000000000000017 /* SpriteSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpriteSheet.swift; sourceTree = "<group>"; };
+		F10000000000000000000018 /* scissors.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = scissors.png; sourceTree = "<group>"; };
+		F10000000000000000000019 /* power.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = power.png; sourceTree = "<group>"; };
 		F10000000000000000000006 /* Tank-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Tank-Bridging-Header.h"; sourceTree = "<group>"; };
 		F10000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F10000000000000000000008 /* MakeAcreature.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MakeAcreature.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -88,6 +94,8 @@
 				F1000000000000000000000D /* ArchiveBook.swift */,
 				F1000000000000000000000E /* RoomView.swift */,
 				F10000000000000000000016 /* RoomArt.swift */,
+				F10000000000000000000017 /* SpriteSheet.swift */,
+				G10000000000000000000004 /* Sprites */,
 				F1000000000000000000000F /* EventToasts.swift */,
 				F10000000000000000000010 /* FuseBoxSettings.swift */,
 				F10000000000000000000011 /* AmbientAudio.swift */,
@@ -99,6 +107,15 @@
 				F10000000000000000000007 /* Assets.xcassets */,
 			);
 			path = MakeAcreature;
+			sourceTree = "<group>";
+		};
+		G10000000000000000000004 /* Sprites */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000018 /* scissors.png */,
+				F10000000000000000000019 /* power.png */,
+			);
+			path = Sprites;
 			sourceTree = "<group>";
 		};
 		G10000000000000000000003 /* Products */ = {
@@ -162,6 +179,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				B10000000000000000000007 /* Assets.xcassets in Resources */,
+				B10000000000000000000018 /* scissors.png in Resources */,
+				B10000000000000000000019 /* power.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -184,6 +203,7 @@
 				B1000000000000000000000D /* ArchiveBook.swift in Sources */,
 				B1000000000000000000000E /* RoomView.swift in Sources */,
 				B10000000000000000000016 /* RoomArt.swift in Sources */,
+				B10000000000000000000017 /* SpriteSheet.swift in Sources */,
 				B1000000000000000000000F /* EventToasts.swift in Sources */,
 				B10000000000000000000010 /* FuseBoxSettings.swift in Sources */,
 				B10000000000000000000011 /* AmbientAudio.swift in Sources */,

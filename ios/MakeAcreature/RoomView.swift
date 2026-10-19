@@ -320,10 +320,14 @@ struct RoomView: View {
 
     private var deckPowerButton: some View {
         Button(action: session.toggleDeck) {
-            Rectangle()
-                .fill(session.tapePlaying
-                    ? Color(red: 0.22, green: 0.72, blue: 0.28)
-                    : Color(red: 0.78, green: 0.16, blue: 0.14))
+            if let sheet = UIImage(named: "power") {
+                PixelStrip(image: sheet, frames: 2, frame: session.tapePlaying ? 1 : 0)
+            } else {
+                Rectangle()
+                    .fill(session.tapePlaying
+                        ? Color(red: 0.22, green: 0.72, blue: 0.28)
+                        : Color(red: 0.78, green: 0.16, blue: 0.14))
+            }
         }
         .buttonStyle(FullHit())
         .a11yButton(session.tapePlaying ? "Deck power, on" : "Deck power, off")
@@ -399,7 +403,7 @@ struct RoomView: View {
         let x = shearHeld ? shearPoint.x : hook.midX
         let y = shearHeld ? shearPoint.y - h / 2 : hook.midY
         return scissorsGraphic(spread: shearSpread, s: s)
-            .frame(width: 22 * s, height: h)
+            .frame(width: 13 * s, height: h)
             .contentShape(Rectangle())
             .position(x: x, y: y)
             .gesture(
@@ -448,35 +452,19 @@ struct RoomView: View {
             }
     }
 
-    /// Open blades share a tip at the bottom. `spread` is 1 open and 0 shut.
-    private func scissorsHeight(_ s: CGFloat) -> CGFloat { 22 * s }
+    /// The strip is 18 room pixels tall. The last pixel is the cut.
+    private func scissorsHeight(_ s: CGFloat) -> CGFloat { 18 * s }
 
+    /// `spread` is 1 open and 0 shut. The frames live in `art/sprites/scissors.aseprite`.
     private func scissorsGraphic(spread: CGFloat, s: CGFloat) -> some View {
-        let h = scissorsHeight(s)
-        let angle = Double(spread) * 34 + 4
-        return ZStack(alignment: .bottom) {
-            scissorsBlade(angle: -angle, s: s, h: h * 0.78)
-            scissorsBlade(angle: angle, s: s, h: h * 0.78)
-            Circle()
-                .fill(Color(red: 0.90, green: 0.74, blue: 0.32))
-                .frame(width: max(4, s * 2.2), height: max(4, s * 2.2))
-                .offset(y: -h * 0.55)
-            Circle()
-                .stroke(Color(red: 0.82, green: 0.86, blue: 0.88), lineWidth: max(1.5, s * 0.45))
-                .frame(width: max(5, s * 2.4), height: max(5, s * 2.4))
-                .offset(x: -s * 1.6 * spread, y: -h * 0.82)
-            Circle()
-                .stroke(Color(red: 0.82, green: 0.86, blue: 0.88), lineWidth: max(1.5, s * 0.45))
-                .frame(width: max(5, s * 2.4), height: max(5, s * 2.4))
-                .offset(x: s * 1.6 * spread, y: -h * 0.82)
+        let frames = 4
+        let index = Int(((1 - min(max(spread, 0), 1)) * CGFloat(frames - 1)).rounded())
+        return Group {
+            if let sheet = UIImage(named: "scissors") {
+                PixelStrip(image: sheet, frames: frames, frame: index)
+            }
         }
-    }
-
-    private func scissorsBlade(angle: Double, s: CGFloat, h: CGFloat) -> some View {
-        Capsule()
-            .fill(Color(red: 0.86, green: 0.90, blue: 0.92))
-            .frame(width: max(2.5, s * 1.15), height: h)
-            .rotationEffect(.degrees(angle), anchor: .bottom)
+        .frame(width: 13 * s, height: scissorsHeight(s))
     }
 
     /// Index of the vine whose stem the bottom edge crosses.
