@@ -56,6 +56,9 @@ final class TankMetalView: UIView {
             float2 sampleUV = u.cam.xy + p * u.cam.zw;
             return tex.sample(smp, sampleUV);
         }
+        if (u.frame.x <= 0.0) {
+            return float4(0.302, 0.671, 0.780, 1.0);
+        }
         float2 lo = u.window.xy;
         float2 hi = u.window.xy + u.window.zw;
         float2 gap = max(max(lo - in.uv, in.uv - hi), float2(0.0));
@@ -153,8 +156,8 @@ final class TankMetalView: UIView {
                 Float(frame.shownH / max(frame.worldH, 1))
             ),
             frame: SIMD2<Float>(
-                Float(22 * viewScale / drawableW),
-                Float(22 * viewScale / drawableH)
+                Float((camera.worldW < tankScreenPixels * 0.85) ? 0 : 22 * viewScale / drawableW),
+                Float((camera.worldW < tankScreenPixels * 0.85) ? 0 : 22 * viewScale / drawableH)
             ),
             pad: .zero
         )
@@ -306,9 +309,11 @@ func tankFrame(
         camera.worldW = worldW
         camera.worldH = worldH
         if worldW < tankScreenPixels * 0.85 {
-            camera.homeW = min(tankScreenPixels * 0.62, max(worldW * 1.65, worldW + 48))
-            camera.visibleW = camera.homeW
-            camera.centerInWall = true
+            // The tumbler view is the glass. The table around it is drawn
+            // outside this view, so the world fills the view with no bezel.
+            camera.homeW = worldW
+            camera.visibleW = worldW
+            camera.centerInWall = false
             camera.stickToFloor = false
         } else {
             camera.homeW = worldW

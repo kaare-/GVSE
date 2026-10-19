@@ -17,11 +17,13 @@ struct RoomView: View {
     @State private var tree: [SpeciesNode] = []
     @State private var confirmEmpty: Int?
     @State private var vines: [CGFloat] = [6, 6]
-    /// Scissors hang on the wall hook until they are picked up.
-    @State private var holdingShears = false
+    /// False while the scissors hang on the hook.
+    @State private var shearHeld = false
     /// View point at the bottom edge of the scissors. That edge is the cut.
     @State private var shearPoint: CGPoint = .zero
-    @State private var shearOpen = true
+    /// 1 open, 0 shut. Springs shut when the blades meet a vine.
+    @State private var shearSpread: CGFloat = 1
+    @State private var shearSnipped = false
     @State private var thumbs: [UIImage?] = [nil, nil, nil, nil]
     @State private var pinchEntered = false
     @State private var skyPhase = RoomMood.phase()
@@ -90,32 +92,9 @@ struct RoomView: View {
                 if cast.openingGlass {
                     place(RoomArt.openingGlass, layout) { openingButton }
                 }
-                if holdingShears {
-                    Color.clear
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .contentShape(Rectangle())
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { value in
-                                    shearPoint = value.location
-                                    shearOpen = true
-                                }
-                                .onEnded { value in
-                                    shearPoint = value.location
-                                    let cut = cutVines(at: value.location, layout: layout)
-                                    guard cut else { return }
-                                    shearOpen = false
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-                                        shearOpen = true
-                                    }
-                                }
-                        )
-                    scissorsGraphic(open: shearOpen, s: layout.s)
-                        .position(x: shearPoint.x, y: shearPoint.y - scissorsHeight(layout.s) / 2)
-                        .allowsHitTesting(false)
-                }
-                place(RoomArt.shearHook, layout) { shearHookButton(layout) }
+                scissorsTool(layout)
             }
+            .coordinateSpace(name: "room")
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .ignoresSafeArea()
@@ -257,12 +236,12 @@ struct RoomView: View {
     /// A mote in the opening glass. It is not baked into the picture.
     /// Coordinates match the centred picture, the same way the vines do.
     private func openingMote(_ layout: RoomLayout) -> some View {
-        let g = RoomArt.openingGlass
+        let g = RoomArt.openingWater
         let s = layout.s
-        let waterX = CGFloat(g.x + 3)
-        let waterY = CGFloat(g.y + 6)
-        let waterW = CGFloat(max(4, g.w - 6))
-        let waterH = CGFloat(max(6, g.h - 12))
+        let waterX = CGFloat(g.x)
+        let waterY = CGFloat(g.y)
+        let waterW = CGFloat(g.w)
+        let waterH = CGFloat(g.h)
         return TimelineView(.animation) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
             let x = (waterX + waterW * (0.5 + 0.22 * CGFloat(sin(t * 1.4)))) * s
@@ -315,12 +294,9 @@ struct RoomView: View {
         }
     }
 
-    private func bookButton(_ layout: RoomLayout) -> some View {
-        let cover = layout.rect(RoomArt.book)
-        let hit = layout.rect(RoomArt.bookHit)
-        return Button(action: onOpenBook) {
+    private func bookButton(_: RoomLayout) -> some View {
+        Button(action: onOpenBook) {
             PixelLabel(text: "BOOK", scale: 1, color: Palette.highlight)
-                .offset(y: cover.midY - hit.midY)
         }
         .buttonStyle(.plain)
         .a11yButton("Book", hint: "Archive, \(session.archive.specimens.count)")
@@ -416,80 +392,128 @@ struct RoomView: View {
         .a11yButton("Tank sign", hint: shown)
     }
 
-    private func shearHookButton(_ layout: RoomLayout) -> some View {
-        Button {
-            if holdingShears {
-                holdingShears = false
-                shearOpen = true
-            } else {
-                let r = layout.rect(RoomArt.shearHook)
-                shearPoint = CGPoint(x: r.midX, y: r.maxY)
-                shearOpen = true
-                holdingShears = true
+    private func scissorsTool(_ layout: RoomLayout) -> some View {
+        let s = layout.s
+        let h = scissorsHeight(s)
+        let hook = layout.rect(RoomArt.shearHook)
+        let x = shearHeld ? shearPoint.x : hook.midX
+        let y = shearHeld ? shearPoint.y - h / 2 : hook.midY
+        return scissorsGraphic(spread: shearSpread, s: s)
+            .frame(width: 22 * s, height: h)
+            .contentShape(Rectangle())
+            .position(x: x, y: y)
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("room"))
+                    .onChanged { value in
+                        shearHeld = true
+                        shearPoint = value.location
+                        let over = vineAt(value.location, layout: layout) != nil
+                        if over && !shearSnipped {
+                            withAnimation(.spring(response: 0.16, dampingFraction: 0.55)) {
+                                shearSpread = 0
+                            }
+                            _ = cutVines(at: value.location, layout: layout)
+                            shearSnipped = true
+                        } else if !over {
+                            shearSnipped = false
+                            withAnimation(.spring(response: 0.18, dampingFraction: 0.7)) {
+                                shearSpread = 1
+                            }
+                        }
+                    }
+                    .onEnded { value in
+                        let hookHit = layout.rect(RoomArt.shearHook).insetBy(dx: -18, dy: -18)
+                        if hookHit.contains(value.location) {
+                            shearHeld = false
+                            shearSnipped = false
+                            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                                shearSpread = 1
+                            }
+                            return
+                        }
+                        if vineAt(value.location, layout: layout) != nil, !shearSnipped {
+                            withAnimation(.spring(response: 0.16, dampingFraction: 0.55)) {
+                                shearSpread = 0
+                            }
+                            _ = cutVines(at: value.location, layout: layout)
+                        }
+                        shearPoint = value.location
+                        shearHeld = true
+                    }
+            )
+            .a11yButton(shearHeld ? "Scissors" : "Scissors on the hook", hint: "Drag them over a vine to cut. Drop them on the hook to hang them up")
+            .accessibilityAction(named: "Hang up") {
+                shearHeld = false
+                shearSpread = 1
             }
-        } label: {
-            ZStack {
-                Color.clear
-                if !holdingShears {
-                    scissorsGraphic(open: true, s: layout.s)
-                }
-            }
-        }
-        .buttonStyle(FullHit())
-        .a11yButton(holdingShears ? "Hook" : "Scissors", hint: holdingShears ? "Hang the scissors back" : "Pick up the scissors")
     }
 
-    /// Open blades share a tip at the bottom. Closing them does not move that edge.
-    private func scissorsHeight(_ s: CGFloat) -> CGFloat { 16 * s }
+    /// Open blades share a tip at the bottom. `spread` is 1 open and 0 shut.
+    private func scissorsHeight(_ s: CGFloat) -> CGFloat { 22 * s }
 
-    private func scissorsGraphic(open: Bool, s: CGFloat) -> some View {
+    private func scissorsGraphic(spread: CGFloat, s: CGFloat) -> some View {
         let h = scissorsHeight(s)
-        let angle = open ? 26.0 : 7.0
+        let angle = Double(spread) * 34 + 4
         return ZStack(alignment: .bottom) {
-            scissorsBlade(angle: -angle, s: s, h: h * 0.82)
-            scissorsBlade(angle: angle, s: s, h: h * 0.82)
+            scissorsBlade(angle: -angle, s: s, h: h * 0.78)
+            scissorsBlade(angle: angle, s: s, h: h * 0.78)
             Circle()
-                .fill(Color(red: 0.86, green: 0.72, blue: 0.38))
-                .frame(width: max(3, s * 1.6), height: max(3, s * 1.6))
-                .offset(y: -h * 0.62)
+                .fill(Color(red: 0.90, green: 0.74, blue: 0.32))
+                .frame(width: max(4, s * 2.2), height: max(4, s * 2.2))
+                .offset(y: -h * 0.55)
+            Circle()
+                .stroke(Color(red: 0.82, green: 0.86, blue: 0.88), lineWidth: max(1.5, s * 0.45))
+                .frame(width: max(5, s * 2.4), height: max(5, s * 2.4))
+                .offset(x: -s * 1.6 * spread, y: -h * 0.82)
+            Circle()
+                .stroke(Color(red: 0.82, green: 0.86, blue: 0.88), lineWidth: max(1.5, s * 0.45))
+                .frame(width: max(5, s * 2.4), height: max(5, s * 2.4))
+                .offset(x: s * 1.6 * spread, y: -h * 0.82)
         }
-        .frame(width: 12 * s, height: h)
-        .animation(.easeOut(duration: 0.16), value: open)
     }
 
     private func scissorsBlade(angle: Double, s: CGFloat, h: CGFloat) -> some View {
         Capsule()
-            .fill(Color(red: 0.78, green: 0.82, blue: 0.84))
-            .frame(width: max(2, s * 1.2), height: h)
+            .fill(Color(red: 0.86, green: 0.90, blue: 0.92))
+            .frame(width: max(2.5, s * 1.15), height: h)
             .rotationEffect(.degrees(angle), anchor: .bottom)
+    }
+
+    /// Index of the vine whose stem the bottom edge crosses.
+    private func vineAt(_ bottom: CGPoint, layout: RoomLayout) -> Int? {
+        let s = layout.s
+        let x = (bottom.x - layout.origin.x) / s
+        let y = Int(((bottom.y - layout.origin.y) / s).rounded())
+        for i in RoomArt.vines.indices {
+            let vine = RoomArt.vines[i]
+            let len = vines.indices.contains(i) ? Int(vines[i]) : 6
+            if vine.hangs {
+                guard x >= CGFloat(vine.x) - 8, x <= CGFloat(vine.x) + 8 else { continue }
+                guard y > vine.y, y < vine.y + len else { continue }
+                return i
+            }
+            guard x >= CGFloat(vine.x) - 6, x <= CGFloat(vine.x) + 6 else { continue }
+            guard y < vine.y, y > vine.y - len else { continue }
+            return i
+        }
+        return nil
     }
 
     /// The bottom edge of the scissors is the cut. The stub that remains
     /// is however much vine is above that edge.
     private func cutVines(at bottom: CGPoint, layout: RoomLayout) -> Bool {
+        guard let i = vineAt(bottom, layout: layout) else { return false }
         let s = layout.s
-        let reach = 8 * s
-        let left = (bottom.x - reach - layout.origin.x) / s
-        let right = (bottom.x + reach - layout.origin.x) / s
         let cutY = Int(((bottom.y - layout.origin.y) / s).rounded())
-        var cut = false
-        for i in RoomArt.vines.indices {
-            let vine = RoomArt.vines[i]
-            let vx = CGFloat(vine.x)
-            guard vx >= left, vx <= right else { continue }
-            let len = vines.indices.contains(i) ? Int(vines[i]) : 6
-            let keep: Int
-            if vine.hangs {
-                guard cutY > vine.y, cutY < vine.y + len else { continue }
-                keep = max(4, cutY - vine.y)
-            } else {
-                guard cutY < vine.y, cutY > vine.y - len else { continue }
-                keep = max(4, vine.y - cutY)
-            }
-            vines[i] = LobbyGrowth.setLength(i, CGFloat(keep))
-            cut = true
+        let vine = RoomArt.vines[i]
+        let keep: Int
+        if vine.hangs {
+            keep = max(4, cutY - vine.y)
+        } else {
+            keep = max(4, vine.y - cutY)
         }
-        return cut
+        vines[i] = LobbyGrowth.setLength(i, CGFloat(keep))
+        return true
     }
 
     private var deskLampControl: some View {
@@ -565,20 +589,29 @@ struct RoomView: View {
             for (i, vine) in RoomArt.vines.enumerated() {
                 let len = vines.indices.contains(i) ? vines[i] : 6
                 if vine.hangs {
-                    // Solid stem over the baked one. No sway, no gaps.
-                    let stem = min(len, 14)
-                    var y = CGFloat(vine.y)
-                    let end = y + stem
-                    while y < end {
-                        let rect = CGRect(
-                            x: (CGFloat(vine.x) - 1) * s,
+                    let x = CGFloat(vine.x)
+                    let n = max(1, Int(len))
+                    for step in 0..<n {
+                        let y = CGFloat(vine.y + step)
+                        let stem = CGRect(
+                            x: (x - 1) * s,
                             y: y * s,
                             width: max(s * 3, 1),
                             height: max(s, 1)
                         )
-                        ctx.fill(Path(rect), with: .color(bright))
-                        y += 1
+                        ctx.fill(Path(stem), with: .color(bright))
+                        if step > 8 && step % 4 == 0 {
+                            let side: CGFloat = step % 8 == 0 ? -3 : 2
+                            let leafRect = CGRect(
+                                x: (x + side) * s,
+                                y: y * s,
+                                width: max(s * 2, 1),
+                                height: max(s, 1)
+                            )
+                            ctx.fill(Path(leafRect), with: .color(dark))
+                        }
                     }
+                    continue
                 }
                 var x = CGFloat(vine.x)
                 var y = CGFloat(vine.y) + (vine.hangs ? min(len, 10) : 0)
@@ -947,7 +980,7 @@ struct CassetteDeck: View {
                 let dx = value.translation.width
                 let dy = value.translation.height
                 if abs(dx) < 12, abs(dy) < 12 {
-                    if !out { pull(tape.id) }
+                    if out { restore(tape.id) } else { pull(tape.id) }
                 } else if abs(dx) > abs(dy) {
                     let shift = Int((dx / 28).rounded())
                     if shift != 0 {
@@ -956,8 +989,10 @@ struct CassetteDeck: View {
                 }
             }
         )
-        .a11yButton(out ? "Empty slot" : tape.name, hint: out ? "Drag sideways to reorder" : "Pull it out. Drag sideways to reorder")
-        .accessibilityAction(named: "Pull out") { if !out { pull(tape.id) } }
+        .a11yButton(out ? "Empty slot" : tape.name, hint: out ? "Put the tape back. Drag sideways to reorder" : "Pull it out. Drag sideways to reorder")
+        .accessibilityAction(named: out ? "Put back" : "Pull out") {
+            if out { restore(tape.id) } else { pull(tape.id) }
+        }
     }
 
     private func spineColor(_ index: Int) -> Color {
@@ -1194,6 +1229,15 @@ struct CassetteDeck: View {
             .buttonStyle(.plain)
             .a11yButton("Name tag \(tape.name)", hint: "Rename")
             PixelLabel(text: clock(tape.duration), scale: 1, color: Palette.paper)
+            Button {
+                restore(tape.id)
+            } label: {
+                PixelPanel {
+                    PixelLabel(text: "SHELF", scale: 1, color: Palette.paper)
+                }
+            }
+            .buttonStyle(.plain)
+            .a11yButton("Put \(tape.name) back")
         }
         .padding(10)
         .background(Color(red: 0.42, green: 0.28, blue: 0.16))
@@ -1203,6 +1247,10 @@ struct CassetteDeck: View {
     private func pull(_ id: UUID) {
         guard !pulled.contains(id) else { return }
         pulled.append(id)
+    }
+
+    private func restore(_ id: UUID) {
+        pulled.removeAll { $0 == id }
     }
 
     private func clock(_ secs: Double) -> String {

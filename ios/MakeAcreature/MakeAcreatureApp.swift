@@ -88,60 +88,91 @@ struct MakeAcreatureApp: App {
     private var tankScreen: some View {
         VStack(spacing: 0) {
             topMenu
-            ZStack {
-                TankScreen(session: session)
-                if let rect = session.inspected?.rect {
-                    TrackingBox(rect: rect)
-                }
-                if let rect = session.selectionRect {
-                    SelectionBox(rect: rect)
-                }
-                if let state = session.inspected {
-                    VStack(alignment: .leading, spacing: 0) {
-                        InspectCard(
-                            state: state,
-                            onArchive: session.archiveInspected,
-                            onClose: session.closeInspect
-                        )
-                        .padding(6)
-                        .offset(x: cardHome.width + cardDrag.width, y: cardHome.height + cardDrag.height)
-                        .gesture(
-                            DragGesture(minimumDistance: 12)
-                                .onChanged { cardDrag = $0.translation }
-                                .onEnded { value in
-                                    cardHome.width = min(max(cardHome.width + value.translation.width, -24), 180)
-                                    cardHome.height = min(max(cardHome.height + value.translation.height, -8), 520)
-                                    cardDrag = .zero
+            GeometryReader { geo in
+                let stage: GlassStage? = session.container == .glass ? GlassStage(size: geo.size) : nil
+                ZStack {
+                    if let stage {
+                        GlassBackdrop(stage: stage)
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .gesture(
+                                MagnificationGesture().onChanged { scale in
+                                    if scale < 0.9 { session.leaveForLobby = true }
                                 }
+                            )
+                    }
+                    TankScreen(session: session)
+                        .frame(
+                            width: stage?.water.width ?? geo.size.width,
+                            height: stage?.water.height ?? geo.size.height
                         )
-                        Spacer(minLength: 0)
+                        .clipShape(
+                            RoundedRectangle(
+                                cornerRadius: stage.map { max(4, $0.s * 1.4) } ?? 0,
+                                style: .continuous
+                            )
+                        )
+                        .position(
+                            x: stage?.water.midX ?? geo.size.width / 2,
+                            y: stage?.water.midY ?? geo.size.height / 2
+                        )
+                    if let stage {
+                        TumblerChrome(stage: stage)
                     }
-                }
-                if session.carriedCells > 0 {
-                    VStack {
-                        Spacer(minLength: 0)
-                        HStack(spacing: 6) {
-                            PixelPanel {
-                                PixelLabel(text: "SAMPLE \(session.carriedCells)", scale: 1, color: Palette.highlight)
-                            }
-                            Button(action: session.discardBucket) {
-                                PixelPanel { PixelLabel(text: "DUMP", scale: 1, color: Palette.dimPaper) }
-                            }
-                            .buttonStyle(.plain)
-                            .a11yButton("Dump sample", hint: "Throw away what you sampled")
+                    if let rect = session.inspected?.rect {
+                        TrackingBox(rect: shifted(rect, stage))
+                    }
+                    if let rect = session.selectionRect {
+                        SelectionBox(rect: shifted(rect, stage))
+                    }
+                    if let state = session.inspected {
+                        VStack(alignment: .leading, spacing: 0) {
+                            InspectCard(
+                                state: state,
+                                onArchive: session.archiveInspected,
+                                onClose: session.closeInspect
+                            )
+                            .padding(6)
+                            .offset(x: cardHome.width + cardDrag.width, y: cardHome.height + cardDrag.height)
+                            .gesture(
+                                DragGesture(minimumDistance: 12)
+                                    .onChanged { cardDrag = $0.translation }
+                                    .onEnded { value in
+                                        cardHome.width = min(max(cardHome.width + value.translation.width, -24), 180)
+                                        cardHome.height = min(max(cardHome.height + value.translation.height, -8), 520)
+                                        cardDrag = .zero
+                                    }
+                            )
+                            Spacer(minLength: 0)
                         }
-                        .padding(.bottom, 6)
+                    }
+                    if session.carriedCells > 0 {
+                        VStack {
+                            Spacer(minLength: 0)
+                            HStack(spacing: 6) {
+                                PixelPanel {
+                                    PixelLabel(text: "SAMPLE \(session.carriedCells)", scale: 1, color: Palette.highlight)
+                                }
+                                Button(action: session.discardBucket) {
+                                    PixelPanel { PixelLabel(text: "DUMP", scale: 1, color: Palette.dimPaper) }
+                                }
+                                .buttonStyle(.plain)
+                                .a11yButton("Dump sample", hint: "Throw away what you sampled")
+                            }
+                            .padding(.bottom, 6)
+                        }
+                    }
+                    if let hint = session.hint {
+                        VStack {
+                            Spacer()
+                            HintToast(text: hint)
+                            Spacer().frame(height: 24)
+                        }
+                        .animation(.easeOut(duration: 0.2), value: hint)
+                        .accessibilityElement(children: .combine)
                     }
                 }
-                if let hint = session.hint {
-                    VStack {
-                        Spacer()
-                        HintToast(text: hint)
-                        Spacer().frame(height: 24)
-                    }
-                    .animation(.easeOut(duration: 0.2), value: hint)
-                    .accessibilityElement(children: .combine)
-                }
+                .frame(width: geo.size.width, height: geo.size.height)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
@@ -153,6 +184,11 @@ struct MakeAcreatureApp: App {
 
     @State private var cardHome = CGSize.zero
     @State private var cardDrag = CGSize.zero
+
+    private func shifted(_ rect: CGRect, _ stage: GlassStage?) -> CGRect {
+        guard let stage else { return rect }
+        return rect.offsetBy(dx: stage.water.minX, dy: stage.water.minY)
+    }
 
     private var clockLabel: String {
         "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)"
@@ -255,5 +291,61 @@ struct MakeAcreatureApp: App {
         }
         .buttonStyle(.plain)
         .a11yButton(title, selected: on)
+    }
+}
+
+/// The study, cropped so the tumbler sits on the table.
+private struct GlassBackdrop: View {
+    var stage: GlassStage
+    @State private var mood = RoomMood(
+        phase: RoomMood.phase(),
+        lampOn: RoomMood.storedLamp,
+        shelfOn: RoomMood.storedShelf,
+        candleLit: RoomMood.storedCandle
+    )
+    private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Image(uiImage: RoomArt.picture(LobbyScript.cast, mood: mood))
+            .resizable()
+            .interpolation(.none)
+            .frame(width: CGFloat(RoomArt.w) * stage.s, height: CGFloat(RoomArt.h) * stage.s)
+            .position(
+                x: stage.origin.x + CGFloat(RoomArt.w) * stage.s / 2,
+                y: stage.origin.y + CGFloat(RoomArt.h) * stage.s / 2
+            )
+            .onReceive(clock) { date in
+                mood.phase = RoomMood.phase(at: date)
+                mood.lampOn = RoomMood.storedLamp
+                mood.shelfOn = RoomMood.storedShelf
+                mood.candleLit = RoomMood.storedCandle
+            }
+            .allowsHitTesting(false)
+    }
+}
+
+/// Rim, highlight, and base so the live water reads as a tumbler.
+private struct TumblerChrome: View {
+    var stage: GlassStage
+
+    var body: some View {
+        let g = stage.rect(RoomArt.openingGlass)
+        let water = stage.water
+        ZStack {
+            Capsule()
+                .fill(Color(red: 0.93, green: 0.97, blue: 0.98).opacity(0.92))
+                .frame(width: g.width * 0.94, height: max(6, stage.s * 2.2))
+                .position(x: g.midX, y: g.minY + stage.s * 1.1)
+            Rectangle()
+                .fill(Color.white.opacity(0.5))
+                .frame(width: max(2, stage.s * 0.55), height: water.height * 0.7)
+                .position(x: water.minX + stage.s * 0.35, y: water.midY)
+            Capsule()
+                .fill(Color(red: 0.75, green: 0.86, blue: 0.89))
+                .frame(width: g.width, height: max(7, stage.s * 2.8))
+                .position(x: g.midX, y: g.maxY - stage.s * 1.5)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }

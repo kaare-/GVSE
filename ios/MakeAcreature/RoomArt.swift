@@ -58,7 +58,7 @@ enum RoomArt {
     }
 
     static let vines = [
-        Vine(x: 9, y: 36, sway: 4, hangs: true),
+        Vine(x: 10, y: 30, sway: 0, hangs: true),
         Vine(x: 99, y: 20, sway: 3, hangs: false),
     ]
 
@@ -79,10 +79,10 @@ enum RoomArt {
     static let favInner = Spot(x: 100, y: 70, w: 14, h: 16)
     static let favHit = Spot(x: 96, y: 66, w: 22, h: 28)
 
-    /// One book under the tank table. The archive and the event log share it.
-    static let book = Spot(x: 42, y: 172, w: 16, h: 18)
-    static let bookHit = Spot(x: 40, y: 170, w: 20, h: 12)
-    static let logHit = Spot(x: 40, y: 182, w: 20, h: 8)
+    /// One book under the tank table, cover facing out. Archive on top, log below.
+    static let book = Spot(x: 42, y: 172, w: 20, h: 18)
+    static let bookHit = Spot(x: 42, y: 172, w: 20, h: 9)
+    static let logHit = Spot(x: 42, y: 181, w: 20, h: 9)
 
     /// The gray box under the table. Charts live here.
     static let crate = Spot(x: 20, y: 174, w: 20, h: 14)
@@ -99,9 +99,10 @@ enum RoomArt {
     static let sign = Spot(x: 36, y: 159, w: 48, h: 7)
     static let signHit = Spot(x: 28, y: 156, w: 64, h: 14)
 
-    /// The opening glass. One tumbler, not the big tank.
-    /// Sits on the aquarium stand, in the space the big tank leaves open.
-    static let openingGlass = Spot(x: 52, y: 132, w: 16, h: 26)
+    /// The opening glass. One tumbler on the left side of the stand.
+    /// `openingWater` is 15×21, the same shape as the 40×56 cell world.
+    static let openingGlass = Spot(x: 34, y: 126, w: 21, h: 31)
+    static let openingWater = Spot(x: 37, y: 130, w: 15, h: 21)
 
     static func cgImage(cast: RoomCast = RoomCast(), mood: RoomMood = RoomMood()) -> CGImage {
         let pix = Pix(w: w, h: h, cast: cast, mood: mood)
@@ -128,6 +129,44 @@ enum RoomArt {
         UIImage(cgImage: cgImage(cast: cast, mood: mood))
     }
     #endif
+}
+
+/// Where the tumbler sits once you have pinched into it.
+/// The live water occupies `water`; the table is the picture around it.
+struct GlassStage {
+    var s: CGFloat
+    var origin: CGPoint
+    var water: CGRect
+
+    init(size: CGSize) {
+        let across: CGFloat = 46
+        let scale = size.width / max(across, 1)
+        let g = RoomArt.openingGlass
+        let focusX = CGFloat(g.x) + CGFloat(g.w) / 2
+        let focusY = CGFloat(g.y) + CGFloat(g.h) / 2
+        let origin = CGPoint(
+            x: size.width / 2 - focusX * scale,
+            y: size.height * 0.40 - focusY * scale
+        )
+        let spot = RoomArt.openingWater
+        s = scale
+        self.origin = origin
+        water = CGRect(
+            x: origin.x + CGFloat(spot.x) * scale,
+            y: origin.y + CGFloat(spot.y) * scale,
+            width: CGFloat(spot.w) * scale,
+            height: CGFloat(spot.h) * scale
+        )
+    }
+
+    func rect(_ spot: RoomArt.Spot) -> CGRect {
+        CGRect(
+            x: origin.x + CGFloat(spot.x) * s,
+            y: origin.y + CGFloat(spot.y) * s,
+            width: CGFloat(spot.w) * s,
+            height: CGFloat(spot.h) * s
+        )
+    }
 }
 
 /// What a beat has put in the room. Later beats fill these in.
@@ -353,6 +392,7 @@ private final class Pix {
         if cast.openingGlass { tumbler() }
         ficus()
         lighting()
+        hangingStem()
     }
 
     private func planks() {
@@ -529,8 +569,6 @@ private final class Pix {
         ], [
             "g": Ink.plantDk, "G": Ink.plant, " ": 0,
         ])
-        fill(8, 29, 3, 22, Ink.plant)
-        fill(9, 29, 1, 22, Ink.plantLt)
 
         for spot in RoomArt.vials where cast.jars {
             vial(spot.x, spot.y)
@@ -660,15 +698,27 @@ private final class Pix {
         fill(t.x + t.w - 2, t.y, 2, t.h, Ink.woodDk)
     }
 
-    /// One tumbler of water. The mote that moves in it is drawn on top.
+    /// A drinking glass: rim, two thin walls, water, a heavy base.
+    /// The water rectangle matches `openingWater`.
     private func tumbler() {
         let g = RoomArt.openingGlass
-        fill(g.x + 3, g.y, g.w - 6, 2, Ink.brass)
-        fill(g.x + 1, g.y + 2, 1, g.h - 4, Ink.glass)
-        fill(g.x + g.w - 2, g.y + 2, 1, g.h - 4, Ink.glass)
-        fill(g.x + 2, g.y + 4, g.w - 4, g.h - 8, Ink.waterL)
-        fill(g.x + 2, g.y + 6, g.w - 4, 4, Ink.waterM)
-        fill(g.x, g.y + g.h - 2, g.w, 2, Ink.glass)
+        let water = RoomArt.openingWater
+        fill(g.x, g.y + g.h - 4, g.w, 4, Ink.glass)
+        fill(g.x + 2, g.y + g.h - 6, g.w - 4, 2, 0xC9DDE3)
+        fill(g.x + 1, g.y + 3, 2, g.h - 8, Ink.glass)
+        fill(g.x + g.w - 3, g.y + 3, 2, g.h - 8, Ink.glass)
+        fill(water.x, water.y, water.w, water.h, Ink.waterL)
+        fill(water.x, water.y, water.w, 3, Ink.waterM)
+        fill(water.x, water.y + 2, 1, water.h - 4, 0xE7F6FA)
+        fill(g.x + 2, g.y, g.w - 4, 2, 0xF7FCFE)
+        fill(g.x + 1, g.y + 2, g.w - 2, 2, Ink.glass)
+    }
+
+    /// Bright stem from inside the pot, through the shelf, into the live vine.
+    /// Painted last so the shelf and the window cannot open a gap.
+    private func hangingStem() {
+        fill(7, 27, 5, 8, Ink.plant)
+        fill(8, 27, 3, 8, Ink.plantLt)
     }
 
     private func favouriteFrame() {
@@ -711,14 +761,13 @@ private final class Pix {
         }
     }
 
-    /// One closed book under the table. The archive and the log share it.
+    /// Cover facing the room. No page block, so it is not half a spine.
     private func archiveBook() {
         let b = RoomArt.book
-        fill(b.x + 3, b.y + 1, max(1, b.w - 4), b.h - 2, Ink.page)
-        fill(b.x, b.y, max(1, b.w - 5), b.h, Ink.red)
-        fill(b.x, b.y, max(1, b.w - 5), 2, Ink.redLt)
-        fill(b.x, b.y, 3, b.h, Ink.redDk)
-        fill(b.x + 2, b.y + b.h, max(1, b.w - 3), 2, 0x120C0E)
+        fill(b.x, b.y, b.w, b.h, Ink.red)
+        fill(b.x, b.y, b.w, 2, Ink.redLt)
+        fill(b.x + 2, b.y + b.h / 2, b.w - 4, 1, Ink.gold)
+        fill(b.x, b.y + b.h, b.w, 2, 0x120C0E)
     }
 
     /// The gray box under the table. Charts live here.
