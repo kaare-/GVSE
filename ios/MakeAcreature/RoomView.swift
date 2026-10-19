@@ -16,7 +16,7 @@ struct RoomView: View {
 
     @State private var tree: [SpeciesNode] = []
     @State private var confirmEmpty: Int?
-    @State private var vines: [CGFloat] = [6, 6]
+    @State private var vines: [CGFloat] = [42, 6]
     /// False while the scissors hang on the hook.
     @State private var shearHeld = false
     /// View point at the bottom edge of the scissors. That edge is the cut.
@@ -163,7 +163,12 @@ struct RoomView: View {
                     .offset(x: inner.minX - hit.minX, y: inner.minY - hit.minY)
                 VStack {
                     Spacer(minLength: 0)
-                    PixelLabel(text: "TREE OF LIFE", scale: 1, color: Palette.dimPaper)
+                    PixelLabel(
+                        text: "TREE OF LIFE",
+                        scale: 1,
+                        color: Color(red: 0.16, green: 0.10, blue: 0.04)
+                    )
+                    .offset(y: layout.rect(RoomArt.treeFrame).maxY - hit.maxY)
                 }
                 .frame(width: hit.width, height: hit.height)
             }
@@ -296,10 +301,20 @@ struct RoomView: View {
 
     private func bookButton(_: RoomLayout) -> some View {
         Button(action: onOpenBook) {
-            PixelLabel(text: "BOOK", scale: 1, color: Palette.highlight)
+            spineTitle("BOOK", color: Palette.paper)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(.plain)
         .a11yButton("Book", hint: "Archive, \(session.archive.specimens.count)")
+    }
+
+    /// Letters stacked down the spine.
+    private func spineTitle(_ word: String, color: Color) -> some View {
+        VStack(spacing: -1) {
+            ForEach(Array(word.enumerated()), id: \.offset) { _, character in
+                PixelLabel(text: String(character), scale: 1, color: color)
+            }
+        }
     }
 
     private var drawerButton: some View {
@@ -320,22 +335,29 @@ struct RoomView: View {
 
     private var deckPowerButton: some View {
         Button(action: session.toggleDeck) {
-            if let sheet = UIImage(named: "power") {
-                PixelStrip(image: sheet, frames: 2, frame: session.tapePlaying ? 1 : 0)
-            } else {
-                Rectangle()
-                    .fill(session.tapePlaying
-                        ? Color(red: 0.22, green: 0.72, blue: 0.28)
-                        : Color(red: 0.78, green: 0.16, blue: 0.14))
-            }
+            deckPowerFace
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .buttonStyle(FullHit())
+        .buttonStyle(.plain)
         .a11yButton(session.tapePlaying ? "Deck power, on" : "Deck power, off")
+    }
+
+    @ViewBuilder
+    private var deckPowerFace: some View {
+        if let sheet = UIImage(named: "power") {
+            PixelStrip(image: sheet, frames: 2, frame: session.tapePlaying ? 1 : 0)
+        } else {
+            Rectangle()
+                .fill(session.tapePlaying
+                    ? Color(red: 0.22, green: 0.72, blue: 0.28)
+                    : Color(red: 0.78, green: 0.16, blue: 0.14))
+        }
     }
 
     private var logButton: some View {
         Button(action: onOpenLog) {
-            PixelLabel(text: "LOG", scale: 1, color: Palette.paper)
+            spineTitle("LOG", color: Palette.paper)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(.plain)
         .a11yButton("Event log")
@@ -367,6 +389,7 @@ struct RoomView: View {
                             color: Color(red: 0.16, green: 0.10, blue: 0.04)
                         )
                         .fixedSize()
+                        .offset(y: layout.rect(RoomArt.favFrame).maxY - hit.maxY)
                     }
                 }
             }
@@ -403,10 +426,11 @@ struct RoomView: View {
         let x = shearHeld ? shearPoint.x : hook.midX
         let y = shearHeld ? shearPoint.y - h / 2 : hook.midY
         return scissorsGraphic(spread: shearSpread, s: s)
-            .frame(width: 13 * s, height: h)
+            .frame(width: CGFloat(RoomArt.shearW) * s, height: h)
             .contentShape(Rectangle())
             .position(x: x, y: y)
-            .gesture(
+            .zIndex(2)
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .named("room"))
                     .onChanged { value in
                         shearHeld = true
@@ -452,8 +476,8 @@ struct RoomView: View {
             }
     }
 
-    /// The strip is 18 room pixels tall. The last pixel is the cut.
-    private func scissorsHeight(_ s: CGFloat) -> CGFloat { 18 * s }
+    /// The strip's last row is the blade tip. That row is the cut.
+    private func scissorsHeight(_ s: CGFloat) -> CGFloat { CGFloat(RoomArt.shearH) * s }
 
     /// `spread` is 1 open and 0 shut. The frames live in `art/sprites/scissors.aseprite`.
     private func scissorsGraphic(spread: CGFloat, s: CGFloat) -> some View {
@@ -464,24 +488,29 @@ struct RoomView: View {
                 PixelStrip(image: sheet, frames: frames, frame: index)
             }
         }
-        .frame(width: 13 * s, height: scissorsHeight(s))
+        .frame(width: CGFloat(RoomArt.shearW) * s, height: scissorsHeight(s))
+    }
+
+    /// Room pixel under the blade tip. The tip is the bottom edge of the scissors.
+    private func bladeRow(_ bottom: CGPoint, layout: RoomLayout) -> (x: CGFloat, y: Int) {
+        let s = layout.s
+        let x = (bottom.x - layout.origin.x) / s
+        let y = Int(floor((bottom.y - layout.origin.y) / s - 0.01))
+        return (x, y)
     }
 
     /// Index of the vine whose stem the bottom edge crosses.
     private func vineAt(_ bottom: CGPoint, layout: RoomLayout) -> Int? {
-        let s = layout.s
-        let x = (bottom.x - layout.origin.x) / s
-        let y = Int(((bottom.y - layout.origin.y) / s).rounded())
+        let point = bladeRow(bottom, layout: layout)
         for i in RoomArt.vines.indices {
             let vine = RoomArt.vines[i]
             let len = vines.indices.contains(i) ? Int(vines[i]) : 6
             if vine.hangs {
-                guard x >= CGFloat(vine.x) - 8, x <= CGFloat(vine.x) + 8 else { continue }
-                guard y > vine.y, y < vine.y + len else { continue }
-                return i
+                if RoomArt.hangingHits(x: point.x, y: point.y, length: len) { return i }
+                continue
             }
-            guard x >= CGFloat(vine.x) - 6, x <= CGFloat(vine.x) + 6 else { continue }
-            guard y < vine.y, y > vine.y - len else { continue }
+            guard point.x >= CGFloat(vine.x) - 6, point.x <= CGFloat(vine.x) + 6 else { continue }
+            guard point.y < vine.y, point.y > vine.y - len else { continue }
             return i
         }
         return nil
@@ -491,8 +520,7 @@ struct RoomView: View {
     /// is however much vine is above that edge.
     private func cutVines(at bottom: CGPoint, layout: RoomLayout) -> Bool {
         guard let i = vineAt(bottom, layout: layout) else { return false }
-        let s = layout.s
-        let cutY = Int(((bottom.y - layout.origin.y) / s).rounded())
+        let cutY = bladeRow(bottom, layout: layout).y
         let vine = RoomArt.vines[i]
         let keep: Int
         if vine.hangs {
@@ -568,6 +596,14 @@ struct RoomView: View {
         }
     }
 
+    private func roomInk(_ rgb: Int) -> Color {
+        Color(
+            red: Double((rgb >> 16) & 255) / 255,
+            green: Double((rgb >> 8) & 255) / 255,
+            blue: Double(rgb & 255) / 255
+        )
+    }
+
     private func vineLayer(_ layout: RoomLayout) -> some View {
         let s = layout.s
         let bright = Color(red: 0.635, green: 0.839, blue: 0.435)
@@ -577,27 +613,14 @@ struct RoomView: View {
             for (i, vine) in RoomArt.vines.enumerated() {
                 let len = vines.indices.contains(i) ? vines[i] : 6
                 if vine.hangs {
-                    let x = CGFloat(vine.x)
-                    let n = max(1, Int(len))
-                    for step in 0..<n {
-                        let y = CGFloat(vine.y + step)
-                        let stem = CGRect(
-                            x: (x - 1) * s,
-                            y: y * s,
-                            width: max(s * 3, 1),
+                    for dot in RoomArt.hangingPlant(length: max(1, Int(len))) {
+                        let rect = CGRect(
+                            x: CGFloat(dot.x) * s,
+                            y: CGFloat(dot.y) * s,
+                            width: max(s, 1),
                             height: max(s, 1)
                         )
-                        ctx.fill(Path(stem), with: .color(bright))
-                        if step > 8 && step % 4 == 0 {
-                            let side: CGFloat = step % 8 == 0 ? -3 : 2
-                            let leafRect = CGRect(
-                                x: (x + side) * s,
-                                y: y * s,
-                                width: max(s * 2, 1),
-                                height: max(s, 1)
-                            )
-                            ctx.fill(Path(leafRect), with: .color(dark))
-                        }
+                        ctx.fill(Path(rect), with: .color(roomInk(dot.rgb)))
                     }
                     continue
                 }
@@ -671,23 +694,28 @@ private struct FullHit: ButtonStyle {
 private enum LobbyGrowth {
     static func catchUp() -> [CGFloat] {
         let now = Date().timeIntervalSince1970
+        let genKey = "lobbyVineGen"
+        let freshTrail = UserDefaults.standard.integer(forKey: genKey) < 2
         var lengths: [CGFloat] = []
         for i in 0..<RoomArt.vines.count {
             let key = "lobbyVine\(i)"
             let seenKey = "lobbySeen\(i)"
             let seen = UserDefaults.standard.double(forKey: seenKey)
             var len = UserDefaults.standard.double(forKey: key)
-            let cap = RoomArt.vines[i].hangs ? 56.0 : 14.0
+            let hangs = RoomArt.vines[i].hangs
+            let cap = hangs ? 56.0 : 14.0
             if seen <= 0, len <= 0 {
-                len = RoomArt.vines[i].hangs ? 10 : 6
+                len = hangs ? 42 : 6
             } else if seen > 0 {
                 len += max(0, now - seen) / 3600 * 2
             }
+            if freshTrail, hangs { len = 42 }
             len = min(cap, max(4, len))
             UserDefaults.standard.set(len, forKey: key)
             UserDefaults.standard.set(now, forKey: seenKey)
             lengths.append(CGFloat(len))
         }
+        if freshTrail { UserDefaults.standard.set(2, forKey: genKey) }
         return lengths
     }
 

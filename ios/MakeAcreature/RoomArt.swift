@@ -49,6 +49,9 @@ enum RoomArt {
 
     /// Hook on the right wall. The scissors hang here until they are picked up.
     static let shearHook = Spot(x: 104, y: 46, w: 12, h: 18)
+    /// The scissors strip. The last row is the blade tip, and that tip is the cut.
+    static let shearW = 17
+    static let shearH = 22
 
     /// Where a plant's live growth starts. The window plant hangs and
     /// lengthens downward. The other still climbs.
@@ -58,9 +61,57 @@ enum RoomArt {
     }
 
     static let vines = [
-        Vine(x: 10, y: 30, sway: 0, hangs: true),
+        Vine(x: 9, y: 29, sway: 0, hangs: true),
         Vine(x: 99, y: 20, sway: 3, hangs: false),
     ]
+
+    /// Straight through the pot and the shelf, then a slow wave.
+    static func hangSway(_ step: Int) -> Int {
+        if step < 10 { return 0 }
+        let wave = [0, 1, 1, 2, 2, 2, 1, 1, 0, 0, -1, -1, -2, -2, -2, -1, -1, 0]
+        return wave[(step - 10) % wave.count]
+    }
+
+    struct HangDot {
+        var x, y, rgb: Int
+    }
+
+    /// One stem from the soil, across the shelf, then down. Leaves droop
+    /// out to either side. Nothing is baked, so a cut shortens this.
+    static func hangingPlant(length: Int) -> [HangDot] {
+        guard let vine = vines.first(where: { $0.hangs }) else { return [] }
+        let n = max(1, length)
+        var dots: [HangDot] = []
+        func put(_ x: Int, _ y: Int, _ rgb: Int) {
+            guard x >= 1, y >= 0, x < w - 1, y < floorY else { return }
+            dots.append(HangDot(x: x, y: y, rgb: rgb))
+        }
+        for step in 0..<n {
+            let x = vine.x + hangSway(step)
+            let y = vine.y + step
+            put(x - 1, y, Ink.plantDk)
+            put(x, y, Ink.plant)
+            put(x + 1, y, Ink.plantLt)
+            guard step >= 4, step % 3 == 1 else { continue }
+            let dir = (step / 3) % 2 == 0 ? -1 : 1
+            let root = dir < 0 ? x - 1 : x + 1
+            for i in 1...4 {
+                let droop = i > 2 ? i - 2 : 0
+                let color = i == 4 ? Ink.plantDk : (i == 1 ? Ink.plantLt : Ink.plant)
+                put(root + dir * i, y + droop, color)
+            }
+        }
+        return dots
+    }
+
+    /// True when `(x, y)` is on the hanging stem or one of its leaves.
+    static func hangingHits(x: CGFloat, y: Int, length: Int) -> Bool {
+        guard let vine = vines.first(where: { $0.hangs }) else { return false }
+        let step = y - vine.y
+        guard step >= 0, step < max(1, length) else { return false }
+        let stem = vine.x + hangSway(step)
+        return x >= CGFloat(stem - 4) && x <= CGFloat(stem + 5)
+    }
 
     /// A taller upright plant in the bottom right. The shelf pots stay.
     static let ficus = Spot(x: 100, y: 172, w: 18, h: 50)
@@ -79,10 +130,11 @@ enum RoomArt {
     static let favInner = Spot(x: 100, y: 70, w: 14, h: 16)
     static let favHit = Spot(x: 96, y: 66, w: 22, h: 28)
 
-    /// One book under the tank table, cover facing out. Archive on top, log below.
-    static let book = Spot(x: 42, y: 172, w: 20, h: 18)
-    static let bookHit = Spot(x: 42, y: 172, w: 20, h: 9)
-    static let logHit = Spot(x: 42, y: 181, w: 20, h: 9)
+    /// Two standing books in the cubby. The spine is the colored left edge.
+    static let book = Spot(x: 42, y: 170, w: 8, h: 20)
+    static let bookHit = book
+    static let log = Spot(x: 51, y: 172, w: 7, h: 18)
+    static let logHit = log
 
     /// The gray box under the table. Charts live here.
     static let crate = Spot(x: 20, y: 174, w: 20, h: 14)
@@ -92,8 +144,8 @@ enum RoomArt {
     /// Cassette deck under the table, between the book and the fuse box.
     static let deck = Spot(x: 64, y: 174, w: 16, h: 16)
     static let deckHit = Spot(x: 62, y: 172, w: 20, h: 14)
-    /// Power key on the deck. Red while off, green while a tape plays.
-    static let deckPower = Spot(x: 66, y: 184, w: 5, h: 5)
+    /// Power key on the deck's lower lip. Red while off, green while a tape plays.
+    static let deckPower = Spot(x: 66, y: 186, w: 3, h: 3)
 
     /// Plaque on the bench, directly under the main tank.
     static let sign = Spot(x: 36, y: 159, w: 48, h: 7)
@@ -391,7 +443,7 @@ private final class Pix {
         }
         floor()
         if cast.bench {
-            archiveBook()
+            standingBooks()
             filingBox()
             cassette()
             tankPlaque()
@@ -400,7 +452,6 @@ private final class Pix {
         if cast.openingGlass { tumbler() }
         ficus()
         lighting()
-        hangingStem()
     }
 
     private func planks() {
@@ -518,6 +569,7 @@ private final class Pix {
             rightRim(6, 156, 108, 12)
             rightRim(RoomArt.crate.x, RoomArt.crate.y, RoomArt.crate.w, RoomArt.crate.h)
             rightRim(RoomArt.book.x, RoomArt.book.y, RoomArt.book.w, RoomArt.book.h)
+            rightRim(RoomArt.log.x, RoomArt.log.y, RoomArt.log.w, RoomArt.log.h)
             rightRim(RoomArt.deck.x, RoomArt.deck.y, RoomArt.deck.w, RoomArt.deck.h)
             rightRim(RoomArt.fuseBox.x, RoomArt.fuseBox.y, RoomArt.fuseBox.w, RoomArt.fuseBox.h)
         }
@@ -566,17 +618,11 @@ private final class Pix {
         fill(18, 38, 3, 5, Ink.woodDk)
         fill(100, 38, 3, 5, Ink.woodDk)
 
-        // The window plant. A bright stem runs from the soil, through the
-        // shelf, and into the live vine so the pot and the hanging part meet.
+        // The window plant. The pot stays here. The stem and the leaves
+        // are drawn live, from the soil downward, so a cut can shorten them.
         fill(4, 26, 12, 8, Ink.pot)
         fill(3, 25, 14, 2, Ink.potLt)
         fill(7, 28, 6, 3, 0x3E2818)
-        sprite(4, 21, [
-            " gGGg ",
-            "gG  Gg",
-        ], [
-            "g": Ink.plantDk, "G": Ink.plant, " ": 0,
-        ])
 
         for spot in RoomArt.vials where cast.jars {
             vial(spot.x, spot.y)
@@ -723,13 +769,6 @@ private final class Pix {
         fill(g.x, water.y + water.h + 2, g.w, 2, edge)
     }
 
-    /// Bright stem from inside the pot, through the shelf, into the live vine.
-    /// Painted last so the shelf and the window cannot open a gap.
-    private func hangingStem() {
-        fill(7, 27, 5, 8, Ink.plant)
-        fill(8, 27, 3, 8, Ink.plantLt)
-    }
-
     private func favouriteFrame() {
         let f = RoomArt.favFrame
         let inner = RoomArt.favInner
@@ -770,12 +809,22 @@ private final class Pix {
         }
     }
 
-    /// Cover facing the room. No page block, so it is not half a spine.
-    private func archiveBook() {
-        let b = RoomArt.book
-        fill(b.x, b.y, b.w, b.h, Ink.red)
-        fill(b.x, b.y, b.w, 2, Ink.redLt)
-        fill(b.x + 2, b.y + b.h / 2, b.w - 4, 1, Ink.gold)
+    /// Two upright books. Colored spine on the left, page edges on the right.
+    private func standingBooks() {
+        standingBook(RoomArt.book, Ink.red, Ink.redLt)
+        standingBook(RoomArt.log, Ink.bookG, 0x6A9460)
+    }
+
+    private func standingBook(_ b: RoomArt.Spot, _ cover: Int, _ light: Int) {
+        fill(b.x + b.w - 2, b.y + 1, 2, b.h - 1, Ink.page)
+        for yy in stride(from: b.y + 3, to: b.y + b.h - 1, by: 2) {
+            set(b.x + b.w - 1, yy, 0xD9C39A)
+        }
+        fill(b.x, b.y, max(1, b.w - 2), b.h, cover)
+        fill(b.x, b.y, 1, b.h, light)
+        fill(b.x, b.y, max(1, b.w - 2), 1, light)
+        set(b.x + 1, b.y + 2, Ink.gold)
+        set(b.x + 1, b.y + b.h - 3, Ink.gold)
         fill(b.x, b.y + b.h, b.w, 2, 0x120C0E)
     }
 
@@ -802,7 +851,6 @@ private final class Pix {
         disc(d.x + d.w - 6, d.y + 8, 2, Ink.metal)
         set(d.x + 5, d.y + 8, 0x1A1410)
         set(d.x + d.w - 6, d.y + 8, 0x1A1410)
-        fill(d.x + 3, d.y + d.h - 5, 3, 2, Ink.metal)
         fill(d.x + d.w - 6, d.y + d.h - 5, 3, 2, Ink.brass)
         fill(d.x + 1, d.y + d.h, d.w - 1, 2, 0x120C0E)
     }

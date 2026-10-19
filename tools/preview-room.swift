@@ -16,12 +16,71 @@ struct PreviewRoom {
 
         let mood = RoomMood(phase: 0.12, lampOn: true, shelfOn: true, candleLit: true)
         let room = RoomArt.cgImage(cast: LobbyScript.cast, mood: mood)
-        let bytes = pixels(of: room)
+        var bytes = pixels(of: room)
         let w = room.width
+        stampPlant(&bytes, width: w, length: 42)
         let glass = RoomArt.glassView
         try save(image(from: bytes, width: w, height: room.height), scale: 4, name: "room@4.png", to: outDir)
         try save(crop(bytes, width: w, spot: glass), scale: 8, name: "glass@8.png", to: outDir)
         reportContact(bytes, width: w)
+        reportPlant(bytes, width: w)
+        reportShelf(bytes, width: w)
+    }
+}
+
+func stampPlant(_ bytes: inout [UInt8], width: Int, length: Int) {
+    for dot in RoomArt.hangingPlant(length: length) {
+        let i = (dot.y * width + dot.x) * 4
+        bytes[i] = UInt8((dot.rgb >> 16) & 255)
+        bytes[i + 1] = UInt8((dot.rgb >> 8) & 255)
+        bytes[i + 2] = UInt8(dot.rgb & 255)
+        bytes[i + 3] = 255
+    }
+}
+
+func reportPlant(_ bytes: [UInt8], width: Int) {
+    print("hanging plant")
+    var broke = false
+    var seen = false
+    for y in 24..<90 {
+        var row = ""
+        var green = false
+        for x in 0..<16 {
+            let i = (y * width + x) * 4
+            let r = Int(bytes[i])
+            let g = Int(bytes[i + 1])
+            if g > r + 12 && g > 70 {
+                row.append("g")
+                green = true
+                seen = true
+            } else {
+                row.append(".")
+            }
+        }
+        if seen && !green && !broke && y < 70 {
+            print(String(format: "%3d GAP", y))
+            broke = true
+        }
+        if green { print(String(format: "%3d %@", y, row as NSString)) }
+    }
+}
+
+func reportShelf(_ bytes: [UInt8], width: Int) {
+    print("shelf x=40..60")
+    for y in 168..<194 {
+        var row = ""
+        for x in 40..<62 {
+            let i = (y * width + x) * 4
+            let r = Int(bytes[i])
+            let g = Int(bytes[i + 1])
+            let b = Int(bytes[i + 2])
+            if r > 140 && r > g + 30 { row.append("R") }
+            else if g > 70 && g > r + 10 && b < 90 { row.append("G") }
+            else if r > 200 && g > 180 { row.append("p") }
+            else if r < 30 && g < 30 { row.append(".") }
+            else { row.append(" ") }
+        }
+        print(String(format: "%3d %@", y, row as NSString))
     }
 }
 
