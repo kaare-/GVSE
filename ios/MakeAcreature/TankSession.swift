@@ -116,6 +116,11 @@ final class TankSession: ObservableObject {
     @Published private(set) var container: TankContainer = .main
     /// A pinch wider than the whole glass. The shell returns to the lobby.
     @Published var leaveForLobby = false
+    /// Pinch scale of the study while looking into the tumbler. 1 fits the room.
+    @Published var glassZoom: CGFloat = 1
+    @Published var glassPan: CGSize = .zero
+    private var glassPinchZoom: CGFloat = 1
+    private var glassPinchLocal = CGPoint.zero
     /// Selection box above the finger. The creature inside it is the one selected.
     @Published var selectionRect: CGRect?
     @Published var swirl = false
@@ -339,6 +344,8 @@ final class TankSession: ObservableObject {
 
     /// The opening tumbler. A small glass of water, not the wide tank.
     func openGlass() {
+        glassZoom = 1
+        glassPan = .zero
         switchTo(.glass)
     }
 
@@ -1084,7 +1091,12 @@ final class TankSession: ObservableObject {
                 return
             }
             if let prev = slidePoint {
-                slide(by: CGPoint(x: point.x - prev.x, y: point.y - prev.y))
+                let delta = CGPoint(x: point.x - prev.x, y: point.y - prev.y)
+                if metal?.waterHole != nil {
+                    nudgeGlass(by: delta)
+                } else {
+                    slide(by: delta)
+                }
             }
             slidePoint = point
         case .needle:
@@ -1109,6 +1121,10 @@ final class TankSession: ObservableObject {
         guard let metal else { return }
         switch nav {
         case .pinch(let scale, let anchor, let state):
+            if metal.waterHole != nil {
+                pinchGlassScene(scale: scale, anchor: anchor, state: state)
+                return
+            }
             if state == .began {
                 navigating = true
                 slidePoint = nil
@@ -1119,11 +1135,7 @@ final class TankSession: ObservableObject {
             let worldH = max(metal.camera.worldH, 1)
             let rawW = metal.camera.pinchStartW / max(scale, 0.05)
             let homeW = max(metal.camera.homeW, worldW)
-            let smallGlass = worldW < tankScreenPixels * 0.85
-            // A pinch out past the glass itself returns to the room.
-            // The window never grows past the water, so the study cannot
-            // end up drawn inside the tank.
-            if rawW > homeW * 1.08 || (smallGlass && rawW > worldW * 1.02) {
+            if rawW > homeW * 1.08 {
                 if !askedToLeave {
                     askedToLeave = true
                     leaveForLobby = true
@@ -1167,11 +1179,72 @@ final class TankSession: ObservableObject {
                 navigating = true
                 slidePoint = nil
             }
-            slide(by: delta)
+            if metal.waterHole != nil {
+                nudgeGlass(by: delta)
+            } else {
+                slide(by: delta)
+            }
             if state == .ended || state == .cancelled || state == .failed {
                 navigating = false
             }
         }
+    }
+
+    /// Pinch scales the study. The tumbler water is part of that picture.
+    private func pinchGlassScene(scale: CGFloat, anchor: CGPoint, state: UIGestureRecognizer.State) {
+        guard let metal else { return }
+        if state == .began {
+            navigating = true
+            slidePoint = nil
+            askedToLeave = false
+            glassPinchZoom = glassZoom
+            let center = CGPoint(x: metal.bounds.midX, y: metal.bounds.midY)
+            glassPinchLocal = CGPoint(
+                x: (anchor.x - center.x - glassPan.width) / max(glassZoom, 0.01),
+                y: (anchor.y - center.y - glassPan.height) / max(glassZoom, 0.01)
+            )
+        }
+        let raw = glassPinchZoom * scale
+        if raw < 0.92 {
+            if !askedToLeave {
+                askedToLeave = true
+                leaveForLobby = true
+            }
+        } else {
+            let next = min(max(raw, 1), 8)
+            let center = CGPoint(x: metal.bounds.midX, y: metal.bounds.midY)
+            let pan = CGSize(
+                width: anchor.x - center.x - glassPinchLocal.x * next,
+                height: anchor.y - center.y - glassPinchLocal.y * next
+            )
+            glassZoom = next
+            glassPan = clampedGlassPan(pan, zoom: next, view: metal.bounds.size)
+        }
+        if state == .ended || state == .cancelled || state == .failed {
+            navigating = false
+        }
+    }
+
+    /// Drag the zoomed study. At the fitted zoom there is nowhere to drag.
+    private func nudgeGlass(by delta: CGPoint) {
+        guard let metal, glassZoom > 1 else { return }
+        glassPan = clampedGlassPan(
+            CGSize(width: glassPan.width + delta.x, height: glassPan.height + delta.y),
+            zoom: glassZoom,
+            view: metal.bounds.size
+        )
+    }
+
+    private func clampedGlassPan(_ pan: CGSize, zoom: CGFloat, view: CGSize) -> CGSize {
+        let fit = min(view.width / CGFloat(RoomArt.w), view.height / CGFloat(RoomArt.h))
+        let w = CGFloat(RoomArt.w) * fit * zoom
+        let h = CGFloat(RoomArt.h) * fit * zoom
+        let slackX = max(0, (w - view.width) / 2)
+        let slackY = max(0, (h - view.height) / 2)
+        return CGSize(
+            width: min(max(pan.width, -slackX), slackX),
+            height: min(max(pan.height, -slackY), slackY)
+        )
     }
 
     /// Move the window by a drag measured in view points.

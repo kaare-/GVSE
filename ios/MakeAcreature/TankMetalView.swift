@@ -11,6 +11,9 @@ final class TankMetalView: UIView {
     var onTouch: ((CGPoint?, Bool) -> Void)?
     var onNavigate: ((TankNav) -> Void)?
     var camera = TankCamera()
+    /// Where the tumbler water sits, in this view's points. The sim is drawn
+    /// there and nowhere else, so a pinch can scale the room around it.
+    var waterHole: CGRect?
     var cameraTiltDegrees: Double = 0 {
         didSet {
             let radians = cameraTiltDegrees * .pi / 180
@@ -112,12 +115,37 @@ final class TankMetalView: UIView {
 
     func layoutFrame(worldW: CGFloat, worldH: CGFloat) -> TankFrame {
         let viewScale = contentScale
-        return tankFrame(
-            camera: &camera,
+        return frameForWorld(
             worldW: worldW,
             worldH: worldH,
             drawableW: max(bounds.width * viewScale, 1),
             drawableH: max(bounds.height * viewScale, 1),
+            viewScale: viewScale
+        )
+    }
+
+    private func frameForWorld(
+        worldW: CGFloat,
+        worldH: CGFloat,
+        drawableW: CGFloat,
+        drawableH: CGFloat,
+        viewScale: CGFloat
+    ) -> TankFrame {
+        if let hole = waterHole, worldW < tankScreenPixels * 0.85, hole.width > 1, hole.height > 1 {
+            return glassHoleFrame(
+                camera: &camera,
+                worldW: worldW,
+                worldH: worldH,
+                hole: hole,
+                viewScale: viewScale
+            )
+        }
+        return tankFrame(
+            camera: &camera,
+            worldW: worldW,
+            worldH: worldH,
+            drawableW: drawableW,
+            drawableH: drawableH,
             viewScale: viewScale
         )
     }
@@ -135,15 +163,14 @@ final class TankMetalView: UIView {
         let viewScale = contentScale
         let drawableW = max(bounds.width * viewScale, 1)
         let drawableH = max(bounds.height * viewScale, 1)
-        smallWorld = camera.worldW < tankScreenPixels * 0.85
+        smallWorld = waterHole != nil && CGFloat(width) < tankScreenPixels * 0.85
         metalLayer.isOpaque = !smallWorld
         isOpaque = !smallWorld
         backgroundColor = smallWorld
             ? .clear
             : UIColor(red: 0.337, green: 0.282, blue: 0.235, alpha: 1)
         metalLayer.drawableSize = CGSize(width: drawableW, height: drawableH)
-        let frame = tankFrame(
-            camera: &camera,
+        let frame = frameForWorld(
             worldW: CGFloat(width),
             worldH: CGFloat(height),
             drawableW: drawableW,
@@ -164,8 +191,8 @@ final class TankMetalView: UIView {
                 Float(frame.shownH / max(frame.worldH, 1))
             ),
             frame: SIMD2<Float>(
-                Float((camera.worldW < tankScreenPixels * 0.85) ? 0 : 22 * viewScale / drawableW),
-                Float((camera.worldW < tankScreenPixels * 0.85) ? 0 : 22 * viewScale / drawableH)
+                Float(smallWorld ? 0 : 22 * viewScale / drawableW),
+                Float(smallWorld ? 0 : 22 * viewScale / drawableH)
             ),
             pad: .zero
         )
@@ -310,6 +337,43 @@ let tankMinVisible: CGFloat = 48
 /// Physics cells across the main tank (three screens).
 let tankMainCellsWide: UInt32 = 384
 
+/// The whole tumbler, drawn into `hole`. The room around it is not this texture.
+func glassHoleFrame(
+    camera: inout TankCamera,
+    worldW: CGFloat,
+    worldH: CGFloat,
+    hole: CGRect,
+    viewScale: CGFloat
+) -> TankFrame {
+    camera.worldW = worldW
+    camera.worldH = worldH
+    camera.homeW = worldW
+    camera.visibleW = worldW
+    camera.left = 0
+    camera.top = 0
+    camera.centerInWall = false
+    camera.stickToFloor = false
+    camera.pinchStartW = worldW
+    let dw = hole.width * viewScale
+    let dh = hole.height * viewScale
+    let scale = min(dw / max(worldW, 1), dh / max(worldH, 1))
+    let contentW = worldW * scale
+    let contentH = worldH * scale
+    return TankFrame(
+        left: 0,
+        top: 0,
+        shownW: worldW,
+        shownH: worldH,
+        scale: scale,
+        ox: hole.minX * viewScale + (dw - contentW) * 0.5,
+        oy: hole.minY * viewScale + (dh - contentH) * 0.5,
+        viewScale: viewScale,
+        worldW: worldW,
+        worldH: worldH,
+        visibleW: worldW
+    )
+}
+
 func tankFrame(
     camera: inout TankCamera,
     worldW: CGFloat,
@@ -376,13 +440,17 @@ func tankFrame(
 
 struct TankScreen: UIViewRepresentable {
     let session: TankSession
+    var waterHole: CGRect? = nil
 
     func makeUIView(context: Context) -> TankMetalView {
         let view = TankMetalView()
+        view.waterHole = waterHole
         view.configure()
         session.attach(view: view)
         return view
     }
 
-    func updateUIView(_ uiView: TankMetalView, context: Context) {}
+    func updateUIView(_ uiView: TankMetalView, context: Context) {
+        uiView.waterHole = waterHole
+    }
 }

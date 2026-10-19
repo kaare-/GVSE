@@ -89,36 +89,21 @@ struct MakeAcreatureApp: App {
         VStack(spacing: 0) {
             topMenu
             GeometryReader { geo in
-                let stage: GlassStage? = session.container == .glass ? GlassStage(size: geo.size) : nil
+                let stage: GlassStage? = session.container == .glass
+                    ? GlassStage(size: geo.size, zoom: session.glassZoom, pan: session.glassPan)
+                    : nil
                 ZStack {
                     if let stage {
                         Color(red: 0.20, green: 0.14, blue: 0.10)
                         GlassBackdrop(stage: stage)
-                            .frame(width: stage.crop.width, height: stage.crop.height)
-                            .clipped()
-                            .position(x: stage.crop.midX, y: stage.crop.midY)
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .gesture(
-                                MagnificationGesture().onChanged { scale in
-                                    if scale < 0.92 { session.leaveForLobby = true }
-                                }
-                            )
-                        Color.clear
-                            .frame(width: stage.water.width, height: stage.water.height)
-                            .overlay(TankScreen(session: session).clipped())
-                            .offset(
-                                x: stage.water.midX - geo.size.width / 2,
-                                y: stage.water.midY - geo.size.height / 2
-                            )
-                    } else {
-                        TankScreen(session: session)
                     }
+                    TankScreen(session: session, waterHole: stage?.water)
+                        .frame(width: geo.size.width, height: geo.size.height)
                     if let rect = session.inspected?.rect {
-                        TrackingBox(rect: shifted(rect, stage))
+                        TrackingBox(rect: rect)
                     }
                     if let rect = session.selectionRect {
-                        SelectionBox(rect: shifted(rect, stage))
+                        SelectionBox(rect: rect)
                     }
                     if let state = session.inspected {
                         VStack(alignment: .leading, spacing: 0) {
@@ -179,11 +164,6 @@ struct MakeAcreatureApp: App {
 
     @State private var cardHome = CGSize.zero
     @State private var cardDrag = CGSize.zero
-
-    private func shifted(_ rect: CGRect, _ stage: GlassStage?) -> CGRect {
-        guard let stage else { return rect }
-        return rect.offsetBy(dx: stage.water.minX, dy: stage.water.minY)
-    }
 
     private var clockLabel: String {
         "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)"
@@ -289,7 +269,7 @@ struct MakeAcreatureApp: App {
     }
 }
 
-/// The desk around the tumbler, clipped to the close crop.
+/// The study, scaled with the pinch so the tumbler and the room move together.
 private struct GlassBackdrop: View {
     var stage: GlassStage
     @State private var mood = RoomMood(
@@ -301,14 +281,13 @@ private struct GlassBackdrop: View {
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        let crop = RoomArt.glassCrop
         Image(uiImage: RoomArt.picture(LobbyScript.cast, mood: mood))
             .resizable()
             .interpolation(.none)
             .frame(width: CGFloat(RoomArt.w) * stage.s, height: CGFloat(RoomArt.h) * stage.s)
             .position(
-                x: (CGFloat(RoomArt.w) * 0.5 - CGFloat(crop.x)) * stage.s,
-                y: (CGFloat(RoomArt.h) * 0.5 - CGFloat(crop.y)) * stage.s
+                x: stage.picture.x + CGFloat(RoomArt.w) * stage.s / 2,
+                y: stage.picture.y + CGFloat(RoomArt.h) * stage.s / 2
             )
             .onReceive(clock) { date in
                 mood.phase = RoomMood.phase(at: date)
