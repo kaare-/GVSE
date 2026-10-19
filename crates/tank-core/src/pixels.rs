@@ -244,17 +244,13 @@ pub fn write_rgba(
                 albedo(cell)
             };
             if owner == 0 && !cell.is_open() && !cell.is_glass() {
-                // A little colour play, shared across the channels, so a
-                // bed is not one flat stamp and not a speckled texture.
-                let (pr, pg, pb) = colour_play(px, py);
-                let form = if (cell.is_rigid() || cell.is_silhouette()) && rock_touches_body(grid, cell, vx, vy) {
-                    blob_shade(grid, cell, px, py, vis_h)
-                } else {
-                    0
-                };
-                r = shade(r, pr + form);
-                g = shade(g, pg + form);
-                b = shade(b, pb + form);
+                // One flat colour for the whole cell. The shift depends on
+                // the cell, so neighbouring blocks differ and the nine
+                // screen pixels of one block do not.
+                let (pr, pg, pb) = colour_play(vx, vy);
+                r = shade(r, pr);
+                g = shade(g, pg);
+                b = shade(b, pb);
             }
             let li = pixels.light[i] as u32;
             r = ((r as u32) * li / 255) as u8;
@@ -449,55 +445,14 @@ fn veil(cloud_q8: &[u8]) -> u32 {
     sum / cloud_q8.len() as u32
 }
 
-/// A few steps of colour, warmer or cooler, so neighbouring grains differ
-/// without a drawn texture.
-fn colour_play(px: usize, py: usize) -> (i32, i32, i32) {
-    let n = (px.wrapping_mul(5).wrapping_add(py.wrapping_mul(3))) & 7;
-    let lift = n as i32 - 3;
-    let warm = ((px.wrapping_add(py)) & 1) as i32;
-    (lift + warm, lift, lift - warm)
-}
-
-fn same_rock(a: Cell, b: Cell) -> bool {
-    if a.is_rigid() && b.is_rigid() {
-        return a.pad != 0 && a.pad == b.pad;
-    }
-    a.is_silhouette() && b.is_silhouette()
-}
-
-/// A drawn rock shares one light. Loose cobbles keep the per-cell corner.
-fn rock_touches_body(grid: &PhysicsGrid, cell: Cell, vx: i32, vy: i32) -> bool {
-    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        if same_rock(cell, grid.get_visible(vx + dx, vy + dy)) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Edge of the whole stone, with a slow light from the upper left.
-/// It does not repeat inside every 3×3 cell.
-fn blob_shade(grid: &PhysicsGrid, cell: Cell, px: usize, py: usize, vis_h: i32) -> i32 {
-    let mut edge = false;
-    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        let nx = px as i32 + dx;
-        let ny = py as i32 + dy;
-        if nx < 0 || ny < 0 {
-            edge = true;
-            break;
-        }
-        let nvx = nx / PX_PER_CELL as i32;
-        let nvy = vis_h - 1 - ny / PX_PER_CELL as i32;
-        if !same_rock(cell, grid.get_visible(nvx, nvy)) {
-            edge = true;
-            break;
-        }
-    }
-    let grad = 8 - ((px as i32 + py as i32) % 13) / 2;
-    if edge {
-        grad - 26
-    } else {
-        grad
-    }
+/// A few steps of colour, warmer or cooler, one value per physics cell.
+/// Neighbouring blocks differ. Nothing inside a block changes.
+fn colour_play(vx: i32, vy: i32) -> (i32, i32, i32) {
+    let n = (vx as u32).wrapping_mul(5).wrapping_add((vy as u32).wrapping_mul(3));
+    // Luminance stays inside the wet-sand gap. Warmth is a colour cast
+    // and cancels out of the sum, so a soaked block still reads darker.
+    let lift = (n & 7) as i32 * 2 - 7;
+    let warm = ((n >> 3) & 3) as i32 - 1;
+    (lift + warm * 2, lift, lift - warm * 2)
 }
 

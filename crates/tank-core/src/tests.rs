@@ -688,7 +688,7 @@ fn loose_rock_falls_and_tumbles() {
 }
 
 #[test]
-fn wet_sand_renders_darker_and_grains_differ() {
+fn wet_sand_renders_darker_and_each_block_is_flat() {
     let mut tank = Tank::try_new(1, 8, 8).unwrap();
     let mut wet = Cell::sand();
     wet.sat = crate::cell::water_capacity(MaterialId::Sand);
@@ -702,8 +702,25 @@ fn wet_sand_renders_darker_and_grains_differ() {
         wet_sum + 30 < dry_sum,
         "wet sand should read darker (dry {dry:?} wet {soaked:?})"
     );
-    let next = rgb_at(&mut tank, 2, 2, 1, 0);
-    assert_ne!(dry, next, "neighbouring sand pixels should not match");
+    place(&mut tank, 3, 2, Cell::sand());
+    assert_eq!(dry, rgb_at(&mut tank, 2, 2, 2, 1), "one sand block is one colour");
+    assert_eq!(dry, rgb_at(&mut tank, 2, 2, 1, 2), "a block has no border or grain");
+    let beside = rgb_at(&mut tank, 3, 2, 0, 0);
+    assert_ne!(dry, beside, "neighbouring sand blocks differ");
+    assert_eq!(beside, rgb_at(&mut tank, 3, 2, 2, 2), "the next block is flat too");
+}
+
+#[test]
+fn a_stone_block_is_one_flat_colour() {
+    let mut tank = Tank::try_new(1, 8, 8).unwrap();
+    place(&mut tank, 2, 4, Cell::solid(MaterialId::Stone));
+    place(&mut tank, 3, 4, Cell::solid(MaterialId::Stone));
+    let a = rgb_at(&mut tank, 2, 4, 0, 0);
+    assert_eq!(a, rgb_at(&mut tank, 2, 4, 2, 2), "one stone block is one colour");
+    assert_eq!(a, rgb_at(&mut tank, 2, 4, 1, 1), "the middle matches the corner");
+    let b = rgb_at(&mut tank, 3, 4, 0, 0);
+    assert_ne!(a, b, "neighbouring stone blocks differ");
+    assert_eq!(b, rgb_at(&mut tank, 3, 4, 2, 2));
 }
 
 #[test]

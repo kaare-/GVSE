@@ -138,7 +138,7 @@ final class TankSession: ObservableObject {
     @Published private(set) var savesChanged = 0
     /// Samples for the filing-cabinet charts, oldest first.
     @Published private(set) var chart: [ChartPoint] = []
-    /// Cassette in the deck: 0 slow, 1 bright, 2 night.
+    /// Cassette in the deck. Index into `AmbientAudio.tapeNames`.
     @Published private(set) var tape = 0
     private var predationCount: UInt32 = 0
 
@@ -208,7 +208,7 @@ final class TankSession: ObservableObject {
             TelemetryClient.flushPendingCrash(handle: handle, consent: consent)
             AmbientAudio.shared.setTankSeed(tank_seed(handle))
         }
-        tape = min(2, max(0, UserDefaults.standard.integer(forKey: "tape")))
+        tape = min(AmbientAudio.tapeNames.count - 1, max(0, UserDefaults.standard.integer(forKey: "tape")))
         AmbientAudio.shared.setTape(tape)
         AmbientAudio.shared.setMuted(!soundOn)
         if soundOn { AmbientAudio.shared.startIfNeeded() }
@@ -470,11 +470,12 @@ final class TankSession: ObservableObject {
     }
 
     func setTape(_ index: Int) {
-        tape = min(2, max(0, index))
+        let names = AmbientAudio.tapeNames
+        tape = min(names.count - 1, max(0, index))
         UserDefaults.standard.set(tape, forKey: "tape")
         AmbientAudio.shared.setTape(tape)
         if soundOn { AmbientAudio.shared.startIfNeeded() }
-        showHint(["SLOW", "BRIGHT", "NIGHT"][tape])
+        showHint(names[tape])
     }
 
     private func loadHandle(for target: TankContainer) -> OpaquePointer? {

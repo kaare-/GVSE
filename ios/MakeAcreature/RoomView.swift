@@ -574,12 +574,12 @@ struct ChartDrawer: View {
     }
 }
 
-/// A few generative tapes. Picking one sets the room's sound.
+/// Generative tapes. Picking one sets the room's sound.
 struct CassetteDeck: View {
     @ObservedObject var session: TankSession
     var onClose: () -> Void
 
-    private let tapes = ["SLOW", "BRIGHT", "NIGHT"]
+    private var tapes: [String] { AmbientAudio.tapeNames }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -592,19 +592,23 @@ struct CassetteDeck: View {
                 .buttonStyle(.plain)
             }
             PixelLabel(text: "A TAPE SETS THE ROOM", scale: 1, color: Palette.dimPaper)
-            ForEach(0..<tapes.count, id: \.self) { i in
-                Button {
-                    session.setTape(i)
-                } label: {
-                    PixelPanel {
-                        PixelLabel(
-                            text: session.tape == i ? "\(tapes[i])  IN" : tapes[i],
-                            scale: 2,
-                            color: session.tape == i ? Palette.highlight : Palette.paper
-                        )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(0..<tapes.count, id: \.self) { i in
+                        Button {
+                            session.setTape(i)
+                        } label: {
+                            PixelPanel {
+                                PixelLabel(
+                                    text: session.tape == i ? "\(tapes[i])  IN" : tapes[i],
+                                    scale: 2,
+                                    color: session.tape == i ? Palette.highlight : Palette.paper
+                                )
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-                .buttonStyle(.plain)
             }
         }
         .padding(12)
