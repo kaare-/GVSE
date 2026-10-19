@@ -724,6 +724,23 @@ fn a_stone_block_is_one_flat_colour() {
 }
 
 #[test]
+fn block_colour_does_not_run_in_stripes() {
+    let mut tank = Tank::try_new(1, 16, 16).unwrap();
+    for i in 0..12u32 {
+        place(&mut tank, i as i32, 3, Cell::sand());
+        place(&mut tank, i as i32, 5, Cell::solid(MaterialId::Stone));
+    }
+    let sand: Vec<_> = (0..12u32).map(|i| rgb_at(&mut tank, i, 3, 0, 0)).collect();
+    let stone: Vec<_> = (0..12u32).map(|i| rgb_at(&mut tank, i, 5, 0, 0)).collect();
+    for row in [&sand, &stone] {
+        let repeats = row.iter().skip(8).zip(row.iter()).all(|(a, b)| a == b);
+        assert!(!repeats, "a diagonal or a row should not repeat a short ramp");
+        let distinct = row.iter().collect::<std::collections::HashSet<_>>().len();
+        assert!(distinct > 6, "pore colour should scatter, got {distinct} shades");
+    }
+}
+
+#[test]
 fn creature_cap_stops_at_five_hundred() {
     let mut tank = Tank::try_new(1, 24, 24).unwrap();
     let mut n = 0u32;

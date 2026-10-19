@@ -7,6 +7,8 @@ use crate::cell::Cell;
 use crate::clock::day_factor;
 use crate::consts::{PX_PER_CELL, WATER_SAT_RENDER};
 use crate::grid::PhysicsGrid;
+use crate::hash::hash_u64;
+use wk_material::MaterialRegistry;
 
 #[derive(Debug, Clone)]
 pub struct PixelLayer {
@@ -244,10 +246,9 @@ pub fn write_rgba(
                 albedo(cell)
             };
             if owner == 0 && !cell.is_open() && !cell.is_glass() {
-                // One flat colour for the whole cell. The shift depends on
-                // the cell, so neighbouring blocks differ and the nine
-                // screen pixels of one block do not.
-                let (pr, pg, pb) = colour_play(vx, vy);
+                // One flat colour for the whole cell. The shift is that
+                // cell's pore, so the bed does not wear a diagonal ramp.
+                let (pr, pg, pb) = colour_play(cell, vx, vy);
                 r = shade(r, pr);
                 g = shade(g, pg);
                 b = shade(b, pb);
@@ -445,14 +446,22 @@ fn veil(cloud_q8: &[u8]) -> u32 {
     sum / cloud_q8.len() as u32
 }
 
-/// A few steps of colour, warmer or cooler, one value per physics cell.
-/// Neighbouring blocks differ. Nothing inside a block changes.
-fn colour_play(vx: i32, vy: i32) -> (i32, i32, i32) {
-    let n = (vx as u32).wrapping_mul(5).wrapping_add((vy as u32).wrapping_mul(3));
-    // Luminance stays inside the wet-sand gap. Warmth is a colour cast
-    // and cancels out of the sum, so a soaked block still reads darker.
-    let lift = (n & 7) as i32 * 2 - 7;
-    let warm = ((n >> 3) & 3) as i32 - 1;
+/// Porosity brightens or darkens the block. Permeability, the fracture
+/// tail of the same pore draw GvsE uses, pulls it warm. The mixer is
+/// per cell, so the shift does not repeat along a diagonal. The nine
+/// screen pixels of one block stay one colour, and the luminance stays
+/// inside the wet-sand gap.
+fn colour_play(cell: Cell, vx: i32, vy: i32) -> (i32, i32, i32) {
+    let pore = hash_u64(0xA0_2E, vx as u32 as u64, vy as u32 as u64, 0x50_12) as u8;
+    let hydro = MaterialRegistry::hydrology(cell.id());
+    let poro = hydro.porosity.sample(pore) as i32;
+    let pmid = (hydro.porosity.min as i32 + hydro.porosity.max as i32) / 2;
+    let pspan = (hydro.porosity.max as i32 - hydro.porosity.min as i32).max(1);
+    let lift = ((poro - pmid) * 14 / pspan).clamp(-7, 7);
+    let perm = hydro.permeability.sample_fracture(pore) as i32;
+    let lo = hydro.permeability.min as i32;
+    let span = (hydro.permeability.max as i32 - lo).max(1);
+    let warm = ((perm - lo) * 6 / span).clamp(0, 6);
     (lift + warm * 2, lift, lift - warm * 2)
 }
 
