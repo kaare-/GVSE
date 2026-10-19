@@ -105,6 +105,14 @@ struct RoomView: View {
         }
         .onReceive(skyClock) { date in
             skyPhase = RoomMood.phase(at: date)
+            let mood = RoomMood(phase: skyPhase, lampOn: lampOn, candleLit: candleLit)
+            AmbientAudio.shared.setCv([
+                Float(mood.sunPower) / 30,
+                mood.raining ? 1 : 0,
+                mood.lampOn ? 1 : 0,
+                mood.candleLit ? 1 : 0,
+                min(1, Float(session.liveCells) / 2_000),
+            ])
             session.followPlaylist()
         }
         .onReceive(refresh) { _ in
@@ -744,12 +752,24 @@ struct CassetteDeck: View {
     var onClose: () -> Void
 
     @State private var pulled: [UUID] = []
+    @State private var recording = false
+    @State private var blankOnPlayer = false
+    @State private var started = Date()
+    @State private var pitch = 0.42
+    @State private var level = 0.65
+    @State private var bright = false
+    @State private var gateOpen = true
+    @State private var pitchCv = -1
+    @State private var levelCv = -1
+    @State private var armed: Int?
+    private let cvNames = ["DAY", "RAIN", "LAMP", "CANDLE", "ROOM"]
+    private let clock = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.28)
                 .ignoresSafeArea()
-                .onTapGesture(perform: onClose)
+                .onTapGesture(perform: closeDesk)
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     PixelLabel(text: "SHELF", scale: 2, color: Palette.highlight)
@@ -767,13 +787,15 @@ struct CassetteDeck: View {
                     }
                     .buttonStyle(.plain)
                     .a11yButton(session.tapePlaying ? "Deck power, on" : "Deck power, off")
-                    Button(action: onClose) {
+                    Button(action: closeDesk) {
                         PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
                     }
                     .buttonStyle(.plain)
                 }
                 shelf
                 pile
+                player
+                if recording { rack }
                 Spacer(minLength: 0)
             }
             .padding(16)
@@ -783,6 +805,14 @@ struct CassetteDeck: View {
             .padding(.vertical, 48)
         }
         .preferredColorScheme(.dark)
+        .onReceive(clock) { _ in
+            guard recording else { return }
+            if Date().timeIntervalSince(started) >= 36 {
+                finishRecord()
+            } else {
+                session.soloTake(currentTake())
+            }
+        }
     }
 
     private var shelf: some View {
@@ -848,7 +878,194 @@ struct CassetteDeck: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 88, alignment: .topLeading)
+    }
+
+    /// The player under the shelf. Record pulls a blank off the rack.
+    private var player: some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color(red: 0.08, green: 0.07, blue: 0.06))
+                    .frame(width: 168, height: 64)
+                PixelLabel(text: "RACK", scale: 1, color: Palette.dimPaper)
+                    .offset(x: 176)
+                blankCassette
+                    .offset(x: blankOnPlayer ? 18 : 168)
+                    .animation(.easeInOut(duration: 0.35), value: blankOnPlayer)
+            }
+            .frame(width: 230, height: 64, alignment: .leading)
+            Button(action: toggleRecord) {
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 0.82, green: 0.12, blue: 0.1))
+                        .frame(width: 28, height: 28)
+                    if recording {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Color.white)
+                            .frame(width: 10, height: 10)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .a11yButton(recording ? "Stop recording" : "Record", hint: "Record onto a blank cassette")
+        }
+    }
+
+    private var blankCassette: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(Color(red: 0.55, green: 0.5, blue: 0.42))
+            .frame(width: 46, height: 30)
+            .overlay(PixelLabel(text: "EMPTY", scale: 1, color: Color(red: 0.12, green: 0.08, blue: 0.04)))
+    }
+
+    /// Buttons, sliders, and patch cables. Environmental jacks feed the sliders.
+    private var rack: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ForEach(cvNames.indices, id: \.self) { index in
+                    Button {
+                        armed = armed == index ? nil : index
+                    } label: {
+                        VStack(spacing: 3) {
+                            Circle()
+                                .fill(armed == index ? Palette.highlight : Color(white: 0.45))
+                                .frame(width: 12, height: 12)
+                            PixelLabel(text: cvNames[index], scale: 1, color: Palette.dimPaper)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .gesture(
+                        DragGesture(minimumDistance: 12, coordinateSpace: .named("rack")).onEnded { value in
+                            plug(index, at: value.location.y)
+                        }
+                    )
+                    .a11yButton(cvNames[index], hint: "Patch this into a slider")
+                }
+            }
+            sliderRow("PITCH", value: $pitch, cv: $pitchCv)
+            sliderRow("LEVEL", value: $level, cv: $levelCv)
+            HStack(spacing: 8) {
+                rackButton(bright ? "TONE" : "SOFT") { bright.toggle(); hear() }
+                rackButton(gateOpen ? "OPEN" : "SHUT") { gateOpen.toggle(); hear() }
+            }
+            if pitchCv >= 0 || levelCv >= 0 {
+                PixelLabel(text: cableCaption, scale: 1, color: Palette.highlight)
+            }
+        }
+        .padding(8)
+        .background(Color(red: 0.05, green: 0.06, blue: 0.05))
+        .coordinateSpace(name: "rack")
+        .overlay(cableLayer)
+    }
+
+    private var cableCaption: String {
+        var parts: [String] = []
+        if pitchCv >= 0, cvNames.indices.contains(pitchCv) { parts.append("\(cvNames[pitchCv]) PITCH") }
+        if levelCv >= 0, cvNames.indices.contains(levelCv) { parts.append("\(cvNames[levelCv]) LEVEL") }
+        return parts.joined(separator: "  ")
+    }
+
+    private var cableLayer: some View {
+        GeometryReader { geo in
+            Canvas { ctx, size in
+                let ink = Color(red: 0.9, green: 0.72, blue: 0.28)
+                func line(_ from: Int, _ y: CGFloat) {
+                    guard cvNames.indices.contains(from) else { return }
+                    var path = Path()
+                    let x = size.width * (CGFloat(from) + 0.5) / CGFloat(cvNames.count)
+                    path.move(to: CGPoint(x: x, y: 18))
+                    path.addLine(to: CGPoint(x: size.width - 18, y: y))
+                    ctx.stroke(path, with: .color(ink), lineWidth: 2)
+                }
+                if pitchCv >= 0 { line(pitchCv, 58) }
+                if levelCv >= 0 { line(levelCv, 96) }
+            }
+            .allowsHitTesting(false)
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func sliderRow(_ title: String, value: Binding<Double>, cv: Binding<Int>) -> some View {
+        HStack(spacing: 8) {
+            PixelLabel(text: title, scale: 1, color: Palette.paper)
+                .frame(width: 48, alignment: .leading)
+            Slider(value: value, in: 0...1)
+                .onChange(of: value.wrappedValue) { _ in hear() }
+            Button {
+                if let armed {
+                    cv.wrappedValue = cv.wrappedValue == armed ? -1 : armed
+                    self.armed = nil
+                } else {
+                    cv.wrappedValue = -1
+                }
+                hear()
+            } label: {
+                Circle()
+                    .stroke(cv.wrappedValue >= 0 ? Color(red: 0.9, green: 0.72, blue: 0.28) : Color(white: 0.4), lineWidth: 2)
+                    .background(Circle().fill(Color(white: 0.12)))
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(.plain)
+            .a11yButton("\(title) jack", hint: cv.wrappedValue >= 0 ? "Unplug" : "Plug a cable here")
+        }
+    }
+
+    private func rackButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            PixelPanel { PixelLabel(text: title, scale: 1, color: Palette.paper) }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func plug(_ source: Int, at y: CGFloat) {
+        if y < 70 {
+            pitchCv = pitchCv == source ? -1 : source
+        } else {
+            levelCv = levelCv == source ? -1 : source
+        }
+        armed = nil
+        hear()
+    }
+
+    private func toggleRecord() {
+        if recording { finishRecord() } else { beginRecord() }
+    }
+
+    private func beginRecord() {
+        recording = true
+        blankOnPlayer = true
+        started = Date()
+        session.soloTake(currentTake())
+    }
+
+    private func finishRecord() {
+        let dur = min(36, max(4, Date().timeIntervalSince(started)))
+        session.keepTake(currentTake(), duration: dur)
+        recording = false
+        blankOnPlayer = false
+        armed = nil
+    }
+
+    private func currentTake() -> AmbientAudio.Take {
+        AmbientAudio.Take(
+            pitch: Float(pitch),
+            level: Float(gateOpen ? level : 0.04),
+            bright: bright,
+            pitchCv: pitchCv,
+            levelCv: levelCv
+        )
+    }
+
+    private func hear() {
+        guard recording else { return }
+        session.soloTake(currentTake())
+    }
+
+    private func closeDesk() {
+        if recording { finishRecord() }
+        onClose()
     }
 
     private func frontTape(_ tape: ShelfTape) -> some View {

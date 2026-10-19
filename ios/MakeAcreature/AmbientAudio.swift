@@ -11,9 +11,20 @@ final class AmbientAudio {
     /// How long each voice plays before the playlist fades into the next.
     static let tapeDurations: [TimeInterval] = [48, 36, 72, 40, 56, 34, 80, 44]
 
+    /// A take written onto a cassette. Control voltage indexes are
+    /// day, rain, lamp, candle, room. `-1` means the jack is empty.
+    struct Take: Equatable, Codable {
+        var pitch: Float
+        var level: Float
+        var bright: Bool
+        var pitchCv: Int
+        var levelCv: Int
+    }
+
     struct PlaySlot {
         var voice: Int
         var duration: Double
+        var take: Take? = nil
     }
 
     private let gate = NSLock()
@@ -21,6 +32,7 @@ final class AmbientAudio {
     private var slot = 0
     private var into: Double = 0
     private var deckOn = false
+    private var cv: [Float] = [0.5, 0, 1, 0, 0]
 
     private var engine: AVAudioEngine?
     private var source: AVAudioSourceNode?
@@ -54,8 +66,18 @@ final class AmbientAudio {
             let next = min(max(0, start), slots.count - 1)
             if resetHead { into = 0 }
             slot = next
-            tape = min(max(0, slots[next].voice), Self.tapes.count - 1)
+            let voice = slots[next].voice
+            if slots[next].take == nil {
+                tape = min(max(0, voice), Self.tapes.count - 1)
+            }
         }
+        gate.unlock()
+    }
+
+    /// Day, rain, lamp, candle, and the room. Patched jacks read these.
+    func setCv(_ values: [Float]) {
+        gate.lock()
+        cv = values
         gate.unlock()
     }
 
@@ -125,15 +147,19 @@ final class AmbientAudio {
                 var sample: Float = 0
                 if playing, !slots.isEmpty {
                     let safeSlot = min(slot, slots.count - 1)
-                    voiceIndex = min(max(0, slots[safeSlot].voice), Self.tapes.count - 1)
-                    let part = Self.tapes[voiceIndex]
                     let dur = max(slots[safeSlot].duration, 1)
                     let fade = min(1.6, dur / 3)
                     var gain = 1.0
                     if into < fade { gain = into / fade }
                     let left = dur - into
                     if left < fade { gain = min(gain, max(0, left) / fade) }
-                    sample = self.voice(t: t, tape: voiceIndex, part: part, sting: 0) * Float(max(0, gain))
+                    if let take = slots[safeSlot].take {
+                        sample = self.played(t: t, take: take) * Float(max(0, gain))
+                    } else {
+                        voiceIndex = min(max(0, slots[safeSlot].voice), Self.tapes.count - 1)
+                        let part = Self.tapes[voiceIndex]
+                        sample = self.voice(t: t, tape: voiceIndex, part: part, sting: 0) * Float(max(0, gain))
+                    }
                     into += 1 / Double(rate)
                     if into >= dur {
                         into = 0
@@ -167,6 +193,25 @@ final class AmbientAudio {
             engine = nil
             source = nil
         }
+    }
+
+    /// A recorded cassette. Sliders set the tone; patched jacks add the room.
+    private func played(t: Float, take: Take) -> Float {
+        func src(_ index: Int) -> Float {
+            guard index >= 0, cv.indices.contains(index) else { return 0 }
+            return cv[index]
+        }
+        let pitch = min(1, max(0, take.pitch + (take.pitchCv >= 0 ? src(take.pitchCv) * 0.5 : 0)))
+        let freq = 90 * pow(3.2, pitch)
+        var amp = take.level
+        if take.levelCv >= 0 {
+            amp *= 0.25 + 0.75 * src(take.levelCv)
+        }
+        var sample = sin(2 * .pi * freq * t) * amp * 0.34
+        if take.bright {
+            sample += sin(2 * .pi * freq * 2 * t) * amp * 0.12
+        }
+        return sample * max(intensity, 0.2)
     }
 
     /// Drone, a two-note chord, and a line that steps. Envelopes sit on

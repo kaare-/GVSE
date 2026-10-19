@@ -86,6 +86,7 @@ struct ShelfTape: Identifiable, Codable, Equatable {
     var name: String
     var voice: Int
     var duration: Double
+    var take: AmbientAudio.Take? = nil
 }
 
 final class TankSession: ObservableObject {
@@ -155,6 +156,7 @@ final class TankSession: ObservableObject {
     @Published private(set) var shelf: [ShelfTape] = []
 
     var tapePlaying: Bool { deckOn && soundOn }
+    private var soloing = false
     private var predationCount: UInt32 = 0
 
     let archive = ArchiveStore()
@@ -526,10 +528,40 @@ final class TankSession: ObservableObject {
 
     /// The playlist advanced on its own. Keep the shelf mark in step.
     func followPlaylist() {
+        guard !soloing else { return }
         let i = AmbientAudio.shared.playingSlot
         guard shelf.indices.contains(i), i != tape else { return }
         tape = i
         UserDefaults.standard.set(tape, forKey: "tape")
+    }
+
+    /// Hear a take while it is recording. The shelf comes back in `keepTake`.
+    func soloTake(_ take: AmbientAudio.Take) {
+        soloing = true
+        let slot = AmbientAudio.PlaySlot(voice: -1, duration: 3600, take: take)
+        AmbientAudio.shared.setDeck(on: true, slots: [slot], start: 0, resetHead: false)
+        AmbientAudio.shared.setMuted(false)
+    }
+
+    /// The blank cassette leaves the player and joins the right end of the shelf.
+    func keepTake(_ take: AmbientAudio.Take, duration: Double) {
+        let n = shelf.filter { $0.voice < 0 }.count + 1
+        shelf.append(
+            ShelfTape(
+                id: UUID(),
+                name: "TAKE \(n)",
+                voice: -1,
+                duration: duration,
+                take: take
+            )
+        )
+        tape = shelf.count - 1
+        deckOn = true
+        UserDefaults.standard.set(true, forKey: "deckOn")
+        UserDefaults.standard.set(tape, forKey: "tape")
+        soloing = false
+        saveShelf()
+        pushDeck(resetHead: true)
     }
 
     private func loadShelf() {
@@ -550,7 +582,9 @@ final class TankSession: ObservableObject {
     }
 
     private func pushDeck(resetHead: Bool) {
-        let slots = shelf.map { AmbientAudio.PlaySlot(voice: $0.voice, duration: $0.duration) }
+        let slots = shelf.map {
+            AmbientAudio.PlaySlot(voice: $0.voice, duration: $0.duration, take: $0.take)
+        }
         AmbientAudio.shared.setDeck(on: deckOn && soundOn, slots: slots, start: tape, resetHead: resetHead)
         AmbientAudio.shared.setMuted(!(deckOn && soundOn))
     }
