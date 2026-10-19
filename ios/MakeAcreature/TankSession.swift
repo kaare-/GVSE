@@ -116,7 +116,7 @@ final class TankSession: ObservableObject {
     @Published private(set) var container: TankContainer = .main
     /// A pinch wider than the whole glass. The shell returns to the lobby.
     @Published var leaveForLobby = false
-    /// Pinch scale of the study while looking into the tumbler. 1 fits the room.
+    /// Pinch scale while looking into the tumbler. 1 fits the glass on the table.
     @Published var glassZoom: CGFloat = 1
     @Published var glassPan: CGSize = .zero
     private var glassPinchZoom: CGFloat = 1
@@ -1236,9 +1236,10 @@ final class TankSession: ObservableObject {
     }
 
     private func clampedGlassPan(_ pan: CGSize, zoom: CGFloat, view: CGSize) -> CGSize {
-        let fit = min(view.width / CGFloat(RoomArt.w), view.height / CGFloat(RoomArt.h))
-        let w = CGFloat(RoomArt.w) * fit * zoom
-        let h = CGFloat(RoomArt.h) * fit * zoom
+        let seen = RoomArt.glassView
+        let fit = min(view.width / CGFloat(seen.w), view.height / CGFloat(seen.h))
+        let w = CGFloat(seen.w) * fit * zoom
+        let h = CGFloat(seen.h) * fit * zoom
         let slackX = max(0, (w - view.width) / 2)
         let slackY = max(0, (h - view.height) / 2)
         return CGSize(

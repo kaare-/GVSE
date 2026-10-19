@@ -96,6 +96,9 @@ struct MakeAcreatureApp: App {
                     if let stage {
                         Color(red: 0.20, green: 0.14, blue: 0.10)
                         GlassBackdrop(stage: stage)
+                            .frame(width: stage.crop.width, height: stage.crop.height)
+                            .clipped()
+                            .position(x: stage.crop.midX, y: stage.crop.midY)
                     }
                     TankScreen(session: session, waterHole: stage?.water)
                         .frame(width: geo.size.width, height: geo.size.height)
@@ -269,7 +272,7 @@ struct MakeAcreatureApp: App {
     }
 }
 
-/// The study, scaled with the pinch so the tumbler and the room move together.
+/// The tumbler and the table, scaled together by the pinch.
 private struct GlassBackdrop: View {
     var stage: GlassStage
     @State private var mood = RoomMood(
@@ -286,8 +289,8 @@ private struct GlassBackdrop: View {
             .interpolation(.none)
             .frame(width: CGFloat(RoomArt.w) * stage.s, height: CGFloat(RoomArt.h) * stage.s)
             .position(
-                x: stage.picture.x + CGFloat(RoomArt.w) * stage.s / 2,
-                y: stage.picture.y + CGFloat(RoomArt.h) * stage.s / 2
+                x: stage.picture.x - stage.crop.minX + CGFloat(RoomArt.w) * stage.s / 2,
+                y: stage.picture.y - stage.crop.minY + CGFloat(RoomArt.h) * stage.s / 2
             )
             .onReceive(clock) { date in
                 mood.phase = RoomMood.phase(at: date)

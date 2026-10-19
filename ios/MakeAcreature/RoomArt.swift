@@ -104,6 +104,9 @@ enum RoomArt {
     /// The foot ends on the pixel above the table top (y = 156).
     static let openingGlass = Spot(x: 34, y: 127, w: 21, h: 31)
     static let openingWater = Spot(x: 37, y: 131, w: 15, h: 21)
+    /// Widest view after pinching in. The tumbler and the table under it.
+    /// The rest of the study stays in the lobby.
+    static let glassView = Spot(x: 20, y: 102, w: 48, h: 70)
 
     static func cgImage(cast: RoomCast = RoomCast(), mood: RoomMood = RoomMood()) -> CGImage {
         let pix = Pix(w: w, h: h, cast: cast, mood: mood)
@@ -132,27 +135,38 @@ enum RoomArt {
     #endif
 }
 
-/// The study once you have pinched into the tumbler.
-/// `picture` is the top-left of the room bitmap. `water` is the live sim,
-/// locked to the tumbler so a pinch scales the whole scene together.
+/// The tumbler on the table, once you have pinched in.
+/// `crop` is that view. `picture` is the top-left of the room bitmap.
+/// `water` stays locked to the tumbler, so a pinch scales the whole view.
 struct GlassStage {
     var s: CGFloat
     var picture: CGPoint
+    var crop: CGRect
     var water: CGRect
 
     init(size: CGSize, zoom: CGFloat, pan: CGSize) {
+        let view = RoomArt.glassView
         let zoom = min(max(zoom, 1), 8)
         let fit = min(
-            size.width / CGFloat(RoomArt.w),
-            size.height / CGFloat(RoomArt.h)
+            size.width / CGFloat(view.w),
+            size.height / CGFloat(view.h)
         )
         let scale = fit * zoom
-        let picture = CGPoint(
-            x: (size.width - CGFloat(RoomArt.w) * scale) / 2 + pan.width,
-            y: (size.height - CGFloat(RoomArt.h) * scale) / 2 + pan.height
+        let origin = CGPoint(
+            x: (size.width - CGFloat(view.w) * scale) / 2 + pan.width,
+            y: (size.height - CGFloat(view.h) * scale) / 2 + pan.height
         )
         s = scale
-        self.picture = picture
+        picture = CGPoint(
+            x: origin.x - CGFloat(view.x) * scale,
+            y: origin.y - CGFloat(view.y) * scale
+        )
+        crop = CGRect(
+            x: origin.x,
+            y: origin.y,
+            width: CGFloat(view.w) * scale,
+            height: CGFloat(view.h) * scale
+        )
         let spot = RoomArt.openingWater
         water = CGRect(
             x: picture.x + CGFloat(spot.x) * scale,
