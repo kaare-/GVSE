@@ -705,9 +705,7 @@ fn wet_sand_renders_darker_and_each_block_is_flat() {
     place(&mut tank, 3, 2, Cell::sand());
     assert_eq!(dry, rgb_at(&mut tank, 2, 2, 2, 1), "one sand block is one colour");
     assert_eq!(dry, rgb_at(&mut tank, 2, 2, 1, 2), "a block has no border or grain");
-    let beside = rgb_at(&mut tank, 3, 2, 0, 0);
-    assert_ne!(dry, beside, "neighbouring sand blocks differ");
-    assert_eq!(beside, rgb_at(&mut tank, 3, 2, 2, 2), "the next block is flat too");
+    assert_eq!(dry, rgb_at(&mut tank, 3, 2, 0, 0), "neighbouring sand blocks match");
 }
 
 #[test]
@@ -718,25 +716,26 @@ fn a_stone_block_is_one_flat_colour() {
     let a = rgb_at(&mut tank, 2, 4, 0, 0);
     assert_eq!(a, rgb_at(&mut tank, 2, 4, 2, 2), "one stone block is one colour");
     assert_eq!(a, rgb_at(&mut tank, 2, 4, 1, 1), "the middle matches the corner");
-    let b = rgb_at(&mut tank, 3, 4, 0, 0);
-    assert_ne!(a, b, "neighbouring stone blocks differ");
-    assert_eq!(b, rgb_at(&mut tank, 3, 4, 2, 2));
+    assert_eq!(a, rgb_at(&mut tank, 3, 4, 0, 0), "neighbouring stone blocks match");
+    assert_eq!(a, rgb_at(&mut tank, 3, 4, 2, 2));
 }
 
 #[test]
-fn block_colour_does_not_run_in_stripes() {
+fn a_bed_is_one_colour_along_a_row_and_a_diagonal() {
     let mut tank = Tank::try_new(1, 16, 16).unwrap();
     for i in 0..12u32 {
         place(&mut tank, i as i32, 3, Cell::sand());
-        place(&mut tank, i as i32, 5, Cell::solid(MaterialId::Stone));
+        place(&mut tank, i as i32, i as i32 + 4, Cell::solid(MaterialId::Stone));
     }
-    let sand: Vec<_> = (0..12u32).map(|i| rgb_at(&mut tank, i, 3, 0, 0)).collect();
-    let stone: Vec<_> = (0..12u32).map(|i| rgb_at(&mut tank, i, 5, 0, 0)).collect();
-    for row in [&sand, &stone] {
-        let repeats = row.iter().skip(8).zip(row.iter()).all(|(a, b)| a == b);
-        assert!(!repeats, "a diagonal or a row should not repeat a short ramp");
-        let distinct = row.iter().collect::<std::collections::HashSet<_>>().len();
-        assert!(distinct > 6, "pore colour should scatter, got {distinct} shades");
+    let sand = rgb_at(&mut tank, 0, 3, 0, 0);
+    let stone = rgb_at(&mut tank, 0, 4, 0, 0);
+    for i in 1..12u32 {
+        assert_eq!(sand, rgb_at(&mut tank, i, 3, 0, 0), "sand does not change along a row");
+        assert_eq!(
+            stone,
+            rgb_at(&mut tank, i, i + 4, 0, 0),
+            "stone does not stripe on a diagonal"
+        );
     }
 }
 
