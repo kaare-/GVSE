@@ -196,13 +196,11 @@ pub fn rebuild_light(
             if cell.is_glass() {
                 lit = lit * 250 / 256;
             }
-            // Cloud darkens the water it is suspended in. Dry air above
-            // the surface stays even, so fines do not draw stripes up
-            // out of the glass.
+            // Water loses a little light with depth. The murk of fines is
+            // one veil for the whole tank: a per-column factor drew a dark
+            // shaft up through the water from whatever sat on the floor.
             if cell.sat >= WATER_SAT_RENDER {
-                if let Some(&c) = cloud_q8.get(px) {
-                    lit = lit * c as u32 / 255;
-                }
+                lit = lit * veil(cloud_q8) / 255;
                 incoming = incoming * 999 / 1000;
             }
             pixels.light[i] = lit.min(255) as u8;
@@ -246,18 +244,17 @@ pub fn write_rgba(
                 albedo(cell)
             };
             if owner == 0 && !cell.is_open() && !cell.is_glass() {
-                if (cell.is_rigid() || cell.is_silhouette()) && rock_touches_body(grid, cell, vx, vy) {
-                    let relief = blob_shade(grid, cell, px, py, vis_h);
-                    r = shade(r, relief);
-                    g = shade(g, relief);
-                    b = shade(b, relief);
+                // A little colour play, shared across the channels, so a
+                // bed is not one flat stamp and not a speckled texture.
+                let (pr, pg, pb) = colour_play(px, py);
+                let form = if (cell.is_rigid() || cell.is_silhouette()) && rock_touches_body(grid, cell, vx, vy) {
+                    blob_shade(grid, cell, px, py, vis_h)
                 } else {
-                    let (jr, jg, jb) = grain_speck(px, py);
-                    let relief = rock_relief(cell, px, py);
-                    r = shade(r, jr + relief);
-                    g = shade(g, jg + relief);
-                    b = shade(b, jb + relief);
-                }
+                    0
+                };
+                r = shade(r, pr + form);
+                g = shade(g, pg + form);
+                b = shade(b, pb + form);
             }
             let li = pixels.light[i] as u32;
             r = ((r as u32) * li / 255) as u8;
@@ -267,7 +264,7 @@ pub fn write_rgba(
                 // Milky haze over cloudy water columns, densest where the
                 // fines are (alpha ∝ 1 − cloud).
                 if cell.sat >= WATER_SAT_RENDER {
-                    let c = overlay.cloud_q8.get(px).copied().unwrap_or(255) as u32;
+                    let c = veil(overlay.cloud_q8);
                     if c < 250 {
                         let t = (255 - c) * 3 / 4;
                         let milk = [0xB8u32, 0xC4, 0xB0];
@@ -442,13 +439,23 @@ fn shade(c: u8, d: i32) -> u8 {
     (c as i32 + d).clamp(0, 255) as u8
 }
 
-/// Small per-pixel grain so a flat 3×3 cell is not one colour.
-/// Neighbours differ: the mix advances by 3 along x.
-fn grain_speck(px: usize, py: usize) -> (i32, i32, i32) {
-    let n = (px.wrapping_mul(3).wrapping_add(py.wrapping_mul(5))) & 15;
-    let j = n as i32 - 8;
-    let warm = ((px.wrapping_add(py.wrapping_mul(2))) & 3) as i32 - 1;
-    (j + warm, j, j - warm)
+/// One cloud factor for the whole glass. Fines still thicken the water,
+/// but a creature's column does not wear its own dark stripe.
+fn veil(cloud_q8: &[u8]) -> u32 {
+    if cloud_q8.is_empty() {
+        return 255;
+    }
+    let sum: u32 = cloud_q8.iter().map(|&c| c as u32).sum();
+    sum / cloud_q8.len() as u32
+}
+
+/// A few steps of colour, warmer or cooler, so neighbouring grains differ
+/// without a drawn texture.
+fn colour_play(px: usize, py: usize) -> (i32, i32, i32) {
+    let n = (px.wrapping_mul(5).wrapping_add(py.wrapping_mul(3))) & 7;
+    let lift = n as i32 - 3;
+    let warm = ((px.wrapping_add(py)) & 1) as i32;
+    (lift + warm, lift, lift - warm)
 }
 
 fn same_rock(a: Cell, b: Cell) -> bool {
@@ -494,20 +501,3 @@ fn blob_shade(grid: &PhysicsGrid, cell: Cell, px: usize, py: usize, vis_h: i32) 
     }
 }
 
-/// A lit corner on a cobble. The corner walks as [`Cell::tumble`] advances,
-/// so a falling loose rock reads as a turn.
-fn rock_relief(cell: Cell, px: usize, py: usize) -> i32 {
-    if !cell.tumbles() {
-        return 0;
-    }
-    let sx = (px as i32) % PX_PER_CELL as i32;
-    let sy = (py as i32) % PX_PER_CELL as i32;
-    let (hx, hy) = match cell.tumble() {
-        0 => (0, 0),
-        1 => (2, 0),
-        2 => (2, 2),
-        _ => (0, 2),
-    };
-    let dist = (sx - hx).abs() + (sy - hy).abs();
-    16 - dist * 8
-}

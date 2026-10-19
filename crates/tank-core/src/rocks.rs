@@ -86,7 +86,10 @@ pub fn step(grid: &mut PhysicsGrid, tick: u64) {
         }
     }
     let mut ids: Vec<u8> = bodies.keys().copied().collect();
-    ids.sort_unstable();
+    ids.sort_by_key(|id| {
+        let miny = bodies.get(id).and_then(|c| c.iter().map(|p| p.1).min()).unwrap_or(0);
+        (miny, *id)
+    });
     for id in ids {
         let Some(cells) = bodies.get(&id) else {
             continue;
@@ -101,10 +104,16 @@ pub fn step(grid: &mut PhysicsGrid, tick: u64) {
             }
             continue;
         }
-        // Blocked. Tip onto a side only when that lets the stone drop.
-        if let Some(turned) = rotated(&cells) {
-            if occupy(grid, &cells, &turned) && !translate(grid, &turned, 0, -1) {
-                let _ = occupy(grid, &turned, &cells);
+        // It hit something and cannot fall. A tall stone tips onto its
+        // side — onto the rock it landed on — and stays there.
+        if let Some(turned) = flatter(&cells) {
+            if !occupy(grid, &cells, &turned) {
+                for dx in [1, -1, 2, -2] {
+                    let kicked: Vec<(i32, i32)> = turned.iter().map(|(x, y)| (x + dx, *y)).collect();
+                    if occupy(grid, &cells, &kicked) {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -118,6 +127,23 @@ fn alloc_id(used: &mut [bool; 256]) -> Option<u8> {
         }
     }
     None
+}
+
+/// A quarter turn that leaves the stone shorter than it is now, so a
+/// standing rock lies down once and does not stand back up next tick.
+fn flatter(cells: &[(i32, i32)]) -> Option<Vec<(i32, i32)>> {
+    let turned = rotated(cells)?;
+    if span_h(&turned) < span_h(cells) {
+        Some(turned)
+    } else {
+        None
+    }
+}
+
+fn span_h(cells: &[(i32, i32)]) -> i32 {
+    let miny = cells.iter().map(|c| c.1).min().unwrap_or(0);
+    let maxy = cells.iter().map(|c| c.1).max().unwrap_or(0);
+    maxy - miny
 }
 
 /// 90° clockwise around the stone's bounding box, tipping it onto a side.

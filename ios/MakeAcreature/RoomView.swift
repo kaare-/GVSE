@@ -495,10 +495,15 @@ struct TreeScreen: View {
             .background(Color(white: 0.12))
             VStack(alignment: .leading, spacing: 2) {
                 let name = tree.first { $0.id == picked }?.name ?? ""
-                PixelLabel(text: name.uppercased(), scale: 2, color: Palette.highlight, maxWidth: 200)
-                ForEach(Array(card.split(separator: "\n").prefix(8).enumerated()), id: \.offset) { _, line in
-                    PixelLabel(text: String(line), scale: 1, color: Palette.paper, maxWidth: 220)
+                PixelLabel(text: name.uppercased(), scale: 2, color: Palette.highlight, maxWidth: 220)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(card.split(separator: "\n").enumerated()), id: \.offset) { _, line in
+                            PixelLabel(text: String(line), scale: 1, color: Palette.paper, maxWidth: 240)
+                        }
+                    }
                 }
+                .frame(maxHeight: 280)
             }
             Spacer(minLength: 0)
             Button {

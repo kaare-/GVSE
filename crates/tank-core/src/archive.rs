@@ -109,6 +109,11 @@ impl Specimen {
             s.push_str(&self.notes);
             s.push('\n');
         }
+        s.push_str("\nGENETICS\n");
+        for line in genetics_lines(&self.genome) {
+            s.push_str(&line);
+            s.push('\n');
+        }
         s
     }
 }
@@ -286,154 +291,166 @@ fn render_org(tank: &Tank, org: u32) -> Option<(u16, u16, Vec<u8>)> {
     Some((w2 as u16, h2 as u16, padded))
 }
 
-/// Plain words for the blocks a genome actually builds. One line each,
-/// units of at least 1, not the bytecode. Sensors and drinks are named
-/// for what they do.
+/// The whole program, in words: the header, then every mode with its
+/// blocks, children, switches and drives. Not the bytecode.
 pub fn genetics_lines(genome: &crate::bio::Genome) -> Vec<String> {
     use crate::bio::profile::{
         Block, SENSOR_CHEM, SENSOR_COLOUR, SENSOR_GRAVITY, SENSOR_HUMIDITY, SENSOR_KIND_MOD, SENSOR_LIGHT,
         SENSOR_TEMP, SENSOR_TOUCH, UPTAKE_GLUCOSE, UPTAKE_MINERAL, UPTAKE_WATER,
     };
-    use crate::bio::species::reachable_modes;
-    let mut photo = false;
-    let mut chemo = false;
-    let mut drinks = [false; 3];
-    let mut store = false;
-    let mut enzyme = false;
-    let mut repair = false;
-    let mut wall = false;
-    let mut clear = false;
-    let mut glue = false;
-    let mut toxin = false;
-    let mut needle = false;
-    let mut signal = false;
-    let mut receptor = false;
-    let mut sensors = [false; 7];
-    let mut nerve = false;
-    let mut muscle = false;
-    let mut cilia = false;
-    let mut buoy = false;
-    let mut excrete = false;
-    let mut pigment = false;
-    let mut thermo = false;
-    for &mi in &reachable_modes(genome) {
-        let Some(m) = genome.modes.get(mi as usize) else {
-            continue;
-        };
+    use crate::bio::program::{ChildKind, Detach, Dir, HeadingRule};
+    let mut lines = Vec::new();
+    lines.push(format!("BUOY {}", genome.buoy));
+    lines.push(format!("TEMP {} WIDTH {}", genome.temp_opt, genome.temp_width));
+    lines.push(format!("LIFE {}S", genome.base_age));
+    lines.push(format!(
+        "PACE CHEAP {} FAST {} TRUE {}",
+        genome.cheap, genome.fast, genome.accurate
+    ));
+    lines.push(format!("WALL KEY {}", genome.wall_key));
+    if genome.glue_key != 0 {
+        lines.push(format!("GLUE KEY {} WIDTH {}", genome.glue_key, genome.glue_width));
+    }
+    for (i, m) in genome.modes.iter().enumerate() {
+        let seed = if i as u8 == genome.seed_mode { " SEED" } else { "" };
+        lines.push(format!(
+            "MODE {i} {}X{}{seed}",
+            m.shape_w.max(1),
+            m.shape_h.max(1)
+        ));
+        if m.heading_rule != HeadingRule::Inherit {
+            let face = match m.heading_rule {
+                HeadingRule::TurnLeft => "LEFT",
+                HeadingRule::TurnRight => "RIGHT",
+                HeadingRule::Flip => "BACK",
+                HeadingRule::Inherit => "ON",
+            };
+            lines.push(format!("FACE {face}"));
+        }
+        let energy = m.divide_when.energy_frac as u32 * 100 / 255;
+        lines.push(format!("SPLITS PAST {energy}"));
         for e in &m.entries[..m.n_entries as usize] {
             if e.units < 1 {
                 continue;
             }
+            let name = match e.block {
+                Block::Photo => "PHOTO",
+                Block::Chemo => "CHEMO",
+                Block::Uptake => match e.param_a {
+                    UPTAKE_GLUCOSE => "DRINKS SUGAR",
+                    UPTAKE_MINERAL => "DRINKS LIME",
+                    UPTAKE_WATER => "DRINKS WATER",
+                    _ => "DRINKS",
+                },
+                Block::Store => "STORE",
+                Block::Enzyme => "ENZYME",
+                Block::Repair => "REPAIR",
+                Block::Wall => "WALL",
+                Block::Transparent => "CLEAR",
+                Block::Glue => "GLUE",
+                Block::Toxin => "TOXIN",
+                Block::Needle => "NEEDLE",
+                Block::Signal => "SIGNAL",
+                Block::Receptor => "RECEPTOR",
+                Block::Sensor => match e.param_a % SENSOR_KIND_MOD {
+                    SENSOR_LIGHT => "EYE",
+                    SENSOR_TOUCH => "TOUCH",
+                    SENSOR_CHEM => "SMELL",
+                    SENSOR_COLOUR => "COLOUR",
+                    SENSOR_TEMP => "WARMTH",
+                    SENSOR_HUMIDITY => "DAMP",
+                    SENSOR_GRAVITY => "BALANCE",
+                    _ => "SENSE",
+                },
+                Block::Nerve => "NERVE",
+                Block::Muscle => "MUSCLE",
+                Block::Cilia => "CILIA",
+                Block::Buoy => "FLOAT",
+                Block::Excrete => "EXCRETE",
+                Block::Pigment => "PIGMENT",
+                Block::Thermo => "THERMO",
+            };
+            let mut line = format!("{name} {}", e.units);
             match e.block {
-                Block::Photo => photo = true,
-                Block::Chemo => chemo = true,
-                Block::Uptake => {
-                    let k = e.param_a as usize;
-                    if k < drinks.len() {
-                        drinks[k] = true;
-                    }
+                Block::Enzyme | Block::Signal | Block::Receptor | Block::Toxin | Block::Needle => {
+                    line.push_str(&format!(" KEY {}", e.param_a));
                 }
-                Block::Store => store = true,
-                Block::Enzyme => enzyme = true,
-                Block::Repair => repair = true,
-                Block::Wall => wall = true,
-                Block::Transparent => clear = true,
-                Block::Glue => glue = true,
-                Block::Toxin => toxin = true,
-                Block::Needle => needle = true,
-                Block::Signal => signal = true,
-                Block::Receptor => receptor = true,
-                Block::Sensor => {
-                    let k = (e.param_a % SENSOR_KIND_MOD) as usize;
-                    if k < sensors.len() {
-                        sensors[k] = true;
-                    }
-                }
-                Block::Nerve => nerve = true,
-                Block::Muscle => muscle = true,
-                Block::Cilia => cilia = true,
-                Block::Buoy => buoy = true,
-                Block::Excrete => excrete = true,
-                Block::Pigment => pigment = true,
-                Block::Thermo => thermo = true,
+                Block::Pigment => line.push_str(&format!(" HUE {}", e.param_a)),
+                Block::Wall if e.param_a > 0 => line.push_str(&format!(" HARD {}", e.param_a)),
+                _ => {}
             }
+            if let Some(g) = gate_words(&e.gate) {
+                line.push_str(" IF ");
+                line.push_str(&g);
+            }
+            lines.push(line);
         }
-    }
-    let mut lines = Vec::new();
-    if photo {
-        lines.push("PHOTO".into());
-    }
-    if chemo {
-        lines.push("CHEMO".into());
-    }
-    if drinks[UPTAKE_GLUCOSE as usize] {
-        lines.push("DRINKS SUGAR".into());
-    }
-    if drinks[UPTAKE_MINERAL as usize] {
-        lines.push("DRINKS LIME".into());
-    }
-    if drinks[UPTAKE_WATER as usize] {
-        lines.push("DRINKS WATER".into());
-    }
-    if store {
-        lines.push("STORE".into());
-    }
-    if enzyme {
-        lines.push("ENZYME".into());
-    }
-    if repair {
-        lines.push("REPAIR".into());
-    }
-    if wall {
-        lines.push("WALL".into());
-    }
-    if clear {
-        lines.push("CLEAR".into());
-    }
-    if glue {
-        lines.push("GLUE".into());
-    }
-    if toxin {
-        lines.push("TOXIN".into());
-    }
-    if needle {
-        lines.push("NEEDLE".into());
-    }
-    if signal {
-        lines.push("SIGNAL".into());
-    }
-    if receptor {
-        lines.push("RECEPTOR".into());
-    }
-    const EYES: [&str; 7] = ["EYE", "TOUCH", "SMELL", "COLOUR", "WARMTH", "DAMP", "BALANCE"];
-    let _ = (SENSOR_LIGHT, SENSOR_TOUCH, SENSOR_CHEM, SENSOR_COLOUR, SENSOR_TEMP, SENSOR_HUMIDITY, SENSOR_GRAVITY);
-    for (on, name) in sensors.iter().zip(EYES) {
-        if *on {
-            lines.push(name.into());
+        for c in &m.children[..m.n_children as usize] {
+            let kind = match c.kind {
+                ChildKind::Grow => "GROW",
+                ChildKind::SecreteBone => "BONE",
+                ChildKind::SecreteShell => "SHELL",
+            };
+            let dir = match c.dir {
+                Dir::Ahead => "AHEAD",
+                Dir::Left => "LEFT",
+                Dir::Right => "RIGHT",
+                Dir::Behind => "BEHIND",
+            };
+            let hold = match c.detach {
+                Detach::Never => "STAYS".to_string(),
+                Detach::Immediate => "FREE".to_string(),
+                Detach::When(g) => gate_words(&g).unwrap_or_else(|| "WHEN".into()),
+            };
+            lines.push(format!("{kind} {dir} MODE {} X{} {hold}", c.mode, c.repeat));
         }
-    }
-    if nerve {
-        lines.push("NERVE".into());
-    }
-    if muscle {
-        lines.push("MUSCLE".into());
-    }
-    if cilia {
-        lines.push("CILIA".into());
-    }
-    if buoy {
-        lines.push("BUOY".into());
-    }
-    if excrete {
-        lines.push("EXCRETE".into());
-    }
-    if pigment {
-        lines.push("PIGMENT".into());
-    }
-    if thermo {
-        lines.push("THERMO".into());
+        for t in &m.transitions[..m.n_transitions as usize] {
+            let when = gate_words(&t.gate).unwrap_or_else(|| "ALWAYS".into());
+            lines.push(format!("WHEN {when} TO MODE {}", t.mode));
+        }
+        for link in &m.links[..m.n_links as usize] {
+            if link.weight == 0 {
+                continue;
+            }
+            let how = if link.rise { "RISE" } else { "LEVEL" };
+            lines.push(format!(
+                "DRIVE {how} {} WEIGHT {}",
+                scalar_name(link.scalar),
+                link.weight
+            ));
+        }
     }
     lines
+}
+
+fn scalar_name(s: crate::bio::program::Scalar) -> &'static str {
+    use crate::bio::program::Scalar;
+    match s {
+        Scalar::Always => "ALWAYS",
+        Scalar::EnergyFrac => "ENERGY",
+        Scalar::AgeFrac => "AGE",
+        Scalar::Stress => "STRESS",
+        Scalar::Damage => "DAMAGE",
+        Scalar::Light => "LIGHT",
+        Scalar::Touch => "TOUCH",
+        Scalar::Depth => "DEPTH",
+        Scalar::Sig => "SIGNAL",
+        Scalar::Kin => "KIN",
+        Scalar::Waste => "WASTE",
+        Scalar::TempDev => "HEAT",
+        Scalar::Sense => "SENSE",
+        Scalar::Humidity => "DAMP",
+        Scalar::Hydration => "WATER",
+    }
+}
+
+fn gate_words(g: &crate::bio::program::Gate) -> Option<String> {
+    use crate::bio::program::Scalar;
+    if g.scalar == Scalar::Always {
+        return None;
+    }
+    let side = if g.above { "ABOVE" } else { "BELOW" };
+    Some(format!("{} {side} {}", scalar_name(g.scalar), g.threshold))
 }
 
 /// Seed-mode colour of a genome (species swatch).

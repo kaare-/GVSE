@@ -129,6 +129,14 @@ struct SpecimenPage: View {
         name != specimen.displayName || notes != specimen.notes
     }
 
+    /// Full program, the lines after the GENETICS marker on the page.
+    private var genetics: [String] {
+        guard let tail = specimen.page.components(separatedBy: "GENETICS\n").dropFirst().first else {
+            return []
+        }
+        return tail.split(separator: "\n").map { String($0) }.filter { !$0.isEmpty }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
@@ -165,6 +173,12 @@ struct SpecimenPage: View {
                         maxWidth: 280
                     )
                     .fixedSize(horizontal: false, vertical: true)
+                }
+                if !genetics.isEmpty {
+                    PixelLabel(text: "GENETICS", scale: 2, color: Palette.dimPaper)
+                    ForEach(Array(genetics.enumerated()), id: \.offset) { _, line in
+                        PixelLabel(text: line, scale: 1, color: Palette.paper, maxWidth: 280)
+                    }
                 }
                 Button {
                     PixelPrompt.singleLine(title: "NAME", text: name, placeholder: "NAME") { entered in

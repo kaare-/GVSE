@@ -519,6 +519,55 @@ fn a_stone_does_not_cast_a_column_shadow() {
     assert!(gap <= 2, "a rock should not darken the column under it ({under} vs {beside})");
 }
 
+#[test]
+fn fines_in_one_column_do_not_shade_a_shaft() {
+    let mut tank = water_box(3, 16, 24, 20);
+    tank.add_fines(24, 80.0);
+    tank.tick(&day());
+    let above = tank.pixel_light_at(24, 20);
+    let beside = tank.pixel_light_at(6, 20);
+    let gap = (above as i32 - beside as i32).abs();
+    assert!(
+        gap <= 2,
+        "fines over one spot must not darken that column of water ({above} vs {beside})"
+    );
+}
+
+#[test]
+fn a_tall_rock_lies_down_when_it_hits_another() {
+    let mut tank = Tank::try_new(5, 12, 16).unwrap();
+    let rock = |id: u8| {
+        let mut c = Cell::stone();
+        c.flags |= Cell::RIGID | Cell::BOUND;
+        c.pad = id;
+        c
+    };
+    for x in 2..=4 {
+        tank.place(x, 0, rock(1));
+    }
+    for y in 2..=4 {
+        tank.place(3, y, rock(2));
+    }
+    tick_n(&mut tank, 6);
+    let stones = stone_cells(&tank);
+    let mut by_id: std::collections::BTreeMap<u8, Vec<(i32, i32)>> = std::collections::BTreeMap::new();
+    for (x, y, c) in &stones {
+        by_id.entry(c.pad).or_default().push((*x, *y));
+    }
+    assert_eq!(by_id.get(&1).map(|b| b.len()), Some(3), "the floor stone stays whole");
+    let fallen = by_id.get(&2).expect("the stone that fell");
+    assert_eq!(fallen.len(), 3, "it stays one stone");
+    let miny = fallen.iter().map(|p| p.1).min().unwrap();
+    let maxy = fallen.iter().map(|p| p.1).max().unwrap();
+    let minx = fallen.iter().map(|p| p.0).min().unwrap();
+    let maxx = fallen.iter().map(|p| p.0).max().unwrap();
+    assert!(
+        maxx - minx > maxy - miny,
+        "it should be lying down on the other rock ({fallen:?})"
+    );
+    assert!(miny <= 1, "it rests on the lower stone ({fallen:?})");
+}
+
 fn stone_cells(tank: &Tank) -> Vec<(i32, i32, Cell)> {
     let (w, h) = tank.visible_size();
     let mut stones = Vec::new();
@@ -2358,7 +2407,9 @@ fn species_card_names_the_blocks() {
     tank.seed_algae(24, 24).unwrap();
     let sp = tank.inspect(24, 24).species;
     let page = tank.species_page(sp).expect("card");
-    assert!(page.contains("PHOTO"), "{page}");
+    assert!(page.contains("PHOTO 5"), "{page}");
+    assert!(page.contains("MODE 0"), "{page}");
+    assert!(page.contains("GROW"), "{page}");
     assert!(page.contains("AGE"), "{page}");
     assert!(page.contains("CELLS"), "{page}");
     assert!(page.contains("KIN"), "{page}");
@@ -2437,6 +2488,8 @@ fn archive_specimen_and_seed_a_new_tank_from_it() {
     assert_eq!(back, sp);
     assert!(Specimen::from_bytes(&bytes[..bytes.len() / 2]).is_none());
     assert!(sp.page_text().contains(&sp.species_name));
+    assert!(sp.page_text().contains("GENETICS"), "the page carries the full program");
+    assert!(sp.page_text().contains("PHOTO"), "the program names its blocks");
 
     // New tank, seeded from the specimen.
     let mut fresh = water_box(22, 32, 24, 20);
