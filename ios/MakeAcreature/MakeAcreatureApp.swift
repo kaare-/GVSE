@@ -66,6 +66,11 @@ struct MakeAcreatureApp: App {
                 CassetteDeck(session: session) { showDeck = false }
             }
             .onAppear { session.resume() }
+            .onChange(of: session.leaveForLobby) { leave in
+                guard leave else { return }
+                session.leaveForLobby = false
+                withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
+            }
             .onChange(of: scenePhase) { phase in
                 if phase == .active {
                     session.resume()
@@ -202,9 +207,6 @@ struct MakeAcreatureApp: App {
                 }
                 barButton("INSPECT", icon: BuildTool.needle.icon, on: inspecting) {
                     session.tool = inspecting ? .none : .needle
-                }
-                barButton("ROOM", icon: BarIcon.room, on: false) {
-                    withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
                 }
                 barButton("PHOTO", icon: BarIcon.photo, on: false) {
                     showPhoto = true

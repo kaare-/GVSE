@@ -102,6 +102,8 @@ final class TankSession: ObservableObject {
     @Published var fillLevel = 0.55
     /// Main tank, or a shelf sample. Jar 1 is not the main tank.
     @Published private(set) var container: TankContainer = .main
+    /// A pinch wider than the whole glass. The shell returns to the lobby.
+    @Published var leaveForLobby = false
     /// Selection box above the finger. The creature inside it is the one selected.
     @Published var selectionRect: CGRect?
     @Published var swirl = false
@@ -930,6 +932,8 @@ final class TankSession: ObservableObject {
 
     /// Last point of a one-finger slide, while no brush is in hand.
     private var slidePoint: CGPoint?
+    /// One pinch-out past the widest view asks to leave, once.
+    private var askedToLeave = false
 
     private func handleTouch(point: CGPoint?, ended: Bool) {
         if navigating || point == nil {
@@ -972,11 +976,23 @@ final class TankSession: ObservableObject {
             if state == .began {
                 navigating = true
                 slidePoint = nil
+                askedToLeave = false
                 metal.camera.pinchStartW = metal.camera.visibleW
             }
-            let before = pixelFloat(at: anchor)
             let worldW = max(metal.camera.worldW, 1)
             let worldH = max(metal.camera.worldH, 1)
+            let rawW = metal.camera.pinchStartW / max(scale, 0.05)
+            if rawW > worldW * 1.08 {
+                if !askedToLeave {
+                    askedToLeave = true
+                    leaveForLobby = true
+                }
+                if state == .ended || state == .cancelled || state == .failed {
+                    navigating = false
+                }
+                return
+            }
+            let before = pixelFloat(at: anchor)
             let visW = min(max(metal.camera.pinchStartW / max(scale, 0.05), tankMinVisible), worldW)
             let viewScale = metal.contentScale
             let drawableW = max(metal.bounds.width * viewScale, 1)

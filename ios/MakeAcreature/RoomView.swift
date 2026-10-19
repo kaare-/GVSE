@@ -19,6 +19,7 @@ struct RoomView: View {
     @State private var vines: [CGFloat] = [6, 6]
     @State private var shears = false
     @State private var thumbs: [UIImage?] = [nil, nil, nil, nil]
+    @State private var pinchEntered = false
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -157,34 +158,44 @@ struct RoomView: View {
         }
     }
 
+    private func enterGlass(_ open: () -> Void) {
+        guard !pinchEntered else { return }
+        pinchEntered = true
+        open()
+        onBack()
+    }
+
     private var tankButton: some View {
-        Button {
-            session.openMain()
-            onBack()
-        } label: {
-            Color.clear
-        }
-        .buttonStyle(FullHit())
-        .a11yButton("Main tank, \(session.liveCells) cells", hint: "Look into the main tank")
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                MagnificationGesture().onChanged { scale in
+                    if scale > 1.18 { enterGlass { session.openMain() } }
+                }
+            )
+            .accessibilityAction(named: "Look in") { enterGlass { session.openMain() } }
+            .a11yButton("Main tank, \(session.liveCells) cells", hint: "Pinch in to look into the main tank")
     }
 
     private func vialButton(_ index: Int) -> some View {
         let open = session.container.sampleIndex == index
-        return Button {
-            session.openSample(index)
-            onBack()
-        } label: {
-            VStack {
-                Spacer(minLength: 0)
-                PixelLabel(
-                    text: "\(index + 1)",
-                    scale: 1,
-                    color: open ? Palette.highlight : Palette.paper
-                )
-            }
+        return VStack {
+            Spacer(minLength: 0)
+            PixelLabel(
+                text: "\(index + 1)",
+                scale: 1,
+                color: open ? Palette.highlight : Palette.paper
+            )
         }
-        .buttonStyle(FullHit())
-        .a11yButton("Sample tank \(index + 1)", hint: "Open this sample, separate from the main tank", selected: open)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .gesture(
+            MagnificationGesture().onChanged { scale in
+                if scale > 1.18 { enterGlass { session.openSample(index) } }
+            }
+        )
+        .accessibilityAction(named: "Look in") { enterGlass { session.openSample(index) } }
+        .a11yButton("Sample tank \(index + 1)", hint: "Pinch in to open this sample", selected: open)
         .contextMenu {
             Button("Empty tank \(index + 1)", role: .destructive) {
                 confirmEmpty = index
