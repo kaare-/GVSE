@@ -2436,12 +2436,33 @@ fn species_card_names_the_blocks() {
     let sp = tank.inspect(24, 24).species;
     let page = tank.species_page(sp).expect("card");
     assert!(page.contains("PHOTO 5"), "{page}");
-    assert!(page.contains("MODE 0"), "{page}");
+    assert!(page.contains("\nGENE\n"), "{page}");
+    assert!(page.contains("  SIZE "), "{page}");
+    assert!(!page.contains("MODE"), "{page}");
     assert!(page.contains("GROW"), "{page}");
     assert!(page.contains("AGE"), "{page}");
     assert!(page.contains("CELLS"), "{page}");
     assert!(page.contains("KIN"), "{page}");
     assert!(!page.contains("Block"), "{page}");
+}
+
+#[test]
+fn a_gene_card_groups_the_body_then_each_mode() {
+    use crate::archive::genetics_lines;
+    use crate::bio::Genome;
+    let algae = genetics_lines(&Genome::algae());
+    let gene = algae.iter().position(|l| l == "GENE").expect("one gene");
+    let buoy = algae.iter().position(|l| l.starts_with("BUOY")).unwrap();
+    let wall = algae.iter().position(|l| l.starts_with("WALL KEY")).unwrap();
+    let glue = algae.iter().position(|l| l.starts_with("GLUE KEY")).unwrap();
+    assert!(buoy < wall && wall < glue && glue < gene, "{algae:?}");
+    assert_eq!(algae.iter().filter(|l| l.starts_with("GENE")).count(), 1);
+    assert!(algae.iter().any(|l| l.starts_with("  SIZE ")));
+    assert!(algae.iter().any(|l| l.starts_with("  SPLITS ")));
+    let straw = genetics_lines(&Genome::straw());
+    assert!(straw.iter().any(|l| l == "GENE 1"), "{straw:?}");
+    assert!(straw.iter().any(|l| l == "GENE 2"), "{straw:?}");
+    assert!(straw.iter().any(|l| l.starts_with("  GROW ") || l.starts_with("  WHEN ")));
 }
 
 #[test]

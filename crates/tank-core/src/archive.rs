@@ -291,8 +291,9 @@ fn render_org(tank: &Tank, org: u32) -> Option<(u16, u16, Vec<u8>)> {
     Some((w2 as u16, h2 as u16, padded))
 }
 
-/// The whole program, in words: the header, then every mode with its
-/// blocks, children, switches and drives. Not the bytecode.
+/// The whole program, in words. Shared body settings come first. Each
+/// mode is one gene, and its size, splits, blocks, growth, switches and
+/// drives sit under that gene. A creature with one mode reads as one gene.
 pub fn genetics_lines(genome: &crate::bio::Genome) -> Vec<String> {
     use crate::bio::profile::{
         Block, SENSOR_CHEM, SENSOR_COLOUR, SENSOR_GRAVITY, SENSOR_HUMIDITY, SENSOR_KIND_MOD, SENSOR_LIGHT,
@@ -308,16 +309,15 @@ pub fn genetics_lines(genome: &crate::bio::Genome) -> Vec<String> {
         genome.cheap, genome.fast, genome.accurate
     ));
     lines.push(format!("WALL KEY {}", genome.wall_key));
-    if genome.glue_key != 0 {
-        lines.push(format!("GLUE KEY {} WIDTH {}", genome.glue_key, genome.glue_width));
-    }
+    lines.push(format!("GLUE KEY {} WIDTH {}", genome.glue_key, genome.glue_width));
+    let n = genome.modes.len();
     for (i, m) in genome.modes.iter().enumerate() {
-        let seed = if i as u8 == genome.seed_mode { " SEED" } else { "" };
-        lines.push(format!(
-            "MODE {i} {}X{}{seed}",
-            m.shape_w.max(1),
-            m.shape_h.max(1)
-        ));
+        let title = gene_title(i, n);
+        lines.push(title);
+        if n > 1 && i as u8 == genome.seed_mode {
+            lines.push("  SEED".into());
+        }
+        lines.push(format!("  SIZE {}X{}", m.shape_w.max(1), m.shape_h.max(1)));
         if m.heading_rule != HeadingRule::Inherit {
             let face = match m.heading_rule {
                 HeadingRule::TurnLeft => "LEFT",
@@ -325,10 +325,10 @@ pub fn genetics_lines(genome: &crate::bio::Genome) -> Vec<String> {
                 HeadingRule::Flip => "BACK",
                 HeadingRule::Inherit => "ON",
             };
-            lines.push(format!("FACE {face}"));
+            lines.push(format!("  FACE {face}"));
         }
         let energy = m.divide_when.energy_frac as u32 * 100 / 255;
-        lines.push(format!("SPLITS PAST {energy}"));
+        lines.push(format!("  SPLITS PAST {energy}"));
         for e in &m.entries[..m.n_entries as usize] {
             if e.units < 1 {
                 continue;
@@ -370,7 +370,7 @@ pub fn genetics_lines(genome: &crate::bio::Genome) -> Vec<String> {
                 Block::Pigment => "PIGMENT",
                 Block::Thermo => "THERMO",
             };
-            let mut line = format!("{name} {}", e.units);
+            let mut line = format!("  {name} {}", e.units);
             match e.block {
                 Block::Enzyme | Block::Signal | Block::Receptor | Block::Toxin | Block::Needle => {
                     line.push_str(&format!(" KEY {}", e.param_a));
@@ -402,11 +402,15 @@ pub fn genetics_lines(genome: &crate::bio::Genome) -> Vec<String> {
                 Detach::Immediate => "FREE".to_string(),
                 Detach::When(g) => gate_words(&g).unwrap_or_else(|| "WHEN".into()),
             };
-            lines.push(format!("{kind} {dir} MODE {} X{} {hold}", c.mode, c.repeat));
+            lines.push(format!(
+                "  {kind} {dir} {} X{} {hold}",
+                gene_title(c.mode as usize, n),
+                c.repeat
+            ));
         }
         for t in &m.transitions[..m.n_transitions as usize] {
             let when = gate_words(&t.gate).unwrap_or_else(|| "ALWAYS".into());
-            lines.push(format!("WHEN {when} TO MODE {}", t.mode));
+            lines.push(format!("  WHEN {when} TO {}", gene_title(t.mode as usize, n)));
         }
         for link in &m.links[..m.n_links as usize] {
             if link.weight == 0 {
@@ -414,13 +418,22 @@ pub fn genetics_lines(genome: &crate::bio::Genome) -> Vec<String> {
             }
             let how = if link.rise { "RISE" } else { "LEVEL" };
             lines.push(format!(
-                "DRIVE {how} {} WEIGHT {}",
+                "  DRIVE {how} {} WEIGHT {}",
                 scalar_name(link.scalar),
                 link.weight
             ));
         }
     }
     lines
+}
+
+/// One mode is simply a gene. Several modes are numbered from one.
+fn gene_title(index: usize, count: usize) -> String {
+    if count <= 1 {
+        "GENE".to_string()
+    } else {
+        format!("GENE {}", index + 1)
+    }
 }
 
 fn scalar_name(s: crate::bio::program::Scalar) -> &'static str {
