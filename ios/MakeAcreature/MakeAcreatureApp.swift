@@ -94,23 +94,26 @@ struct MakeAcreatureApp: App {
                     if let stage {
                         Color(red: 0.20, green: 0.14, blue: 0.10)
                         GlassBackdrop(stage: stage)
+                            .frame(width: stage.crop.width, height: stage.crop.height)
+                            .clipped()
+                            .position(x: stage.crop.midX, y: stage.crop.midY)
                         Color.clear
                             .contentShape(Rectangle())
                             .gesture(
                                 MagnificationGesture().onChanged { scale in
-                                    if scale < 0.9 { session.leaveForLobby = true }
+                                    if scale < 0.92 { session.leaveForLobby = true }
                                 }
                             )
+                        Color.clear
+                            .frame(width: stage.water.width, height: stage.water.height)
+                            .overlay(TankScreen(session: session).clipped())
+                            .offset(
+                                x: stage.water.midX - geo.size.width / 2,
+                                y: stage.water.midY - geo.size.height / 2
+                            )
+                    } else {
+                        TankScreen(session: session)
                     }
-                    TankScreen(session: session)
-                        .frame(
-                            width: stage?.water.width ?? geo.size.width,
-                            height: stage?.water.height ?? geo.size.height
-                        )
-                        .position(
-                            x: stage?.water.midX ?? geo.size.width / 2,
-                            y: stage?.water.midY ?? geo.size.height / 2
-                        )
                     if let rect = session.inspected?.rect {
                         TrackingBox(rect: shifted(rect, stage))
                     }
@@ -286,7 +289,7 @@ struct MakeAcreatureApp: App {
     }
 }
 
-/// The study, fitted in the tank view so the glass sits on the table.
+/// The desk around the tumbler, clipped to the close crop.
 private struct GlassBackdrop: View {
     var stage: GlassStage
     @State private var mood = RoomMood(
@@ -298,13 +301,14 @@ private struct GlassBackdrop: View {
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        let crop = RoomArt.glassCrop
         Image(uiImage: RoomArt.picture(LobbyScript.cast, mood: mood))
             .resizable()
             .interpolation(.none)
             .frame(width: CGFloat(RoomArt.w) * stage.s, height: CGFloat(RoomArt.h) * stage.s)
             .position(
-                x: stage.origin.x + CGFloat(RoomArt.w) * stage.s / 2,
-                y: stage.origin.y + CGFloat(RoomArt.h) * stage.s / 2
+                x: (CGFloat(RoomArt.w) * 0.5 - CGFloat(crop.x)) * stage.s,
+                y: (CGFloat(RoomArt.h) * 0.5 - CGFloat(crop.y)) * stage.s
             )
             .onReceive(clock) { date in
                 mood.phase = RoomMood.phase(at: date)

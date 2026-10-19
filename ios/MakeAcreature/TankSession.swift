@@ -1119,7 +1119,11 @@ final class TankSession: ObservableObject {
             let worldH = max(metal.camera.worldH, 1)
             let rawW = metal.camera.pinchStartW / max(scale, 0.05)
             let homeW = max(metal.camera.homeW, worldW)
-            if rawW > homeW * 1.08 {
+            let smallGlass = worldW < tankScreenPixels * 0.85
+            // A pinch out past the glass itself returns to the room.
+            // The window never grows past the water, so the study cannot
+            // end up drawn inside the tank.
+            if rawW > homeW * 1.08 || (smallGlass && rawW > worldW * 1.02) {
                 if !askedToLeave {
                     askedToLeave = true
                     leaveForLobby = true

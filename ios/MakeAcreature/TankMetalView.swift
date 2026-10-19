@@ -29,6 +29,7 @@ final class TankMetalView: UIView {
     private var textureHeight = 0
     private var panOrigin = CGPoint.zero
     private var multiTouch = false
+    private var smallWorld = false
     private let shader = """
     #include <metal_stdlib>
     using namespace metal;
@@ -57,7 +58,7 @@ final class TankMetalView: UIView {
             return tex.sample(smp, sampleUV);
         }
         if (u.frame.x <= 0.0) {
-            return float4(0.302, 0.671, 0.780, 1.0);
+            discard_fragment();
         }
         float2 lo = u.window.xy;
         float2 hi = u.window.xy + u.window.zw;
@@ -99,6 +100,7 @@ final class TankMetalView: UIView {
         sampler = device.makeSamplerState(descriptor: samp)
         backgroundColor = UIColor(red: 0.337, green: 0.282, blue: 0.235, alpha: 1)
         isOpaque = true
+        clipsToBounds = true
         isMultipleTouchEnabled = true
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
@@ -133,6 +135,12 @@ final class TankMetalView: UIView {
         let viewScale = contentScale
         let drawableW = max(bounds.width * viewScale, 1)
         let drawableH = max(bounds.height * viewScale, 1)
+        smallWorld = camera.worldW < tankScreenPixels * 0.85
+        metalLayer.isOpaque = !smallWorld
+        isOpaque = !smallWorld
+        backgroundColor = smallWorld
+            ? .clear
+            : UIColor(red: 0.337, green: 0.282, blue: 0.235, alpha: 1)
         metalLayer.drawableSize = CGSize(width: drawableW, height: drawableH)
         let frame = tankFrame(
             camera: &camera,
@@ -250,7 +258,12 @@ final class TankMetalView: UIView {
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.337, green: 0.282, blue: 0.235, alpha: 1)
+        pass.colorAttachments[0].clearColor = MTLClearColor(
+            red: smallWorld ? 0 : 0.337,
+            green: smallWorld ? 0 : 0.282,
+            blue: smallWorld ? 0 : 0.235,
+            alpha: smallWorld ? 0 : 1
+        )
         return pass
     }
 }
