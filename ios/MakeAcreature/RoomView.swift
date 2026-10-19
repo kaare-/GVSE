@@ -20,6 +20,8 @@ struct RoomView: View {
     @State private var shears = false
     @State private var thumbs: [UIImage?] = [nil, nil, nil, nil]
     @State private var pinchEntered = false
+    private let cast = LobbyScript.cast
+    private static let lobbyPicture = RoomArt.picture(LobbyScript.cast)
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -27,7 +29,7 @@ struct RoomView: View {
             let layout = RoomLayout(size: geo.size)
             ZStack {
                 Color(red: 0.20, green: 0.14, blue: 0.10)
-                Image(uiImage: RoomArt.image)
+                Image(uiImage: Self.lobbyPicture)
                     .resizable()
                     .interpolation(.none)
                     .frame(
@@ -36,30 +38,47 @@ struct RoomView: View {
                     )
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
 
-                glassThumb(thumbs[0], RoomArt.tankGlass, layout)
-                ForEach(0..<3, id: \.self) { i in
-                    glassThumb(thumbs[i + 1], RoomArt.vialGlass(i), layout)
+                if cast.tank {
+                    glassThumb(thumbs[0], RoomArt.tankGlass, layout)
+                }
+                if cast.jars {
+                    ForEach(0..<3, id: \.self) { i in
+                        glassThumb(thumbs[i + 1], RoomArt.vialGlass(i), layout)
+                    }
                 }
                 vineLayer(layout)
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                if cast.openingGlass {
+                    openingMote(layout)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
 
                 place(RoomArt.treeHit, layout) { treeButton(layout) }
                 place(RoomArt.fuseHit, layout) { fuseButton(layout) }
-                place(RoomArt.tank, layout) { tankButton }
-                ForEach(0..<3, id: \.self) { i in
-                    place(RoomArt.vials[i], layout) { vialButton(i) }
+                if cast.tank {
+                    place(RoomArt.tank, layout) { tankButton }
                 }
-                place(RoomArt.bookHit, layout) { bookButton(layout) }
-                place(RoomArt.logHit, layout) { logButton }
-                place(RoomArt.favHit, layout) { crateButton(layout) }
-                place(RoomArt.crateHit, layout) { drawerButton }
-                place(RoomArt.deckHit, layout) { deckButton }
-                place(RoomArt.signHit, layout) { signButton }
-                place(RoomArt.toolJar, layout) { toolJarButton }
-                if shears {
-                    ForEach(0..<RoomArt.vines.count, id: \.self) { i in
-                        place(vineHit(i), layout) { vineButton(i) }
+                if cast.jars {
+                    ForEach(0..<3, id: \.self) { i in
+                        place(RoomArt.vials[i], layout) { vialButton(i) }
                     }
+                }
+                if cast.bench {
+                    place(RoomArt.bookHit, layout) { bookButton(layout) }
+                    place(RoomArt.logHit, layout) { logButton }
+                    place(RoomArt.crateHit, layout) { drawerButton }
+                    place(RoomArt.deckHit, layout) { deckButton }
+                    place(RoomArt.signHit, layout) { signButton }
+                    place(RoomArt.toolJar, layout) { toolJarButton }
+                    if shears {
+                        ForEach(0..<RoomArt.vines.count, id: \.self) { i in
+                            place(vineHit(i), layout) { vineButton(i) }
+                        }
+                    }
+                }
+                place(RoomArt.favHit, layout) { crateButton(layout) }
+                if cast.openingGlass {
+                    place(RoomArt.openingGlass, layout) { openingButton }
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -69,6 +88,7 @@ struct RoomView: View {
             tree = session.speciesTree()
             vines = LobbyGrowth.catchUp()
             refreshThumbs(others: true)
+            SystemCue.play(LobbyScript.opening.sound)
         }
         .onReceive(refresh) { _ in
             tree = session.speciesTree()
@@ -163,6 +183,41 @@ struct RoomView: View {
         pinchEntered = true
         open()
         onBack()
+    }
+
+    private var openingButton: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                MagnificationGesture().onChanged { scale in
+                    if scale > 1.18 { enterGlass { session.openMain() } }
+                }
+            )
+            .accessibilityAction(named: "Look in") { enterGlass { session.openMain() } }
+            .a11yButton("Glass of water", hint: "Pinch in to look into the glass")
+    }
+
+    /// A mote in the opening glass. It is not baked into the picture.
+    /// Coordinates match the centred picture, the same way the vines do.
+    private func openingMote(_ layout: RoomLayout) -> some View {
+        let g = RoomArt.openingGlass
+        let s = layout.s
+        let waterX = CGFloat(g.x + 3)
+        let waterY = CGFloat(g.y + 6)
+        let waterW = CGFloat(max(4, g.w - 6))
+        let waterH = CGFloat(max(6, g.h - 12))
+        return TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            let x = (waterX + waterW * (0.5 + 0.22 * CGFloat(sin(t * 1.4)))) * s
+            let y = (waterY + waterH * (0.48 + 0.18 * CGFloat(cos(t * 0.9)))) * s
+            Rectangle()
+                .fill(Color(red: 0.42, green: 0.72, blue: 0.29))
+                .frame(width: max(s * 2, 2), height: max(s * 2, 2))
+                .position(x: x, y: y)
+        }
+        .frame(width: CGFloat(RoomArt.w) * s, height: CGFloat(RoomArt.h) * s)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private var tankButton: some View {
@@ -369,8 +424,12 @@ struct RoomView: View {
     }
 
     private func refreshThumbs(others: Bool) {
-        let glass = RoomArt.tankGlass
-        thumbs[0] = session.lobbyPreview(.main, width: glass.w, height: glass.h)
+        guard cast.tank || cast.jars else { return }
+        if cast.tank {
+            let glass = RoomArt.tankGlass
+            thumbs[0] = session.lobbyPreview(.main, width: glass.w, height: glass.h)
+        }
+        guard cast.jars else { return }
         if others {
             for i in 0..<3 {
                 let g = RoomArt.vialGlass(i)

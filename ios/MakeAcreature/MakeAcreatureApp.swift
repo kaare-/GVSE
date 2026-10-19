@@ -4,7 +4,7 @@ import SwiftUI
 struct MakeAcreatureApp: App {
     @StateObject private var session = TankSession()
     @Environment(\.scenePhase) private var scenePhase
-    @State private var inRoom = false
+    @State private var inRoom = true
     @State private var showBook = false
     @State private var showTree = false
     @State private var showSettings = false

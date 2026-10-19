@@ -3,6 +3,7 @@ import Foundation
 #if canImport(UIKit)
 import UIKit
 #endif
+import AVFoundation
 
 /// The study, drawn at 120×260 and shown with nearest-neighbour scaling
 /// so the pixels stay big. Hotspots are in the same grid as the picture.
@@ -80,8 +81,11 @@ enum RoomArt {
     static let sign = Spot(x: 36, y: 159, w: 48, h: 7)
     static let signHit = Spot(x: 28, y: 156, w: 64, h: 14)
 
-    static func cgImage() -> CGImage {
-        let pix = Pix(w: w, h: h)
+    /// The opening glass. One tumbler, not the big tank.
+    static let openingGlass = Spot(x: 52, y: 168, w: 16, h: 26)
+
+    static func cgImage(cast: RoomCast = RoomCast()) -> CGImage {
+        let pix = Pix(w: w, h: h, cast: cast)
         pix.paint()
         let provider = CGDataProvider(data: Data(pix.bytes) as CFData)!
         return CGImage(
@@ -101,7 +105,89 @@ enum RoomArt {
 
     #if canImport(UIKit)
     static let image: UIImage = UIImage(cgImage: cgImage())
+    static func picture(_ cast: RoomCast) -> UIImage { UIImage(cgImage: cgImage(cast: cast)) }
     #endif
+}
+
+/// What a beat has put in the room. Later beats fill these in.
+struct RoomCast {
+    var tank = true
+    var jars = true
+    var bench = true
+    var openingGlass = false
+}
+
+/// Ordered beats. A beat can show or hide room objects, choose which glass
+/// is on screen, and play a short system sound. The cassette is separate.
+/// Only the opening beat is played. The rest are empty hooks.
+struct LobbyBeat {
+    var name: String
+    var tank: Bool?
+    var jars: Bool?
+    var bench: Bool?
+    var glass: String?
+    var sound: String?
+}
+
+enum LobbyScript {
+    static let beats: [LobbyBeat] = [
+        LobbyBeat(name: "opening", tank: false, jars: false, bench: false, glass: "glass", sound: "move"),
+        LobbyBeat(name: "bench", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
+        LobbyBeat(name: "tank", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
+        LobbyBeat(name: "jars", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
+    ]
+
+    /// The beat on screen. Hooks past this are not played.
+    static let opening = beats[0]
+
+    static var cast: RoomCast {
+        RoomCast(
+            tank: opening.tank ?? false,
+            jars: opening.jars ?? false,
+            bench: opening.bench ?? false,
+            openingGlass: opening.glass != nil
+        )
+    }
+}
+
+/// A short cue for a beat. It does not start or stop the cassette.
+enum SystemCue {
+    private static var played = Set<String>()
+    private static var player: AVAudioPlayer?
+
+    static func play(_ name: String?) {
+        guard let name, played.insert(name).inserted else { return }
+        let rate = 22_050
+        let n = rate / 6
+        var samples = [Int16](repeating: 0, count: n)
+        for i in 0..<n {
+            let t = Float(i) / Float(rate)
+            let env = sin(Float.pi * Float(i) / Float(n))
+            let s = sin(2 * Float.pi * 520 * t) * env * 0.35
+            samples[i] = Int16(max(-1, min(1, s)) * 32000)
+        }
+        var data = Data(capacity: 44 + n * 2)
+        func append(_ s: String) { data.append(contentsOf: s.utf8) }
+        func append32(_ v: UInt32) { var le = v.littleEndian; withUnsafeBytes(of: &le) { data.append(contentsOf: $0) } }
+        func append16(_ v: UInt16) { var le = v.littleEndian; withUnsafeBytes(of: &le) { data.append(contentsOf: $0) } }
+        append("RIFF")
+        append32(UInt32(36 + n * 2))
+        append("WAVE")
+        append("fmt ")
+        append32(16)
+        append16(1)
+        append16(1)
+        append32(UInt32(rate))
+        append32(UInt32(rate * 2))
+        append16(2)
+        append16(16)
+        append("data")
+        append32(UInt32(n * 2))
+        samples.withUnsafeBytes { data.append(contentsOf: $0) }
+        player = try? AVAudioPlayer(data: data)
+        player?.volume = 0.5
+        player?.play()
+    }
 }
 
 private enum Ink {
@@ -158,11 +244,13 @@ private enum Ink {
 private final class Pix {
     let w: Int
     let h: Int
+    let cast: RoomCast
     var bytes: [UInt8]
 
-    init(w: Int, h: Int) {
+    init(w: Int, h: Int, cast: RoomCast = RoomCast()) {
         self.w = w
         self.h = h
+        self.cast = cast
         bytes = [UInt8](repeating: 0, count: w * h * 4)
     }
 
@@ -172,17 +260,22 @@ private final class Pix {
         shelf()
         tree()
         lamps()
-        tank()
+        if cast.tank { tank() }
         favouriteFrame()
-        bench()
-        clutter()
+        if cast.bench {
+            bench()
+            clutter()
+        }
         floor()
-        archiveBook()
-        favouriteCrate()
-        cassette()
-        tankPlaque()
+        if cast.bench {
+            archiveBook()
+            favouriteCrate()
+            cassette()
+            tankPlaque()
+            toolJar()
+        }
         fuse()
-        toolJar()
+        if cast.openingGlass { tumbler() }
         lighting()
     }
 
@@ -242,11 +335,13 @@ private final class Pix {
             }
         }
         // Hard rims: light from the left leaves a dark edge on the right.
-        rightRim(16, 100, 88, 60)
-        rightRim(6, 156, 108, 12)
-        rightRim(6, 200, 28, 30)
-        rightRim(48, 206, 30, 24)
-        rightRim(80, 208, 16, 22)
+        if cast.tank { rightRim(16, 100, 88, 60) }
+        if cast.bench {
+            rightRim(6, 156, 108, 12)
+            rightRim(6, 200, 28, 30)
+            rightRim(48, 206, 30, 24)
+            rightRim(80, 208, 16, 22)
+        }
         for x in 2..<118 {
             shade(x, 40, 5 + x / 24)
         }
@@ -304,7 +399,7 @@ private final class Pix {
             "g": Ink.plantDk, "G": Ink.plant, " ": 0,
         ])
 
-        for spot in RoomArt.vials {
+        for spot in RoomArt.vials where cast.jars {
             vial(spot.x, spot.y)
         }
 
@@ -391,6 +486,17 @@ private final class Pix {
         fill(t.x, t.y + t.h - 2, t.w, 2, Ink.wood)
         fill(t.x, t.y, 2, t.h, Ink.woodLt)
         fill(t.x + t.w - 2, t.y, 2, t.h, Ink.woodDk)
+    }
+
+    /// One tumbler of water. The mote that moves in it is drawn on top.
+    private func tumbler() {
+        let g = RoomArt.openingGlass
+        fill(g.x + 3, g.y, g.w - 6, 2, Ink.brass)
+        fill(g.x + 1, g.y + 2, 1, g.h - 4, Ink.glass)
+        fill(g.x + g.w - 2, g.y + 2, 1, g.h - 4, Ink.glass)
+        fill(g.x + 2, g.y + 4, g.w - 4, g.h - 8, Ink.waterL)
+        fill(g.x + 2, g.y + 6, g.w - 4, 4, Ink.waterM)
+        fill(g.x, g.y + g.h - 2, g.w, 2, Ink.glass)
     }
 
     private func favouriteFrame() {
