@@ -51,8 +51,9 @@ struct SpeciesNode: Identifiable {
     var parent: UInt16? { rec.parent == UInt16(TANK_NO_SPECIES) ? nil : rec.parent }
 }
 
-/// The big tank, or one of the three shelf vials. The vials are their own saves.
+/// The opening tumbler, the big tank, or one of the three shelf vials.
 enum TankContainer: Equatable {
+    case glass
     case main
     case sample(Int)
 
@@ -63,6 +64,7 @@ enum TankContainer: Equatable {
 
     var key: String {
         switch self {
+        case .glass: return "glass"
         case .main: return "main"
         case .sample(let index): return "sample-\(index)"
         }
@@ -70,6 +72,7 @@ enum TankContainer: Equatable {
 
     static func stored() -> TankContainer {
         let raw = UserDefaults.standard.string(forKey: "openContainer") ?? "main"
+        if raw == "glass" { return .glass }
         if raw.hasPrefix("sample-"), let n = Int(raw.dropFirst("sample-".count)), (0..<3).contains(n) {
             return .sample(n)
         }
@@ -186,6 +189,8 @@ final class TankSession: ObservableObject {
 
     private func saveURL(for container: TankContainer) -> URL {
         switch container {
+        case .glass:
+            return docs.appendingPathComponent("glass.postcard")
         case .main:
             return docs.appendingPathComponent("tank-0.postcard")
         case .sample(let index):
@@ -332,6 +337,11 @@ final class TankSession: ObservableObject {
         switchTo(.main)
     }
 
+    /// The opening tumbler. A small glass of water, not the wide tank.
+    func openGlass() {
+        switchTo(.glass)
+    }
+
     func openSample(_ index: Int) {
         switchTo(.sample(max(0, min(2, index))))
     }
@@ -397,7 +407,7 @@ final class TankSession: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "favouriteId")
         UserDefaults.standard.set(false, forKey: "startGuideDone")
         AmbientAudio.shared.setMuted(false)
-        let targets: [TankContainer] = [.main, .sample(0), .sample(1), .sample(2)]
+        let targets: [TankContainer] = [.glass, .main, .sample(0), .sample(1), .sample(2)]
         for (i, target) in targets.enumerated() {
             guard let fresh = freshGlass(for: target, salt: UInt64(i)) else { continue }
             write(handle: fresh, to: target)
@@ -979,6 +989,8 @@ final class TankSession: ObservableObject {
         }
         if handle == nil {
             switch container {
+            case .glass:
+                handle = tank_glass(1)
             case .main:
                 handle = tank_main_preset(1)
             case .sample(let index):
@@ -999,6 +1011,8 @@ final class TankSession: ObservableObject {
     private func freshGlass(for target: TankContainer, salt: UInt64 = 0) -> OpaquePointer? {
         let seed = UInt64(Date().timeIntervalSince1970) &+ salt
         switch target {
+        case .glass:
+            return tank_glass(seed)
         case .main:
             return tank_main_empty(seed)
         case .sample:
@@ -1104,7 +1118,8 @@ final class TankSession: ObservableObject {
             let worldW = max(metal.camera.worldW, 1)
             let worldH = max(metal.camera.worldH, 1)
             let rawW = metal.camera.pinchStartW / max(scale, 0.05)
-            if rawW > worldW * 1.08 {
+            let homeW = max(metal.camera.homeW, worldW)
+            if rawW > homeW * 1.08 {
                 if !askedToLeave {
                     askedToLeave = true
                     leaveForLobby = true
@@ -1115,7 +1130,8 @@ final class TankSession: ObservableObject {
                 return
             }
             let before = pixelFloat(at: anchor)
-            let visW = min(max(metal.camera.pinchStartW / max(scale, 0.05), tankMinVisible), worldW)
+            let home = max(metal.camera.homeW, worldW)
+            let visW = min(max(metal.camera.pinchStartW / max(scale, 0.05), tankMinVisible), home)
             let viewScale = metal.contentScale
             let drawableW = max(metal.bounds.width * viewScale, 1)
             let drawableH = max(metal.bounds.height * viewScale, 1)
@@ -1125,7 +1141,12 @@ final class TankSession: ObservableObject {
             let shownH = min(visH, worldH)
             let zoom = drawableW / max(visW, 1)
             let ox = (drawableW - shownW * zoom) * 0.5
-            let oy = drawableH - shownH * zoom
+            let oy: CGFloat
+            if metal.camera.centerInWall && shownH >= worldH - 0.5 {
+                oy = (drawableH - shownH * zoom) * 0.5
+            } else {
+                oy = drawableH - shownH * zoom
+            }
             metal.camera.visibleW = visW
             if let before {
                 let dx = anchor.x * viewScale
@@ -1310,7 +1331,7 @@ final class TankSession: ObservableObject {
                 grav_x: lastGravX,
                 grav_y: lastGravY,
                 paused: paused ? 1 : 0,
-                always_day: alwaysDay ? 1 : 0,
+                always_day: (alwaysDay || container == .glass) ? 1 : 0,
                 swirl: effectiveSwirl ? 1 : 0,
                 _pad1: 0,
                 light_slider: Float(lightSlider),

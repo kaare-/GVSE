@@ -217,6 +217,15 @@ pub extern "C" fn tank_main_preset(seed: u64) -> *mut TankHandle {
     }))
 }
 
+/// The opening tumbler: water and one starter, small enough to see whole.
+#[no_mangle]
+pub extern "C" fn tank_glass(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::glass(seed),
+        rgba: Vec::new(),
+    }))
+}
+
 /// Place a narrower tank in the middle of `visible_w`. Returns 1 when
 /// the width changed. Jars stay on `tank_empty`; only the main glass
 /// asks for this.
@@ -1373,6 +1382,7 @@ mod tests {
             "tank_humidity_at",
             "tank_t_local_at",
             "tank_cloud_mean",
+            "tank_glass",
             "tank_starter_specimen",
             "tank_take_enclosure_bucket",
         ] {

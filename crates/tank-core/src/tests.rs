@@ -1,7 +1,7 @@
 use wk_material::MaterialId;
 
 use crate::cell::Cell;
-use crate::consts::{MAIN_W, PRESET_H, PRESET_W, PX_PER_CELL};
+use crate::consts::{GLASS_H, GLASS_W, MAIN_W, PRESET_H, PRESET_W, PX_PER_CELL};
 use crate::tank::{Tank, TankInput, ToolEvent};
 
 fn tick_n(tank: &mut Tank, n: u32) {
@@ -762,6 +762,27 @@ fn rgb_at(tank: &mut Tank, vx: u32, vy: u32, dx: u32, dy: u32) -> (u8, u8, u8) {
     let py = (vis_h - 1 - vy) * PX_PER_CELL + dy;
     let i = ((py * pw + px) * 4) as usize;
     (rgba[i], rgba[i + 1], rgba[i + 2])
+}
+
+#[test]
+fn glass_is_water_and_one_creature() {
+    let tank = Tank::glass(3);
+    assert_eq!(tank.visible_size(), (GLASS_W, GLASS_H));
+    assert!(tank.live_cells() >= 1, "the starter is in the glass");
+    assert_eq!(tank.count_material(MaterialId::Sand as u8), 0);
+    let (w, h) = tank.visible_size();
+    let mut water = 0;
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let c = tank.cell_visible(x, y);
+            assert!(!c.is_rock(), "no rocks in the glass");
+            if c.is_open() && c.sat > 40 {
+                water += 1;
+            }
+        }
+    }
+    assert!(water > 200, "the glass is water, water={water}");
+    assert!(tank.is_day_now(), "a new glass is lit");
 }
 
 #[test]

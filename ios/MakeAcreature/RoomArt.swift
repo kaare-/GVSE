@@ -21,13 +21,13 @@ enum RoomArt {
     static let treeInner = Spot(x: 28, y: 48, w: 64, h: 36)
     static let treeHit = Spot(x: 24, y: 44, w: 72, h: 54)
 
-    /// Small breaker panel, low on the right.
-    static let fuseBox = Spot(x: 98, y: 214, w: 18, h: 24)
-    static let fuseHit = Spot(x: 96, y: 212, w: 22, h: 28)
+    /// Breaker panel under the tank table, at the right.
+    static let fuseBox = Spot(x: 84, y: 174, w: 14, h: 16)
+    static let fuseHit = Spot(x: 82, y: 172, w: 18, h: 20)
     static let fuseLamps = [
-        Spot(x: 102, y: 218, w: 4, h: 4),
-        Spot(x: 102, y: 224, w: 4, h: 4),
-        Spot(x: 102, y: 230, w: 4, h: 4),
+        Spot(x: 87, y: 176, w: 3, h: 3),
+        Spot(x: 87, y: 181, w: 3, h: 3),
+        Spot(x: 87, y: 186, w: 3, h: 3),
     ]
 
     static let tank = Spot(x: 16, y: 100, w: 88, h: 60)
@@ -47,8 +47,8 @@ enum RoomArt {
         return Spot(x: v.x + 1, y: v.y + 2, w: 10, h: 13)
     }
 
-    /// A jar of odd tools under the right end of the shelf.
-    static let toolJar = Spot(x: 104, y: 44, w: 14, h: 18)
+    /// Hook on the right wall. The scissors hang here until they are picked up.
+    static let shearHook = Spot(x: 104, y: 46, w: 12, h: 18)
 
     /// Where a plant's live growth starts. The window plant hangs and
     /// lengthens downward. The other still climbs.
@@ -58,12 +58,12 @@ enum RoomArt {
     }
 
     static let vines = [
-        Vine(x: 9, y: 30, sway: 4, hangs: true),
+        Vine(x: 9, y: 36, sway: 4, hangs: true),
         Vine(x: 99, y: 20, sway: 3, hangs: false),
     ]
 
     /// A taller upright plant in the bottom right. The shelf pots stay.
-    static let ficus = Spot(x: 98, y: 148, w: 20, h: 54)
+    static let ficus = Spot(x: 100, y: 172, w: 18, h: 50)
 
     /// The desk lamp. A double tap turns it on or off.
     static let deskLampHit = Spot(x: 1, y: 110, w: 14, h: 46)
@@ -74,24 +74,26 @@ enum RoomArt {
     /// The candle. A double tap lights or puts it out. A swipe blows it out.
     static let candleHit = Spot(x: 104, y: 118, w: 16, h: 40)
 
-    /// Small frame on the wall under the scissor jar.
+    /// Small frame on the wall under the scissor hook.
     static let favFrame = Spot(x: 98, y: 68, w: 18, h: 24)
     static let favInner = Spot(x: 100, y: 70, w: 14, h: 16)
     static let favHit = Spot(x: 96, y: 66, w: 22, h: 28)
 
-    static let book = Spot(x: 6, y: 200, w: 28, h: 30)
-    static let bookHit = Spot(x: 4, y: 198, w: 36, h: 40)
-    static let logHit = Spot(x: 4, y: 240, w: 40, h: 14)
+    /// One book under the tank table. The archive and the event log share it.
+    static let book = Spot(x: 42, y: 172, w: 16, h: 18)
+    static let bookHit = Spot(x: 40, y: 170, w: 20, h: 12)
+    static let logHit = Spot(x: 40, y: 182, w: 20, h: 8)
 
-    static let crate = Spot(x: 48, y: 206, w: 30, h: 24)
-    static let crateInner = Spot(x: 52, y: 210, w: 22, h: 14)
-    static let crateHit = Spot(x: 46, y: 204, w: 34, h: 40)
+    /// The gray box under the table. Charts live here.
+    static let crate = Spot(x: 20, y: 174, w: 20, h: 14)
+    static let crateInner = Spot(x: 24, y: 178, w: 8, h: 6)
+    static let crateHit = Spot(x: 18, y: 172, w: 24, h: 18)
 
-    /// Cassette deck on the floor, between the cabinet and the fuse box.
-    static let deck = Spot(x: 80, y: 208, w: 16, h: 22)
-    static let deckHit = Spot(x: 78, y: 206, w: 20, h: 28)
+    /// Cassette deck under the table, between the book and the fuse box.
+    static let deck = Spot(x: 64, y: 174, w: 16, h: 16)
+    static let deckHit = Spot(x: 62, y: 172, w: 20, h: 14)
     /// Power key on the deck. Red while off, green while a tape plays.
-    static let deckPower = Spot(x: 81, y: 221, w: 6, h: 6)
+    static let deckPower = Spot(x: 66, y: 184, w: 5, h: 5)
 
     /// Plaque on the bench, directly under the main tank.
     static let sign = Spot(x: 36, y: 159, w: 48, h: 7)
@@ -336,19 +338,18 @@ private final class Pix {
         lamps()
         if cast.tank { tank() }
         favouriteFrame()
+        shearHook()
         if cast.bench {
             bench()
-            clutter()
         }
         floor()
-        cassette()
         if cast.bench {
             archiveBook()
-            favouriteCrate()
+            filingBox()
+            cassette()
             tankPlaque()
-            toolJar()
         }
-        fuse()
+        if cast.bench { fuse() }
         if cast.openingGlass { tumbler() }
         ficus()
         lighting()
@@ -467,10 +468,11 @@ private final class Pix {
         if cast.tank { rightRim(16, 100, 88, 60) }
         if cast.bench {
             rightRim(6, 156, 108, 12)
-            rightRim(6, 200, 28, 30)
-            rightRim(48, 206, 30, 24)
+            rightRim(RoomArt.crate.x, RoomArt.crate.y, RoomArt.crate.w, RoomArt.crate.h)
+            rightRim(RoomArt.book.x, RoomArt.book.y, RoomArt.book.w, RoomArt.book.h)
+            rightRim(RoomArt.deck.x, RoomArt.deck.y, RoomArt.deck.w, RoomArt.deck.h)
+            rightRim(RoomArt.fuseBox.x, RoomArt.fuseBox.y, RoomArt.fuseBox.w, RoomArt.fuseBox.h)
         }
-        rightRim(80, 208, 16, 22)
         for x in 2..<118 {
             shade(x, 40, 5 + x / 24)
         }
@@ -516,7 +518,8 @@ private final class Pix {
         fill(18, 38, 3, 5, Ink.woodDk)
         fill(100, 38, 3, 5, Ink.woodDk)
 
-        // The window plant. The stem starts in the soil and hangs from the rim.
+        // The window plant. A bright stem runs from the soil, through the
+        // shelf, and into the live vine so the pot and the hanging part meet.
         fill(4, 26, 12, 8, Ink.pot)
         fill(3, 25, 14, 2, Ink.potLt)
         fill(7, 28, 6, 3, 0x3E2818)
@@ -526,9 +529,8 @@ private final class Pix {
         ], [
             "g": Ink.plantDk, "G": Ink.plant, " ": 0,
         ])
-        fill(9, 29, 2, 16, Ink.plantDk)
-        fill(8, 36, 1, 6, Ink.plant)
-        fill(11, 40, 1, 5, Ink.plant)
+        fill(8, 29, 3, 22, Ink.plant)
+        fill(9, 29, 1, 22, Ink.plantLt)
 
         for spot in RoomArt.vials where cast.jars {
             vial(spot.x, spot.y)
@@ -622,25 +624,27 @@ private final class Pix {
         fill(x + 1, 154, 10, 2, Ink.brassDk)
     }
 
-    /// Taller than the shelf pots. The trunk comes out of the soil and
-    /// runs up into the crown, with a couple of side branches.
+    /// Taller than the shelf pots. Crown first, then the pot, then the
+    /// trunk last so it runs from inside the soil up into the leaves.
     private func ficus() {
         let p = RoomArt.ficus
-        let potTop = p.y + p.h - 10
+        let potTop = p.y + p.h - 12
         let cx = p.x + p.w / 2
-        fill(p.x + 1, potTop + 2, p.w - 2, 8, Ink.pot)
-        fill(p.x, potTop, p.w, 3, Ink.potLt)
+        fill(p.x, p.y + 16, p.w, 16, Ink.plant)
+        fill(p.x + 1, p.y + 8, p.w - 2, 14, Ink.plantLt)
+        fill(p.x + 4, p.y + 2, p.w - 8, 10, Ink.plant)
+        fill(p.x - 1, p.y + 20, 6, 6, Ink.plantDk)
+        fill(p.x + p.w - 5, p.y + 14, 6, 6, Ink.plant)
+        fill(p.x + 1, potTop + 3, p.w - 2, 9, Ink.pot)
+        fill(p.x, potTop, p.w, 4, Ink.potLt)
         fill(p.x + 3, potTop + 1, p.w - 6, 2, 0x3E2818)
-        fill(cx - 1, p.y + 18, 3, potTop + 4 - (p.y + 18), Ink.woodDk)
-        fill(cx, p.y + 20, 1, potTop + 2 - (p.y + 20), Ink.wood)
-        fill(cx - 4, p.y + 28, 4, 2, Ink.woodDk)
-        fill(cx + 2, p.y + 34, 5, 2, Ink.woodDk)
-        fill(p.x + 2, p.y + 22, p.w - 4, 12, Ink.plantDk)
-        fill(p.x, p.y + 10, p.w, 16, Ink.plant)
-        fill(p.x + 2, p.y + 2, p.w - 4, 12, Ink.plantLt)
-        fill(p.x + 5, p.y, p.w - 10, 6, Ink.plant)
-        fill(p.x - 2, p.y + 24, 5, 4, Ink.plantDk)
-        fill(p.x + p.w - 3, p.y + 16, 6, 5, Ink.plant)
+        let trunkTop = p.y + 18
+        let trunkBot = potTop + 5
+        guard trunkBot > trunkTop else { return }
+        fill(cx - 1, trunkTop, 3, trunkBot - trunkTop, Ink.woodDk)
+        fill(cx, trunkTop + 2, 1, max(1, trunkBot - trunkTop - 6), Ink.wood)
+        fill(cx - 5, trunkTop + 6, 5, 2, Ink.woodDk)
+        fill(cx + 2, trunkTop + 12, 5, 2, Ink.woodDk)
     }
 
     private func tank() {
@@ -689,25 +693,6 @@ private final class Pix {
         fill(18, 168, 84, 6, 0x140E0C)
     }
 
-    private func clutter() {
-        fill(26, 176, 22, 14, Ink.metalDk)
-        fill(26, 176, 22, 2, Ink.metal)
-        fill(26, 188, 22, 2, 0x2A3034)
-        fill(35, 181, 4, 4, Ink.brass)
-        fill(52, 182, 14, 3, Ink.bookR)
-        fill(51, 185, 15, 3, Ink.bookB)
-        fill(53, 188, 13, 3, Ink.bookT)
-        fill(76, 178, 14, 12, Ink.metal)
-        fill(77, 179, 12, 4, 0x2A3438)
-        // Handle.
-        for dx in 0..<10 { set(78 + dx, 176, Ink.metalLt) }
-        set(78, 177, Ink.metalLt)
-        set(87, 177, Ink.metalLt)
-        fill(86, 168, 2, 12, Ink.woodLt)
-        fill(83, 172, 7, 3, Ink.page)
-        set(84, 173, Ink.bookR)
-    }
-
     private func floor() {
         for x in 0..<w {
             let gap = x % 8 == 0
@@ -726,27 +711,24 @@ private final class Pix {
         }
     }
 
+    /// One closed book under the table. The archive and the log share it.
     private func archiveBook() {
         let b = RoomArt.book
-        fill(b.x + 4, b.y + 2, b.w - 2, b.h - 2, Ink.page)
-        fill(b.x, b.y, b.w - 4, b.h, Ink.red)
-        fill(b.x, b.y, b.w - 4, 2, Ink.redLt)
+        fill(b.x + 3, b.y + 1, max(1, b.w - 4), b.h - 2, Ink.page)
+        fill(b.x, b.y, max(1, b.w - 5), b.h, Ink.red)
+        fill(b.x, b.y, max(1, b.w - 5), 2, Ink.redLt)
         fill(b.x, b.y, 3, b.h, Ink.redDk)
-        fill(b.x + 8, b.y + 8, 12, 14, Ink.redDk)
-        // Contact shadow.
-        fill(b.x + 2, b.y + b.h, b.w - 2, 2, 0x120C0E)
+        fill(b.x + 2, b.y + b.h, max(1, b.w - 3), 2, 0x120C0E)
     }
 
-    private func favouriteCrate() {
+    /// The gray box under the table. Charts live here.
+    private func filingBox() {
         let c = RoomArt.crate
-        let inner = RoomArt.crateInner
-        fill(c.x, c.y + c.h - 4, c.w, 4, Ink.woodDk)
-        fill(c.x, c.y, c.w, c.h - 4, Ink.wood)
-        fill(c.x, c.y, c.w, 2, Ink.woodLt)
-        fill(c.x, c.y, 3, c.h, Ink.woodDk)
-        fill(c.x + c.w - 3, c.y, 3, c.h, Ink.woodDk)
-        fill(inner.x, inner.y, inner.w, inner.h, 0x2A1C12)
-        fill(c.x + 1, c.y + c.h, c.w - 2, 2, 0x120C0E)
+        fill(c.x, c.y, c.w, c.h, Ink.metalDk)
+        fill(c.x, c.y, c.w, 2, Ink.metal)
+        fill(c.x, c.y + c.h - 2, c.w, 2, 0x2A3034)
+        fill(c.x + 2, c.y + 5, 4, 4, Ink.brass)
+        fill(c.x + 1, c.y + c.h, max(1, c.w - 2), 2, 0x120C0E)
     }
 
     /// A small deck. Window, two reels, a tape band, two keys.
@@ -773,24 +755,14 @@ private final class Pix {
         fill(s.x + 1, s.y + 1, s.w - 2, s.h - 2, Ink.brassDk)
     }
 
-    private func toolJar() {
-        let j = RoomArt.toolJar
-        fill(j.x + 3, j.y + 4, 8, 2, Ink.brass)
-        fill(j.x + 1, j.y + 6, 1, 11, Ink.glass)
-        fill(j.x + 12, j.y + 6, 1, 11, Ink.glass)
-        fill(j.x + 2, j.y + 6, 10, 11, Ink.waterL)
-        fill(j.x + 1, j.y + 16, 12, 1, Ink.glass)
-        // Scissors and a couple of other handles, sticking out of the mouth.
-        set(j.x + 4, j.y, Ink.metalLt)
-        set(j.x + 4, j.y + 1, Ink.metalLt)
-        set(j.x + 5, j.y + 2, Ink.metal)
-        set(j.x + 8, j.y, Ink.metalLt)
-        set(j.x + 8, j.y + 1, Ink.metal)
-        set(j.x + 7, j.y + 2, Ink.metal)
-        set(j.x + 6, j.y + 3, Ink.brass)
-        set(j.x + 9, j.y + 1, Ink.woodLt)
-        set(j.x + 10, j.y + 2, Ink.wood)
-        set(j.x + 3, j.y + 2, 0xC8D0D4)
+    /// An empty hook. The scissors themselves are drawn on top.
+    private func shearHook() {
+        let h = RoomArt.shearHook
+        let x = h.x + 5
+        let y = h.y + 1
+        fill(x, y, 2, 2, Ink.metalLt)
+        fill(x - 1, y + 2, 4, 2, Ink.metal)
+        fill(x - 1, y + 3, 2, 5, Ink.metalDk)
     }
 
     private func vial(_ x: Int, _ y: Int) {

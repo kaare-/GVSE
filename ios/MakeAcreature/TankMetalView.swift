@@ -266,6 +266,10 @@ struct TankCamera {
     var worldH: CGFloat = 0
     var pinchStartW: CGFloat = tankScreenPixels
     var stickToFloor = true
+    /// Widest view before a pinch-out leaves for the lobby.
+    /// A small glass uses a wider window so the wall shows around it.
+    var homeW: CGFloat = tankScreenPixels
+    var centerInWall = false
 }
 
 struct TankFrame {
@@ -301,12 +305,21 @@ func tankFrame(
     if camera.worldW != worldW || camera.worldH != worldH {
         camera.worldW = worldW
         camera.worldH = worldH
-        camera.visibleW = min(tankScreenPixels, max(worldW, 1))
+        if worldW < tankScreenPixels * 0.85 {
+            camera.homeW = min(tankScreenPixels * 0.62, max(worldW * 1.65, worldW + 48))
+            camera.visibleW = camera.homeW
+            camera.centerInWall = true
+            camera.stickToFloor = false
+        } else {
+            camera.homeW = worldW
+            camera.visibleW = min(tankScreenPixels, max(worldW, 1))
+            camera.centerInWall = false
+            camera.stickToFloor = true
+        }
         camera.pinchStartW = camera.visibleW
-        camera.left = max(0, (worldW - camera.visibleW) / 2)
-        camera.stickToFloor = true
+        camera.left = max(0, (worldW - min(camera.visibleW, worldW)) / 2)
     }
-    let visW = min(max(camera.visibleW, tankMinVisible), max(worldW, 1))
+    let visW = min(max(camera.visibleW, tankMinVisible), max(camera.homeW, worldW))
     camera.visibleW = visW
     let aspect = drawableW / max(drawableH, 1)
     let visH = visW / max(aspect, 0.01)
@@ -316,7 +329,12 @@ func tankFrame(
     let contentW = shownW * scale
     let contentH = shownH * scale
     let ox = (drawableW - contentW) * 0.5
-    let oy = drawableH - contentH
+    let oy: CGFloat
+    if camera.centerInWall && shownH >= worldH - 0.5 {
+        oy = (drawableH - contentH) * 0.5
+    } else {
+        oy = drawableH - contentH
+    }
     if camera.stickToFloor {
         camera.top = max(0, worldH - shownH)
         camera.stickToFloor = false

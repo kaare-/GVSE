@@ -23,6 +23,10 @@ pub const T_BASE_DEFAULT: f32 = 15.0;
 pub const PRESET_W: u32 = 128;
 pub const PRESET_H: u32 = 256;
 
+/// The opening tumbler: a small glass of water, not the wide tank.
+pub const GLASS_W: u32 = 40;
+pub const GLASS_H: u32 = 56;
+
 /// The phone's main tank: three jar-widths side by side. Jars stay
 /// [`PRESET_W`] wide.
 pub const MAIN_W: u32 = PRESET_W * 3;

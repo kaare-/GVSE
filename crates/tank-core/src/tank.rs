@@ -9,7 +9,8 @@ use crate::bio::{self, CellStore, Genome, GenomeStore};
 use crate::cell::Cell;
 use crate::clock::{self, day_factor};
 use crate::consts::{
-    MAIN_W, MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H, PRESET_W, PX_PER_CELL,
+    GLASS_H, GLASS_W, MAIN_W, MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H, PRESET_W,
+    PX_PER_CELL,
     SAVE_VERSION, TISSUE_DAM_PIXELS,
 };
 use crate::grid::PhysicsGrid;
@@ -490,6 +491,26 @@ impl Tank {
         let _ = self.seed_algae(px as u16, py as u16);
         self.light_dirty = true;
         self.rebuild_light();
+    }
+
+    /// A small glass of water and one starter creature. No sand, no stone.
+    /// Noon light, so the tumbler is not a dark tank.
+    pub fn glass(seed: u64) -> Self {
+        let mut tank = Self::try_new(seed, GLASS_W, GLASS_H).expect("glass size");
+        let w = tank.grid.visible_w();
+        let h = tank.grid.visible_h();
+        let water_top = (h as f32 * 0.78) as i32;
+        for vy in 0..water_top {
+            for vx in 0..w {
+                tank.grid.set_visible(vx, vy, Cell::water());
+            }
+        }
+        let px = (w as u32 / 2) * 3;
+        let py = ((h - water_top + 3) as u32) * 3;
+        let _ = tank.seed_algae(px as u16, py as u16);
+        tank.light_dirty = true;
+        tank.rebuild_light();
+        tank
     }
 
     pub fn seed(&self) -> u64 {

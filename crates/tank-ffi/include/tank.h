@@ -164,6 +164,8 @@ TankHandle *tank_empty(uint64_t seed);
 /* Main glass: three jar-widths, same height. Jars stay on tank_empty. */
 TankHandle *tank_main_empty(uint64_t seed);
 TankHandle *tank_main_preset(uint64_t seed);
+/* Opening tumbler: water and one starter creature, no sand or stone. */
+TankHandle *tank_glass(uint64_t seed);
 /* Copy a narrower tank into the middle of visible_w. 1 if it grew. */
 uint8_t tank_widen(TankHandle *handle, uint32_t visible_w);
 uint32_t tank_seed_algae(TankHandle *handle, uint32_t px, uint32_t py);
