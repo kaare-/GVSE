@@ -68,7 +68,7 @@ enum RoomArt {
     /// Straight through the pot and the shelf, then a slow wave.
     static func hangSway(_ step: Int) -> Int {
         if step < 10 { return 0 }
-        let wave = [0, 1, 1, 2, 2, 2, 1, 1, 0, 0, -1, -1, -2, -2, -2, -1, -1, 0]
+        let wave = [0, 0, 1, 1, 2, 2, 3, 2, 1, 0, 0, -1, -1, -2, -2, -3, -2, -1]
         return wave[(step - 10) % wave.count]
     }
 
@@ -76,8 +76,8 @@ enum RoomArt {
         var x, y, rgb: Int
     }
 
-    /// One stem from the soil, across the shelf, then down. Leaves droop
-    /// out to either side. Nothing is baked, so a cut shortens this.
+    /// One thin stem from the soil, across the shelf, then down. Leaves
+    /// trail out to either side. Nothing is baked, so a cut shortens this.
     static func hangingPlant(length: Int) -> [HangDot] {
         guard let vine = vines.first(where: { $0.hangs }) else { return [] }
         let n = max(1, length)
@@ -89,17 +89,16 @@ enum RoomArt {
         for step in 0..<n {
             let x = vine.x + hangSway(step)
             let y = vine.y + step
-            put(x - 1, y, Ink.plantDk)
-            put(x, y, Ink.plant)
-            put(x + 1, y, Ink.plantLt)
-            guard step >= 4, step % 3 == 1 else { continue }
-            let dir = (step / 3) % 2 == 0 ? -1 : 1
-            let root = dir < 0 ? x - 1 : x + 1
-            for i in 1...4 {
-                let droop = i > 2 ? i - 2 : 0
-                let color = i == 4 ? Ink.plantDk : (i == 1 ? Ink.plantLt : Ink.plant)
-                put(root + dir * i, y + droop, color)
-            }
+            put(x, y, step % 3 == 0 ? Ink.plantLt : Ink.plant)
+            guard step >= 7, step % 6 == 1 else { continue }
+            let dir = (step / 6) % 2 == 0 ? -1 : 1
+            // A leaf hangs off the stem and droops two rows.
+            put(x + dir, y, Ink.plant)
+            put(x + dir * 2, y, Ink.plantLt)
+            put(x + dir * 2, y + 1, Ink.plant)
+            put(x + dir * 3, y + 1, Ink.plantLt)
+            put(x + dir * 3, y + 2, Ink.plantDk)
+            put(x + dir * 4, y + 2, Ink.plantDk)
         }
         return dots
     }
@@ -110,7 +109,7 @@ enum RoomArt {
         let step = y - vine.y
         guard step >= 0, step < max(1, length) else { return false }
         let stem = vine.x + hangSway(step)
-        return x >= CGFloat(stem - 4) && x <= CGFloat(stem + 5)
+        return x >= CGFloat(stem - 5) && x <= CGFloat(stem + 6)
     }
 
     /// A taller upright plant in the bottom right. The shelf pots stay.
