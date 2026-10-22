@@ -90,6 +90,7 @@ struct RoomView: View {
                 place(RoomArt.favHit, layout) { crateButton(layout) }
                 place(RoomArt.deskLampHit, layout) { deskLampControl }
                 place(RoomArt.shelfLamp, layout) { shelfLampControl }
+                place(RoomArt.matchboxHit, layout) { matchboxControl }
                 place(RoomArt.candleHit, layout) { candleControl }
                 if cast.openingGlass {
                     place(RoomArt.openingGlass, layout) { openingButton }
@@ -553,6 +554,14 @@ struct RoomView: View {
             .a11yButton(shelfOn ? "Shelf lamp, on" : "Shelf lamp, off", hint: "Double tap to turn the light on or off")
     }
 
+    private var matchboxControl: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture { lightCandle() }
+            .accessibilityAction(named: "Light candle") { lightCandle() }
+            .a11yButton("Matchbox", hint: "Tap to light the candle")
+    }
+
     private var candleControl: some View {
         Color.clear
             .contentShape(Rectangle())
@@ -564,7 +573,10 @@ struct RoomView: View {
             )
             .accessibilityAction(named: candleLit ? "Put out" : "Light") { toggleCandle() }
             .accessibilityAction(named: "Blow out") { blowOutCandle() }
-            .a11yButton(candleLit ? "Candle, lit" : "Candle", hint: "Double tap to light or put out. Swipe to blow it out")
+            .a11yButton(
+                candleLit ? "Candle, lit" : "Candle",
+                hint: "Light it from the matchbox. Swipe to blow it out"
+            )
     }
 
     private func toggleLamp() {
@@ -575,6 +587,12 @@ struct RoomView: View {
     private func toggleShelf() {
         shelfOn.toggle()
         UserDefaults.standard.set(shelfOn, forKey: "lobbyShelfLamp")
+    }
+
+    private func lightCandle() {
+        guard !candleLit else { return }
+        candleLit = true
+        UserDefaults.standard.set(true, forKey: "lobbyCandle")
     }
 
     private func toggleCandle() {
