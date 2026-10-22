@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Full-screen modular rack. Modelled loosely on Plaits, Maths, a Moog
-/// ladder, Doepfer noise, and an 8-step sequencer. Patch outs into ins,
-/// record, then save the take onto a cassette on the shelf.
+/// ladder, Doepfer noise, and an 8-step sequencer. Patch outs into ins
+/// with coloured cables (many at once), record, then save onto the shelf.
 struct EurorackStudio: View {
     @ObservedObject var session: TankSession
     var onClose: () -> Void
@@ -14,12 +14,14 @@ struct EurorackStudio: View {
     @State private var elapsed: TimeInterval = 0
     @State private var armed: AmbientAudio.Take.Jack?
     @State private var name = ""
+    @State private var anchors: [Int: CGPoint] = [:]
+    @State private var dragFrom: AmbientAudio.Take.Jack?
+    @State private var dragPoint: CGPoint?
     private let tick = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
     private let panel = Color(red: 0.10, green: 0.11, blue: 0.10)
     private let face = Color(red: 0.16, green: 0.17, blue: 0.16)
     private let screw = Color(red: 0.55, green: 0.52, blue: 0.42)
-    private let cableInk = Color(red: 0.92, green: 0.72, blue: 0.22)
 
     var body: some View {
         ZStack {
@@ -27,33 +29,16 @@ struct EurorackStudio: View {
             VStack(spacing: 0) {
                 header
                 ScrollView {
-                    VStack(spacing: 10) {
-                        HStack(alignment: .top, spacing: 8) {
-                            plaits
-                            maths
-                        }
-                        HStack(alignment: .top, spacing: 8) {
-                            ladder
-                            noise
-                        }
-                        HStack(alignment: .top, spacing: 8) {
-                            lfo
-                            vca
-                        }
-                        seq
-                        roomCv
-                        if !take.cables.isEmpty {
-                            PixelLabel(text: cableCaption, scale: 1, color: cableInk)
-                        }
-                        PixelLabel(
-                            text: armed == nil
-                                ? "TAP AN OUT, THEN AN IN, TO PATCH"
-                                : "ARMED \(armed!.label)  TAP AN IN OR THE SAME OUT TO CLEAR",
-                            scale: 1,
-                            color: Palette.dimPaper
-                        )
+                    ZStack {
+                        rackModules
+                            .padding(12)
+                            .coordinateSpace(name: "rack")
+                            .onPreferenceChange(JackAnchorKey.self) { anchors = $0 }
+
+                        cableLayer
+                            .allowsHitTesting(false)
+                            .padding(12)
                     }
-                    .padding(12)
                 }
                 transport
             }
@@ -70,10 +55,110 @@ struct EurorackStudio: View {
         .onChange(of: take) { _ in hear() }
     }
 
+    private var rackModules: some View {
+        VStack(spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
+                plaits
+                maths
+            }
+            HStack(alignment: .top, spacing: 8) {
+                ladder
+                noise
+            }
+            HStack(alignment: .top, spacing: 8) {
+                lfo
+                vca
+            }
+            seq
+            roomCv
+            legend
+            PixelLabel(
+                text: hintText,
+                scale: 1,
+                color: Palette.dimPaper
+            )
+        }
+    }
+
+    private var hintText: String {
+        if dragFrom != nil {
+            return "DROP ON AN IN JACK"
+        }
+        if let armed {
+            return "ARMED \(armed.label)  TAP AN IN  OR DRAG FROM AN OUT"
+        }
+        return "DRAG OUT TO IN  OR TAP OUT THEN IN  MANY CABLES OK"
+    }
+
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            PixelLabel(text: "CABLE COLOURS", scale: 1, color: Palette.dimPaper)
+            HStack(spacing: 8) {
+                ForEach(sourceJacks, id: \.rawValue) { jack in
+                    HStack(spacing: 3) {
+                        Circle().fill(RackCable.color(for: jack)).frame(width: 8, height: 8)
+                        PixelLabel(text: jack.label, scale: 1, color: Palette.paper)
+                    }
+                }
+            }
+            if !take.cables.isEmpty {
+                PixelLabel(text: cableCaption, scale: 1, color: Palette.paper)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var sourceJacks: [AmbientAudio.Take.Jack] {
+        [.lfo, .env, .noiseOut, .seq, .day, .rain, .lamp, .candle, .room]
+    }
+
+    private var cableLayer: some View {
+        GeometryReader { _ in
+            Canvas { ctx, _ in
+                for (i, cable) in take.cables.enumerated() {
+                    guard let from = anchors[cable.from], let to = anchors[cable.to] else { continue }
+                    let ink = RackCable.color(for: cable.from)
+                    var path = Path()
+                    path.move(to: from)
+                    let midY = (from.y + to.y) / 2 + CGFloat((i % 5) - 2) * 10
+                    let c1 = CGPoint(x: from.x + (to.x - from.x) * 0.25, y: midY)
+                    let c2 = CGPoint(x: from.x + (to.x - from.x) * 0.75, y: midY)
+                    path.addCurve(to: to, control1: c1, control2: c2)
+                    ctx.stroke(path, with: .color(ink.opacity(0.95)), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    // Tip plugs.
+                    ctx.fill(Path(ellipseIn: CGRect(x: from.x - 3, y: from.y - 3, width: 6, height: 6)), with: .color(ink))
+                    ctx.fill(Path(ellipseIn: CGRect(x: to.x - 3, y: to.y - 3, width: 6, height: 6)), with: .color(ink))
+                }
+                if let fromJack = dragFrom, let from = anchors[fromJack.rawValue], let tip = dragPoint {
+                    let ink = RackCable.color(for: fromJack)
+                    var path = Path()
+                    path.move(to: from)
+                    let mid = CGPoint(x: (from.x + tip.x) / 2, y: min(from.y, tip.y) - 24)
+                    path.addQuadCurve(to: tip, control: mid)
+                    ctx.stroke(
+                        path,
+                        with: .color(ink.opacity(0.85)),
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [5, 4])
+                    )
+                }
+            }
+        }
+    }
+
     private var header: some View {
         HStack {
             PixelLabel(text: "EURORACK", scale: 2, color: Palette.highlight)
             Spacer()
+            if !take.cables.isEmpty {
+                Button {
+                    take.cables.removeAll()
+                    armed = nil
+                } label: {
+                    PixelPanel { PixelLabel(text: "CLEAR", scale: 2) }
+                }
+                .buttonStyle(.plain)
+                .a11yButton("Clear all cables")
+            }
             Button(action: close) {
                 PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
             }
@@ -126,13 +211,11 @@ struct EurorackStudio: View {
 
     // MARK: - Modules
 
-    /// Morphing oscillator, Plaits-flavoured.
     private var plaits: some View {
         module("PLAITS", width: 160) {
             knob("PITCH", value: $take.pitch)
             knob("WAVE", value: $take.wave)
             HStack(spacing: 10) {
-                jackOut(.seq)
                 jackIn(.pitch)
                 jackIn(.wave)
             }
@@ -140,7 +223,6 @@ struct EurorackStudio: View {
         }
     }
 
-    /// Function / envelope, Maths-flavoured.
     private var maths: some View {
         module("MATHS", width: 160) {
             knob("ATK", value: $take.attack)
@@ -149,21 +231,23 @@ struct EurorackStudio: View {
             knob("REL", value: $take.release)
             HStack(spacing: 10) {
                 jackOut(.env)
-                jackIn(.clock)
             }
         }
     }
 
-    /// Low-pass with resonance, ladder-flavoured.
     private var ladder: some View {
         module("LADDER", width: 160) {
             knob("CUT", value: $take.cutoff)
-            knob("RES", value: $take.reso)
+            knobsRow
             HStack(spacing: 10) {
                 jackIn(.cutoff)
                 jackIn(.reso)
             }
         }
+    }
+
+    private var knobsRow: some View {
+        knob("RES", value: $take.reso)
     }
 
     private var noise: some View {
@@ -221,7 +305,7 @@ struct EurorackStudio: View {
             HStack(spacing: 12) {
                 ForEach([AmbientAudio.Take.Jack.day, .rain, .lamp, .candle, .room], id: \.rawValue) { jack in
                     VStack(spacing: 4) {
-                        PixelLabel(text: jack.label, scale: 1, color: Palette.dimPaper)
+                        PixelLabel(text: jack.label, scale: 1, color: RackCable.color(for: jack))
                         jackOut(jack)
                     }
                 }
@@ -272,55 +356,110 @@ struct EurorackStudio: View {
     }
 
     private func jackOut(_ jack: AmbientAudio.Take.Jack) -> some View {
-        Button { tapJack(jack) } label: {
-            VStack(spacing: 2) {
-                Circle()
-                    .strokeBorder(armed == jack ? cableInk : Color(white: 0.55), lineWidth: 2)
-                    .background(Circle().fill(Color(white: 0.12)))
-                    .frame(width: 18, height: 18)
-                PixelLabel(text: jack.label, scale: 1, color: Palette.dimPaper)
-            }
+        let ink = RackCable.color(for: jack)
+        let lit = armed == jack || dragFrom == jack
+        return VStack(spacing: 2) {
+            Circle()
+                .strokeBorder(lit ? Color.white : ink, lineWidth: lit ? 3 : 2)
+                .background(Circle().fill(ink.opacity(0.35)))
+                .frame(width: 20, height: 20)
+                .background(anchorProbe(jack))
+            PixelLabel(text: jack.label, scale: 1, color: ink)
         }
-        .buttonStyle(.plain)
-        .a11yButton("\(jack.label) out", hint: "Patch from here")
+        .contentShape(Rectangle())
+        .gesture(outGesture(jack))
+        .a11yButton("\(jack.label) out", hint: "Drag to an in, or tap then tap an in")
     }
 
     private func jackIn(_ jack: AmbientAudio.Take.Jack) -> some View {
-        let plugged = take.cables.contains { $0.to == jack.rawValue }
-        return Button { tapJack(jack) } label: {
-            VStack(spacing: 2) {
-                Circle()
-                    .strokeBorder(plugged ? cableInk : Color(white: 0.4), lineWidth: 2)
-                    .background(Circle().fill(plugged ? Color(red: 0.35, green: 0.28, blue: 0.1) : Color(white: 0.08)))
-                    .frame(width: 18, height: 18)
-                PixelLabel(text: jack.label, scale: 1, color: Palette.dimPaper)
+        let cable = take.cables.first { $0.to == jack.rawValue }
+        let ink = cable.map { RackCable.color(for: $0.from) } ?? Color(white: 0.4)
+        let plugged = cable != nil
+        return VStack(spacing: 2) {
+            Circle()
+                .strokeBorder(plugged ? ink : Color(white: 0.4), lineWidth: 2)
+                .background(Circle().fill(plugged ? ink.opacity(0.45) : Color(white: 0.08)))
+                .frame(width: 20, height: 20)
+                .background(anchorProbe(jack))
+            PixelLabel(text: jack.label, scale: 1, color: plugged ? ink : Palette.dimPaper)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { tapJack(jack) }
+        .a11yButton("\(jack.label) in", hint: plugged ? "Tap to unplug, or patch another source" : "Drop a cable here")
+    }
+
+    private func anchorProbe(_ jack: AmbientAudio.Take.Jack) -> some View {
+        GeometryReader { geo in
+            let frame = geo.frame(in: .named("rack"))
+            Color.clear.preference(
+                key: JackAnchorKey.self,
+                value: [jack.rawValue: CGPoint(x: frame.midX, y: frame.midY)]
+            )
+        }
+    }
+
+    private func outGesture(_ jack: AmbientAudio.Take.Jack) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("rack"))
+            .onChanged { value in
+                if hypot(value.translation.width, value.translation.height) < 6 {
+                    return
+                }
+                dragFrom = jack
+                dragPoint = value.location
+                armed = jack
+            }
+            .onEnded { value in
+                let dragged = hypot(value.translation.width, value.translation.height) >= 6
+                defer {
+                    dragFrom = nil
+                    dragPoint = nil
+                }
+                if dragged, let dest = nearestIn(to: value.location, maxDist: 40) {
+                    connect(from: jack, to: dest)
+                    armed = nil
+                } else if !dragged {
+                    tapJack(jack)
+                }
+            }
+    }
+
+    private func nearestIn(to point: CGPoint, maxDist: CGFloat) -> AmbientAudio.Take.Jack? {
+        let inputs: [AmbientAudio.Take.Jack] = [.pitch, .wave, .cutoff, .level, .clock, .reso]
+        var best: AmbientAudio.Take.Jack?
+        var bestDist = maxDist
+        for jack in inputs {
+            guard let p = anchors[jack.rawValue] else { continue }
+            let d = hypot(p.x - point.x, p.y - point.y)
+            if d < bestDist {
+                bestDist = d
+                best = jack
             }
         }
-        .buttonStyle(.plain)
-        .a11yButton("\(jack.label) in", hint: plugged ? "Unplug or repatch" : "Patch into here")
+        return best
     }
 
     private func tapJack(_ jack: AmbientAudio.Take.Jack) {
         if jack.isSource {
-            if armed == jack {
-                armed = nil
-            } else {
-                armed = jack
-            }
+            armed = armed == jack ? nil : jack
             return
         }
         guard let src = armed else {
-            // Tap an in with nothing armed: clear cables into it.
             take.cables.removeAll { $0.to == jack.rawValue }
             return
         }
-        if let i = take.cables.firstIndex(where: { $0.from == src.rawValue && $0.to == jack.rawValue }) {
-            take.cables.remove(at: i)
-        } else {
-            take.cables.removeAll { $0.to == jack.rawValue }
-            take.cables.append(.init(from: src.rawValue, to: jack.rawValue))
-        }
+        connect(from: src, to: jack)
         armed = nil
+    }
+
+    /// One cable per input; many cables overall. Same pair toggles off.
+    private func connect(from: AmbientAudio.Take.Jack, to: AmbientAudio.Take.Jack) {
+        guard from.isSource, !to.isSource else { return }
+        if let i = take.cables.firstIndex(where: { $0.from == from.rawValue && $0.to == to.rawValue }) {
+            take.cables.remove(at: i)
+            return
+        }
+        take.cables.removeAll { $0.to == to.rawValue }
+        take.cables.append(.init(from: from.rawValue, to: to.rawValue))
     }
 
     private var cableCaption: String {
@@ -391,7 +530,46 @@ struct EurorackStudio: View {
     }
 }
 
-/// Circular knob. Drag up/down or around to turn.
+/// Stable colour per source jack so several cables stay readable.
+private enum RackCable {
+    static func color(for jack: AmbientAudio.Take.Jack) -> Color {
+        color(for: jack.rawValue)
+    }
+
+    static func color(for jack: Int) -> Color {
+        switch jack {
+        case AmbientAudio.Take.Jack.lfo.rawValue:
+            return Color(red: 0.90, green: 0.22, blue: 0.20)
+        case AmbientAudio.Take.Jack.env.rawValue:
+            return Color(red: 0.95, green: 0.55, blue: 0.12)
+        case AmbientAudio.Take.Jack.noiseOut.rawValue:
+            return Color(red: 0.82, green: 0.82, blue: 0.86)
+        case AmbientAudio.Take.Jack.seq.rawValue:
+            return Color(red: 0.20, green: 0.78, blue: 0.38)
+        case AmbientAudio.Take.Jack.day.rawValue:
+            return Color(red: 0.35, green: 0.70, blue: 0.98)
+        case AmbientAudio.Take.Jack.rain.rawValue:
+            return Color(red: 0.28, green: 0.52, blue: 0.78)
+        case AmbientAudio.Take.Jack.lamp.rawValue:
+            return Color(red: 0.96, green: 0.86, blue: 0.28)
+        case AmbientAudio.Take.Jack.candle.rawValue:
+            return Color(red: 0.95, green: 0.48, blue: 0.22)
+        case AmbientAudio.Take.Jack.room.rawValue:
+            return Color(red: 0.72, green: 0.38, blue: 0.90)
+        default:
+            return Color(red: 0.92, green: 0.72, blue: 0.22)
+        }
+    }
+}
+
+private struct JackAnchorKey: PreferenceKey {
+    static var defaultValue: [Int: CGPoint] = [:]
+    static func reduce(value: inout [Int: CGPoint], nextValue: () -> [Int: CGPoint]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
+/// Circular knob. Drag up/down to turn.
 private struct RackKnob: View {
     @Binding var value: Float
     @State private var start: Float = 0
