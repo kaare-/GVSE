@@ -459,9 +459,9 @@ final class AmbientAudio {
             sample += osc * 0.12
         }
 
-        // Keep a floor so the rack is never fully silent while open.
+        // Envelope closes between steps — no constant sine floor under ambient.
         var amp = mod(.level, base: take.level, amount: 0.55)
-        amp *= 0.25 + 0.75 * max(takeEnv, take.sustain * 0.35)
+        amp *= max(0, takeEnv)
         let out = sample * amp * 0.42 * max(intensity, 0.25)
         return out.isNaN || out.isInfinite ? 0 : out
     }

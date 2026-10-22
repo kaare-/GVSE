@@ -294,12 +294,10 @@ final class TankSession: ObservableObject {
         running = true
         playing = true
         startMotion()
-        if soloing {
-            AmbientAudio.shared.setMuted(false)
-            AmbientAudio.shared.ensureRunning()
-        } else {
-            pushDeck(resetHead: false)
-        }
+        // Never resume into a stuck rack sine. EurorackStudio.onAppear
+        // will begin solo again if that page is still up.
+        soloing = false
+        pushDeck(resetHead: false)
         guard link == nil else { return }
         let pump = DisplayPump()
         pump.onFrame = { [weak self] dt in self?.advance(dt) }
@@ -627,17 +625,20 @@ final class TankSession: ObservableObject {
 
     /// Update the rack voice while patching. Playlist stays cut.
     func soloTake(_ take: AmbientAudio.Take) {
-        soloing = true
+        guard soloing else {
+            beginRackSolo(take)
+            return
+        }
         let slot = AmbientAudio.PlaySlot(voice: -1, duration: 3600, take: take)
         AmbientAudio.shared.setDeck(on: true, slots: [slot], start: 0, resetHead: false)
         AmbientAudio.shared.setMuted(false)
         AmbientAudio.shared.ensureRunning()
     }
 
-    /// Leave the solo voice and restore the shelf playlist.
+    /// Leave the rack voice and restore the shelf playlist. Always safe to call.
     func endSolo() {
-        guard soloing else { return }
         soloing = false
+        // Always re-push the shelf so a stuck sine cannot keep the deck.
         pushDeck(resetHead: true)
     }
 
@@ -674,7 +675,13 @@ final class TankSession: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "lobbyShelf"),
            let saved = try? JSONDecoder().decode([ShelfTape].self, from: data),
            !saved.isEmpty {
-            shelf = saved
+            // Drop stray rack patches glued onto ambient tapes.
+            shelf = saved.map { tape in
+                var t = tape
+                if t.voice >= 0 { t.take = nil }
+                return t
+            }
+            saveShelf()
             return
         }
         shelf = Self.freshShelf()
@@ -690,8 +697,15 @@ final class TankSession: ObservableObject {
     private func pushDeck(resetHead: Bool) {
         // While the eurorack page is auditioning, leave its solo voice alone.
         if soloing { return }
+        // Factory / ambient tapes use the generative voice only. User takes
+        // (voice < 0) keep their patched recording. This stops a leaked Take
+        // on a normal cassette from injecting the rack sine into the playlist.
         let slots = shelf.map {
-            AmbientAudio.PlaySlot(voice: $0.voice, duration: $0.duration, take: $0.take)
+            AmbientAudio.PlaySlot(
+                voice: $0.voice,
+                duration: $0.duration,
+                take: $0.voice < 0 ? $0.take : nil
+            )
         }
         let on = deckOn && soundOn
         AmbientAudio.shared.setDeck(on: on, slots: slots, start: tape, resetHead: resetHead)

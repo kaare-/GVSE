@@ -61,6 +61,8 @@ struct CassetteDeck: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            // Clear any stuck rack sine from a previous session.
+            session.endSolo()
             if seated == nil, session.shelf.indices.contains(session.tape) {
                 seated = session.shelf[session.tape].id
             }
@@ -68,17 +70,13 @@ struct CassetteDeck: View {
         .fullScreenCover(isPresented: $showRack) {
             EurorackStudio(session: session) {
                 showRack = false
-                // Playlist only — never leave the rack voice under the desk.
                 session.endSolo()
             }
         }
         .onChange(of: showRack) { open in
-            if open {
-                // Cut the ambient playlist the moment the rack opens.
-                session.beginRackSolo(AmbientAudio.Take.fresh)
-            } else {
-                session.endSolo()
-            }
+            // Only restore playlist when the rack closes. Starting solo is
+            // EurorackStudio.onAppear's job — never leave a bare sine running here.
+            if !open { session.endSolo() }
         }
     }
 
