@@ -147,7 +147,7 @@ pub fn step(grid: &mut PhysicsGrid, coarse: &mut CoarseField, tick: u64, t_tank:
                     n.pad = n.pad.saturating_add(DEW_GAIN);
                     deposited = true;
                 }
-            } else if n.is_rock() {
+            } else if n.is_rock() && !n.is_rigid() && !n.is_silhouette() {
                 if n.pad < 255 {
                     n.set_rock_film(n.pad.saturating_add(DEW_GAIN));
                     deposited = true;

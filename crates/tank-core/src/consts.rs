@@ -19,9 +19,21 @@ pub const NIGHT_FLOOR: f32 = 0.1;
 /// Default base temperature, °C.
 pub const T_BASE_DEFAULT: f32 = 15.0;
 
-/// Visible physics cells for the phone preset.
+/// Visible physics cells for a jar, and the height of every glass.
 pub const PRESET_W: u32 = 128;
 pub const PRESET_H: u32 = 256;
+
+/// The opening tumbler: a small glass of water, not the wide tank.
+pub const GLASS_W: u32 = 40;
+pub const GLASS_H: u32 = 56;
+
+/// A shelf sample jar. Smaller volume than the tumbler.
+pub const JAR_W: u32 = 24;
+pub const JAR_H: u32 = 32;
+
+/// The phone's main tank: three jar-widths side by side. Jars stay
+/// [`PRESET_W`] wide.
+pub const MAIN_W: u32 = PRESET_W * 3;
 
 /// Biology pixels per physics cell edge.
 pub const PX_PER_CELL: u32 = 3;
@@ -39,12 +51,19 @@ pub const WATER_SUBSTEPS: u32 = 2;
 /// Grain fall + repose passes per tick.
 pub const GRAIN_PASSES: u32 = 2;
 
-/// Hard cap on a visible tank. The phone preset is 128×256.
-pub const MAX_VISIBLE_W: u32 = 256;
+/// Hard cap on a visible tank. The main tank is [`MAIN_W`]×[`PRESET_H`].
+pub const MAX_VISIBLE_W: u32 = MAIN_W;
 pub const MAX_VISIBLE_H: u32 = 512;
 pub const MIN_VISIBLE: u32 = 4;
 
 pub const SAVE_VERSION: u32 = 9;
+
+// ---- Phase 5 M0: soft bodies (verlet springs) ----
+
+/// Constraint iterations per soft-body step.
+pub const SOFT_ITERS: u32 = 3;
+/// Spring stiffness (fraction of length error corrected per iteration).
+pub const SOFT_STIFF: f32 = 0.45;
 
 // ---- biology (cell-language §a, §b, §c) ----
 
@@ -132,6 +151,11 @@ pub const MAX_SLOTS: usize = 64;
 /// Live-cell soft cap (handoff lever).
 pub const LIVE_CAP: usize = 30_000;
 
+/// Living organisms. Each free algae speck is its own creature, so this
+/// is the cap the tank actually feels. Body parts of an existing creature
+/// still grow under [`LIVE_CAP`].
+pub const CREATURE_CAP: usize = 500;
+
 /// No mitosis below this tank temperature (°C).
 pub const MITOSIS_FLOOR_C: f32 = 4.0;
 
@@ -144,9 +168,10 @@ pub const BOND_SHARE_DIV: i32 = 8;
 /// Hard living pixels (of 9) that turn a physics cell solid to flow (§b.3).
 pub const TISSUE_DAM_PIXELS: u8 = 5;
 
-/// Light absorbed per PHOTO pixel row (×0.5) and per other tissue (×0.75), Q8.
-pub const TISSUE_PASS_PHOTO_Q8: u32 = 128;
-pub const TISSUE_PASS_OTHER_Q8: u32 = 192;
+/// Light kept per living pixel row, Q8. Near 1 so a mat does not black
+/// out the water; the bed is side-lit in `rebuild_light`.
+pub const TISSUE_PASS_PHOTO_Q8: u32 = 252;
+pub const TISSUE_PASS_OTHER_Q8: u32 = 254;
 
 // ---- Phase 4: thermal cycle (`evolution-system.md` §4), THERMO (§a.7) ----
 

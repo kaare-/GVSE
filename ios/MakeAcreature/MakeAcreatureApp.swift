@@ -4,9 +4,14 @@ import SwiftUI
 struct MakeAcreatureApp: App {
     @StateObject private var session = TankSession()
     @Environment(\.scenePhase) private var scenePhase
-    @State private var inRoom = false
+    @State private var inRoom = true
     @State private var showBook = false
     @State private var showTree = false
+    @State private var showSettings = false
+    @State private var showPhoto = false
+    @State private var showLog = false
+    @State private var showCharts = false
+    @State private var showDeck = false
 
     var body: some Scene {
         WindowGroup {
@@ -20,10 +25,24 @@ struct MakeAcreatureApp: App {
                         session: session,
                         onBack: { withAnimation(.easeOut(duration: 0.2)) { inRoom = false } },
                         onOpenBook: { showBook = true },
-                        onOpenTree: { showTree = true }
+                        onOpenTree: { showTree = true },
+                        onOpenSettings: { showSettings = true },
+                        onOpenLog: { showLog = true },
+                        onOpenCharts: { showCharts = true },
+                        onOpenDeck: { showDeck = true }
                     )
                     .transition(.opacity)
-                    .simultaneousGesture(zoomGesture(toRoom: false))
+                }
+                if session.showStartGuide {
+                    StartGuide(
+                        onSkip: { session.dismissStartGuide(skipped: true) },
+                        onDone: { session.dismissStartGuide(skipped: false) }
+                    )
+                    .zIndex(20)
+                }
+                if showPhoto {
+                    PhotoModeOverlay(session: session) { showPhoto = false }
+                        .zIndex(15)
                 }
             }
             .preferredColorScheme(.dark)
@@ -34,7 +53,28 @@ struct MakeAcreatureApp: App {
             .fullScreenCover(isPresented: $showTree) {
                 TreeScreen(session: session) { showTree = false }
             }
+            .fullScreenCover(isPresented: $showSettings) {
+                FuseBoxSettings(session: session) { showSettings = false }
+            }
+            .fullScreenCover(isPresented: $showLog) {
+                EventLogView(session: session) { showLog = false }
+            }
+            .fullScreenCover(isPresented: $showCharts) {
+                ChartDrawer(session: session) { showCharts = false }
+            }
+            .overlay {
+                if showDeck {
+                    CassetteDeck(session: session) { showDeck = false }
+                        .zIndex(12)
+                        .transition(.opacity)
+                }
+            }
             .onAppear { session.resume() }
+            .onChange(of: session.leaveForLobby) { leave in
+                guard leave else { return }
+                session.leaveForLobby = false
+                withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
+            }
             .onChange(of: scenePhase) { phase in
                 if phase == .active {
                     session.resume()
@@ -45,174 +85,228 @@ struct MakeAcreatureApp: App {
         }
     }
 
-    /// Pinch out past minimum zoom → the room; pinch in → back to the tank.
-    private func zoomGesture(toRoom: Bool) -> some Gesture {
-        MagnificationGesture()
-            .onEnded { value in
-                if toRoom && value < 0.72 {
-                    withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
-                } else if !toRoom && value > 1.35 {
-                    withAnimation(.easeOut(duration: 0.2)) { inRoom = false }
-                }
-            }
-    }
-
     private var tankScreen: some View {
-        ZStack(alignment: .top) {
-            TankScreen(session: session)
-                .ignoresSafeArea()
-            if let rect = session.inspected?.rect {
-                TrackingBox(rect: rect).ignoresSafeArea()
+        VStack(spacing: 0) {
+            topMenu
+            GeometryReader { geo in
+                let stage: GlassStage? = {
+                    guard session.deskGlass else { return nil }
+                    switch session.container {
+                    case .glass:
+                        return .tumbler(size: geo.size, zoom: session.glassZoom, pan: session.glassPan)
+                    case .sample(0):
+                        return .jar(size: geo.size, zoom: session.glassZoom, pan: session.glassPan)
+                    default:
+                        return nil
+                    }
+                }()
+                ZStack {
+                    if let stage {
+                        Color(red: 0.20, green: 0.14, blue: 0.10)
+                        GlassBackdrop(session: session, stage: stage)
+                            .frame(width: stage.crop.width, height: stage.crop.height)
+                            .clipped()
+                            .position(x: stage.crop.midX, y: stage.crop.midY)
+                    }
+                    TankScreen(session: session, waterHole: stage?.water)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                    if let rect = session.inspected?.rect {
+                        TrackingBox(rect: rect)
+                    }
+                    if let rect = session.selectionRect {
+                        SelectionBox(rect: rect)
+                    }
+                    if let state = session.inspected {
+                        VStack(alignment: .leading, spacing: 0) {
+                            InspectCard(
+                                state: state,
+                                onArchive: session.archiveInspected,
+                                onClose: session.closeInspect
+                            )
+                            .padding(6)
+                            .offset(x: cardHome.width + cardDrag.width, y: cardHome.height + cardDrag.height)
+                            .gesture(
+                                DragGesture(minimumDistance: 12)
+                                    .onChanged { cardDrag = $0.translation }
+                                    .onEnded { value in
+                                        cardHome.width = min(max(cardHome.width + value.translation.width, -24), 180)
+                                        cardHome.height = min(max(cardHome.height + value.translation.height, -8), 520)
+                                        cardDrag = .zero
+                                    }
+                            )
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    if session.carriedCells > 0 {
+                        VStack {
+                            Spacer(minLength: 0)
+                            HStack(spacing: 6) {
+                                PixelPanel {
+                                    PixelLabel(text: "SAMPLE \(session.carriedCells)", scale: 1, color: Palette.highlight)
+                                }
+                                Button(action: session.discardBucket) {
+                                    PixelPanel { PixelLabel(text: "DUMP", scale: 1, color: Palette.dimPaper) }
+                                }
+                                .buttonStyle(.plain)
+                                .a11yButton("Dump sample", hint: "Throw away what you sampled")
+                            }
+                            .padding(.bottom, 6)
+                        }
+                    }
+                    if let hint = session.hint {
+                        VStack {
+                            Spacer()
+                            HintToast(text: hint)
+                            Spacer().frame(height: 24)
+                        }
+                        .animation(.easeOut(duration: 0.2), value: hint)
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        PixelPanel {
-                            PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 3)
-                        }
-                        PixelPanel {
-                            PixelLabel(
-                                text: String(format: "%.0f C", session.temperatureC),
-                                scale: 2,
-                                color: Palette.highlight
-                            )
-                        }
-                    }
-                    Spacer()
-                    slotButtons
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Button {
-                            withAnimation(.easeOut(duration: 0.2)) { inRoom = true }
-                        } label: {
-                            PixelLabel(text: "ROOM", scale: 2, color: Palette.highlight)
-                        }
-                        .buttonStyle(.plain)
-                        Button(action: session.toggleAlwaysDay) {
-                            PixelLabel(
-                                text: session.alwaysDay ? "ALWAYS DAY" : "DAY/NIGHT",
-                                scale: 2
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        HStack(spacing: 4) {
-                            Button { session.nudgeBaseTemp(-1) } label: {
-                                PixelLabel(text: "T-", scale: 2)
-                            }
-                            .buttonStyle(.plain)
-                            PixelLabel(text: String(format: "BASE %.0f", session.tBase), scale: 2)
-                            Button { session.nudgeBaseTemp(1) } label: {
-                                PixelLabel(text: "T+", scale: 2)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        HStack(spacing: 4) {
-                            Button { session.nudgeLight(-0.1) } label: {
-                                PixelLabel(text: "L-", scale: 2)
-                            }
-                            .buttonStyle(.plain)
-                            PixelLabel(text: String(format: "LIGHT %.0f%%", session.lightSlider * 100), scale: 2)
-                            Button { session.nudgeLight(0.1) } label: {
-                                PixelLabel(text: "L+", scale: 2)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        Button(action: session.toggleConsent) {
-                            PixelLabel(
-                                text: session.consent ? "STATS ON" : "STATS OFF",
-                                scale: 2
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        Button(action: session.toggleSwirl) {
-                            PixelLabel(
-                                text: session.swirl ? "SWIRL ON" : "SWIRL OFF",
-                                scale: 2
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        Button {
-                            session.magnifierPinned.toggle()
-                        } label: {
-                            PixelLabel(
-                                text: session.magnifierPinned ? "LENS PIN" : "LENS",
-                                scale: 2
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                ToolWheel(
-                    tool: $session.tool,
-                    brush: $session.brush,
-                    variant: $session.variant,
-                    fillLevel: $session.fillLevel,
-                    encloseOp: $session.encloseOp,
-                    onUndo: session.undo,
-                    onTopUp: session.topUp
-                )
-                .onChange(of: session.fillLevel) { _ in
-                    if session.tool == .fill {
-                        session.applyFillSlider()
-                    }
-                }
-                if session.carriedCells > 0 {
-                    HStack(spacing: 8) {
-                        PixelPanel {
-                            PixelLabel(text: "BUCKET \(session.carriedCells) CELLS  TAP TO POUR", scale: 2, color: Palette.highlight)
-                        }
-                        Button(action: session.discardBucket) {
-                            PixelPanel { PixelLabel(text: "DUMP", scale: 2, color: Palette.dimPaper) }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                if let state = session.inspected {
-                    InspectCard(
-                        state: state,
-                        onArchive: session.archiveInspected,
-                        onClose: session.closeInspect
-                    )
-                }
-                Spacer()
-            }
-            .padding(10)
-            if let hint = session.hint {
-                VStack {
-                    Spacer()
-                    HintToast(text: hint)
-                    Spacer().frame(height: 80)
-                }
-                .animation(.easeOut(duration: 0.2), value: hint)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .background(Palette.panel)
+            bottomBar
         }
-        .simultaneousGesture(zoomGesture(toRoom: true))
+        .background(Palette.panel)
     }
 
-    private var slotButtons: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { i in
-                Button {
-                    session.selectSlot(i)
-                } label: {
-                    PixelPanel {
-                        PixelLabel(
-                            text: "T\(i + 1)",
-                            scale: 2,
-                            color: session.slot == i
-                                ? Palette.highlight
-                                : Color(red: 0.7, green: 0.68, blue: 0.6)
-                        )
-                    }
-                }
-                .buttonStyle(.plain)
+    @State private var cardHome = CGSize.zero
+    @State private var cardDrag = CGSize.zero
+
+    private var clockLabel: String {
+        "\(session.isDay ? "DAY" : "NIGHT") \(session.dayNumber)"
+    }
+
+    private var topMenu: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 6) {
+                PixelLabel(text: clockLabel, scale: 1)
+                    .accessibilityLabel("\(session.isDay ? "Day" : "Night") \(session.dayNumber)")
+                PixelLabel(
+                    text: String(format: "%.0f C", session.temperatureC),
+                    scale: 1,
+                    color: Palette.highlight
+                )
+                .accessibilityLabel(String(format: "Tank temperature %.0f degrees", session.temperatureC))
+                Spacer(minLength: 4)
             }
-            Button { session.newTank() } label: {
-                PixelPanel {
-                    PixelLabel(text: "NEW", scale: 2)
-                }
-            }
-            .buttonStyle(.plain)
+            ToolWheel(
+                tool: $session.tool,
+                brush: $session.brush,
+                variant: $session.variant,
+                strokeMode: $session.strokeMode
+            )
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.panel)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color(white: 0.35)).frame(height: 1)
+        }
+    }
+
+    private var inspecting: Bool {
+        session.tool == .needle || session.tool == .sample
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 0) {
+            if inspecting {
+                HStack(spacing: 3) {
+                    modeChip("INSPECT", on: session.tool == .needle) { session.tool = .needle }
+                    modeChip("SCOOP", on: session.tool == .sample) { session.tool = .sample }
+                }
+                .padding(.horizontal, 6)
+                .padding(.top, 4)
+            }
+            HStack(spacing: 3) {
+                barButton(
+                    session.playing ? "PAUSE" : "PLAY",
+                    icon: session.playing ? BarIcon.pause : BarIcon.play,
+                    on: session.playing
+                ) {
+                    if session.playing { session.pause() } else { session.unpauseFromEvent() }
+                }
+                barButton("INSPECT", icon: BuildTool.needle.icon, on: inspecting) {
+                    session.tool = inspecting ? .none : .needle
+                }
+                barButton("PHOTO", icon: BarIcon.photo, on: false) {
+                    showPhoto = true
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+        }
+        .frame(maxWidth: .infinity)
+        .background(Palette.panel)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color(white: 0.35)).frame(height: 1)
+        }
+    }
+
+    private func modeChip(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            PixelLabel(text: title, scale: 1, color: on ? Palette.highlight : Palette.dimPaper)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+                .background(on ? Color(white: 0.18) : Color(white: 0.08))
+                .overlay(Rectangle().stroke(on ? Palette.highlight : Color(white: 0.28), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .a11yButton(title, selected: on)
+    }
+
+    private func barButton(_ title: String, icon: [String], on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 1) {
+                PixelIcon(rows: icon, ink: on ? Palette.highlight : Color(red: 0.72, green: 0.68, blue: 0.58), scale: 2)
+                PixelLabel(
+                    text: title,
+                    scale: 1,
+                    color: on ? Palette.highlight : Color(red: 0.72, green: 0.68, blue: 0.58)
+                )
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 2)
+            .background(on ? Color(white: 0.2) : Color(white: 0.08))
+            .overlay(Rectangle().stroke(on ? Palette.highlight : Color(white: 0.28), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .a11yButton(title, selected: on)
+    }
+}
+
+/// The desk glass and the study around it, scaled together by the pinch.
+private struct GlassBackdrop: View {
+    @ObservedObject var session: TankSession
+    var stage: GlassStage
+    @State private var mood = RoomMood(
+        phase: RoomMood.phase(),
+        lampOn: RoomMood.storedLamp,
+        shelfOn: RoomMood.storedShelf,
+        candleLit: RoomMood.storedCandle
+    )
+    private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Image(uiImage: RoomArt.picture(session.roomCast, mood: mood))
+            .resizable()
+            .interpolation(.none)
+            .frame(width: CGFloat(RoomArt.w) * stage.s, height: CGFloat(RoomArt.h) * stage.s)
+            .position(
+                x: stage.picture.x - stage.crop.minX + CGFloat(RoomArt.w) * stage.s / 2,
+                y: stage.picture.y - stage.crop.minY + CGFloat(RoomArt.h) * stage.s / 2
+            )
+            .onReceive(clock) { date in
+                mood.phase = RoomMood.phase(at: date)
+                mood.lampOn = RoomMood.storedLamp
+                mood.shelfOn = RoomMood.storedShelf
+                mood.candleLit = RoomMood.storedCandle
+            }
+            .allowsHitTesting(false)
     }
 }

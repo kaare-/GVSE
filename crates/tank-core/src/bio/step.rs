@@ -25,7 +25,6 @@ use crate::hash::hash_u64;
 use crate::pixels::{CoarseField, PixelLayer};
 use crate::tank::SimEvent;
 
-const FILM_STUCK_AGE: u16 = 45;
 /// Lysis of a soft-litter *seat* (dry-air Organic cell) yields this much
 /// dissolved glucose; in water the dead leave pixel litter instead.
 const LITTER_GLUCOSE: u8 = 40;
@@ -46,7 +45,9 @@ pub struct BioStepResult {
 /// Share of a corpse's soft mass that drifts off as fines (Q8).
 pub const FINES_SHARE_Q8: u32 = 77; // 30 %
 /// Corpses settle one pixel per this many ticks.
-const CORPSE_SINK_EVERY: u64 = 2;
+/// Pixels a corpse drops per tick while the water under it is open.
+/// Faster than GvsE's slow settle (`vel_y` −0.15, then a 2400-tick rest).
+const CORPSE_SINK_PX: u16 = 3;
 /// Fungus-made soil is checked for this often (`fields::make_soil`).
 const SOIL_EVERY: u64 = 16;
 
@@ -126,6 +127,24 @@ pub mod ev {
     pub const COLOUR_CROWN: u32 = 27;
     /// Milestone: first colour crown.
     pub const MS_COLOUR_CROWN: u32 = 48;
+    /// Raw (Phase 5): a geometric eye — ≥2 light SENSOR cells around a
+    /// TRANSPARENT window with NERVE and a motor (arg0 = organism).
+    pub const EYE: u32 = 28;
+    /// Milestone: first eye.
+    pub const MS_EYE: u32 = 49;
+    /// Raw (Phase 5): a muscle-driven body swam ≥ 3 px (arg0 = organism).
+    pub const LOCOMOTION: u32 = 29;
+    /// Milestone: first locomotion.
+    pub const MS_LOCOMOTION: u32 = 50;
+    /// Raw (Phase 5): a swallowed organism left an eater alive (arg0 = prey org).
+    pub const ESCAPE: u32 = 30;
+    /// Milestone: first escape.
+    pub const MS_ESCAPE: u32 = 51;
+    /// Raw (Phase 5): a geometric mouth — hard walls + enzyme lining +
+    /// muscle opening enclosing water (arg0 = organism).
+    pub const CHAMBER: u32 = 31;
+    /// Milestone: first chamber / mouth.
+    pub const MS_CHAMBER: u32 = 52;
 }
 
 /// "Something moved" (§a.6): net cilia displacement over this window.
@@ -148,6 +167,7 @@ pub fn step(
     tick: u64,
     t_tank: f32,
     lambda_scale_q8: u32,
+    grav_x: f32,
 ) -> BioStepResult {
     genomes.set_tick(tick);
     let mut out = BioStepResult {
@@ -169,7 +189,7 @@ pub fn step(
         move_free_cell(cells, genomes, grid, pixels, world_seed, tick, id);
         metabolise(
             cells, genomes, grid, pixels, coarse, world_seed, tick, id, t_tank, lambda_scale_q8,
-            &mut out,
+            grav_x, &mut out,
         );
     }
     share_bond_energy(cells, genomes);
@@ -204,7 +224,7 @@ fn step_corpses(
     cells: &mut CellStore,
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
-    tick: u64,
+    _tick: u64,
     out: &mut BioStepResult,
 ) {
     let vis_h = grid.visible_h() as u32;
@@ -216,16 +236,23 @@ fn step_corpses(
             crumble_corpse(cells, pixels, id, out);
             continue;
         }
-        if c.film || tick % CORPSE_SINK_EVERY != 0 {
+        if c.film {
             continue;
         }
-        let below_py = c.py + c.h as u16;
-        if below_py as u32 >= pixels.h {
-            continue;
+        let mut py = c.py;
+        for _ in 0..CORPSE_SINK_PX {
+            let below_py = py + c.h as u16;
+            if below_py as u32 >= pixels.h {
+                break;
+            }
+            let (bx, by) = pixel_to_phys(c.px, below_py, vis_h);
+            if !grid.get_visible(bx, by).is_open() {
+                break;
+            }
+            py += 1;
         }
-        let (bx, by) = pixel_to_phys(c.px, below_py, vis_h);
-        if grid.get_visible(bx, by).is_open() {
-            let _ = cells.move_corpse(pixels, id, c.px, c.py + 1);
+        if py != c.py {
+            let _ = cells.move_corpse(pixels, id, c.px, py);
         }
     }
 }
@@ -275,11 +302,66 @@ pub fn pixel_to_phys(px: u16, py: u16, vis_h: u32) -> (i32, i32) {
     (vx, vy)
 }
 
+/// A plant may grow into air only while some cell of the body is a root
+/// sitting in solid ground. Free bodies stay in the water.
+fn org_is_rooted(cells: &CellStore, genomes: &GenomeStore, grid: &PhysicsGrid, org: u32) -> bool {
+    let Some(o) = cells.org(org) else {
+        return false;
+    };
+    let vis_h = grid.visible_h() as u32;
+    for s in o.slots.iter().filter(|s| s.cell != NONE) {
+        let Some(c) = cells.get(s.cell) else {
+            continue;
+        };
+        if genomes.coeffs(c.genotype, c.mode).uptake_water < 2 {
+            continue;
+        }
+        let (vx, vy) = pixel_to_phys(c.px, c.py, vis_h);
+        if !grid.get_visible(vx, vy).is_open() {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when shifting the body up by `dy` (negative) would put a cell in dry air.
+fn climb_would_leave_water(cells: &CellStore, grid: &PhysicsGrid, org_id: u32, dy: i32) -> bool {
+    let Some(o) = cells.org(org_id) else {
+        return false;
+    };
+    let vis_h = grid.visible_h() as u32;
+    o.slots.iter().filter(|s| s.cell != NONE).any(|s| {
+        let Some(c) = cells.get(s.cell) else {
+            return false;
+        };
+        let ny = c.py as i32 + dy;
+        if ny < 0 {
+            return true;
+        }
+        let (vx, vy) = pixel_to_phys(c.px, ny as u16, vis_h);
+        crate::humidity::is_air_cell(grid.get_visible(vx, vy))
+    })
+}
+
+/// True when the pixel row under this footprint is solid and not glass.
+fn supported_below(grid: &PhysicsGrid, px: u16, py: u16, h: u8) -> bool {
+    let vis_h = grid.visible_h() as u32;
+    let ph = vis_h.saturating_mul(crate::consts::PX_PER_CELL as u32);
+    let foot = py as u32 + h as u32;
+    if foot >= ph {
+        return true;
+    }
+    let (bx, by) = pixel_to_phys(px, py.saturating_add(h as u16), vis_h);
+    let below = grid.get_visible(bx, by);
+    !below.is_open() && !below.is_glass()
+}
+
 fn near_solid(grid: &PhysicsGrid, px: u16, py: u16) -> bool {
     let (vx, vy) = pixel_to_phys(px, py, grid.visible_h() as u32);
     for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
         let n = grid.get_visible(vx + dx, vy + dy);
-        if !n.is_open() {
+        // The pane is a window. Treating it as a bed let film coat the glass.
+        if !n.is_open() && !n.is_glass() {
             return true;
         }
     }
@@ -365,10 +447,6 @@ fn move_free_cell(
     if cell.film || cell.parent_cell != NONE {
         return;
     }
-    // A GLUE attachment holds the cell in its colony (bonds carry force).
-    if cell.glue_to != NONE {
-        return;
-    }
     // A root co-occupying moist sand/soil is static (§h.1).
     {
         let (vx, vy) = pixel_to_phys(cell.px, cell.py, grid.visible_h() as u32);
@@ -379,6 +457,13 @@ fn move_free_cell(
     }
     // Multi-cell bodies drift as a unit in `drift_bodies`.
     if cells.org_slot_count(cell.org) > 1 {
+        return;
+    }
+    // Kin glue holds two organisms together. The lower id drifts for
+    // both, so the pair sinks and swims as one instead of freezing in
+    // the column or being pinned to the glass.
+    let partner = cell.glue_to;
+    if partner != NONE && partner < id {
         return;
     }
     let g = genomes.genome(cell.genotype);
@@ -424,13 +509,21 @@ fn move_free_cell(
             }
         }
     } else {
-        let buoy_units = mc.buoy as i32 * 10;
-        let b = buoy as i32 + buoy_units;
+        // Genome buoy is a bias. Divide it down so a saved buoy of 20 does
+        // not climb every tick, then add a stable per-cell offset so a
+        // population occupies the column instead of the surface.
+        let personal = (hash_u64(world_seed, id as u64, 0xB0, 0x0B) % 11) as i32 - 5;
+        let bias = (buoy as i32 + mc.buoy as i32 * 4) / 4;
+        let b = (bias + personal).clamp(-6, 6);
         if in_water && b > 0 {
-            if h % 8 < (b as u64).clamp(0, 7) {
+            if h % 16 < b as u64 {
                 ny -= 1;
             }
-        } else if !in_water || b < 0 || h % 16 == 0 {
+        } else if in_water && b < 0 {
+            if h % 16 < (-b) as u64 {
+                ny += 1;
+            }
+        } else if !in_water || h % 24 == 0 {
             ny += 1;
         }
     }
@@ -438,12 +531,48 @@ fn move_free_cell(
     if solid_below && ny > cell.py as i32 {
         ny = cell.py as i32;
     }
+    // A free cell may ride the surface. It does not step up into dry air
+    // and hang there, and it does not keep dividing above the water.
+    // A swimmer that bumps the surface turns back into the water instead
+    // of sitting under the ceiling with its heading pointed at the air.
+    let mut bounced = false;
+    if ny < cell.py as i32 {
+        let (ax, ay) = pixel_to_phys(cell.px, ny.max(0) as u16, vis_h);
+        if crate::humidity::is_air_cell(grid.get_visible(ax, ay)) {
+            ny = cell.py as i32;
+            bounced = mc.cilia > 0;
+        }
+    }
     let pw = pixels.w as i32;
     let ph = pixels.h as i32;
     nx = nx.clamp(0, pw - cell.w as i32);
     ny = ny.clamp(0, ph - cell.h as i32);
+    if bounced && nx == cell.px as i32 && ny == cell.py as i32 {
+        if let Some(c) = cells.get_mut(id) {
+            c.heading = c.heading.wrapping_add(4) % 8;
+        }
+        return;
+    }
     if nx != cell.px as i32 || ny != cell.py as i32 {
+        let dx = nx - cell.px as i32;
+        let dy = ny - cell.py as i32;
+        if partner != NONE {
+            if let Some(other) = cells.get(partner) {
+                let ox = other.px as i32 + dx;
+                let oy = other.py as i32 + dy;
+                if ox < 0 || oy < 0 || ox + other.w as i32 > pw || oy + other.h as i32 > ph {
+                    return;
+                }
+            }
+        }
         let moved = cells.move_cell(pixels, id, nx as u16, ny as u16);
+        if moved && partner != NONE {
+            if let Some(other) = cells.get(partner) {
+                let ox = (other.px as i32 + dx).max(0) as u16;
+                let oy = (other.py as i32 + dy).max(0) as u16;
+                let _ = cells.move_cell(pixels, partner, ox, oy);
+            }
+        }
         if moved {
             if let Some((dx, dy)) = thrust {
                 if let Some(c) = cells.get_mut(id) {
@@ -471,12 +600,12 @@ fn thrust_period(units: u32, perimeter_px: u32) -> u64 {
     (TICK_HZ * perimeter_px as u64 / (THRUST_PX_S_NUM * units as u64)).max(1)
 }
 
-/// SENSOR (§a.4 #14). Light / chem: contrast between the far end of a ray
-/// along the heading (`8·units` px, stopped by anything occupying a
-/// pixel or by solid matter) and the cell's own footprint, `128 + (far −
-/// here)`; a ray blocked at its first pixel sees nothing (0). Touch:
-/// `touch × 64`.
+/// SENSOR (§a.4 #14 / §h.5). Light / chem: contrast along a heading ray.
+/// Touch: `touch × 64`. Colour: first owned cell's hue vs `sensor_hue`
+/// ring-match. Temp / humidity: local scalars. Gravity: |tilt| × 255.
 fn sensor_read(
+    cells: &CellStore,
+    genomes: &GenomeStore,
     pixels: &PixelLayer,
     grid: &PhysicsGrid,
     c: &crate::bio::CellRec,
@@ -484,10 +613,25 @@ fn sensor_read(
     here_light: u8,
     here_glucose: u8,
     touch: u8,
+    humidity: u8,
+    t_tank: f32,
+    grav_x: f32,
 ) -> u8 {
-    use crate::bio::profile::{SENSOR_CHEM, SENSOR_TOUCH};
-    if mc.sensor_kind == SENSOR_TOUCH {
-        return touch.saturating_mul(64);
+    use crate::bio::profile::{
+        SENSOR_CHEM, SENSOR_COLOUR, SENSOR_GRAVITY, SENSOR_HUMIDITY, SENSOR_TEMP, SENSOR_TOUCH,
+    };
+    use crate::bio::program::ring_match_q8;
+    match mc.sensor_kind {
+        SENSOR_TOUCH => return touch.saturating_mul(64),
+        SENSOR_TEMP => {
+            // 22 °C → 128; ±16 °C → edges.
+            return ((t_tank - 6.0) * (255.0 / 32.0)).clamp(0.0, 255.0) as u8;
+        }
+        SENSOR_HUMIDITY => return humidity,
+        SENSOR_GRAVITY => {
+            return (grav_x.abs().min(1.0) * 255.0) as u8;
+        }
+        _ => {}
     }
     let (dx, dy) = heading_delta(c.heading);
     // First pixel outside the footprint on the heading side, centred.
@@ -499,9 +643,45 @@ fn sensor_read(
     let pw = pixels.w as i32;
     let ph = pixels.h as i32;
     let vis_h = grid.visible_h() as u32;
-    let field = if mc.sensor_kind == SENSOR_CHEM { &pixels.glucose } else { &pixels.light };
-    let here = if mc.sensor_kind == SENSOR_CHEM { here_glucose } else { here_light } as i32;
     let len = 8 * mc.sensor as i32;
+    if mc.sensor_kind == SENSOR_COLOUR {
+        for _ in 0..len {
+            if x < 0 || y < 0 || x >= pw || y >= ph {
+                break;
+            }
+            let i = (y * pw + x) as usize;
+            let owner = pixels.owner[i];
+            if owner != EMPTY_OWNER {
+                if owner < OWNER_BIAS || secretion_kind(owner).is_some() {
+                    break;
+                }
+                let Some(seen) = cells.get(owner - OWNER_BIAS) else {
+                    break;
+                };
+                let rgb = genomes.coeffs(seen.genotype, seen.mode).colour;
+                let hue = rgb_to_hue(rgb[0], rgb[1], rgb[2]);
+                // Width 48 ≈ ±34° of a 256-hue circle — selective but not brittle.
+                return ring_match_q8(hue, mc.sensor_hue, 48);
+            }
+            let (vx, vy) = pixel_to_phys(x as u16, y as u16, vis_h);
+            if !grid.get_visible(vx, vy).is_open() {
+                break;
+            }
+            x += dx;
+            y += dy;
+        }
+        return 0;
+    }
+    let field = if mc.sensor_kind == SENSOR_CHEM {
+        &pixels.glucose
+    } else {
+        &pixels.light
+    };
+    let here = if mc.sensor_kind == SENSOR_CHEM {
+        here_glucose
+    } else {
+        here_light
+    } as i32;
     let mut far: Option<i32> = None;
     for _ in 0..len {
         if x < 0 || y < 0 || x >= pw || y >= ph {
@@ -523,6 +703,27 @@ fn sensor_read(
         None => 0,
         Some(f) => (128 + (f - here).clamp(-127, 127)) as u8,
     }
+}
+
+/// Coarse RGB → hue byte on a 256-circle (HSV-style).
+fn rgb_to_hue(r: u8, g: u8, b: u8) -> u8 {
+    let r = r as i32;
+    let g = g as i32;
+    let b = b as i32;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    if d == 0 {
+        return 0;
+    }
+    let h = if max == r {
+        ((g - b) * 43) / d
+    } else if max == g {
+        85 + ((b - r) * 43) / d
+    } else {
+        171 + ((r - g) * 43) / d
+    };
+    h.rem_euclid(256) as u8
 }
 
 /// Motor drive (§a.6, Q8): the CILIA gate contributes +1 when it passes;
@@ -571,7 +772,10 @@ fn body_env(cells: &CellStore, genomes: &GenomeStore, grid: &PhysicsGrid, org_id
             env.film = true;
             return Some(env);
         }
-        if near_solid(grid, c.px, c.py) {
+        // Resting means the footprint is sitting on sand, rock or the
+        // floor. A neighbour to the side, the pane, or the water surface
+        // does not freeze the body in the column.
+        if supported_below(grid, c.px, c.py, c.h) {
             env.touching = true;
         }
         if genomes.coeffs(c.genotype, c.mode).cilia > 0 {
@@ -638,6 +842,9 @@ fn drift_bodies(
         if all_water && h % 6 == 0 {
             dx = if (h >> 8) % 2 == 0 { 1 } else { -1 };
         }
+        if dy < 0 && climb_would_leave_water(cells, grid, org_id, dy) {
+            dy = 0;
+        }
         if dx != 0 || dy != 0 {
             let _ = cells.move_org(pixels, org_id, dx, dy);
         }
@@ -667,7 +874,7 @@ fn swim_bodies(
             continue;
         }
         let h = hash_u64(world_seed, tick, org_id as u64, 0xB2_D2);
-        body_thrust(cells, genomes, pixels, org_id, h);
+        body_thrust(cells, genomes, grid, pixels, org_id, h);
     }
 }
 
@@ -675,7 +882,14 @@ fn swim_bodies(
 /// own heading; adjacent running cilia cells beat in phase, thrust ×
 /// `(1 + 0.25·n_adjacent)` capped at ×2. The net vector moves the body
 /// one pixel along its dominant axis at the speed law's rate.
-fn body_thrust(cells: &mut CellStore, genomes: &GenomeStore, pixels: &mut PixelLayer, org_id: u32, h: u64) {
+fn body_thrust(
+    cells: &mut CellStore,
+    genomes: &GenomeStore,
+    grid: &PhysicsGrid,
+    pixels: &mut PixelLayer,
+    org_id: u32,
+    h: u64,
+) {
     let Some(o) = cells.org(org_id) else {
         return;
     };
@@ -725,6 +939,13 @@ fn body_thrust(cells: &mut CellStore, genomes: &GenomeStore, pixels: &mut PixelL
         return;
     }
     let seed = o.seed;
+    let mut dir = dir;
+    if dir.1 < 0 && climb_would_leave_water(cells, grid, org_id, dir.1) {
+        dir.1 = 0;
+        if dir.0 == 0 {
+            return;
+        }
+    }
     if cells.move_org(pixels, org_id, dir.0, dir.1) {
         if let Some(c) = cells.get_mut(seed) {
             c.moved_dx = c.moved_dx.saturating_add(dir.0 as i8);
@@ -746,6 +967,7 @@ fn metabolise(
     id: u32,
     t_tank: f32,
     lambda_scale_q8: u32,
+    grav_x: f32,
     out: &mut BioStepResult,
 ) {
     let Some(cell) = cells.get(id).copied() else {
@@ -783,7 +1005,20 @@ fn metabolise(
     };
     let sense = if mc.sensor > 0 {
         let here_glucose = (glucose_sum / area as u32).min(255) as u8;
-        sensor_read(pixels, grid, &cell, &mc, light_mean, here_glucose, touch)
+        sensor_read(
+            cells,
+            genomes,
+            pixels,
+            grid,
+            &cell,
+            &mc,
+            light_mean,
+            here_glucose,
+            touch,
+            humidity,
+            t_tank,
+            grav_x,
+        )
     } else {
         0
     };
@@ -1059,15 +1294,22 @@ fn metabolise(
             arg0: id,
         });
     }
-    if mc.cilia > 0 {
+    // Motor drive is shared by CILIA (thrust) and MUSCLE (spring rest).
+    if mc.cilia > 0 || mc.muscle > 0 {
         let mut avg = cell.link_avg;
         let drive = motor_drive(&mc, &scalars, &mut avg) > 0;
         if drive {
-            energy -= FP / 50 / TICK_HZ as i32 * mc.cilia as i32;
+            if mc.cilia > 0 {
+                energy -= FP / 50 / TICK_HZ as i32 * mc.cilia as i32;
+            }
+            if mc.muscle > 0 {
+                // Pay-per-use: ~0.05 g per full contraction / s → per tick.
+                energy -= FP / 20 / TICK_HZ as i32 * mc.muscle as i32;
+            }
         }
         if let Some(c) = cells.get_mut(id) {
             c.link_avg = avg;
-            if !drive {
+            if mc.cilia > 0 && !drive {
                 // Tumble: rotate 90° to a hash-chosen side, and keep
                 // turning each tick until some heading gives a drive.
                 let side = if hash_u64(world_seed, tick, id as u64, 0xB3_01) % 2 == 0 { 2 } else { 6 };
@@ -1132,6 +1374,7 @@ fn metabolise(
         c.sig = sig;
         c.hit = 0;
         c.warm = warm;
+        c.sense = sense;
     }
 
     // ---- develop: grow, transition, brood release, divide
@@ -1162,15 +1405,8 @@ fn metabolise(
         }
     }
 
-    // Stick to a wall / waterline → contribute film.
-    if age > FILM_STUCK_AGE
-        && cell.parent_cell == NONE
-        && near_solid(grid, cell.px, cell.py)
-        && pixels.film[idx] < 40
-    {
-        pixels.film[idx] = 40;
-    }
-
+    // Creatures used to paint the front pane here. That read as dirt on
+    // the glass, so the pane stays clear.
     if tick % 4 == (id as u64 % 4) && try_transition(cells, genomes, pixels, coarse, id, &scalars) {
         return;
     }
@@ -1214,7 +1450,7 @@ fn die(
     grid: &mut PhysicsGrid,
     pixels: &mut PixelLayer,
     id: u32,
-    age: u16,
+    _age: u16,
     tick: u64,
     out: &mut BioStepResult,
 ) {
@@ -1235,7 +1471,8 @@ fn die(
         let mass = structure as i32 + cell.energy.max(0);
         Some(corpse_split(mc, cell.area(), mass))
     };
-    let to_film = cell.film || age > FILM_STUCK_AGE && near_solid(grid, cell.px, cell.py);
+    // Dying against a surface used to leave a smear on the front pane.
+    let to_film = false;
     let fragments = cells.kill(genomes, pixels, id, to_film, tick, corpse);
     out.deaths += 1;
     out.events.push(SimEvent {
@@ -1421,8 +1658,9 @@ fn try_divide(
     // (§h.1). A propagule that finds a blocked seat tries the other sides.
     let vis_h = grid.visible_h() as u32;
     let child_preview = *genomes.coeffs(genotype, spec.mode);
+    let allow_air = org_is_rooted(cells, genomes, grid, cell.org);
     let seat_ok = |nx: i32, ny: i32| -> bool {
-        hydrate::seat_ok(grid, coarse, pixels, nx, ny, &child_preview)
+        hydrate::seat_ok(grid, coarse, pixels, nx, ny, &child_preview, allow_air)
     };
     let (dx, dy) = spec.dir.delta(cell.heading);
     let mut nx = cell.px as i32 + side_offset(dx, cell.w);
@@ -1974,5 +2212,30 @@ pub fn side_offset(d: i32, ext: u8) -> i32 {
         std::cmp::Ordering::Greater => ext as i32,
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
+    }
+}
+
+/// Pale-pink cilia fringe drawn just behind a cell (`long` is the beat
+/// frame: every other pixel trails one further). Coordinates may fall
+/// outside the tank; the caller clips.
+pub fn for_cilia_fringe(
+    px: i32,
+    py: i32,
+    w: u8,
+    h: u8,
+    heading: u8,
+    long: bool,
+    mut visit: impl FnMut(i32, i32),
+) {
+    let (bx, by) = heading_delta(heading.wrapping_add(4) % 8);
+    let n = if bx != 0 { h as i32 } else { w as i32 };
+    for k in 0..n {
+        let depth = if long && k % 2 == 1 { 2 } else { 1 };
+        let (x, y) = if bx != 0 {
+            (px + side_offset(bx, w) + bx * (depth - 1), py + k)
+        } else {
+            (px + k, py + side_offset(by, h) + by * (depth - 1))
+        };
+        visit(x, y);
     }
 }

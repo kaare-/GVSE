@@ -96,13 +96,13 @@ struct ArchivedSpecimen: Identifiable, Equatable {
     /// The archive page as one shareable image: portrait + text in the
     /// pixel font, 2× scale.
     func pageImage() -> UIImage {
-        let lines = page.split(separator: "\n").map(String.init)
+        let lines = page.split(separator: "\n").prefix(24).map { String($0.prefix(64)) }
         let scale: CGFloat = 2
         let textW = CGFloat(lines.map(\.count).max() ?? 0) * 6 * scale
         let portraitH = portrait?.size.height ?? 0
         let size = CGSize(
-            width: max(textW, portrait?.size.width ?? 0) + 32,
-            height: portraitH + CGFloat(lines.count) * 9 * scale + 48
+            width: max(max(textW, portrait?.size.width ?? 0) + 32, 32),
+            height: max(portraitH + CGFloat(lines.count) * 9 * scale + 48, 48)
         )
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1

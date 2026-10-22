@@ -5,13 +5,16 @@
 //! bone / shell secretions, cilia.
 #![allow(clippy::too_many_arguments)]
 
+pub mod bones;
 pub mod chem;
 pub mod fields;
 pub mod genome;
 pub mod hydrate;
 pub mod minerals;
+pub mod neural;
 pub mod profile;
 pub mod program;
+pub mod soft;
 pub mod species;
 pub mod step;
 pub mod store;

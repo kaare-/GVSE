@@ -1,149 +1,893 @@
+import Combine
 import SwiftUI
 
-/// The minimal room (Phase 3): a cosy pixel wall around the aquarium
-/// with the tree-of-life picture and the archive book. The fuse box,
-/// favourite frame and door sign are reserved spots until Phase 6. The
-/// sim keeps running; tapping the tank or pinching in goes back.
+/// The study. The picture is a low-res bitmap; the buttons sit on the
+/// painted objects and only the live bits (tree, fuse lamps, counts,
+/// portrait, door name) are drawn on top.
 struct RoomView: View {
     @ObservedObject var session: TankSession
     var onBack: () -> Void
     var onOpenBook: () -> Void
     var onOpenTree: () -> Void
+    var onOpenSettings: () -> Void
+    var onOpenLog: () -> Void
+    var onOpenCharts: () -> Void
+    var onOpenDeck: () -> Void
 
     @State private var tree: [SpeciesNode] = []
+    @State private var confirmEmpty: Int?
+    @State private var vines: [CGFloat] = [42, 6]
+    /// False while the scissors hang on the hook.
+    @State private var shearHeld = false
+    /// View point at the bottom edge of the scissors. That edge is the cut.
+    @State private var shearPoint: CGPoint = .zero
+    /// 1 open, 0 shut. Springs shut when the blades meet a vine.
+    @State private var shearSpread: CGFloat = 1
+    @State private var shearSnipped = false
+    @State private var thumbs: [UIImage?] = [nil, nil, nil, nil]
+    @State private var pinchEntered = false
+    @State private var skyPhase = RoomMood.phase()
+    @State private var lampOn = RoomMood.storedLamp
+    @State private var shelfOn = RoomMood.storedShelf
+    @State private var candleLit = RoomMood.storedCandle
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    private let skyClock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private var cast: RoomCast { session.roomCast }
+
+    private var roomMood: RoomMood {
+        RoomMood(phase: skyPhase, lampOn: lampOn, shelfOn: shelfOn, candleLit: candleLit)
+    }
 
     var body: some View {
         GeometryReader { geo in
+            let layout = RoomLayout(size: geo.size)
+            let cast = session.roomCast
             ZStack {
-                wall
-                VStack(spacing: 0) {
-                    Spacer(minLength: 24)
-                    HStack(alignment: .bottom, spacing: 18) {
-                        treePicture
-                        Spacer(minLength: 0)
-                        reserved("FUSE BOX")
-                    }
-                    .padding(.horizontal, 18)
-                    Spacer(minLength: 16)
-                    tankOnStand
-                    Spacer(minLength: 12)
-                    HStack(alignment: .bottom, spacing: 18) {
-                        book
-                        Spacer(minLength: 0)
-                        reserved("FRAME")
-                        reserved("DOOR SIGN")
-                    }
-                    .padding(.horizontal, 18)
-                    Spacer(minLength: geo.size.height * 0.14)
-                }
-            }
-        }
-        .onAppear { tree = session.speciesTree() }
-        .onReceive(refresh) { _ in tree = session.speciesTree() }
-    }
+                Color(red: 0.20, green: 0.14, blue: 0.10)
+                Image(uiImage: RoomArt.picture(cast, mood: roomMood))
+                    .resizable()
+                    .interpolation(.none)
+                    .frame(
+                        width: CGFloat(RoomArt.w) * layout.s,
+                        height: CGFloat(RoomArt.h) * layout.s
+                    )
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
 
-    private var wall: some View {
-        Canvas { ctx, size in
-            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Palette.wall))
-            let floorY = size.height * 0.82
-            ctx.fill(Path(CGRect(x: 0, y: floorY, width: size.width, height: size.height - floorY)), with: .color(Palette.floor))
-            ctx.fill(Path(CGRect(x: 0, y: floorY, width: size.width, height: 3)), with: .color(Color(white: 0.08)))
-            var x: CGFloat = 0
-            while x < size.width {
-                ctx.fill(Path(CGRect(x: x, y: floorY + 3, width: 2, height: size.height - floorY)), with: .color(Color(white: 0.06).opacity(0.5)))
-                x += 48
+                if cast.tank {
+                    glassThumb(thumbs[0], RoomArt.tankGlass, layout)
+                }
+                if cast.jarCount > 0 {
+                    ForEach(0..<cast.jarCount, id: \.self) { i in
+                        glassThumb(thumbs[i + 1], RoomArt.vialGlass(i), layout)
+                    }
+                }
+                vineLayer(layout)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                if cast.openingGlass {
+                    openingMote(layout)
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
+
+                place(RoomArt.treeHit, layout) { treeButton(layout) }
+                place(RoomArt.fuseHit, layout) { fuseButton(layout) }
+                if cast.tank {
+                    place(RoomArt.tank, layout) { tankButton }
+                }
+                if cast.jarCount > 0 {
+                    ForEach(0..<cast.jarCount, id: \.self) { i in
+                        place(RoomArt.vials[i], layout) { vialButton(i) }
+                    }
+                }
+                if cast.bench {
+                    place(RoomArt.bookHit, layout) { bookButton(layout) }
+                    place(RoomArt.logHit, layout) { logButton }
+                    place(RoomArt.crateHit, layout) { drawerButton }
+                    place(RoomArt.signHit, layout) { signButton }
+                }
+                place(RoomArt.deckHit, layout) { deckButton }
+                place(RoomArt.deckPower, layout) { deckPowerButton }
+                place(RoomArt.favHit, layout) { crateButton(layout) }
+                place(RoomArt.deskLampHit, layout) { deskLampControl }
+                place(RoomArt.shelfLamp, layout) { shelfLampControl }
+                place(RoomArt.candleHit, layout) { candleControl }
+                if cast.openingGlass {
+                    place(RoomArt.openingGlass, layout) { openingButton }
+                }
+                scissorsTool(layout)
             }
+            .coordinateSpace(name: "room")
+            .frame(width: geo.size.width, height: geo.size.height)
         }
         .ignoresSafeArea()
+        .onAppear {
+            tree = session.speciesTree()
+            vines = LobbyGrowth.catchUp()
+            refreshThumbs(others: true)
+            SystemCue.play(LobbyScript.opening.sound)
+        }
+        .onReceive(skyClock) { date in
+            skyPhase = RoomMood.phase(at: date)
+            let mood = RoomMood(phase: skyPhase, lampOn: lampOn, candleLit: candleLit)
+            AmbientAudio.shared.setCv([
+                Float(mood.sunPower) / 30,
+                mood.raining ? 1 : 0,
+                mood.lampOn ? 1 : 0,
+                mood.candleLit ? 1 : 0,
+                min(1, Float(session.liveCells) / 2_000),
+            ])
+            session.followPlaylist()
+        }
+        .onReceive(refresh) { _ in
+            tree = session.speciesTree()
+            refreshThumbs(others: false)
+        }
+        .onChange(of: session.savesChanged) { _ in
+            refreshThumbs(others: true)
+        }
+        .onChange(of: session.lobbyBeat) { _ in
+            refreshThumbs(others: true)
+        }
+        .confirmationDialog(
+            "Empty sample tank \((confirmEmpty ?? 0) + 1)? It goes back to a clean glass.",
+            isPresented: Binding(
+                get: { confirmEmpty != nil },
+                set: { if !$0 { confirmEmpty = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Empty tank", role: .destructive) {
+                if let i = confirmEmpty {
+                    session.emptySample(i)
+                    let g = RoomArt.vialGlass(i)
+                    thumbs[i + 1] = session.lobbyPreview(.sample(i), width: g.w, height: g.h)
+                }
+                confirmEmpty = nil
+            }
+        }
     }
 
-    private var tankOnStand: some View {
-        Button(action: onBack) {
-            VStack(spacing: 0) {
-                ZStack {
-                    Rectangle().fill(Color(white: 0.2))
-                    VStack(spacing: 6) {
-                        PixelLabel(text: "TANK \(session.slot + 1)", scale: 3, color: Palette.highlight)
-                        PixelLabel(text: session.isDay ? "DAY" : "NIGHT", scale: 2, color: Palette.dimPaper)
-                        PixelLabel(text: "\(session.liveCells) CELLS", scale: 2)
-                        PixelLabel(text: "TAP TO LOOK IN", scale: 1, color: Palette.dimPaper)
+    private func place<Content: View>(_ spot: RoomArt.Spot, _ layout: RoomLayout, @ViewBuilder _ content: () -> Content) -> some View {
+        let r = layout.rect(spot)
+        return content()
+            .frame(width: r.width, height: r.height)
+            .contentShape(Rectangle())
+            .position(x: r.midX, y: r.midY)
+    }
+
+    private func treeButton(_ layout: RoomLayout) -> some View {
+        let hit = layout.rect(RoomArt.treeHit)
+        let inner = layout.rect(RoomArt.treeInner)
+        let fit = min(inner.width / 180, inner.height / 120)
+        return Button(action: onOpenTree) {
+            ZStack(alignment: .topLeading) {
+                TreeOfLifeView(nodes: tree, compact: true)
+                    .scaleEffect(fit)
+                    .frame(width: inner.width, height: inner.height)
+                    .clipped()
+                    .offset(x: inner.minX - hit.minX, y: inner.minY - hit.minY)
+                VStack {
+                    Spacer(minLength: 0)
+                    PixelLabel(
+                        text: "TREE OF LIFE",
+                        scale: 1,
+                        color: Color(red: 0.16, green: 0.10, blue: 0.04)
+                    )
+                    .offset(y: layout.rect(RoomArt.treeFrame).maxY - hit.maxY)
+                }
+                .frame(width: hit.width, height: hit.height)
+            }
+        }
+        .buttonStyle(.plain)
+        .a11yButton("Tree of life")
+    }
+
+    /// The name on the bottom edge of the tree frame.
+    private var creatureName: String {
+        guard let fav = session.favouriteSpecimen else { return "" }
+        let raw = fav.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallback = fav.speciesName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let up = (raw.isEmpty ? fallback : raw).uppercased()
+        if up.isEmpty { return "" }
+        return up.count > 12 ? String(up.prefix(11)) + "." : up
+    }
+
+    private func fuseButton(_ layout: RoomLayout) -> some View {
+        let hit = layout.rect(RoomArt.fuseHit)
+        return Button(action: onOpenSettings) {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                ForEach(0..<3, id: \.self) { i in
+                    let lamp = RoomArt.fuseLamps[i]
+                    Circle()
+                        .fill(breakerOn(i) ? Color(red: 0.78, green: 1, blue: 0.35) : Color(white: 0.12))
+                        .overlay(Circle().stroke(Color(white: 0.75), lineWidth: 1))
+                        .frame(width: CGFloat(lamp.w) * layout.s, height: CGFloat(lamp.h) * layout.s)
+                        .position(
+                            x: (CGFloat(lamp.x - RoomArt.fuseHit.x) + CGFloat(lamp.w) / 2) * layout.s,
+                            y: (CGFloat(lamp.y - RoomArt.fuseHit.y) + CGFloat(lamp.h) / 2) * layout.s
+                        )
+                }
+                Color.clear.frame(width: hit.width, height: hit.height)
+            }
+        }
+        .buttonStyle(FullHit())
+        .a11yButton("Settings")
+    }
+
+    /// Sound, clock, and swirl. Off is a dark well; on is a bright lamp.
+    private func breakerOn(_ index: Int) -> Bool {
+        switch index {
+        case 0: return session.soundOn
+        case 1: return session.alwaysDay
+        default: return session.effectiveSwirl
+        }
+    }
+
+    private func enterGlass(_ open: () -> Void) {
+        guard !pinchEntered else { return }
+        pinchEntered = true
+        open()
+        onBack()
+    }
+
+    private var openingButton: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                MagnificationGesture().onChanged { scale in
+                    if scale > 1.18 { enterGlass { session.openGlass() } }
+                }
+            )
+            .accessibilityAction(named: "Look in") { enterGlass { session.openGlass() } }
+            .a11yButton("Glass of water", hint: "Pinch in to look into the glass")
+    }
+
+    /// A mote in the opening glass. It is not baked into the picture.
+    /// Coordinates match the centred picture, the same way the vines do.
+    private func openingMote(_ layout: RoomLayout) -> some View {
+        let g = RoomArt.openingWater
+        let s = layout.s
+        let waterX = CGFloat(g.x)
+        let waterY = CGFloat(g.y)
+        let waterW = CGFloat(g.w)
+        let waterH = CGFloat(g.h)
+        return TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            let x = (waterX + waterW * (0.5 + 0.22 * CGFloat(sin(t * 1.4)))) * s
+            let y = (waterY + waterH * (0.48 + 0.18 * CGFloat(cos(t * 0.9)))) * s
+            Rectangle()
+                .fill(Color(red: 0.42, green: 0.72, blue: 0.29))
+                .frame(width: max(s * 2, 2), height: max(s * 2, 2))
+                .position(x: x, y: y)
+        }
+        .frame(width: CGFloat(RoomArt.w) * s, height: CGFloat(RoomArt.h) * s)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private var tankButton: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                MagnificationGesture().onChanged { scale in
+                    if scale > 1.18 { enterGlass { session.openMain() } }
+                }
+            )
+            .accessibilityAction(named: "Look in") { enterGlass { session.openMain() } }
+            .a11yButton("Main tank, \(session.liveCells) cells", hint: "Pinch in to look into the main tank")
+    }
+
+    private func vialButton(_ index: Int) -> some View {
+        let open = session.container.sampleIndex == index
+        return VStack {
+            Spacer(minLength: 0)
+            PixelLabel(
+                text: "\(index + 1)",
+                scale: 1,
+                color: open ? Palette.highlight : Palette.paper
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .gesture(
+            MagnificationGesture().onChanged { scale in
+                if scale > 1.18 { enterGlass { session.openSample(index) } }
+            }
+        )
+        .accessibilityAction(named: "Look in") { enterGlass { session.openSample(index) } }
+        .a11yButton("Sample tank \(index + 1)", hint: "Pinch in to open this sample", selected: open)
+        .contextMenu {
+            Button("Empty tank \(index + 1)", role: .destructive) {
+                confirmEmpty = index
+            }
+        }
+    }
+
+    private func bookButton(_: RoomLayout) -> some View {
+        Button(action: onOpenBook) {
+            spineTitle("BOOK", color: Palette.paper)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .buttonStyle(.plain)
+        .a11yButton("Book", hint: "Archive, \(session.archive.specimens.count)")
+    }
+
+    /// Letters stacked down the spine.
+    private func spineTitle(_ word: String, color: Color) -> some View {
+        VStack(spacing: -1) {
+            ForEach(Array(word.enumerated()), id: \.offset) { _, character in
+                PixelLabel(text: String(character), scale: 1, color: color)
+            }
+        }
+    }
+
+    private var drawerButton: some View {
+        Button(action: onOpenCharts) {
+            Color.clear
+        }
+        .buttonStyle(FullHit())
+        .a11yButton("Filing cabinet", hint: "Charts")
+    }
+
+    private var deckButton: some View {
+        Button(action: onOpenDeck) {
+            Color.clear
+        }
+        .buttonStyle(FullHit())
+        .a11yButton("Cassette", hint: "Open the desk")
+    }
+
+    private var deckPowerButton: some View {
+        Button(action: session.toggleDeck) {
+            deckPowerFace
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .buttonStyle(.plain)
+        .a11yButton(session.tapePlaying ? "Deck power, on" : "Deck power, off")
+    }
+
+    @ViewBuilder
+    private var deckPowerFace: some View {
+        if let sheet = UIImage(named: "power") {
+            PixelStrip(image: sheet, frames: 2, frame: session.tapePlaying ? 1 : 0)
+        } else {
+            Rectangle()
+                .fill(session.tapePlaying
+                    ? Color(red: 0.22, green: 0.72, blue: 0.28)
+                    : Color(red: 0.78, green: 0.16, blue: 0.14))
+        }
+    }
+
+    private var logButton: some View {
+        Button(action: onOpenLog) {
+            spineTitle("LOG", color: Palette.paper)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .buttonStyle(.plain)
+        .a11yButton("Event log")
+    }
+
+    private func crateButton(_ layout: RoomLayout) -> some View {
+        let inner = layout.rect(RoomArt.favInner)
+        let hit = layout.rect(RoomArt.favHit)
+        return Button {
+            session.cycleFavourite()
+        } label: {
+            ZStack {
+                if let fav = session.favouriteSpecimen {
+                    let side = min(inner.width, inner.height)
+                    if side >= 4 {
+                        portrait(fav, side: side)
+                            .offset(y: inner.midY - hit.midY)
+                    }
+                } else {
+                    PixelLabel(text: "PICK", scale: 1, color: Palette.dimPaper)
+                        .offset(y: inner.midY - hit.midY)
+                }
+                VStack {
+                    Spacer(minLength: 0)
+                    if !creatureName.isEmpty {
+                        PixelLabel(
+                            text: creatureName,
+                            scale: 1,
+                            color: Color(red: 0.16, green: 0.10, blue: 0.04)
+                        )
+                        .fixedSize()
+                        .offset(y: layout.rect(RoomArt.favFrame).maxY - hit.maxY)
                     }
                 }
-                .frame(width: 220, height: 150)
-                .overlay(Rectangle().stroke(Color(white: 0.45), lineWidth: 3))
-                Rectangle().fill(Color(red: 0.3, green: 0.22, blue: 0.14)).frame(width: 240, height: 14)
-                HStack {
-                    Rectangle().fill(Color(red: 0.26, green: 0.18, blue: 0.11)).frame(width: 12, height: 44)
-                    Spacer()
-                    Rectangle().fill(Color(red: 0.26, green: 0.18, blue: 0.11)).frame(width: 12, height: 44)
+            }
+        }
+        .buttonStyle(.plain)
+        .a11yButton("Framed creature", hint: creatureName.isEmpty ? "Cycle the framed creature" : creatureName)
+        .contextMenu {
+            Button("Clear favourite") { session.clearFavourite() }
+        }
+    }
+
+    private var signButton: some View {
+        let name = session.doorName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shown = name.isEmpty ? "MAIN TANK" : shortSign(name)
+        return Button {
+            PixelPrompt.singleLine(title: "TANK", text: name, placeholder: "MAIN TANK") { entered in
+                session.setDoorName(entered)
+            }
+        } label: {
+            PixelLabel(
+                text: shown,
+                scale: 1,
+                color: Color(red: 0.16, green: 0.1, blue: 0.04)
+            )
+        }
+        .buttonStyle(FullHit())
+        .a11yButton("Tank sign", hint: shown)
+    }
+
+    private func scissorsTool(_ layout: RoomLayout) -> some View {
+        let s = layout.s
+        let h = scissorsHeight(s)
+        let hook = layout.rect(RoomArt.shearHook)
+        let x = shearHeld ? shearPoint.x : hook.midX
+        let y = shearHeld ? shearPoint.y - h / 2 : hook.midY
+        return scissorsGraphic(spread: shearSpread, s: s)
+            .frame(width: CGFloat(RoomArt.shearW) * s, height: h)
+            .contentShape(Rectangle())
+            .position(x: x, y: y)
+            .zIndex(2)
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("room"))
+                    .onChanged { value in
+                        shearHeld = true
+                        shearPoint = value.location
+                        let over = vineAt(value.location, layout: layout) != nil
+                        if over && !shearSnipped {
+                            withAnimation(.spring(response: 0.16, dampingFraction: 0.55)) {
+                                shearSpread = 0
+                            }
+                            _ = cutVines(at: value.location, layout: layout)
+                            shearSnipped = true
+                        } else if !over {
+                            shearSnipped = false
+                            withAnimation(.spring(response: 0.18, dampingFraction: 0.7)) {
+                                shearSpread = 1
+                            }
+                        }
+                    }
+                    .onEnded { value in
+                        let hookHit = layout.rect(RoomArt.shearHook).insetBy(dx: -18, dy: -18)
+                        if hookHit.contains(value.location) {
+                            shearHeld = false
+                            shearSnipped = false
+                            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                                shearSpread = 1
+                            }
+                            return
+                        }
+                        if vineAt(value.location, layout: layout) != nil, !shearSnipped {
+                            withAnimation(.spring(response: 0.16, dampingFraction: 0.55)) {
+                                shearSpread = 0
+                            }
+                            _ = cutVines(at: value.location, layout: layout)
+                        }
+                        shearPoint = value.location
+                        shearHeld = true
+                    }
+            )
+            .a11yButton(shearHeld ? "Scissors" : "Scissors on the hook", hint: "Drag them over a vine to cut. Drop them on the hook to hang them up")
+            .accessibilityAction(named: "Hang up") {
+                shearHeld = false
+                shearSpread = 1
+            }
+    }
+
+    /// The strip's last row is the blade tip. That row is the cut.
+    private func scissorsHeight(_ s: CGFloat) -> CGFloat { CGFloat(RoomArt.shearH) * s }
+
+    /// `spread` is 1 open and 0 shut. The frames live in `art/sprites/scissors.aseprite`.
+    private func scissorsGraphic(spread: CGFloat, s: CGFloat) -> some View {
+        let frames = 4
+        let index = Int(((1 - min(max(spread, 0), 1)) * CGFloat(frames - 1)).rounded())
+        return Group {
+            if let sheet = UIImage(named: "scissors") {
+                PixelStrip(image: sheet, frames: frames, frame: index)
+            }
+        }
+        .frame(width: CGFloat(RoomArt.shearW) * s, height: scissorsHeight(s))
+    }
+
+    /// Room pixel under the blade tip. The tip is the bottom edge of the scissors.
+    private func bladeRow(_ bottom: CGPoint, layout: RoomLayout) -> (x: CGFloat, y: Int) {
+        let s = layout.s
+        let x = (bottom.x - layout.origin.x) / s
+        let y = Int(floor((bottom.y - layout.origin.y) / s - 0.01))
+        return (x, y)
+    }
+
+    /// Index of the vine whose stem the bottom edge crosses.
+    private func vineAt(_ bottom: CGPoint, layout: RoomLayout) -> Int? {
+        let point = bladeRow(bottom, layout: layout)
+        for i in RoomArt.vines.indices {
+            let vine = RoomArt.vines[i]
+            let len = vines.indices.contains(i) ? Int(vines[i]) : 6
+            if vine.hangs {
+                if RoomArt.hangingHits(x: point.x, y: point.y, length: len) { return i }
+                continue
+            }
+            guard point.x >= CGFloat(vine.x) - 6, point.x <= CGFloat(vine.x) + 6 else { continue }
+            guard point.y < vine.y, point.y > vine.y - len else { continue }
+            return i
+        }
+        return nil
+    }
+
+    /// The bottom edge of the scissors is the cut. The stub that remains
+    /// is however much vine is above that edge.
+    private func cutVines(at bottom: CGPoint, layout: RoomLayout) -> Bool {
+        guard let i = vineAt(bottom, layout: layout) else { return false }
+        let cutY = bladeRow(bottom, layout: layout).y
+        let vine = RoomArt.vines[i]
+        let keep: Int
+        if vine.hangs {
+            keep = max(4, cutY - vine.y)
+        } else {
+            keep = max(4, vine.y - cutY)
+        }
+        vines[i] = LobbyGrowth.setLength(i, CGFloat(keep))
+        return true
+    }
+
+    private var deskLampControl: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { toggleLamp() }
+            .accessibilityAction(named: lampOn ? "Turn off" : "Turn on") { toggleLamp() }
+            .a11yButton(lampOn ? "Desk lamp, on" : "Desk lamp, off", hint: "Double tap to turn the light on or off")
+    }
+
+    private var shelfLampControl: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { toggleShelf() }
+            .accessibilityAction(named: shelfOn ? "Turn off" : "Turn on") { toggleShelf() }
+            .a11yButton(shelfOn ? "Shelf lamp, on" : "Shelf lamp, off", hint: "Double tap to turn the light on or off")
+    }
+
+    private var candleControl: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { toggleCandle() }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8).onEnded { value in
+                    if abs(value.translation.width) > 12 { blowOutCandle() }
                 }
-                .frame(width: 220)
-            }
-        }
-        .buttonStyle(.plain)
+            )
+            .accessibilityAction(named: candleLit ? "Put out" : "Light") { toggleCandle() }
+            .accessibilityAction(named: "Blow out") { blowOutCandle() }
+            .a11yButton(candleLit ? "Candle, lit" : "Candle", hint: "Double tap to light or put out. Swipe to blow it out")
     }
 
-    private var treePicture: some View {
-        Button(action: onOpenTree) {
-            VStack(spacing: 4) {
-                TreeOfLifeView(nodes: tree, compact: true)
-                    .overlay(Rectangle().stroke(Color(red: 0.5, green: 0.38, blue: 0.2), lineWidth: 4))
-                PixelLabel(text: "TREE OF LIFE", scale: 1, color: Palette.dimPaper)
-            }
-        }
-        .buttonStyle(.plain)
+    private func toggleLamp() {
+        lampOn.toggle()
+        UserDefaults.standard.set(lampOn, forKey: "lobbyLamp")
     }
 
-    private var book: some View {
-        Button(action: onOpenBook) {
-            VStack(spacing: 4) {
-                ZStack {
-                    Rectangle().fill(Color(red: 0.45, green: 0.2, blue: 0.14))
-                    Rectangle().fill(Color(red: 0.55, green: 0.26, blue: 0.18)).frame(width: 54, height: 72).offset(x: 4)
-                    PixelLabel(text: "\(session.archive.specimens.count)", scale: 2, color: Palette.highlight).offset(x: 4)
+    private func toggleShelf() {
+        shelfOn.toggle()
+        UserDefaults.standard.set(shelfOn, forKey: "lobbyShelfLamp")
+    }
+
+    private func toggleCandle() {
+        candleLit.toggle()
+        UserDefaults.standard.set(candleLit, forKey: "lobbyCandle")
+    }
+
+    private func blowOutCandle() {
+        guard candleLit else { return }
+        candleLit = false
+        UserDefaults.standard.set(false, forKey: "lobbyCandle")
+    }
+
+    @ViewBuilder
+    private func glassThumb(_ image: UIImage?, _ spot: RoomArt.Spot, _ layout: RoomLayout) -> some View {
+        if let image {
+            let r = layout.rect(spot)
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.none)
+                .frame(width: r.width, height: r.height)
+                .position(x: r.midX, y: r.midY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func roomInk(_ rgb: Int) -> Color {
+        Color(
+            red: Double((rgb >> 16) & 255) / 255,
+            green: Double((rgb >> 8) & 255) / 255,
+            blue: Double(rgb & 255) / 255
+        )
+    }
+
+    private func vineLayer(_ layout: RoomLayout) -> some View {
+        let s = layout.s
+        let bright = Color(red: 0.635, green: 0.839, blue: 0.435)
+        let leaf = Color(red: 0.424, green: 0.722, blue: 0.290)
+        let dark = Color(red: 0.18, green: 0.42, blue: 0.16)
+        return Canvas { ctx, _ in
+            for (i, vine) in RoomArt.vines.enumerated() {
+                let len = vines.indices.contains(i) ? vines[i] : 6
+                if vine.hangs {
+                    for dot in RoomArt.hangingPlant(length: max(1, Int(len))) {
+                        let rect = CGRect(
+                            x: CGFloat(dot.x) * s,
+                            y: CGFloat(dot.y) * s,
+                            width: max(s, 1),
+                            height: max(s, 1)
+                        )
+                        ctx.fill(Path(rect), with: .color(roomInk(dot.rgb)))
+                    }
+                    continue
                 }
-                .frame(width: 64, height: 80)
-                PixelLabel(text: "THE BOOK", scale: 1, color: Palette.dimPaper)
+                var x = CGFloat(vine.x)
+                var y = CGFloat(vine.y) + (vine.hangs ? min(len, 10) : 0)
+                let limit = vine.hangs
+                    ? min(CGFloat(RoomArt.floorY - 8), CGFloat(vine.y) + len)
+                    : max(2, CGFloat(vine.y) - len)
+                var step = 0
+                while vine.hangs ? y < limit : y > limit {
+                    let ink = step % 3 == 0 ? bright : leaf
+                    let rect = CGRect(x: x * s, y: y * s, width: max(s, 1), height: max(s * 2, 1))
+                    ctx.fill(Path(rect), with: .color(ink))
+                    if step % 3 == 0 {
+                        let leafX = vine.hangs ? x - 1 : x + 1
+                        let leafRect = CGRect(x: leafX * s, y: y * s, width: max(s, 1), height: max(s, 1))
+                        ctx.fill(Path(leafRect), with: .color(dark))
+                    }
+                    y += vine.hangs ? 2 : -2
+                    let sway = max(vine.sway, 1)
+                    x += (Int(y) / sway) % 2 == 0 ? 1 : -1
+                    if vine.hangs {
+                        x = min(CGFloat(14), max(CGFloat(2), x))
+                    } else {
+                        x = min(CGFloat(RoomArt.w - 2), max(1, x))
+                    }
+                    step += 1
+                }
             }
         }
-        .buttonStyle(.plain)
+        .frame(width: CGFloat(RoomArt.w) * s, height: CGFloat(RoomArt.h) * s)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
-    private func reserved(_ label: String) -> some View {
-        VStack(spacing: 4) {
-            Rectangle()
-                .stroke(Color(white: 0.3), style: StrokeStyle(lineWidth: 2, dash: [4, 4]))
-                .frame(width: 56, height: 56)
-                .overlay(PixelLabel(text: "SOON", scale: 1, color: Color(white: 0.35)))
-            PixelLabel(text: label, scale: 1, color: Color(white: 0.4))
+    private func refreshThumbs(others: Bool) {
+        let cast = session.roomCast
+        guard cast.tank || cast.jarCount > 0 else { return }
+        if cast.tank {
+            let glass = RoomArt.tankGlass
+            thumbs[0] = session.lobbyPreview(.main, width: glass.w, height: glass.h)
         }
+        guard cast.jarCount > 0 else { return }
+        if others {
+            for i in 0..<cast.jarCount {
+                let g = RoomArt.vialGlass(i)
+                thumbs[i + 1] = session.lobbyPreview(.sample(i), width: g.w, height: g.h)
+            }
+        } else if let i = session.container.sampleIndex, i < cast.jarCount {
+            let g = RoomArt.vialGlass(i)
+            thumbs[i + 1] = session.lobbyPreview(.sample(i), width: g.w, height: g.h)
+        }
+    }
+
+    private func shortSign(_ name: String) -> String {
+        let up = name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if up.isEmpty { return "????" }
+        return up.count > 10 ? String(up.prefix(9)) + "." : up
     }
 }
 
-/// Full-screen tree-of-life with names.
+/// Hits the whole frame, not only the opaque pixels of the label.
+private struct FullHit: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+    }
+}
+
+/// Vines lengthen while the app is closed. Nothing in the tank cares.
+private enum LobbyGrowth {
+    static func catchUp() -> [CGFloat] {
+        let now = Date().timeIntervalSince1970
+        let genKey = "lobbyVineGen"
+        let freshTrail = UserDefaults.standard.integer(forKey: genKey) < 2
+        var lengths: [CGFloat] = []
+        for i in 0..<RoomArt.vines.count {
+            let key = "lobbyVine\(i)"
+            let seenKey = "lobbySeen\(i)"
+            let seen = UserDefaults.standard.double(forKey: seenKey)
+            var len = UserDefaults.standard.double(forKey: key)
+            let hangs = RoomArt.vines[i].hangs
+            let cap = hangs ? 56.0 : 14.0
+            if seen <= 0, len <= 0 {
+                len = hangs ? 42 : 6
+            } else if seen > 0 {
+                len += max(0, now - seen) / 3600 * 2
+            }
+            if freshTrail, hangs { len = 42 }
+            len = min(cap, max(4, len))
+            UserDefaults.standard.set(len, forKey: key)
+            UserDefaults.standard.set(now, forKey: seenKey)
+            lengths.append(CGFloat(len))
+        }
+        if freshTrail { UserDefaults.standard.set(2, forKey: genKey) }
+        return lengths
+    }
+
+    static func setLength(_ index: Int, _ length: CGFloat) -> CGFloat {
+        let hangs = RoomArt.vines.indices.contains(index) && RoomArt.vines[index].hangs
+        let cap = hangs ? 56.0 : 14.0
+        let len = min(cap, max(4, Double(length)))
+        UserDefaults.standard.set(len, forKey: "lobbyVine\(index)")
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "lobbySeen\(index)")
+        return CGFloat(len)
+    }
+}
+
+/// Maps the 120×260 picture onto the phone, letterboxed, nearest pixel.
+private struct RoomLayout {
+    var s: CGFloat
+    var origin: CGPoint
+
+    init(size: CGSize) {
+        s = min(size.width / CGFloat(RoomArt.w), size.height / CGFloat(RoomArt.h))
+        origin = CGPoint(
+            x: (size.width - CGFloat(RoomArt.w) * s) / 2,
+            y: (size.height - CGFloat(RoomArt.h) * s) / 2
+        )
+    }
+
+    func rect(_ spot: RoomArt.Spot) -> CGRect {
+        CGRect(
+            x: origin.x + CGFloat(spot.x) * s,
+            y: origin.y + CGFloat(spot.y) * s,
+            width: CGFloat(spot.w) * s,
+            height: CGFloat(spot.h) * s
+        )
+    }
+}
+
+/// Full-screen tree-of-life with names. A tap opens the genetics card.
 struct TreeScreen: View {
     @ObservedObject var session: TankSession
     var onClose: () -> Void
 
     @State private var tree: [SpeciesNode] = []
+    @State private var picked: UInt16?
+    @State private var card = ""
+    @State private var portrait: UIImage?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Palette.panel.ignoresSafeArea()
-            TreeOfLifeView(nodes: tree)
-                .padding(.top, 44)
+            TreeOfLifeView(nodes: tree, onPick: { id in
+                picked = id
+                card = session.speciesCard(id)
+                portrait = session.speciesPortrait(id)
+            })
+            .padding(.top, 44)
+            VStack {
+                HStack {
+                    PixelLabel(text: "TREE OF LIFE  \(tree.count) SPECIES", scale: 2, color: Palette.highlight)
+                    Spacer()
+                    Button(action: onClose) {
+                        PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer()
+                if picked != nil {
+                    speciesCard
+                }
+            }
+            .padding(10)
+        }
+        .onAppear { tree = session.speciesTree() }
+        .preferredColorScheme(.dark)
+    }
+
+    private var speciesCard: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Group {
+                if let portrait {
+                    Image(uiImage: portrait)
+                        .interpolation(.none)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    Rectangle().fill(Color(white: 0.12))
+                }
+            }
+            .frame(width: 96, height: 96)
+            .background(Color(white: 0.12))
+            VStack(alignment: .leading, spacing: 2) {
+                let name = tree.first { $0.id == picked }?.name ?? ""
+                PixelLabel(text: name.uppercased(), scale: 2, color: Palette.highlight, maxWidth: 220)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(card.split(separator: "\n").enumerated()), id: \.offset) { _, line in
+                            PixelLabel(text: String(line), scale: 1, color: Palette.paper, maxWidth: 240)
+                        }
+                    }
+                }
+                .frame(maxHeight: 280)
+            }
+            Spacer(minLength: 0)
+            Button {
+                picked = nil
+            } label: {
+                PixelPanel { PixelLabel(text: "X", scale: 2) }
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(8)
+        .background(Palette.panel)
+        .overlay(Rectangle().stroke(Palette.highlight, lineWidth: 1))
+    }
+}
+
+/// Charts from the samples the open tank has been keeping.
+struct ChartDrawer: View {
+    @ObservedObject var session: TankSession
+    var onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                PixelLabel(text: "TREE OF LIFE  \(tree.count) SPECIES", scale: 2, color: Palette.highlight)
+                PixelLabel(text: "DRAWER", scale: 3, color: Palette.highlight)
                 Spacer()
                 Button(action: onClose) {
                     PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
                 }
                 .buttonStyle(.plain)
             }
-            .padding(10)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    chart("CREATURES", session.chart.map { Double($0.creatures) }, Palette.highlight)
+                    chart("LINEAGES", session.chart.map { Double($0.lineages) }, Palette.paper)
+                    chart("PREDATION", session.chart.map { Double($0.predation) }, Color(red: 0.7, green: 0.3, blue: 0.35))
+                    chart("PHOTOSYNTHESIS", session.chart.map { Double($0.photo) }, Color(red: 0.35, green: 0.62, blue: 0.32))
+                    chart("WATER", session.chart.map { Double($0.water) }, Color(red: 0.32, green: 0.55, blue: 0.7))
+                    chart("SAND", session.chart.map { Double($0.sand) }, Color(red: 0.72, green: 0.55, blue: 0.32))
+                    chart("STONE", session.chart.map { Double($0.stone) }, Color(red: 0.55, green: 0.52, blue: 0.48))
+                }
+            }
         }
-        .onAppear { tree = session.speciesTree() }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.panel.ignoresSafeArea())
         .preferredColorScheme(.dark)
+    }
+
+    private func chart(_ title: String, _ values: [Double], _ ink: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            let last = values.last.map { String(Int($0)) } ?? "0"
+            PixelLabel(text: "\(title)  \(last)", scale: 1, color: Palette.dimPaper)
+            Canvas { ctx, size in
+                let rect = CGRect(origin: .zero, size: size)
+                ctx.fill(Path(rect), with: .color(Color(white: 0.08)))
+                guard values.count >= 2 else { return }
+                let peak = max(values.max() ?? 1, 1)
+                var path = Path()
+                for (i, v) in values.enumerated() {
+                    let x = CGFloat(i) / CGFloat(values.count - 1) * size.width
+                    let y = size.height - CGFloat(v / peak) * (size.height - 2) - 1
+                    if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
+                }
+                ctx.stroke(path, with: .color(ink), lineWidth: 1)
+            }
+            .frame(height: 48)
+        }
     }
 }

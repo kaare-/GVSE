@@ -6,32 +6,166 @@ struct PixelLabel: View {
     let text: String
     var scale: CGFloat = 2
     var color: Color = Color(red: 0.93, green: 0.89, blue: 0.78)
+    /// Wrap on spaces once the line would pass this width. Keeps Dynamic
+    /// Type from clipping a one-line canvas off the phone.
+    var maxWidth: CGFloat? = nil
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var drawnScale: CGFloat {
+        let bump: CGFloat
+        if dynamicTypeSize.isAccessibilitySize {
+            bump = 1.35
+        } else if dynamicTypeSize >= .xxLarge {
+            bump = 1.12
+        } else {
+            bump = 1
+        }
+        return scale * bump
+    }
 
     var body: some View {
-        let width = CGFloat(text.count) * 6 * scale
+        let s = drawnScale
+        let advance = 6 * s
+        let glyphs = Array(text.unicodeScalars)
+        let columns: Int = {
+            let hardCap = 42
+            let raw: Int
+            if let maxWidth, maxWidth >= advance {
+                raw = Int(maxWidth / advance)
+            } else {
+                raw = glyphs.count
+            }
+            return min(hardCap, max(raw, 1))
+        }()
+        let laid = wrap(glyphs, columns: columns)
+        let widest = laid.map(\.count).max() ?? 1
+        let width = CGFloat(max(widest, 1)) * advance
+        let height = CGFloat(max(laid.count, 1)) * 8 * s
         Canvas { ctx, _ in
-            var pen: CGFloat = 0
-            for scalar in text.unicodeScalars {
-                let bits = tank_glyph(scalar.value)
-                for row in 0..<7 {
-                    let rowBits = UInt32((bits >> (row * 5)) & 0x1F)
-                    for col in 0..<5 {
-                        let on = (rowBits >> (4 - col)) & 1 == 1
-                        if !on { continue }
-                        let rect = CGRect(
-                            x: pen + CGFloat(col) * scale,
-                            y: CGFloat(row) * scale,
-                            width: scale,
-                            height: scale
-                        )
-                        ctx.fill(Path(rect), with: .color(color))
+            for (line, rowGlyphs) in laid.enumerated() {
+                for (col, scalar) in rowGlyphs.enumerated() {
+                    let bits = tank_glyph(scalar.value)
+                    let originX = CGFloat(col) * advance
+                    let originY = CGFloat(line) * 8 * s
+                    for row in 0..<7 {
+                        let rowBits = UInt32((bits >> (row * 5)) & 0x1F)
+                        for colPx in 0..<5 where (rowBits >> (4 - colPx)) & 1 == 1 {
+                            let rect = CGRect(
+                                x: originX + CGFloat(colPx) * s,
+                                y: originY + CGFloat(row) * s,
+                                width: s,
+                                height: s
+                            )
+                            ctx.fill(Path(rect), with: .color(color))
+                        }
                     }
                 }
-                pen += 6 * scale
             }
         }
-        .frame(width: max(width, 1), height: 7 * scale)
+        .frame(width: max(width, 1), height: max(height, 1), alignment: .topLeading)
         .accessibilityLabel(text)
+    }
+
+    /// Word-wrap. A single token longer than `columns` is split.
+    private func wrap(_ glyphs: [Unicode.Scalar], columns: Int) -> [[Unicode.Scalar]] {
+        if glyphs.isEmpty { return [[]] }
+        if glyphs.count <= columns { return [glyphs] }
+        let space = Unicode.Scalar(32)!
+        var lines: [[Unicode.Scalar]] = []
+        var line: [Unicode.Scalar] = []
+        var word: [Unicode.Scalar] = []
+        func flushWord() {
+            guard !word.isEmpty else { return }
+            if line.isEmpty {
+                if word.count <= columns {
+                    line = word
+                } else {
+                    var rest = word
+                    while rest.count > columns {
+                        lines.append(Array(rest.prefix(columns)))
+                        rest.removeFirst(columns)
+                    }
+                    line = rest
+                }
+            } else if line.count + 1 + word.count <= columns {
+                line.append(space)
+                line.append(contentsOf: word)
+            } else {
+                lines.append(line)
+                if word.count <= columns {
+                    line = word
+                } else {
+                    var rest = word
+                    line = []
+                    while rest.count > columns {
+                        lines.append(Array(rest.prefix(columns)))
+                        rest.removeFirst(columns)
+                    }
+                    line = rest
+                }
+            }
+            word = []
+        }
+        for scalar in glyphs {
+            if scalar == space {
+                flushWord()
+            } else {
+                word.append(scalar)
+            }
+        }
+        flushWord()
+        if !line.isEmpty { lines.append(line) }
+        if lines.isEmpty { return [[]] }
+        // A saved lineage can be thousands of names. An uncapped canvas
+        // crashes the book and the door sign.
+        let maxLines = 8
+        guard lines.count > maxLines else { return lines }
+        var trimmed = Array(lines.prefix(maxLines))
+        if var last = trimmed.last, !last.isEmpty {
+            last.removeLast()
+            last.append(contentsOf: "..".unicodeScalars)
+            trimmed[trimmed.count - 1] = last
+        }
+        return trimmed
+    }
+}
+
+extension View {
+    /// One VoiceOver name for a pixel control. The drawn glyphs stay visual.
+    func a11yButton(_ label: String, hint: String? = nil, selected: Bool = false) -> some View {
+        modifier(A11yButton(label: label, hint: hint, selected: selected))
+    }
+}
+
+private struct A11yButton: ViewModifier {
+    var label: String
+    var hint: String?
+    var selected: Bool
+
+    func body(content: Content) -> some View {
+        let traits: AccessibilityTraits = selected ? [.isButton, .isSelected] : .isButton
+        content
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label)
+            .accessibilityHint(hint ?? "")
+            .accessibilityAddTraits(traits)
+    }
+}
+
+/// Tank chrome stays as tall as its content so touches below it reach
+/// the tank. When Dynamic Type makes the HUD taller than the screen,
+/// it scrolls instead of clipping.
+struct ChromeScroll<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ViewThatFits(in: .vertical) {
+            content()
+            ScrollView(.vertical, showsIndicators: false) {
+                content()
+            }
+        }
     }
 }
 
@@ -59,10 +193,10 @@ extension GraphicsContext {
 }
 
 enum Palette {
-    static let paper = Color(red: 0.93, green: 0.89, blue: 0.78)
-    static let dimPaper = Color(red: 0.62, green: 0.6, blue: 0.54)
-    static let highlight = Color(red: 1, green: 0.92, blue: 0.7)
-    static let panel = Color(red: 0.09, green: 0.08, blue: 0.07)
+    static let paper = Color(red: 0.961, green: 0.910, blue: 0.796)
+    static let dimPaper = Color(red: 0.72, green: 0.68, blue: 0.58)
+    static let highlight = Color(red: 0.945, green: 0.824, blue: 0.482)
+    static let panel = Color(red: 0.161, green: 0.180, blue: 0.188)
     static let wall = Color(red: 0.16, green: 0.13, blue: 0.11)
     static let floor = Color(red: 0.24, green: 0.17, blue: 0.11)
     static let water = Color(red: 0.4, green: 0.7, blue: 0.9)

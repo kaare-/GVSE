@@ -12,12 +12,13 @@ struct InspectCard: View {
         PixelPanel {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    PixelLabel(text: state.speciesName.uppercased(), scale: 2, color: Palette.highlight)
+                    PixelLabel(text: state.speciesName.uppercased(), scale: 2, color: Palette.highlight, maxWidth: 220)
                     Spacer(minLength: 0)
                     Button(action: onClose) {
                         PixelLabel(text: "X", scale: 2)
                     }
                     .buttonStyle(.plain)
+                    .a11yButton("Close inspect")
                 }
                 PixelLabel(
                     text: state.alive ? "GEN \(state.generation)  CELLS \(state.orgCells)\(kinSuffix)" : "GONE",
@@ -48,10 +49,12 @@ struct InspectCard: View {
                         PixelPanel { PixelLabel(text: "ARCHIVE", scale: 2, color: Palette.highlight) }
                     }
                     .buttonStyle(.plain)
+                    .a11yButton("Archive creature")
                 }
             }
         }
         .frame(maxWidth: 300, alignment: .leading)
+        .accessibilityElement(children: .contain)
     }
 
     private var kinSuffix: String {
@@ -66,6 +69,8 @@ struct InspectCard: View {
             ctx.fill(Path(CGRect(x: 2, y: 2, width: w, height: size.height - 4)), with: .color(colour))
         }
         .frame(width: 160, height: 10)
+        .accessibilityElement()
+        .accessibilityLabel("Energy \(Int(state.energyFrac) * 100 / 255) percent")
     }
 
     private func seconds(_ ticks: UInt32) -> UInt32 { ticks / 30 }
@@ -87,6 +92,25 @@ func roman(_ n: UInt16) -> String {
         }
     }
     return out
+}
+
+/// Selection square held above the finger so the fingertip does not cover it.
+struct SelectionBox: View {
+    var rect: CGRect
+
+    var body: some View {
+        Canvas { ctx, _ in
+            ctx.stroke(Path(rect), with: .color(Palette.highlight), lineWidth: 2)
+            ctx.stroke(
+                Path(rect.insetBy(dx: 3, dy: 3)),
+                with: .color(Color.black.opacity(0.8)),
+                lineWidth: 1
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
 }
 
 /// Corner-marked rectangle that follows the inspected body.

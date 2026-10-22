@@ -74,7 +74,8 @@ impl PixelLayer {
             tile_active: vec![
                 0;
                 (w.div_ceil(crate::bio::fields::TILE as u32)
-                    * h.div_ceil(crate::bio::fields::TILE as u32)) as usize
+                    * h.div_ceil(crate::bio::fields::TILE as u32))
+                    as usize
             ],
             fields_active: false,
             lysis_fines: Vec::new(),
@@ -137,9 +138,9 @@ pub struct Flashlight {
 
 #[allow(clippy::too_many_arguments)]
 /// Column light at pixel resolution. Water loses 0.1 % per pixel row,
-/// solid matter ~55 % per physics cell, and living tissue shades what is
-/// below it (`tissue_pass(owner)` in Q8; PHOTO ≈ ×0.5 per pixel row).
-/// `cloud[x]` (per pixel column, Q8) multiplies the light entering it.
+/// the same in every column. Solids and glass are lit where they sit
+/// and do not darken the pixels under them, so the tank has no vertical
+/// shade lines. Cloudiness dims only the water of that column.
 pub fn rebuild_light(
     grid: &PhysicsGrid,
     pixels: &mut PixelLayer,
@@ -148,7 +149,6 @@ pub fn rebuild_light(
     light_slider: f32,
     flash: Option<Flashlight>,
     cloud_q8: &[u8],
-    tissue_pass: &dyn Fn(u32) -> u8,
 ) {
     let vis_h = grid.visible_h();
     let pw = pixels.w as usize;
@@ -178,35 +178,32 @@ pub fn rebuild_light(
                 incoming = (incoming * boost / 256).min(255 * 256);
             }
         }
-        if let Some(&c) = cloud_q8.get(px) {
-            incoming = incoming * c as u32 / 255;
-        }
-        let mut last_owner = 0u32;
-        let mut last_pass = 255u32;
+        // Side light for the bed. Nothing in the column paints a shaft:
+        // a creature, a rock, or a pane used to darken every pixel under
+        // it, and those streaks read as shadow columns rising off the tank.
+        let side = incoming / 256;
         for py in 0..ph {
             let vy_top = (py / PX_PER_CELL as usize) as i32;
-            let cell = grid.get_visible(vx, vis_h - 1 - vy_top);
+            let vy = vis_h - 1 - vy_top;
+            let cell = grid.get_visible(vx, vy);
             let i = py * pw + px;
-            pixels.light[i] = (incoming / 256).min(255) as u8;
-            let owner = pixels.owner[i];
-            if owner != 0 {
-                if owner != last_owner {
-                    last_owner = owner;
-                    last_pass = tissue_pass(owner) as u32;
-                }
-                incoming = incoming * last_pass / 256;
-            } else if cell.is_open() {
-                if cell.sat >= WATER_SAT_RENDER {
-                    incoming = incoming * 999 / 1000;
-                }
-            } else if cell.is_glass() {
-                // A pane loses ≈ 7 % per physics cell; a holding tank is
-                // not a shadow.
-                incoming = incoming * 250 / 256;
-            } else {
-                // 0.45 per physics cell ≈ 0.766 per pixel row.
-                incoming = incoming * 196 / 256;
+            let solid = !cell.is_open() && !cell.is_glass();
+            if solid {
+                pixels.light[i] = side.min(255) as u8;
+                continue;
             }
+            let mut lit = incoming / 256;
+            if cell.is_glass() {
+                lit = lit * 250 / 256;
+            }
+            // Water loses a little light with depth. The murk of fines is
+            // one veil for the whole tank: a per-column factor drew a dark
+            // shaft up through the water from whatever sat on the floor.
+            if cell.sat >= WATER_SAT_RENDER {
+                lit = lit * veil(cloud_q8) / 255;
+                incoming = incoming * 999 / 1000;
+            }
+            pixels.light[i] = lit.min(255) as u8;
         }
     }
 }
@@ -254,7 +251,7 @@ pub fn write_rgba(
                 // Milky haze over cloudy water columns, densest where the
                 // fines are (alpha ∝ 1 − cloud).
                 if cell.sat >= WATER_SAT_RENDER {
-                    let c = overlay.cloud_q8.get(px).copied().unwrap_or(255) as u32;
+                    let c = veil(overlay.cloud_q8);
                     if c < 250 {
                         let t = (255 - c) * 3 / 4;
                         let milk = [0xB8u32, 0xC4, 0xB0];
@@ -298,7 +295,10 @@ pub fn write_rgba(
             // Keyed-field haze on open pixels, in key-band colours (§a.4).
             if owner == 0 && pixels.fields_active {
                 let hazes = [
-                    (pixels.enzyme_amt[i], enzyme_band_colour(pixels.enzyme_key[i])),
+                    (
+                        pixels.enzyme_amt[i],
+                        enzyme_band_colour(pixels.enzyme_key[i]),
+                    ),
                     (pixels.toxin_amt[i], [0x7B, 0x3F, 0xA0]),
                     (pixels.signal_amt[i], [0x3B, 0xBF, 0xD3]),
                 ];
@@ -311,13 +311,8 @@ pub fn write_rgba(
                     }
                 }
             }
-            let film = pixels.film[i];
-            if film > 0 {
-                let t = film as u32;
-                r = ((r as u32 * (255 - t) + 150 * t) / 255) as u8;
-                g = ((g as u32 * (255 - t) + 190 * t) / 255) as u8;
-                b = ((b as u32 * (255 - t) + 120 * t) / 255) as u8;
-            }
+            // Front-pane film stays in the buffer for the swipe tool, but
+            // it is not drawn. It was the dirt on the glass.
             let o = i * 4;
             out[o] = r;
             out[o + 1] = g;
@@ -338,7 +333,6 @@ pub fn enzyme_band_colour(key: u8) -> [u8; 3] {
 }
 
 fn albedo(cell: Cell) -> [u8; 3] {
-    let v = cell.colour_variant() as usize;
     if cell.is_glass() {
         // Night dew fogs the pane toward white (Phase 4 condensation).
         let t = (cell.pad as i32) / 2;
@@ -346,13 +340,20 @@ fn albedo(cell: Cell) -> [u8; 3] {
     }
     if cell.is_open() {
         if cell.sat < WATER_SAT_RENDER {
-            return [0x1b, 0x24, 0x30];
+            // Lit air. The old near-black read as a hole in the glass.
+            return [0x6e, 0x8c, 0xa4];
         }
         let t = cell.sat as i32;
-        return [mix(0x16, 0x4c, t), mix(0x32, 0x93, t), mix(0x4f, 0xd4, t)];
+        // Deep #285F83 toward shallow #519FBE.
+        return [mix(0x28, 0x51, t), mix(0x5F, 0x9F, t), mix(0x83, 0xBE, t)];
     }
-    let (dry, wet) = palette(cell, v);
-    let t = cell.moisture() as i32;
+    // Sand and stone are one colour for the whole material. Wetness and
+    // the tone nib stay on the cell; they do not paint a second shade.
+    if is_flat_bed(cell) {
+        return palette(cell, 0).0;
+    }
+    let (dry, wet) = palette(cell, cell.colour_variant() as usize);
+    let t = render_wetness(cell);
     [
         mix(dry[0], wet[0], t),
         mix(dry[1], wet[1], t),
@@ -360,14 +361,43 @@ fn albedo(cell: Cell) -> [u8; 3] {
     ]
 }
 
+fn is_flat_bed(cell: Cell) -> bool {
+    matches!(
+        cell.id(),
+        wk_material::MaterialId::Sand
+            | wk_material::MaterialId::Stone
+            | wk_material::MaterialId::Limestone
+            | wk_material::MaterialId::Sandstone
+            | wk_material::MaterialId::Conglomerate
+            | wk_material::MaterialId::Flowstone
+            | wk_material::MaterialId::LooseRock
+            | wk_material::MaterialId::Gravel
+    )
+}
+
+/// Pore water is a fraction of capacity, not of 255, so a soaked sand
+/// grain reaches the wet palette instead of stopping a third of the way.
+/// Rock film is already stored on the 0–255 scale.
+fn render_wetness(cell: Cell) -> i32 {
+    let m = cell.moisture() as i32;
+    if cell.is_rock() {
+        return m.min(255);
+    }
+    let cap = crate::cell::water_capacity(cell.id()) as i32;
+    if cap <= 0 {
+        return 0;
+    }
+    (m * 255 / cap).min(255)
+}
+
 fn palette(cell: Cell, variant: usize) -> ([u8; 3], [u8; 3]) {
     match cell.id() {
         wk_material::MaterialId::Sand => {
             const SAND: [([u8; 3], [u8; 3]); 4] = [
-                ([0xc6, 0xa3, 0x6a], [0x7a, 0x62, 0x40]), // warm
-                ([0xd4, 0xc2, 0x8a], [0x8a, 0x78, 0x50]), // pale
-                ([0xb0, 0x7a, 0x4a], [0x6e, 0x4c, 0x30]), // red
-                ([0x9c, 0x90, 0x70], [0x5e, 0x56, 0x42]), // gray
+                ([0xc6, 0x9e, 0x68], [0xa8, 0x84, 0x50]), // warm
+                ([0xd8, 0xc4, 0x8c], [0xb0, 0x98, 0x68]), // pale
+                ([0xc4, 0x86, 0x52], [0x8e, 0x62, 0x3c]), // red
+                ([0xb0, 0xa4, 0x84], [0x78, 0x70, 0x58]), // gray
             ];
             SAND[variant.min(3)]
         }
@@ -377,10 +407,10 @@ fn palette(cell: Cell, variant: usize) -> ([u8; 3], [u8; 3]) {
         | wk_material::MaterialId::Conglomerate
         | wk_material::MaterialId::Flowstone => {
             const ROCK: [([u8; 3], [u8; 3]); 4] = [
-                ([0x7d, 0x7a, 0x74], [0x5c, 0x5a, 0x56]), // gray
-                ([0x8a, 0x7a, 0x68], [0x64, 0x56, 0x48]), // brown
-                ([0x6e, 0x78, 0x7a], [0x4e, 0x56, 0x58]), // blue-gray
-                ([0x90, 0x88, 0x80], [0x68, 0x62, 0x5c]), // pale
+                ([0x82, 0x77, 0x6a], [0x6a, 0x62, 0x58]), // warm stone
+                ([0xa0, 0x8c, 0x74], [0x80, 0x70, 0x5c]), // brown
+                ([0x86, 0x90, 0x92], [0x66, 0x70, 0x72]), // blue-gray
+                ([0xb0, 0xa6, 0x9a], [0x88, 0x80, 0x76]), // pale
             ];
             ROCK[variant.min(3)]
         }
@@ -409,3 +439,14 @@ fn mix(a: u8, b: u8, t: i32) -> u8 {
     let b = b as i32;
     (a + (b - a) * t / 255) as u8
 }
+
+/// One cloud factor for the whole glass. Fines still thicken the water,
+/// but a creature's column does not wear its own dark stripe.
+fn veil(cloud_q8: &[u8]) -> u32 {
+    if cloud_q8.is_empty() {
+        return 255;
+    }
+    let sum: u32 = cloud_q8.iter().map(|&c| c as u32).sum();
+    sum / cloud_q8.len() as u32
+}
+

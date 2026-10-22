@@ -1,4 +1,5 @@
 /target/
+/ios/build/
 **/*.rs.bk
 *.pdb
 
@@ -10,3 +11,7 @@ world_save.bin
 .idea/
 .vscode/
 GVSE/
+
+# Room preview (./tools/preview-room.sh)
+tools/.preview-room
+art/preview/

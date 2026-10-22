@@ -9,7 +9,10 @@ use crate::bio::{self, CellStore, Genome, GenomeStore};
 use crate::cell::Cell;
 use crate::clock::{self, day_factor};
 use crate::consts::{
-    MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H, PRESET_W, SAVE_VERSION, TISSUE_DAM_PIXELS,
+    GLASS_H, GLASS_W, JAR_H, JAR_W, MAIN_W, MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H,
+    PRESET_W,
+    PX_PER_CELL,
+    SAVE_VERSION, TISSUE_DAM_PIXELS,
 };
 use crate::grid::PhysicsGrid;
 use crate::hash::hash_bytes;
@@ -24,9 +27,6 @@ use crate::tools::{self, UndoFrame, UNDO_CAP};
 use wk_material::MaterialId;
 
 pub use crate::tools::ToolEvent;
-
-/// Light passing a corpse pixel (Q8): dead soft tissue, slightly murky.
-const CORPSE_PASS_Q8: u8 = 192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TankError {
@@ -178,6 +178,16 @@ pub enum ReleaseError {
     OutOfBounds,
 }
 
+/// A sugar or lime cube falling toward the bed. It is not part of the
+/// save: a save dissolves whatever is still in the air.
+#[derive(Clone, Copy)]
+struct FeedCube {
+    x: i16,
+    y: i16,
+    /// Tool kind: 10 sugar, 11 lime.
+    kind: u8,
+}
+
 pub struct Tank {
     seed: u64,
     tick_count: u64,
@@ -225,6 +235,12 @@ pub struct Tank {
     evaporated_sat: u64,
     /// Scoop bucket filled by enclosure "release" (kind 16 / op 3).
     pending_enclosure_bucket: Option<Carried>,
+    /// Phase 5 M0 soft-body state (ephemeral; rebuilt on topology change).
+    soft: bio::soft::SoftStore,
+    /// Phase 5 M2 StudioNet controllers (only for orgs with NERVE).
+    nets: bio::neural::NetStore,
+    /// Sugar and lime cubes in flight. One tap, one cube.
+    feed_cubes: Vec<FeedCube>,
 }
 
 impl Tank {
@@ -275,14 +291,26 @@ impl Tank {
             humidity_primed: false,
             evaporated_sat: 0,
             pending_enclosure_bucket: None,
+            soft: bio::soft::SoftStore::default(),
+            nets: bio::neural::NetStore::default(),
+            feed_cubes: Vec::new(),
         };
         tank.rebuild_light();
         Ok(tank)
     }
 
-    /// Empty tank with a thin sand bed — the "new tank" starting point.
+    /// Empty jar with a thin sand bed — the "new tank" starting point.
     pub fn empty(seed: u64) -> Self {
-        let mut tank = Self::try_new(seed, PRESET_W, PRESET_H).expect("preset size");
+        Self::with_bed(seed, PRESET_W, PRESET_H)
+    }
+
+    /// Empty main tank: three screens wide, same height and sand bed as a jar.
+    pub fn main_empty(seed: u64) -> Self {
+        Self::with_bed(seed, MAIN_W, PRESET_H)
+    }
+
+    fn with_bed(seed: u64, w: u32, h: u32) -> Self {
+        let mut tank = Self::try_new(seed, w, h).expect("tank size");
         let w = tank.grid.visible_w();
         let bed = 4;
         for vy in 0..bed {
@@ -295,40 +323,209 @@ impl Tank {
         tank
     }
 
+    /// Copy this tank into the middle of a wider one of the same height.
+    /// The shore on each side continues the edge column, without cloning
+    /// the creatures that happen to sit on that edge. Already-wide tanks
+    /// come back unchanged.
+    pub fn widened(mut self, new_visible_w: u32) -> Self {
+        let old_w = self.grid.visible_w() as u32;
+        let old_h = self.grid.visible_h() as u32;
+        if new_visible_w <= old_w || new_visible_w > MAX_VISIBLE_W || old_h > MAX_VISIBLE_H {
+            return self;
+        }
+        let Ok(mut wide) = Self::try_new(self.seed, new_visible_w, old_h) else {
+            return self;
+        };
+        wide.tick_count = self.tick_count;
+        wide.t_base = self.t_base;
+        wide.light_slider = self.light_slider;
+        wide.stored_heat = self.stored_heat;
+        wide.t_tank = self.t_tank;
+        wide.always_day = self.always_day;
+        wide.swirl = self.swirl;
+        wide.grav_x = self.grav_x;
+        wide.grav_y = self.grav_y;
+        wide.lambda_scale_q8 = self.lambda_scale_q8;
+        wide.milestones = self.milestones.clone();
+        wide.archive_roots = self.archive_roots.clone();
+        wide.death_causes = self.death_causes;
+        wide.cloudy_last = self.cloudy_last;
+        wide.humidity_primed = self.humidity_primed;
+        wide.evaporated_sat = self.evaporated_sat;
+        wide.events = std::mem::take(&mut self.events);
+
+        wide.feed_cubes = std::mem::take(&mut self.feed_cubes);
+        let dx = ((new_visible_w - old_w) / 2) as i32;
+        for cube in &mut wide.feed_cubes {
+            cube.x = cube.x.saturating_add(dx as i16);
+        }
+        let dx_px = dx * PX_PER_CELL as i32;
+        for vy in 0..old_h as i32 {
+            let left = shore_cell(self.grid.get_visible(0, vy));
+            let right = shore_cell(self.grid.get_visible(old_w as i32 - 1, vy));
+            for vx in 0..old_w as i32 {
+                wide.grid.set_visible(vx + dx, vy, self.grid.get_visible(vx, vy));
+            }
+            for vx in 0..dx {
+                wide.grid.set_visible(vx, vy, left);
+            }
+            for vx in (dx + old_w as i32)..(new_visible_w as i32) {
+                wide.grid.set_visible(vx, vy, right);
+            }
+        }
+
+        let old_pw = self.pixels.w as usize;
+        let new_pw = wide.pixels.w as usize;
+        let ph = self.pixels.h as usize;
+        let shift = dx_px as usize;
+        copy_plane(&self.pixels.owner, old_pw, &mut wide.pixels.owner, new_pw, shift, ph, false);
+        copy_plane(&self.pixels.film, old_pw, &mut wide.pixels.film, new_pw, shift, ph, false);
+        for (src, dst) in [
+            (&self.pixels.glucose, &mut wide.pixels.glucose),
+            (&self.pixels.waste, &mut wide.pixels.waste),
+            (&self.pixels.enzyme_amt, &mut wide.pixels.enzyme_amt),
+            (&self.pixels.enzyme_key, &mut wide.pixels.enzyme_key),
+            (&self.pixels.toxin_amt, &mut wide.pixels.toxin_amt),
+            (&self.pixels.toxin_key, &mut wide.pixels.toxin_key),
+            (&self.pixels.signal_amt, &mut wide.pixels.signal_amt),
+            (&self.pixels.signal_key, &mut wide.pixels.signal_key),
+            (&self.pixels.litter, &mut wide.pixels.litter),
+            (&self.pixels.litter_key, &mut wide.pixels.litter_key),
+            (&self.pixels.grit, &mut wide.pixels.grit),
+        ] {
+            copy_plane(src, old_pw, dst, new_pw, shift, ph, true);
+        }
+        copy_plane(&self.fines, old_pw, &mut wide.fines, new_pw, shift, 1, true);
+
+        let src_w = old_w as usize;
+        let dst_w = new_visible_w as usize;
+        let cell_shift = dx as usize;
+        copy_plane(
+            &self.coarse.minerals, src_w, &mut wide.coarse.minerals, dst_w, cell_shift, old_h as usize, true,
+        );
+        copy_plane(
+            &self.coarse.sediment, src_w, &mut wide.coarse.sediment, dst_w, cell_shift, old_h as usize, true,
+        );
+        copy_plane(
+            &self.coarse.digested, src_w, &mut wide.coarse.digested, dst_w, cell_shift, old_h as usize, true,
+        );
+        copy_plane(
+            &self.coarse.t_local, src_w, &mut wide.coarse.t_local, dst_w, cell_shift, old_h as usize, true,
+        );
+        copy_plane(
+            &self.coarse.humidity, src_w, &mut wide.coarse.humidity, dst_w, cell_shift, old_h as usize, true,
+        );
+
+        let mut cell_recs = self.cells.raw_cells().to_vec();
+        let mut org_recs = self.cells.raw_orgs().to_vec();
+        for c in &mut cell_recs {
+            c.px = (c.px as i32 + dx_px).clamp(0, u16::MAX as i32) as u16;
+        }
+        for o in &mut org_recs {
+            o.origin_x += dx_px;
+            for s in &mut o.secretions {
+                s.px = (s.px as i32 + dx_px).clamp(0, u16::MAX as i32) as u16;
+            }
+        }
+        wide.cells = CellStore::from_raw(cell_recs, org_recs);
+        wide.genomes = std::mem::replace(&mut self.genomes, GenomeStore::new());
+        bio::fields::rescan_tiles(&mut wide.pixels);
+        let (vw, vh) = (wide.grid.visible_w(), wide.grid.visible_h());
+        for vy in 0..vh {
+            for vx in 0..vw {
+                if wide.grid.get_visible(vx, vy).is_tissue() {
+                    wide.tissue_marks.push((vx, vy));
+                }
+            }
+        }
+        wide.light_dirty = true;
+        wide.rebuild_light();
+        wide.thermal_tau = thermal::ThermalMass::measure(&wide.grid, wide.cells.len()).tau_ticks();
+        wide
+    }
+
     /// Phone preset: sand bed, water, one static stone, a sand column.
     pub fn preset(seed: u64) -> Self {
         let mut tank = Self::try_new(seed, PRESET_W, PRESET_H).expect("preset size");
-        let w = tank.grid.visible_w();
-        let h = tank.grid.visible_h();
+        tank.dress_preset();
+        tank
+    }
+
+    /// The same starter aquarium, three screens wide.
+    pub fn main_preset(seed: u64) -> Self {
+        let mut tank = Self::try_new(seed, MAIN_W, PRESET_H).expect("main size");
+        tank.dress_preset();
+        tank
+    }
+
+    fn dress_preset(&mut self) {
+        let w = self.grid.visible_w();
+        let h = self.grid.visible_h();
         let sand_top = (h as f32 * 0.18) as i32;
         let water_top = (h as f32 * 0.55) as i32;
         for vy in 0..sand_top {
             for vx in 0..w {
-                tank.grid.set_visible(vx, vy, Cell::sand());
+                self.grid.set_visible(vx, vy, Cell::sand());
             }
         }
         for vy in sand_top..water_top {
             for vx in 0..w {
-                tank.grid.set_visible(vx, vy, Cell::water());
+                self.grid.set_visible(vx, vy, Cell::water());
             }
         }
         let stone_y = sand_top + 4;
-        if stone_y < h {
+        if stone_y < h && 16 < w {
             let mut stone = Cell::stone();
             stone.set_colour_variant(0);
-            tank.grid.set_visible(16, stone_y, stone);
+            self.grid.set_visible(16, stone_y, stone);
         }
         let cx = w / 2;
         for dy in 0..24 {
             let vy = water_top + dy;
             if vy < h - 1 {
-                tank.grid.set_visible(cx, vy, Cell::sand());
+                self.grid.set_visible(cx, vy, Cell::sand());
             }
         }
         // Seed one algae near the waterline, centre.
         let px = (w as u32 / 2) * 3;
         let py = ((h - water_top + 1) as u32) * 3;
+        let _ = self.seed_algae(px as u16, py as u16);
+        self.light_dirty = true;
+        self.rebuild_light();
+    }
+
+    /// A small glass of water and one starter creature. No sand, no stone.
+    /// Noon light, so the tumbler is not a dark tank.
+    pub fn glass(seed: u64) -> Self {
+        let mut tank = Self::try_new(seed, GLASS_W, GLASS_H).expect("glass size");
+        let w = tank.grid.visible_w();
+        let h = tank.grid.visible_h();
+        let water_top = (h as f32 * 0.78) as i32;
+        for vy in 0..water_top {
+            for vx in 0..w {
+                tank.grid.set_visible(vx, vy, Cell::water());
+            }
+        }
+        let px = (w as u32 / 2) * 3;
+        let py = ((h - water_top + 3) as u32) * 3;
         let _ = tank.seed_algae(px as u16, py as u16);
+        tank.light_dirty = true;
+        tank.rebuild_light();
+        tank
+    }
+
+    /// A shelf sample jar of water. Smaller than the tumbler. No sand, no stone,
+    /// no starter — it is a place to put a scoop.
+    pub fn jar(seed: u64) -> Self {
+        let mut tank = Self::try_new(seed, JAR_W, JAR_H).expect("jar size");
+        let w = tank.grid.visible_w();
+        let h = tank.grid.visible_h();
+        let water_top = (h as f32 * 0.78) as i32;
+        for vy in 0..water_top {
+            for vx in 0..w {
+                tank.grid.set_visible(vx, vy, Cell::water());
+            }
+        }
         tank.light_dirty = true;
         tank.rebuild_light();
         tank
@@ -449,6 +646,39 @@ impl Tank {
         self.cells.len()
     }
 
+    /// Numbers for the filing-cabinet charts. `photo` is the sum of
+    /// photosynthetic units on living cells.
+    pub fn census(&self) -> [u32; 6] {
+        let (w, h) = self.visible_size();
+        let mut water = 0u32;
+        let mut sand = 0u32;
+        let mut stone = 0u32;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let c = self.grid.get_visible(x, y);
+                if c.is_open() && c.sat > 40 {
+                    water += 1;
+                } else if c.id() == wk_material::MaterialId::Sand {
+                    sand += 1;
+                } else if c.is_rock() {
+                    stone += 1;
+                }
+            }
+        }
+        let mut photo = 0u32;
+        for (_, c) in self.cells.iter_alive() {
+            photo = photo.saturating_add(self.genomes.coeffs(c.genotype, c.mode).photo as u32);
+        }
+        [
+            self.live_cells() as u32,
+            self.genomes.visible_species() as u32,
+            water,
+            sand,
+            stone,
+            photo,
+        ]
+    }
+
     pub fn genotype_count(&self) -> usize {
         self.genomes.len()
     }
@@ -477,6 +707,141 @@ impl Tank {
         });
         self.light_dirty = true;
         Some(id)
+    }
+
+    /// Place the starter algae on an open pixel near `(vx, vy)`. Does not
+    /// clear the tank. `None` when the neighbourhood is solid or full.
+    fn seed_starter_near(&mut self, vx: i32, vy: i32) -> Option<u32> {
+        let vis_w = self.grid.visible_w();
+        let vis_h = self.grid.visible_h();
+        for r in 0..6i32 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if r > 0 && dx.abs() != r && dy.abs() != r {
+                        continue;
+                    }
+                    let x = vx + dx;
+                    let y = vy + dy;
+                    if x < 0 || y < 0 || x >= vis_w || y >= vis_h {
+                        continue;
+                    }
+                    if !self.grid.get_visible(x, y).is_open() {
+                        continue;
+                    }
+                    let px = (x as u32 * 3 + 1) as u16;
+                    let py_top = vis_h as u32 - 1 - y as u32;
+                    let py = (py_top * 3 + 1) as u16;
+                    if self.owner_at(px, py) != 0 {
+                        continue;
+                    }
+                    return self.seed_algae(px, py);
+                }
+            }
+        }
+        None
+    }
+
+    /// Drop cubes through air (two cells) and water (one cell). A solid
+    /// under the cube dissolves it into the feed that was already there.
+    fn step_feed_cubes(&mut self) {
+        let cubes = std::mem::take(&mut self.feed_cubes);
+        for mut cube in cubes {
+            let mut steps = 2;
+            let mut dissolved = false;
+            while steps > 0 {
+                let x = cube.x as i32;
+                let y = cube.y as i32;
+                let here = self.grid.get_visible(x, y);
+                let below_open = y > 0 && self.grid.get_visible(x, y - 1).is_air();
+                if !here.is_open() || !below_open {
+                    self.dissolve_cube(cube);
+                    dissolved = true;
+                    break;
+                }
+                let in_water = here.sat > 40;
+                cube.y -= 1;
+                steps -= 1;
+                if in_water {
+                    break;
+                }
+            }
+            if !dissolved {
+                self.feed_cubes.push(cube);
+            }
+        }
+    }
+
+    fn dissolve_feed_cubes(&mut self) {
+        let cubes = std::mem::take(&mut self.feed_cubes);
+        for cube in cubes {
+            self.dissolve_cube(cube);
+        }
+    }
+
+    fn dissolve_cube(&mut self, cube: FeedCube) {
+        let x = cube.x as i32;
+        let y = cube.y as i32;
+        if cube.kind == 11 {
+            self.add_calcium(x, y, 1, 96);
+            self.add_mineral_open(x, y, 96);
+        } else {
+            self.drip_glucose(x, y, 1, 180);
+        }
+    }
+
+    /// Lime that lands in air still leaves calcium in that cell.
+    fn add_mineral_open(&mut self, vx: i32, vy: i32, amount: u8) {
+        let w = self.grid.visible_w();
+        let h = self.grid.visible_h();
+        if vx < 0 || vy < 0 || vx >= w || vy >= h {
+            return;
+        }
+        if !self.grid.get_visible(vx, vy).is_open() {
+            return;
+        }
+        let i = (vy as usize) * (w as usize) + vx as usize;
+        if let Some(slot) = self.coarse.minerals.get_mut(i) {
+            *slot = slot.saturating_add(amount);
+        }
+    }
+
+    fn paint_feed_cubes(&self, out: &mut [u8]) {
+        let vis_h = self.grid.visible_h() as i32;
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        for cube in &self.feed_cubes {
+            let py0 = (vis_h - 1 - cube.y as i32) * 3;
+            let px0 = cube.x as i32 * 3;
+            let sugar = cube.kind != 11;
+            let body = if sugar { [0xF4, 0xF0, 0xE2] } else { [0xE2, 0xEC, 0xC0] };
+            let hi = if sugar { [0xFF, 0xFC, 0xF2] } else { [0xF4, 0xF8, 0xD8] };
+            let edge = if sugar { [0xC2, 0xB4, 0x96] } else { [0x8E, 0xA0, 0x70] };
+            for sy in 0..3 {
+                for sx in 0..3 {
+                    let x = px0 + sx;
+                    let y = py0 + sy;
+                    if x < 0 || y < 0 || x >= pw || y >= ph {
+                        continue;
+                    }
+                    let rgb = if sy == 0 && sx < 2 {
+                        hi
+                    } else if sx == 2 || sy == 2 {
+                        edge
+                    } else {
+                        body
+                    };
+                    let i = (y * pw + x) as usize;
+                    let li = self.pixels.light.get(i).copied().unwrap_or(255) as u32;
+                    let o = i * 4;
+                    if o + 3 >= out.len() {
+                        continue;
+                    }
+                    for k in 0..3 {
+                        out[o + k] = (rgb[k] as u32 * li / 255) as u8;
+                    }
+                }
+            }
+        }
     }
 
     /// Seed a cell whose mode targets `shape_w × shape_h` (growth tests).
@@ -1414,6 +1779,11 @@ impl Tank {
             return;
         }
         self.apply_tools(&input.tools);
+        // A paused stroke stays a silhouette. Play releases each connected
+        // stroke as one rock, then lets sugar and lime cubes sink.
+        crate::rocks::commit_silhouettes(&mut self.grid);
+        crate::rocks::step(&mut self.grid, self.tick_count);
+        self.step_feed_cubes();
         self.light_dirty = true;
         self.rebuild_light();
         // Thermal cycle (§4): base + solar heat + stored heat that carries
@@ -1458,6 +1828,20 @@ impl Tank {
             self.tick_count,
             t_tank,
             self.lambda_scale_q8 as u32,
+            self.grav_x,
+        );
+        let _soft_moved = bio::soft::step(
+            &mut self.soft,
+            &mut self.cells,
+            &self.genomes,
+            &self.grid,
+            &mut self.pixels,
+        );
+        let _nets = bio::neural::step(
+            &mut self.nets,
+            &mut self.cells,
+            &self.genomes,
+            self.seed,
         );
         for ev in &bio.events {
             self.events.push_back(*ev);
@@ -1564,8 +1948,15 @@ impl Tank {
             cell: u32::MAX,
             ..Inspect::default()
         };
-        if owner >= OWNER_BIAS {
-            let id = owner - OWNER_BIAS;
+        let living = if owner >= OWNER_BIAS && secretion_kind(owner).is_none() {
+            self.cells.get(owner - OWNER_BIAS).map(|_| owner - OWNER_BIAS)
+        } else {
+            None
+        };
+        // The pink cilia trail is drawn on empty water, so a tap there
+        // still belongs to the cell that beats it.
+        let id = living.or_else(|| self.cilia_at(px, py));
+        if let Some(id) = id {
             if let Some(c) = self.cells.get(id) {
                 let mc = self.genomes.coeffs(c.genotype, c.mode);
                 let g = self.genomes.genome(c.genotype);
@@ -1587,6 +1978,73 @@ impl Tank {
             }
         }
         rec
+    }
+
+    /// Empty open water, where a cilia fringe is allowed to draw.
+    fn bare_pixel(&self, x: i32, y: i32) -> bool {
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        if x < 0 || y < 0 || x >= pw || y >= ph {
+            return false;
+        }
+        if self.pixels.owner[(y * pw + x) as usize] != 0 {
+            return false;
+        }
+        let (vx, vy) = bio::pixel_to_phys(x as u16, y as u16, self.grid.visible_h() as u32);
+        self.grid.get_visible(vx, vy).is_open()
+    }
+
+    /// Living cell whose cilia fringe covers `(px, py)`, nearest body first.
+    fn cilia_at(&self, px: u32, py: u32) -> Option<u32> {
+        let px = px as i32;
+        let py = py as i32;
+        if !self.bare_pixel(px, py) {
+            return None;
+        }
+        let pw = self.pixels.w as i32;
+        let ph = self.pixels.h as i32;
+        let mut best: Option<(u32, i32)> = None;
+        let mut seen = [u32::MAX; 25];
+        let mut nseen = 0usize;
+        for y in (py - 2).max(0)..=(py + 2).min(ph - 1) {
+            for x in (px - 2).max(0)..=(px + 2).min(pw - 1) {
+                let owner = self.pixels.owner[(y * pw + x) as usize];
+                if owner < OWNER_BIAS || secretion_kind(owner).is_some() {
+                    continue;
+                }
+                let id = owner - OWNER_BIAS;
+                if seen[..nseen].contains(&id) {
+                    continue;
+                }
+                if nseen < seen.len() {
+                    seen[nseen] = id;
+                    nseen += 1;
+                }
+                let Some(c) = self.cells.get(id) else {
+                    continue;
+                };
+                if self.genomes.coeffs(c.genotype, c.mode).cilia == 0 {
+                    continue;
+                }
+                let mut hit = false;
+                let mut visit = |fx: i32, fy: i32| {
+                    if fx == px && fy == py {
+                        hit = true;
+                    }
+                };
+                bio::step::for_cilia_fringe(c.px as i32, c.py as i32, c.w, c.h, c.heading, false, &mut visit);
+                bio::step::for_cilia_fringe(c.px as i32, c.py as i32, c.w, c.h, c.heading, true, &mut visit);
+                if !hit {
+                    continue;
+                }
+                let dist = (c.px as i32 - px).abs() + (c.py as i32 - py).abs();
+                match best {
+                    Some((_, d)) if dist >= d => {}
+                    _ => best = Some((id, dist)),
+                }
+            }
+        }
+        best.map(|(id, _)| id)
     }
 
     /// The lineage card of a living cell's organism.
@@ -1643,23 +2101,39 @@ impl Tank {
     }
 
     /// Pixel bounding box `(x0, y0, x1, y1)` (inclusive) of a living
-    /// organism's cells and secretions — the inspect tracking rectangle.
+    /// organism's cells, secretions, and cilia fringe — the inspect
+    /// tracking rectangle.
     pub fn org_bbox(&self, org: u32) -> Option<(u16, u16, u16, u16)> {
-        let o = self.cells.org(org)?;
-        let mut bb: Option<(u16, u16, u16, u16)> = None;
-        let mut add = |x0: u16, y0: u16, x1: u16, y1: u16| {
-            bb = Some(match bb {
+        fn enclose(bb: &mut Option<(u16, u16, u16, u16)>, x0: u16, y0: u16, x1: u16, y1: u16) {
+            *bb = Some(match *bb {
                 None => (x0, y0, x1, y1),
                 Some(b) => (b.0.min(x0), b.1.min(y0), b.2.max(x1), b.3.max(y1)),
             });
-        };
+        }
+        let o = self.cells.org(org)?;
+        let mut bb: Option<(u16, u16, u16, u16)> = None;
+        let pw = self.pixels.w;
+        let ph = self.pixels.h;
         for s in o.slots.iter().filter(|s| s.cell != bio::store::NONE) {
             if let Some(c) = self.cells.get(s.cell) {
-                add(c.px, c.py, c.px + c.w as u16 - 1, c.py + c.h as u16 - 1);
+                enclose(&mut bb, c.px, c.py, c.px + c.w as u16 - 1, c.py + c.h as u16 - 1);
+                if self.genomes.coeffs(c.genotype, c.mode).cilia > 0 {
+                    // Both beat frames, so the box covers the pink trail
+                    // whether the fringe is short or long this tick.
+                    let px = c.px as i32;
+                    let py = c.py as i32;
+                    let mut add_px = |x: i32, y: i32| {
+                        if x >= 0 && y >= 0 && (x as u32) < pw && (y as u32) < ph {
+                            enclose(&mut bb, x as u16, y as u16, x as u16, y as u16);
+                        }
+                    };
+                    bio::step::for_cilia_fringe(px, py, c.w, c.h, c.heading, false, &mut add_px);
+                    bio::step::for_cilia_fringe(px, py, c.w, c.h, c.heading, true, &mut add_px);
+                }
             }
         }
         for sec in &o.secretions {
-            add(sec.px, sec.py, sec.px, sec.py);
+            enclose(&mut bb, sec.px, sec.py, sec.px, sec.py);
         }
         bb
     }
@@ -1771,30 +2245,23 @@ impl Tank {
         for (_, c) in cells.iter_alive() {
             let mc = genomes.coeffs(c.genotype, c.mode);
             if mc.cilia > 0 {
-                let (bx, by) = bio::program::heading_delta(c.heading.wrapping_add(4) % 8);
                 let beat = c.running && (tick / 4) % 2 == 1;
-                let n = if bx != 0 { c.h } else { c.w } as i32;
-                for k in 0..n {
-                    // Every other pixel trails one further on the beat frame.
-                    let depth = if beat && k % 2 == 1 { 2 } else { 1 };
-                    let (x, y) = if bx != 0 {
-                        (c.px as i32 + bio::step::side_offset(bx, c.w) + bx * (depth - 1), c.py as i32 + k)
-                    } else {
-                        (c.px as i32 + k, c.py as i32 + bio::step::side_offset(by, c.h) + by * (depth - 1))
-                    };
-                    if x < 0 || y < 0 || x >= pw || y >= ph {
-                        continue;
-                    }
-                    let i = (y * pw + x) as usize;
-                    if self.pixels.owner[i] != 0 {
-                        continue;
-                    }
-                    let (vx, vy) = bio::pixel_to_phys(x as u16, y as u16, self.grid.visible_h() as u32);
-                    if !self.grid.get_visible(vx, vy).is_open() {
-                        continue;
-                    }
-                    put(out, i, [0xF0, 0xA6, 0xC0], self.pixels.light[i]);
-                }
+                let pink = bio::Block::Cilia.colour(0);
+                bio::step::for_cilia_fringe(
+                    c.px as i32,
+                    c.py as i32,
+                    c.w,
+                    c.h,
+                    c.heading,
+                    beat,
+                    |x, y| {
+                        if !self.bare_pixel(x, y) {
+                            return;
+                        }
+                        let i = (y * pw + x) as usize;
+                        put(out, i, pink, self.pixels.light[i]);
+                    },
+                );
             }
             if mc.sensor > 0 && mc.sensor_kind == bio::profile::SENSOR_LIGHT {
                 let (dx, dy) = bio::program::heading_delta(c.heading);
@@ -1809,6 +2276,7 @@ impl Tank {
                 }
             }
         }
+        self.paint_feed_cubes(out);
     }
 
     pub fn pixel_hash(&mut self) -> u64 {
@@ -1818,6 +2286,7 @@ impl Tank {
     }
 
     pub fn save_bytes(&mut self) -> Result<Vec<u8>, TankError> {
+        self.dissolve_feed_cubes();
         self.light_dirty = true;
         self.rebuild_light();
         let blob = SaveBlob {
@@ -1952,6 +2421,10 @@ impl Tank {
             genomes.on_birth(c.genotype);
         }
         tank.genomes = genomes;
+        // Older saves founded a species for every tuned algae. Fold those
+        // back into the parent so the tree is the body plans, not the drift.
+        tank.genomes.collapse_same_body_plan();
+        tank.genomes.cull_childless();
         tank.cells = CellStore::from_raw(blob.bio_cells, blob.orgs);
         tank.milestones = blob.milestones;
         tank.archive_roots = blob.archive_roots;
@@ -1984,7 +2457,14 @@ impl Tank {
     fn mark_tissue(&mut self) {
         for &(vx, vy) in &self.tissue_marks {
             let mut c = self.grid.get_visible(vx, vy);
+            // A drawn rock is bound so its cells stay one stone. Clearing
+            // that bit here let grain shatter it the tick it landed on a
+            // cell that had been tissue or rooted sand.
+            let rock = c.is_rigid() || c.is_silhouette();
             c.flags &= !(Cell::TISSUE | Cell::BOUND);
+            if rock {
+                c.flags |= Cell::BOUND;
+            }
             self.grid.set_visible(vx, vy, c);
         }
         self.tissue_marks.clear();
@@ -2059,8 +2539,6 @@ impl Tank {
             None
         };
         let cloud = self.cloud_q8();
-        let cells = &self.cells;
-        let genomes = &self.genomes;
         pixels::rebuild_light(
             &self.grid,
             &mut self.pixels,
@@ -2069,19 +2547,6 @@ impl Tank {
             self.light_slider,
             flash,
             &cloud,
-            &|owner| {
-                if owner < OWNER_BIAS {
-                    return 255;
-                }
-                if secretion_kind(owner).is_some() {
-                    return crate::consts::TISSUE_PASS_OTHER_Q8 as u8 / 2;
-                }
-                match cells.get(owner - OWNER_BIAS) {
-                    Some(c) => genomes.coeffs(c.genotype, c.mode).light_pass_q8,
-                    None if cells.corpse(owner - OWNER_BIAS).is_some() => CORPSE_PASS_Q8,
-                    None => 255,
-                }
-            },
         );
     }
 
@@ -2107,13 +2572,8 @@ impl Tank {
                 continue;
             }
             if tool.kind == 8 {
-                // Seed algae at a physics cell → pixel centre.
-                let px = tool.x as u32 * 3 + 1;
-                let py_phys = tool.y as u32;
-                let vis_h = self.grid.visible_h() as u32;
-                let py_top = vis_h.saturating_sub(1).saturating_sub(py_phys);
-                let py = py_top * 3 + 1;
-                let _ = self.seed_algae(px as u16, py as u16);
+                // One starter organism. A living tank keeps what it has.
+                let _ = self.seed_starter_near(tool.x as i32, tool.y as i32);
                 continue;
             }
             if tool.kind == 9 {
@@ -2121,14 +2581,13 @@ impl Tank {
                 let _ = self.remove_at(tool.x as i32, tool.y as i32, tool.r as i32);
                 continue;
             }
-            if tool.kind == 10 {
-                // Glucose drip into the dissolved field.
-                self.drip_glucose(tool.x as i32, tool.y as i32, tool.r as i32, 180);
-                continue;
-            }
-            if tool.kind == 11 {
-                // Calcium feed: raise the local mineral field (K2#1).
-                self.add_calcium(tool.x as i32, tool.y as i32, tool.r as i32, 96);
+            if tool.kind == 10 || tool.kind == 11 {
+                // One cube. It sinks, then joins the dissolved feed.
+                self.feed_cubes.push(FeedCube {
+                    x: tool.x as i16,
+                    y: tool.y as i16,
+                    kind: tool.kind,
+                });
                 continue;
             }
             if tool.kind == 12 {
@@ -2337,6 +2796,42 @@ impl Tank {
             self.light_dirty = true;
         }
         n
+    }
+}
+
+/// The edge column continued into the new margin: same sand and water,
+/// but not a phantom tissue dam from a creature sitting on that edge.
+fn shore_cell(mut cell: Cell) -> Cell {
+    cell.flags &= !(Cell::TISSUE | Cell::BOUND);
+    cell
+}
+
+fn copy_plane<T: Copy>(
+    src: &[T],
+    src_w: usize,
+    dst: &mut [T],
+    dst_w: usize,
+    dx: usize,
+    rows: usize,
+    fill_edges: bool,
+) {
+    if src_w == 0 || dst_w < dx + src_w {
+        return;
+    }
+    for y in 0..rows {
+        let s0 = y * src_w;
+        let d0 = y * dst_w;
+        dst[d0 + dx..d0 + dx + src_w].copy_from_slice(&src[s0..s0 + src_w]);
+        if fill_edges {
+            let left = src[s0];
+            let right = src[s0 + src_w - 1];
+            for x in 0..dx {
+                dst[d0 + x] = left;
+            }
+            for x in (dx + src_w)..dst_w {
+                dst[d0 + x] = right;
+            }
+        }
     }
 }
 

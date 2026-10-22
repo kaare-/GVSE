@@ -1,0 +1,1 @@
+Placeholder pixel creature. Not the final icon. Display name stays MakeAcreature; naming is still open (store doc naming-candidates.md).

@@ -1,14 +1,13 @@
 //! Phase 3 — the species layer over the genotype tree (`cell-language.md`
 //! §c.4, K3#1 / K4#3).
 //!
-//! A **species** is a connected subtree of genotypes that share a
-//! *structural signature* (what the body is made of and how it is built,
-//! ignoring numeric tuning) and lie within a *parametric distance* `D` of
-//! the species founder. A new species starts at the first genotype that
-//! breaks either rule. Names are a pure function of the tree: a stem from
-//! the seed mode's two dominant blocks, one marker syllable per structural
-//! feature the species added over its parent species, and a roman numeral
-//! for the species depth.
+//! A **species** is a connected subtree of genotypes that share a body
+//! plan (which blocks the body is made of). Shape and numeric tuning stay
+//! in the parent, so a cloud of starter algae is one row. A new species
+//! starts at the first genotype whose structural blocks differ. Names are
+//! a pure function of the tree: a stem from the seed mode's two dominant
+//! blocks, one marker syllable per structural feature the species added
+//! over its parent species, and a roman numeral for the species depth.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +18,14 @@ use crate::bio::program::{ChildKind, Detach};
 use crate::hash::hash_bytes;
 
 /// Parametric distance (Q8: 256 = 1.0) from the species founder beyond
-/// which a genotype founds a new species (§c.4 proposal `D = 1.5`).
+/// which a genotype used to found a new species (§c.4 proposal `D = 1.5`).
+/// Kept for the distance metric. Founding no longer splits on it: a
+/// genotype stays in its parent until the body plan changes, so a cloud
+/// of tuned starter algae does not fill the tree.
 pub const SPECIES_D_Q8: u32 = 384;
+/// Past this many *visible* species, a diverging genotype stays in its
+/// parent. Same-plan variants are collapsed and do not count.
+pub const SPECIES_CAP: usize = 1024;
 /// Blocks with fewer units than this are tuning, not structure.
 pub const STRUCTURAL_UNITS: u8 = 2;
 
@@ -44,6 +49,10 @@ pub struct SpeciesRec {
     /// Set by the archive; archived species are never pruned.
     #[serde(default)]
     pub archived: bool,
+    /// Folded into an ancestor with the same body plan. The slot may be
+    /// reused. Genotypes no longer point here.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 /// Modes reachable from `seed_mode`, BFS order (children first, then
@@ -70,6 +79,17 @@ pub fn reachable_modes(g: &Genome) -> Vec<u8> {
         i += 1;
     }
     order
+}
+
+/// Blocks the body is made of, across every reachable mode. Shape and
+/// numeric tuning are not part of it: two algae that differ only by a
+/// little buoyancy or a stretched cell share a plan.
+pub fn body_plan(g: &Genome) -> u32 {
+    let mut mask = 0u32;
+    for &mi in &reachable_modes(g) {
+        mask |= structural_blocks(&g.modes[mi as usize]);
+    }
+    mask
 }
 
 /// Bitmask of the blocks a mode expresses structurally (`units ≥ 2`).

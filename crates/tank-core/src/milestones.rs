@@ -65,6 +65,9 @@ pub struct Milestones {
     colour: Vec<ColourRec>,
     /// `(genotype, organisms of it that reached ≥ 2 cells)`.
     multicell: Vec<(u32, u16)>,
+    /// Prey organism ids currently enclosed in an eater's cavity (Phase 5 M4).
+    #[serde(default)]
+    swallowed: Vec<u32>,
 }
 
 /// What the detectors need from the tank besides the model.
@@ -129,11 +132,29 @@ impl Milestones {
                 ev::PREDATION => self.fire_once(ev::MS_PREDATION, e.arg0, out),
                 ev::POISON => self.fire_once(ev::MS_POISON, e.arg0, out),
                 ev::SIGNALLING => self.fire_once(ev::MS_SIGNALLING, e.arg0, out),
-                ev::MOVED => self.fire_once(ev::MS_MOVED, e.arg0, out),
+                ev::MOVED => {
+                    self.fire_once(ev::MS_MOVED, e.arg0, out);
+                    // Muscle-driven swim is locomotion (Phase 5).
+                    if !self.has_fired(ev::MS_LOCOMOTION) {
+                        if let Some(c) = cells.get(e.arg0) {
+                            if org_has_muscle(cells, genomes, c.org) {
+                                out.push_back(SimEvent {
+                                    kind: ev::LOCOMOTION,
+                                    arg0: c.org,
+                                });
+                                self.fire_once(ev::MS_LOCOMOTION, c.org, out);
+                            }
+                        }
+                    }
+                }
                 ev::WARM_BLOODED => self.fire_once(ev::MS_WARM_BLOODED, e.arg0, out),
                 ev::LIFE_ON_LAND => self.fire_once(ev::MS_LIFE_ON_LAND, e.arg0, out),
                 ev::CUTTING_TOOK_ROOT => self.fire_once(ev::MS_CUTTING_TOOK_ROOT, e.arg0, out),
                 ev::COLOUR_CROWN => self.fire_once(ev::MS_COLOUR_CROWN, e.arg0, out),
+                ev::EYE => self.fire_once(ev::MS_EYE, e.arg0, out),
+                ev::LOCOMOTION => self.fire_once(ev::MS_LOCOMOTION, e.arg0, out),
+                ev::ESCAPE => self.fire_once(ev::MS_ESCAPE, e.arg0, out),
+                ev::CHAMBER => self.fire_once(ev::MS_CHAMBER, e.arg0, out),
                 ev::HETEROTROPH => {
                     // A lineage living on glucose this many generations deep.
                     let deep = cells
@@ -181,6 +202,25 @@ impl Milestones {
                     self.fire_once(ev::MS_COLOUR_CROWN, org, out);
                 }
             }
+            if !self.has_fired(ev::MS_EYE) {
+                if let Some(org) = geometric_eye(cells, genomes) {
+                    out.push_back(SimEvent {
+                        kind: ev::EYE,
+                        arg0: org,
+                    });
+                    self.fire_once(ev::MS_EYE, org, out);
+                }
+            }
+            if !self.has_fired(ev::MS_CHAMBER) {
+                if let Some(org) = geometric_mouth(cells, genomes) {
+                    out.push_back(SimEvent {
+                        kind: ev::CHAMBER,
+                        arg0: org,
+                    });
+                    self.fire_once(ev::MS_CHAMBER, org, out);
+                }
+            }
+            self.scan_escape(cells, genomes, out);
         }
 
         if tick % GLASS_EVERY == 0 && probe.film_len > 0 {
@@ -318,4 +358,246 @@ fn colour_crown(cells: &CellStore, genomes: &GenomeStore) -> Option<u32> {
         }
     }
     None
+}
+
+fn org_has_muscle(cells: &CellStore, genomes: &GenomeStore, org_id: u32) -> bool {
+    let Some(o) = cells.org(org_id) else {
+        return false;
+    };
+    o.slots.iter().any(|s| {
+        s.cell != crate::bio::store::NONE
+            && cells
+                .get(s.cell)
+                .map(|c| genomes.coeffs(c.genotype, c.mode).muscle > 0)
+                .unwrap_or(false)
+    })
+}
+
+/// Geometric eye (§d.6 / Phase 5 M3): a TRANSPARENT window with ≥2
+/// adjacent light-SENSOR cells on a body that also has NERVE and a motor.
+fn geometric_eye(cells: &CellStore, genomes: &GenomeStore) -> Option<u32> {
+    use crate::bio::profile::SENSOR_LIGHT;
+    for (org_id, o) in cells.iter_orgs() {
+        if o.n_alive < 3 {
+            continue;
+        }
+        let mut has_nerve = false;
+        let mut has_motor = false;
+        let mut windows: Vec<(u16, u16, u8, u8)> = Vec::new();
+        let mut sensors: Vec<(u16, u16, u8, u8)> = Vec::new();
+        for s in o.slots.iter().filter(|s| s.cell != crate::bio::store::NONE) {
+            let Some(c) = cells.get(s.cell) else {
+                continue;
+            };
+            let mc = genomes.coeffs(c.genotype, c.mode);
+            if mc.nerve > 0 {
+                has_nerve = true;
+            }
+            if mc.muscle > 0 || mc.cilia > 0 {
+                has_motor = true;
+            }
+            if mc.transparent > 0 {
+                windows.push((c.px, c.py, c.w, c.h));
+            }
+            if mc.sensor > 0 && mc.sensor_kind == SENSOR_LIGHT {
+                sensors.push((c.px, c.py, c.w, c.h));
+            }
+        }
+        if !has_nerve || !has_motor || windows.is_empty() || sensors.len() < 2 {
+            continue;
+        }
+        for &a in &windows {
+            let n = sensors.iter().filter(|&&b| footprints_touch(a, b)).count();
+            if n >= 2 {
+                return Some(org_id);
+            }
+        }
+    }
+    None
+}
+
+fn footprints_touch(a: (u16, u16, u8, u8), b: (u16, u16, u8, u8)) -> bool {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    let a1x = ax as i32 + aw as i32;
+    let a1y = ay as i32 + ah as i32;
+    let b1x = bx as i32 + bw as i32;
+    let b1y = by as i32 + bh as i32;
+    ax as i32 <= b1x && bx as i32 <= a1x && ay as i32 <= b1y && by as i32 <= a1y
+}
+
+/// Geometric mouth (§d.7 / Phase 5 M4): hard-walled body with living-band
+/// ENZYME lining and MUSCLE at an opening that encloses open water.
+fn geometric_mouth(cells: &CellStore, genomes: &GenomeStore) -> Option<u32> {
+    for (org_id, o) in cells.iter_orgs() {
+        if o.n_alive < 5 {
+            continue;
+        }
+        let mut hard: Vec<(u16, u16, u8, u8)> = Vec::new();
+        let mut has_enzyme = false;
+        let mut has_muscle = false;
+        for s in o.slots.iter().filter(|s| s.cell != crate::bio::store::NONE) {
+            let Some(c) = cells.get(s.cell) else {
+                continue;
+            };
+            let mc = genomes.coeffs(c.genotype, c.mode);
+            if mc.is_hard {
+                hard.push((c.px, c.py, c.w, c.h));
+            }
+            if mc.enzyme > 0 && (64..192).contains(&mc.enzyme_key) {
+                has_enzyme = true;
+            }
+            if mc.muscle > 0 {
+                has_muscle = true;
+            }
+        }
+        if !has_enzyme || !has_muscle || hard.len() < 4 {
+            continue;
+        }
+        if cavity_open_pixel(&hard).is_some() {
+            return Some(org_id);
+        }
+    }
+    None
+}
+
+/// An open-water pixel of the body's bbox that touches ≥ 2 hard footprints
+/// and is not itself covered by hard tissue — the cavity.
+fn cavity_open_pixel(hard: &[(u16, u16, u8, u8)]) -> Option<(i32, i32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for &(px, py, w, h) in hard {
+        x0 = x0.min(px as i32);
+        y0 = y0.min(py as i32);
+        x1 = x1.max(px as i32 + w as i32);
+        y1 = y1.max(py as i32 + h as i32);
+    }
+    // Probe the interior of the bbox for a free cell neighboured by hard walls.
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if hard.iter().any(|&(px, py, w, h)| {
+                x >= px as i32
+                    && x < px as i32 + w as i32
+                    && y >= py as i32
+                    && y < py as i32 + h as i32
+            }) {
+                continue;
+            }
+            let n = hard
+                .iter()
+                .filter(|&&(px, py, w, h)| {
+                    footprints_touch((x as u16, y as u16, 1, 1), (px, py, w, h))
+                })
+                .count();
+            if n >= 2 {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+impl Milestones {
+    /// Escape detector (§12): prey that was enclosed in an eater's cavity
+    /// and is now free (and alive) fires ESCAPE once.
+    fn scan_escape(
+        &mut self,
+        cells: &CellStore,
+        genomes: &GenomeStore,
+        out: &mut VecDeque<SimEvent>,
+    ) {
+        let now = swallowed_orgs(cells, genomes);
+        let prev = self.swallowed.clone();
+        for prey in prev {
+            if !now.contains(&prey) {
+                // Still alive and no longer enclosed ⇒ escaped.
+                if cells.org(prey).map(|o| o.alive && o.n_alive > 0).unwrap_or(false) {
+                    out.push_back(SimEvent {
+                        kind: ev::ESCAPE,
+                        arg0: prey,
+                    });
+                    self.fire_once(ev::MS_ESCAPE, prey, out);
+                }
+            }
+        }
+        self.swallowed = now;
+    }
+}
+
+type Footprint = (u16, u16, u8, u8);
+
+/// Prey orgs whose seed pixel sits in another org's hard-walled cavity.
+fn swallowed_orgs(cells: &CellStore, genomes: &GenomeStore) -> Vec<u32> {
+    let mut eaters: Vec<(u32, Vec<Footprint>)> = Vec::new();
+    for (org_id, o) in cells.iter_orgs() {
+        if o.n_alive < 4 {
+            continue;
+        }
+        let mut hard: Vec<Footprint> = Vec::new();
+        let mut enzyme = false;
+        for s in o.slots.iter().filter(|s| s.cell != crate::bio::store::NONE) {
+            let Some(c) = cells.get(s.cell) else {
+                continue;
+            };
+            let mc = genomes.coeffs(c.genotype, c.mode);
+            if mc.is_hard {
+                hard.push((c.px, c.py, c.w, c.h));
+            }
+            if mc.enzyme > 0 && (64..192).contains(&mc.enzyme_key) {
+                enzyme = true;
+            }
+        }
+        if enzyme && hard.len() >= 4 && cavity_open_pixel(&hard).is_some() {
+            eaters.push((org_id, hard));
+        }
+    }
+    if eaters.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (org_id, o) in cells.iter_orgs() {
+        if !o.alive || o.n_alive == 0 {
+            continue;
+        }
+        let Some(seed) = cells.get(o.seed) else {
+            continue;
+        };
+        let sx = seed.px as i32;
+        let sy = seed.py as i32;
+        for &(eater, ref hard) in &eaters {
+            if eater == org_id {
+                continue;
+            }
+            // Prey seed is inside the eater bbox and not on hard tissue,
+            // and touches ≥ 2 hard cells ⇒ in the cavity.
+            let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+            for &(px, py, w, h) in hard {
+                x0 = x0.min(px as i32);
+                y0 = y0.min(py as i32);
+                x1 = x1.max(px as i32 + w as i32);
+                y1 = y1.max(py as i32 + h as i32);
+            }
+            if sx < x0 || sy < y0 || sx >= x1 || sy >= y1 {
+                continue;
+            }
+            if hard.iter().any(|&(px, py, w, h)| {
+                sx >= px as i32
+                    && sx < px as i32 + w as i32
+                    && sy >= py as i32
+                    && sy < py as i32 + h as i32
+            }) {
+                continue;
+            }
+            let n = hard
+                .iter()
+                .filter(|&&(px, py, w, h)| {
+                    footprints_touch((sx as u16, sy as u16, 1, 1), (px, py, w, h))
+                })
+                .count();
+            if n >= 2 {
+                out.push(org_id);
+                break;
+            }
+        }
+    }
+    out
 }

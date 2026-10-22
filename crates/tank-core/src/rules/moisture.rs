@@ -15,7 +15,7 @@ pub fn apply(grid: &mut PhysicsGrid, active: &ActiveRect) {
     for y in active.y0..=active.y1 {
         for x in active.x0..=active.x1 {
             let cell = grid.get(x, y);
-            if !cell.is_rock() {
+            if !cell.is_rock() || cell.is_rigid() || cell.is_silhouette() {
                 continue;
             }
             let mut source = 0u8;
@@ -47,7 +47,7 @@ pub fn apply(grid: &mut PhysicsGrid, active: &ActiveRect) {
 fn neighbour_wetness(n: Cell) -> u8 {
     if n.is_air() {
         n.sat
-    } else if n.is_rock() {
+    } else if n.is_rock() && !n.is_rigid() && !n.is_silhouette() {
         n.pad
     } else {
         n.sat

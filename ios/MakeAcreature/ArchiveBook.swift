@@ -123,10 +123,18 @@ struct SpecimenPage: View {
     @State private var share = false
     @State private var confirmDelete = false
     @State private var confirmNewTank = false
-    @FocusState private var editing: Bool
+    @State private var confirmAdd = false
 
     private var dirty: Bool {
         name != specimen.displayName || notes != specimen.notes
+    }
+
+    /// Full program, the lines after the GENETICS marker on the page.
+    private var genetics: [String] {
+        guard let tail = specimen.page.components(separatedBy: "GENETICS\n").dropFirst().first else {
+            return []
+        }
+        return tail.split(separator: "\n").map { String($0) }.filter { !$0.isEmpty }
     }
 
     var body: some View {
@@ -158,32 +166,57 @@ struct SpecimenPage: View {
                     }
                 }
                 if !specimen.lineage.isEmpty {
-                    PixelLabel(text: specimen.lineage.uppercased(), scale: 1, color: Palette.dimPaper)
-                        .fixedSize(horizontal: false, vertical: true)
+                    PixelLabel(
+                        text: String(specimen.lineage.uppercased().prefix(240)),
+                        scale: 1,
+                        color: Palette.dimPaper,
+                        maxWidth: 280
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                PixelLabel(text: "NAME", scale: 2, color: Palette.dimPaper)
-                TextField("", text: $name)
-                    .textFieldStyle(.plain)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(Palette.paper)
-                    .padding(6)
-                    .background(Color(white: 0.14))
-                    .focused($editing)
-                PixelLabel(text: "NOTES", scale: 2, color: Palette.dimPaper)
-                TextEditor(text: $notes)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(Palette.paper)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 90)
-                    .padding(4)
-                    .background(Color(white: 0.14))
-                    .focused($editing)
+                if !genetics.isEmpty {
+                    PixelLabel(text: "GENETICS", scale: 2, color: Palette.dimPaper)
+                    ForEach(Array(genetics.enumerated()), id: \.offset) { _, line in
+                        PixelLabel(text: line, scale: 1, color: Palette.paper, maxWidth: 280)
+                    }
+                }
+                Button {
+                    PixelPrompt.singleLine(title: "NAME", text: name, placeholder: "NAME") { entered in
+                        name = entered
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        PixelLabel(text: "NAME", scale: 2, color: Palette.dimPaper)
+                        PixelLabel(
+                            text: name.isEmpty ? "TAP TO NAME" : name.uppercased(),
+                            scale: 2,
+                            color: Palette.highlight,
+                            maxWidth: 260
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
+                Button {
+                    PixelPrompt.notes(text: notes) { entered in
+                        notes = entered
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        PixelLabel(text: "NOTES", scale: 2, color: Palette.dimPaper)
+                        PixelLabel(
+                            text: notes.isEmpty ? "TAP TO WRITE" : String(notes.uppercased().prefix(80)),
+                            scale: 1,
+                            color: Palette.paper,
+                            maxWidth: 260
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
                 if dirty {
                     Button {
                         if let edited = specimen.edited(name: name, notes: notes) {
                             session.archive.update(edited)
                         }
-                        editing = false
                         onBack()
                     } label: {
                         PixelPanel { PixelLabel(text: "SAVE PAGE", scale: 2, color: Palette.highlight) }
@@ -191,15 +224,63 @@ struct SpecimenPage: View {
                     .buttonStyle(.plain)
                 }
                 HStack(spacing: 10) {
-                    Button { confirmNewTank = true } label: {
-                        PixelPanel { PixelLabel(text: "NEW TANK FROM THIS", scale: 2) }
+                    Button {
+                        confirmNewTank.toggle()
+                    } label: {
+                        PixelPanel {
+                            PixelLabel(
+                                text: confirmNewTank ? "PICK A GLASS" : "NEW TANK FROM THIS",
+                                scale: 1,
+                                color: confirmNewTank ? Palette.highlight : Palette.paper
+                            )
+                        }
                     }
                     .buttonStyle(.plain)
                     Spacer()
-                    Button { confirmDelete = true } label: {
-                        PixelPanel { PixelLabel(text: "DELETE", scale: 2, color: Palette.dimPaper) }
+                    Button {
+                        if confirmDelete { onDelete() } else { confirmDelete = true }
+                    } label: {
+                        PixelPanel {
+                            PixelLabel(
+                                text: confirmDelete ? "CONFIRM DELETE" : "DELETE",
+                                scale: 1,
+                                color: Palette.dimPaper
+                            )
+                        }
                     }
                     .buttonStyle(.plain)
+                }
+                Button {
+                    confirmAdd.toggle()
+                } label: {
+                    PixelPanel {
+                        PixelLabel(
+                            text: confirmAdd ? "PICK A GLASS" : "ADD TO A TANK",
+                            scale: 1,
+                            color: confirmAdd ? Palette.highlight : Palette.paper
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
+                if confirmNewTank {
+                    VStack(alignment: .leading, spacing: 8) {
+                        replaceChoice("REPLACE MAIN", .main)
+                        HStack(spacing: 8) {
+                            replaceChoice("JAR 1", .sample(0))
+                            replaceChoice("JAR 2", .sample(1))
+                            replaceChoice("JAR 3", .sample(2))
+                        }
+                    }
+                }
+                if confirmAdd {
+                    VStack(alignment: .leading, spacing: 8) {
+                        addChoice("ADD TO MAIN", .main)
+                        HStack(spacing: 8) {
+                            addChoice("JAR 1", .sample(0))
+                            addChoice("JAR 2", .sample(1))
+                            addChoice("JAR 3", .sample(2))
+                        }
+                    }
                 }
             }
             .padding(12)
@@ -211,15 +292,28 @@ struct SpecimenPage: View {
         .sheet(isPresented: $share) {
             ShareSheet(items: [specimen.pageImage(), specimen.page])
         }
-        .confirmationDialog("Replace tank \(session.slot + 1) with a new tank seeded from this creature?", isPresented: $confirmNewTank, titleVisibility: .visible) {
-            Button("New tank", role: .destructive) {
-                session.newTank(from: specimen)
-                onBack()
-            }
+        .background(Palette.panel)
+        .ignoresSafeArea(.keyboard)
+    }
+
+    private func replaceChoice(_ title: String, _ target: TankContainer) -> some View {
+        Button {
+            session.newTank(from: specimen, into: target)
+            onBack()
+        } label: {
+            PixelPanel { PixelLabel(text: title, scale: 1, color: Palette.highlight) }
         }
-        .confirmationDialog("Remove this page from the book?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete", role: .destructive, action: onDelete)
+        .buttonStyle(.plain)
+    }
+
+    private func addChoice(_ title: String, _ target: TankContainer) -> some View {
+        Button {
+            session.addSpecimen(specimen, into: target)
+            onBack()
+        } label: {
+            PixelPanel { PixelLabel(text: title, scale: 1, color: Palette.paper) }
         }
+        .buttonStyle(.plain)
     }
 }
 

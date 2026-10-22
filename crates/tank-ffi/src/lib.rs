@@ -202,6 +202,58 @@ pub extern "C" fn tank_empty(seed: u64) -> *mut TankHandle {
 }
 
 #[no_mangle]
+pub extern "C" fn tank_main_empty(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::main_empty(seed),
+        rgba: Vec::new(),
+    }))
+}
+
+#[no_mangle]
+pub extern "C" fn tank_main_preset(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::main_preset(seed),
+        rgba: Vec::new(),
+    }))
+}
+
+/// The opening tumbler: water and one starter, small enough to see whole.
+#[no_mangle]
+pub extern "C" fn tank_glass(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::glass(seed),
+        rgba: Vec::new(),
+    }))
+}
+
+/// A shelf sample jar: water, smaller than the tumbler, no starter.
+#[no_mangle]
+pub extern "C" fn tank_jar(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::jar(seed),
+        rgba: Vec::new(),
+    }))
+}
+
+/// Place a narrower tank in the middle of `visible_w`. Returns 1 when
+/// the width changed. Jars stay on `tank_empty`; only the main glass
+/// asks for this.
+#[no_mangle]
+pub extern "C" fn tank_widen(handle: *mut TankHandle, visible_w: u32) -> u8 {
+    let Some(handle) = (unsafe { handle.as_mut() }) else {
+        return 0;
+    };
+    if handle.tank.visible_size().0 >= visible_w {
+        return 0;
+    }
+    let old = std::mem::replace(&mut handle.tank, Tank::empty(0));
+    let before = old.visible_size().0;
+    handle.tank = old.widened(visible_w);
+    handle.rgba.clear();
+    u8::from(handle.tank.visible_size().0 != before)
+}
+
+#[no_mangle]
 pub extern "C" fn tank_seed_algae(handle: *mut TankHandle, px: u32, py: u32) -> u32 {
     let Some(handle) = (unsafe { handle.as_mut() }) else {
         return u32::MAX;
@@ -517,8 +569,9 @@ pub extern "C" fn tank_species_count(handle: *const TankHandle) -> u32 {
     unsafe { handle.as_ref() }.map(|h| h.tank.species_count() as u32).unwrap_or(0)
 }
 
-/// Fill `out` with up to `cap` species nodes (id order, parents first);
-/// returns the total count so a second call can size the buffer.
+/// Fill `out` with up to `cap` saved species and their ancestors (id
+/// order, parents first). Unsaved life is omitted. Returns the total
+/// count so a second call can size the buffer.
 #[no_mangle]
 pub extern "C" fn tank_species_tree(handle: *const TankHandle, out: *mut SpeciesNodeRec, cap: u32) -> u32 {
     let Some(handle) = (unsafe { handle.as_ref() }) else {
@@ -531,6 +584,69 @@ pub extern "C" fn tank_species_tree(handle: *const TankHandle, out: *mut Species
         }
     }
     tree.len() as u32
+}
+
+/// Readable genetics card (UTF-8). Two-call sizing, like `tank_species_name`.
+#[no_mangle]
+pub extern "C" fn tank_species_card(handle: *const TankHandle, species: u16, buf: *mut u8, cap: u32) -> u32 {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    let page = handle.tank.species_page(species).unwrap_or_default();
+    write_str(&page, buf, cap)
+}
+
+/// Studio portrait of a species. Writes width and height, returns the
+/// RGBA byte count. `cap == 0` measures. One call per tap — it grows
+/// the founder.
+#[no_mangle]
+pub extern "C" fn tank_species_portrait(
+    handle: *const TankHandle,
+    species: u16,
+    w_out: *mut u16,
+    h_out: *mut u16,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    let Some((w, h, px)) = handle.tank.species_portrait(species) else {
+        return 0;
+    };
+    unsafe {
+        if !w_out.is_null() {
+            *w_out = w;
+        }
+        if !h_out.is_null() {
+            *h_out = h;
+        }
+        if !buf.is_null() && cap >= px.len() {
+            ptr::copy_nonoverlapping(px.as_ptr(), buf, px.len());
+        }
+    }
+    px.len()
+}
+
+/// Chart sample: live, visible species, water cells, sand, stone, photo units.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CensusRec {
+    pub live: u32,
+    pub species: u32,
+    pub water: u32,
+    pub sand: u32,
+    pub stone: u32,
+    pub photo: u32,
+}
+
+#[no_mangle]
+pub extern "C" fn tank_census(handle: *const TankHandle) -> CensusRec {
+    let Some(handle) = (unsafe { handle.as_ref() }) else {
+        return CensusRec { live: 0, species: 0, water: 0, sand: 0, stone: 0, photo: 0 };
+    };
+    let c = handle.tank.census();
+    CensusRec { live: c[0], species: c[1], water: c[2], sand: c[3], stone: c[4], photo: c[5] }
 }
 
 #[no_mangle]
@@ -1094,9 +1210,16 @@ mod tests {
         let n = tank_species_name(handle, lin.species, name.as_mut_ptr(), 64);
         assert!(n > 0 && name[n as usize] == 0, "NUL-terminated name");
         assert!(std::str::from_utf8(&name[..n as usize]).unwrap().contains(' '));
-        // Species tree lists that species.
+        let living = tank_species_tree(handle, ptr::null_mut(), 0);
+        assert!(living >= 1, "living species are on the tree before anyone saves them");
+
+        // Archive it, inspect the record, seed a new tank from it.
+        let need = tank_specimen(handle, found.cell, ptr::null_mut(), 0);
+        assert!(need > 0);
+        let mut buf = vec![0u8; need];
+        assert_eq!(tank_specimen(handle, found.cell, buf.as_mut_ptr(), need), need);
         let count = tank_species_tree(handle, ptr::null_mut(), 0);
-        assert!(count >= 1);
+        assert!(count >= 1, "saving a creature puts its species on the tree");
         let mut nodes = vec![
             SpeciesNodeRec {
                 id: 0,
@@ -1117,13 +1240,7 @@ mod tests {
             count as usize
         ];
         assert_eq!(tank_species_tree(handle, nodes.as_mut_ptr(), count), count);
-        assert!(nodes.iter().any(|n| n.id == lin.species && n.live_cells > 0));
-
-        // Archive it, inspect the record, seed a new tank from it.
-        let need = tank_specimen(handle, found.cell, ptr::null_mut(), 0);
-        assert!(need > 0);
-        let mut buf = vec![0u8; need];
-        assert_eq!(tank_specimen(handle, found.cell, buf.as_mut_ptr(), need), need);
+        assert!(nodes.iter().any(|n| n.id == lin.species && n.live_cells > 0 && n.archived != 0));
         let info = tank_specimen_info(buf.as_ptr(), need);
         assert!(info.cells >= 1 && info.portrait_w >= 1);
         let mut text = vec![0u8; 512];
@@ -1255,6 +1372,9 @@ mod tests {
             "tank_lineage",
             "tank_species_name",
             "tank_species_tree",
+            "tank_species_card",
+            "tank_species_portrait",
+            "tank_census",
             "tank_discard",
             "tank_remove_at",
             "tank_specimen",
@@ -1271,6 +1391,8 @@ mod tests {
             "tank_humidity_at",
             "tank_t_local_at",
             "tank_cloud_mean",
+            "tank_glass",
+            "tank_jar",
             "tank_starter_specimen",
             "tank_take_enclosure_bucket",
         ] {

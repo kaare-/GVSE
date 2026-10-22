@@ -2,9 +2,11 @@
 //!
 //! Tool kinds match the C ABI:
 //! 1 paint (material byte; `Cell::GLASS` = 18 paints a glass wall) ·
-//! 2 erase · 3 pour · 4 drain · 5 set fill level · 6 undo ·
-//! 7 swipe film · 8 seed algae · 9 remove anything (organisms whole,
-//! corpses, litter, grit) · 10 glucose drip · 11 calcium feed ·
+//! 2 erase (`material` 0 clears any solid; any other byte clears only
+//! that material) · 3 pour · 4 drain · 5 set fill level · 6 undo ·
+//! 7 swipe film · 8 seed one starter algae into the open tank ·
+//! 9 remove anything (organisms whole,
+//! corpses, litter, grit) · 10 one sugar cube · 11 one lime cube ·
 //! 12 detritus feed · 13 clean (litter, grit, corpses only) ·
 //! 14 top-up (pure water onto every free surface, `r` rows; Phase 4) ·
 //! 15 cut / root-trim (kill cells under the stroke; roots → soft litter) ·
@@ -82,6 +84,16 @@ fn paint(grid: &mut PhysicsGrid, tool: &ToolEvent) -> bool {
             Cell::solid(id)
         };
         cell.set_colour_variant(variant);
+        // A rock stroke is a silhouette. It stays put while it is being
+        // drawn, then becomes one body on play. An existing rock is left
+        // alone so a second stroke does not weld onto it.
+        if id == MaterialId::Stone && !glass {
+            let cur = g.get_visible(vx, vy);
+            if cur.is_rigid() {
+                return;
+            }
+            cell.flags |= Cell::SILHOUETTE | Cell::BOUND;
+        }
         if g.get_visible(vx, vy) != cell {
             g.set_visible(vx, vy, cell);
             changed = true;
@@ -91,13 +103,21 @@ fn paint(grid: &mut PhysicsGrid, tool: &ToolEvent) -> bool {
 }
 
 fn erase(grid: &mut PhysicsGrid, tool: &ToolEvent) -> bool {
+    // 0 keeps the old dig: every non-air cell. A material byte lifts only
+    // that solid, so sand can come out from under a rock.
+    let filter = tool.material;
     let mut changed = false;
     for_brush(grid, tool, |g, vx, vy| {
+        let cur = g.get_visible(vx, vy);
         let empty = Cell::air();
-        if g.get_visible(vx, vy) != empty {
-            g.set_visible(vx, vy, empty);
-            changed = true;
+        if cur == empty {
+            return;
         }
+        if filter != 0 && cur.material != filter {
+            return;
+        }
+        g.set_visible(vx, vy, empty);
+        changed = true;
     });
     changed
 }

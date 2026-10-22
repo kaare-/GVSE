@@ -91,6 +91,9 @@ impl Genome {
     /// d.1 — the seed algae.
     pub fn algae() -> Self {
         let mut g = Self::base();
+        // Near-neutral. The free-cell step adds a per-cell offset, so a
+        // clutch spreads through the column instead of pinning to the lid.
+        g.buoy = 0;
         g.modes.push(Mode::algae());
         g
     }
@@ -153,6 +156,100 @@ impl Genome {
         m.push_entry(Entry::new(Block::Cilia, 3));
         m.push_child(ChildSpec::propagule(0, 15));
         g.modes.push(m);
+        g
+    }
+
+    /// Phase 5 M0 — two-cell muscle twitcher: PHOTO + STORE + MUSCLE on a
+    /// bonded pair; drive from energy so a fed body contracts its spring.
+    pub fn twitcher() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.push_entry(Entry::new(Block::Photo, 2));
+        m.push_entry(Entry::new(Block::Store, 2));
+        m.push_entry(Entry::new(Block::Muscle, 4));
+        m.push_link(Link::level(Scalar::EnergyFrac, 32, 96));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
+        g
+    }
+
+    /// Phase 5 M3 — geometric eye: TRANSPARENT window with left/right
+    /// light SENSOR children, NERVE + MUSCLE on the seed (§d.6).
+    pub fn eyed() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_LIGHT;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut seed = Mode::blank();
+        seed.shape_w = 2;
+        seed.shape_h = 2;
+        seed.push_entry(Entry::new(Block::Photo, 1));
+        seed.push_entry(Entry::new(Block::Store, 1));
+        seed.push_entry(Entry::new(Block::Nerve, 2));
+        seed.push_entry(Entry::new(Block::Muscle, 2));
+        seed.push_entry(Entry::new(Block::Transparent, 2));
+        seed.push_link(Link::level(Scalar::Sense, 128, 80));
+        seed.push_child(ChildSpec::part(Dir::Left, 1, 200, 1));
+        seed.push_child(ChildSpec::part(Dir::Right, 1, 200, 1));
+        let mut eye = Mode::blank();
+        eye.push_entry(Entry::new(Block::Photo, 1));
+        eye.push_entry(Entry::with_params(Block::Sensor, 3, SENSOR_LIGHT, 0));
+        eye.push_entry(Entry::new(Block::Nerve, 1));
+        g.modes.push(seed);
+        g.modes.push(eye);
+        g
+    }
+
+    /// Phase 5 M2 — nerved light-seeker: SENSOR(light) + NERVE + MUSCLE
+    /// on a bonded pair; the StudioNet only exists because of NERVE.
+    pub fn nerved() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_LIGHT;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        // 2×2 footprint ⇒ 32 unit capacity (PHOTO1+STORE1+NERVE2+SENSOR2+MUSCLE2).
+        m.shape_w = 2;
+        m.shape_h = 2;
+        m.push_entry(Entry::new(Block::Photo, 1));
+        m.push_entry(Entry::new(Block::Store, 1));
+        m.push_entry(Entry::new(Block::Nerve, 2));
+        m.push_entry(Entry::with_params(Block::Sensor, 2, SENSOR_LIGHT, 0));
+        m.push_entry(Entry::new(Block::Muscle, 2));
+        m.push_link(Link::level(Scalar::Sense, 128, 80));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
+        g
+    }
+
+    /// Phase 5 M1 — hard–soft–hard hinge: hard bone ends with a muscle
+    /// joint in the middle (studio hinge-chain shape, tank blocks).
+    pub fn hinge() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        let mut g = Self::base();
+        g.buoy = 0;
+        // Mode 0: hard bone seed.
+        let mut bone = Mode::blank();
+        bone.push_entry(Entry::new(Block::Photo, 1));
+        bone.push_entry(Entry::new(Block::Store, 1));
+        bone.push_entry(Entry::with_params(Block::Wall, 4, 200, 0));
+        bone.push_child(ChildSpec::part(Dir::Ahead, 1, 220, 1));
+        // Mode 1: muscle joint.
+        let mut joint = Mode::blank();
+        joint.push_entry(Entry::new(Block::Photo, 1));
+        joint.push_entry(Entry::new(Block::Store, 1));
+        joint.push_entry(Entry::new(Block::Muscle, 5));
+        joint.push_link(Link::level(Scalar::EnergyFrac, 24, 100));
+        joint.push_child(ChildSpec::part(Dir::Ahead, 2, 220, 1));
+        // Mode 2: hard tip.
+        let mut tip = Mode::blank();
+        tip.push_entry(Entry::new(Block::Photo, 1));
+        tip.push_entry(Entry::with_params(Block::Wall, 4, 200, 0));
+        g.modes.push(bone);
+        g.modes.push(joint);
+        g.modes.push(tip);
         g
     }
 
@@ -405,12 +502,12 @@ impl Genome {
         g
     }
 
-    /// d.7 — mouth-cavity predator: a hard-walled U. Mode 0 (base) grows a
-    /// side-wall chain (mode 1) on each side; the lining secretes a
-    /// living-wall enzyme (key 120, width 24) gated on touch; chains end in
-    /// a lip mode (2) at depth 3. Walls are `h 0.6`, so the cavity holds
-    /// its enzyme (§b.3). MUSCLE lips and the touch link arrive in 2.3.6.
+    /// d.7 / Phase 5 M4 — mouth-cavity predator: hard-walled U with
+    /// enzyme lining, EXCRETE, and MUSCLE lips that close on touch.
+    /// Walls are `h 0.6`, so the cavity holds its enzyme (§b.3).
     pub fn chamber_predator() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_TOUCH;
         let mut g = Self::base();
         g.buoy = 0;
         g.wall_key = 170;
@@ -418,16 +515,18 @@ impl Genome {
         g.base_age = 150;
         let mut base = Mode::blank();
         base.push_entry(Entry::with_params(Block::Wall, 2, 153, 0));
-        base.push_entry(Entry::new(Block::Photo, 4));
+        base.push_entry(Entry::new(Block::Photo, 2));
         base.push_entry(Entry::new(Block::Store, 2));
+        base.push_entry(Entry::new(Block::Nerve, 1));
         base.push_child(ChildSpec::part(Dir::Left, 1, 220, 1));
         base.push_child(ChildSpec::part(Dir::Right, 1, 220, 1));
         let mut wall = Mode::blank();
         wall.push_entry(Entry::with_params(Block::Wall, 2, 153, 0));
-        wall.push_entry(Entry::new(Block::Photo, 3));
+        wall.push_entry(Entry::new(Block::Photo, 2));
         let mut enz = Entry::with_params(Block::Enzyme, 2, 120, 24 | 0x80);
         enz.gate = Gate::above(Scalar::Touch, 1);
         wall.push_entry(enz);
+        wall.push_entry(Entry::new(Block::Excrete, 1));
         wall.push_entry(Entry::new(Block::Store, 1));
         wall.push_child(ChildSpec::part(Dir::Ahead, 1, 220, 1));
         wall.push_transition(Transition {
@@ -435,22 +534,48 @@ impl Genome {
             mode: 2,
         });
         wall.sacrifice_order = 1;
-        // Lips: the body's propagules leave from the opening.
+        // Lips: muscle + touch sensor close the opening when prey bumps them.
         let mut lip = Mode::blank();
         lip.push_entry(Entry::with_params(Block::Wall, 1, 153, 0));
-        lip.push_entry(Entry::new(Block::Photo, 4));
+        lip.push_entry(Entry::new(Block::Muscle, 2));
+        lip.push_entry(Entry::with_params(Block::Sensor, 1, SENSOR_TOUCH, 0));
+        lip.push_entry(Entry::new(Block::Nerve, 1));
         lip.push_entry(Entry::with_params(
             Block::Uptake,
             2,
             crate::bio::profile::UPTAKE_GLUCOSE,
             0,
         ));
+        // Close (contract) when touched — positive drive shortens springs.
+        lip.push_link(Link::level(Scalar::Touch, 1, 96));
         lip.push_child(ChildSpec::propagule(0, 15));
         lip.divide_when.energy_frac = 230;
         lip.sacrifice_order = 2;
         g.modes.push(base);
         g.modes.push(wall);
         g.modes.push(lip);
+        g
+    }
+
+    /// Phase 5 M4 — SENSOR(colour) seeker: looks along heading for a hue
+    /// matching `param_b` (yellow ≈ 43). Hook for the insect–flower stretch.
+    pub fn colour_seeker() -> Self {
+        use crate::bio::program::{ChildSpec, Dir, Link, Scalar};
+        use crate::bio::profile::SENSOR_COLOUR;
+        let mut g = Self::base();
+        g.buoy = 0;
+        let mut m = Mode::blank();
+        m.shape_w = 2;
+        m.shape_h = 2;
+        m.push_entry(Entry::new(Block::Photo, 2));
+        m.push_entry(Entry::new(Block::Store, 1));
+        m.push_entry(Entry::new(Block::Cilia, 2));
+        m.push_entry(Entry::new(Block::Nerve, 1));
+        // Hue 43 ≈ yellow on the 256-circle; width is fixed in sensor_read.
+        m.push_entry(Entry::with_params(Block::Sensor, 2, SENSOR_COLOUR, 43));
+        m.push_link(Link::level(Scalar::Sense, 80, 100));
+        m.push_child(ChildSpec::part(Dir::Ahead, 0, 200, 1));
+        g.modes.push(m);
         g
     }
 
@@ -895,6 +1020,21 @@ pub struct GenotypeNode {
 
 pub const NONE: u32 = u32::MAX;
 
+fn fallback_genome() -> &'static Genome {
+    use std::sync::OnceLock;
+    static G: OnceLock<Genome> = OnceLock::new();
+    G.get_or_init(Genome::algae)
+}
+
+fn fallback_coeffs() -> &'static ModeCoeffs {
+    use std::sync::OnceLock;
+    static C: OnceLock<ModeCoeffs> = OnceLock::new();
+    C.get_or_init(|| {
+        let g = Genome::algae();
+        ModeCoeffs::compile(&g.modes[0], g.metab_eff)
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct GenomeStore {
     nodes: Vec<GenotypeNode>,
@@ -950,6 +1090,69 @@ impl GenomeStore {
         std::mem::take(&mut self.new_species)
     }
 
+    /// Species that still occupy a row on the tree.
+    pub fn visible_species(&self) -> usize {
+        self.species.iter().filter(|s| !s.collapsed).count()
+    }
+
+    /// Fold species that share their parent's body plan into that parent.
+    /// Archived species stay, so a saved creature keeps its row. A bush of
+    /// tuned starter algae becomes one node; a new block (cilia, muscle,
+    /// pigment) still branches. Genotypes and child links move to the
+    /// surviving ancestor. Idempotent.
+    pub fn collapse_same_body_plan(&mut self) {
+        let n = self.species.len();
+        if n == 0 {
+            return;
+        }
+        let keep: Vec<u16> = (0..n).map(|i| self.plan_ancestor(i as u16)).collect();
+        for i in 0..n {
+            let collapsed = keep[i] != i as u16;
+            self.species[i].collapsed = collapsed;
+            if collapsed {
+                continue;
+            }
+            let parent = self.species[i].parent;
+            if parent != species::NO_SPECIES && (parent as usize) < n {
+                let next = keep[parent as usize];
+                if next != i as u16 {
+                    self.species[i].parent = next;
+                }
+            }
+        }
+        for node in &mut self.nodes {
+            let sp = node.species as usize;
+            if sp < n {
+                node.species = keep[sp];
+            }
+        }
+    }
+
+    /// Nearest ancestor whose body plan differs, or self when this species
+    /// is archived or is the root of its plan.
+    fn plan_ancestor(&self, start: u16) -> u16 {
+        let mut id = start;
+        for _ in 0..64 {
+            let Some(s) = self.species.get(id as usize) else {
+                return start;
+            };
+            if s.archived || s.parent == species::NO_SPECIES {
+                return id;
+            }
+            let Some(parent) = self.species.get(s.parent as usize) else {
+                return id;
+            };
+            if species::body_plan(&s.founder_genome) != species::body_plan(&parent.founder_genome) {
+                return id;
+            }
+            if s.parent == id {
+                return id;
+            }
+            id = s.parent;
+        }
+        id
+    }
+
     /// Live cells across all genotypes of a species.
     pub fn species_live_cells(&self, species: u16) -> u32 {
         self.nodes
@@ -967,17 +1170,87 @@ impl GenomeStore {
             .count() as u32
     }
 
-    /// Assign a species to a fresh node (§c.4): the parent's species while
-    /// the structural signature matches and the parametric distance to
-    /// the founder stays within `D`, else a new species under it.
+    /// Record a same-plan child species and point `genotype` at it, the
+    /// way an older save did before variants folded into their parent.
+    #[cfg(test)]
+    pub fn plant_same_plan_child_for_test(&mut self, parent: u16, genotype: u32) -> u16 {
+        let founder = self.species[parent as usize].founder_genome.clone();
+        let depth = self.species[parent as usize].depth.saturating_add(1);
+        let sig = self.species[parent as usize].sig;
+        let sid = self.species.len() as u16;
+        self.species.push(SpeciesRec {
+            founder: genotype,
+            founder_genome: founder,
+            parent,
+            depth,
+            sig,
+            name: format!("variant {sid}"),
+            first_tick: 0,
+            archived: false,
+            collapsed: false,
+        });
+        self.nodes[genotype as usize].species = sid;
+        sid
+    }
+
+    /// A fresh node keeps its parent's species. Only a lineage root
+    /// (the seed, an archive root) founds a row at birth. A new body
+    /// plan waits until that genotype has offspring — see
+    /// `promote_if_new_plan`.
     fn assign_species(&mut self, id: u32, parent: u32) -> u16 {
+        let parent_species = self.nodes.get(parent as usize).map(|p| p.species).unwrap_or(NO_SPECIES);
+        if parent != NONE && (parent_species as usize) < self.species.len() {
+            return parent_species;
+        }
+        self.found_species(id, NO_SPECIES)
+    }
+
+    /// Give `id` its own species when its body plan differs from the
+    /// species it currently sits in. No-op until the plan actually changed.
+    fn promote_if_new_plan(&mut self, id: u32) {
+        let (tomb, sp) = {
+            let Some(n) = self.nodes.get(id as usize) else {
+                return;
+            };
+            (n.tombstone, n.species)
+        };
+        if tomb {
+            return;
+        }
+        let Some(rec) = self.species.get(sp as usize) else {
+            return;
+        };
+        if rec.collapsed {
+            return;
+        }
+        let genome = self.nodes[id as usize].genome.clone();
+        if species::body_plan(&genome) == species::body_plan(&rec.founder_genome) {
+            return;
+        }
+        let new_sp = self.found_species(id, sp);
+        if new_sp == sp {
+            return;
+        }
+        if let Some(n) = self.nodes.get_mut(id as usize) {
+            n.species = new_sp;
+        }
+    }
+
+    /// Open a species row for `id` under `parent_species`. At the cap,
+    /// childless rows are folded first. If the table is still full, the
+    /// genotype stays in `parent_species`.
+    fn found_species(&mut self, id: u32, parent_species: u16) -> u16 {
         let genome = self.nodes[id as usize].genome.clone();
         let sig = species::signature(&genome);
-        let parent_species = self.nodes.get(parent as usize).map(|p| p.species).unwrap_or(NO_SPECIES);
-        if let Some(ps) = self.species.get(parent_species as usize) {
-            if ps.sig == sig && species::param_distance_q8(&genome, &ps.founder_genome) <= species::SPECIES_D_Q8 {
+        if self.visible_species() >= species::SPECIES_CAP {
+            self.cull_childless();
+            self.collapse_same_body_plan();
+        }
+        if self.visible_species() >= species::SPECIES_CAP && self.species.iter().all(|s| !s.collapsed) {
+            if (parent_species as usize) < self.species.len() {
                 return parent_species;
             }
+            return 0;
         }
         let (depth, parent_genome) = match self.species.get(parent_species as usize) {
             Some(ps) => (ps.depth.saturating_add(1), Some(ps.founder_genome.clone())),
@@ -987,14 +1260,30 @@ impl GenomeStore {
         let same = self
             .species
             .iter()
-            .filter(|s| s.parent == parent_species && s.name.starts_with(&base))
+            .filter(|s| !s.collapsed && s.parent == parent_species && s.name.starts_with(&base))
             .count() as u32;
         let name = species::disambiguate(&base, same + 1);
-        let sid = self.species.len() as u16;
-        if sid == NO_SPECIES {
-            return parent_species;
-        }
-        self.species.push(SpeciesRec {
+        let sid = if let Some(slot) = self.species.iter().position(|s| s.collapsed) {
+            slot as u16
+        } else {
+            let sid = self.species.len() as u16;
+            if sid == NO_SPECIES {
+                return if (parent_species as usize) < self.species.len() { parent_species } else { 0 };
+            }
+            self.species.push(SpeciesRec {
+                founder: id,
+                founder_genome: genome.clone(),
+                parent: parent_species,
+                depth,
+                sig,
+                name: name.clone(),
+                first_tick: self.now,
+                archived: false,
+                collapsed: false,
+            });
+            sid
+        };
+        self.species[sid as usize] = SpeciesRec {
             founder: id,
             founder_genome: genome,
             parent: parent_species,
@@ -1003,9 +1292,87 @@ impl GenomeStore {
             name,
             first_tick: self.now,
             archived: false,
-        });
+            collapsed: false,
+        };
         self.new_species.push(sid);
         sid
+    }
+
+    /// Fold species that never reproduced into their parent. A row stays
+    /// when it is the root, archived, has a child species, or any of its
+    /// genotypes has a child genotype or a second organism. The slot
+    /// remains so saves keep their ids; the tree skips collapsed rows.
+    pub fn cull_childless(&mut self) {
+        let n = self.species.len();
+        if n == 0 {
+            return;
+        }
+        let mut has_child_species = vec![false; n];
+        for s in &self.species {
+            if s.collapsed || s.parent == NO_SPECIES {
+                continue;
+            }
+            if let Some(flag) = has_child_species.get_mut(s.parent as usize) {
+                *flag = true;
+            }
+        }
+        let mut drop = vec![false; n];
+        for i in 0..n {
+            let s = &self.species[i];
+            if s.collapsed || s.archived || s.parent == NO_SPECIES || has_child_species[i] {
+                continue;
+            }
+            let mut kids = false;
+            for node in &self.nodes {
+                if node.tombstone || node.species != i as u16 {
+                    continue;
+                }
+                if node.born >= 2 || node.first_child != NONE {
+                    kids = true;
+                    break;
+                }
+            }
+            if !kids {
+                drop[i] = true;
+            }
+        }
+        if drop.iter().all(|d| !*d) {
+            return;
+        }
+        let mut keep = vec![0u16; n];
+        for i in 0..n {
+            if !drop[i] {
+                keep[i] = i as u16;
+                continue;
+            }
+            let mut id = self.species[i].parent;
+            for _ in 0..64 {
+                if (id as usize) >= n || !drop[id as usize] {
+                    break;
+                }
+                id = self.species[id as usize].parent;
+            }
+            keep[i] = if (id as usize) < n { id } else { 0 };
+        }
+        for i in 0..n {
+            if drop[i] {
+                self.species[i].collapsed = true;
+                continue;
+            }
+            let parent = self.species[i].parent;
+            if parent != NO_SPECIES && (parent as usize) < n {
+                let next = keep[parent as usize];
+                if next != i as u16 {
+                    self.species[i].parent = next;
+                }
+            }
+        }
+        for node in &mut self.nodes {
+            let sp = node.species as usize;
+            if sp < n && drop[sp] {
+                node.species = keep[sp];
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -1064,11 +1431,20 @@ impl GenomeStore {
     }
 
     pub fn genome(&self, id: u32) -> &Genome {
+        if self.nodes.is_empty() {
+            return fallback_genome();
+        }
         &self.nodes[(id as usize).min(self.nodes.len() - 1)].genome
     }
 
     pub fn coeffs(&self, id: u32, mode: u8) -> &ModeCoeffs {
+        if self.nodes.is_empty() {
+            return fallback_coeffs();
+        }
         let n = &self.nodes[(id as usize).min(self.nodes.len() - 1)];
+        if n.coeffs.is_empty() {
+            return fallback_coeffs();
+        }
         let mi = (mode as usize).min(n.coeffs.len() - 1);
         &n.coeffs[mi]
     }
@@ -1103,6 +1479,11 @@ impl GenomeStore {
             p.first_child = id;
         }
         self.live_nodes += 1;
+        // The parent has offspring now. A new body plan earns its row
+        // here, not when a childless variant is first born.
+        if parent != NONE {
+            self.promote_if_new_plan(parent);
+        }
         let sp = self.assign_species(id, parent);
         self.nodes[id as usize].species = sp;
         id
@@ -1167,9 +1548,17 @@ impl GenomeStore {
     }
 
     pub fn on_birth(&mut self, id: u32) {
-        if let Some(n) = self.nodes.get_mut(id as usize) {
+        let born = if let Some(n) = self.nodes.get_mut(id as usize) {
             n.live_cells = n.live_cells.saturating_add(1);
             n.born = n.born.saturating_add(1);
+            n.born
+        } else {
+            return;
+        };
+        // The second organism is the first child. Until then the genotype
+        // stays in its parent species, so a dead-end never takes a row.
+        if born >= 2 {
+            self.promote_if_new_plan(id);
         }
     }
 
@@ -1252,10 +1641,18 @@ impl GenomeStore {
     pub fn import(rows: &[(u32, u32, u16, Genome)]) -> Self {
         let mut s = Self::new();
         let max_id = rows.iter().map(|r| r.0).max().map(|m| m as usize + 1).unwrap_or(0);
-        for i in 0..max_id {
+        for _i in 0..max_id {
+            // Gaps are tombstones. They still need compiled coeffs: a saved
+            // cell can name one, and an empty coeff list aborts the renderer.
+            let genome = Genome::algae();
+            let coeffs = genome
+                .modes
+                .iter()
+                .map(|m| ModeCoeffs::compile(m, genome.metab_eff))
+                .collect();
             let tomb = GenotypeNode {
-                genome: Genome::algae(),
-                coeffs: Vec::new(),
+                genome,
+                coeffs,
                 parent: NONE,
                 first_child: NONE,
                 next_sibling: NONE,
@@ -1266,7 +1663,6 @@ impl GenomeStore {
                 tombstone: true,
                 species: NO_SPECIES,
             };
-            let _ = i;
             s.nodes.push(tomb);
         }
         for (id, parent, depth, genome) in rows {

@@ -1,7 +1,7 @@
 use wk_material::MaterialId;
 
 use crate::cell::Cell;
-use crate::consts::{PRESET_H, PRESET_W, PX_PER_CELL};
+use crate::consts::{GLASS_H, GLASS_W, JAR_H, JAR_W, MAIN_W, PRESET_H, PRESET_W, PX_PER_CELL};
 use crate::tank::{Tank, TankInput, ToolEvent};
 
 fn tick_n(tank: &mut Tank, n: u32) {
@@ -35,6 +35,72 @@ fn preset_pixel_buffer_is_the_phone_size() {
 }
 
 #[test]
+fn main_tank_is_three_screens_and_a_jar_stays_narrow() {
+    let mut main = Tank::main_empty(1);
+    assert_eq!(main.visible_size(), (MAIN_W, PRESET_H));
+    tick_n(&mut main, 4);
+    let jar = Tank::empty(1);
+    assert_eq!(jar.visible_size(), (PRESET_W, PRESET_H));
+    assert_eq!(Tank::main_preset(1).visible_size().0, MAIN_W);
+}
+
+#[test]
+fn widening_keeps_the_old_tank_in_the_middle() {
+    let mut tank = Tank::try_new(2, 8, 16).unwrap();
+    place(&mut tank, 3, 4, Cell::stone());
+    place(&mut tank, 0, 2, Cell::water());
+    let id = tank.seed_algae(10, 20).unwrap();
+    let mut wide = tank.widened(24);
+    assert_eq!(wide.visible_size(), (24, 16));
+    assert_eq!(wide.cell_visible(11, 4).id(), MaterialId::Stone);
+    assert!(wide.cell_visible(0, 2).sat > 0);
+    assert!(wide.cell_visible(23, 4).is_air());
+    let px = wide.cell(id).unwrap().px;
+    let py = wide.cell(id).unwrap().py;
+    assert_eq!(px, 10 + 8 * PX_PER_CELL as u16);
+    assert_eq!(py, 20);
+    assert_eq!(wide.live_cells(), 1);
+    let loaded = Tank::load_bytes(&wide.save_bytes().unwrap()).unwrap();
+    assert_eq!(loaded.cell(id).unwrap().px, px);
+    assert_eq!(loaded.live_cells(), 1);
+}
+
+#[test]
+fn a_narrow_save_widens_without_losing_the_algae() {
+    let mut tank = Tank::empty(4);
+    let id = tank.seed_algae(30, 100).unwrap();
+    let wide = tank.widened(MAIN_W);
+    assert_eq!(wide.visible_size(), (MAIN_W, PRESET_H));
+    assert_eq!(
+        wide.cell(id).unwrap().px,
+        (30 + (MAIN_W - PRESET_W) / 2 * PX_PER_CELL) as u16
+    );
+    assert_eq!(wide.live_cells(), 1);
+    assert_eq!(wide.widened(MAIN_W).visible_size().0, MAIN_W);
+}
+
+#[test]
+fn creatures_do_not_cast_column_shadows() {
+    let mut tank = Tank::try_new(1, 16, 32).unwrap();
+    for vy in 0..28 {
+        for vx in 0..16 {
+            place(&mut tank, vx, vy, Cell::water());
+        }
+    }
+    tank.seed_algae(24, 45).unwrap();
+    let mut rgba = Vec::new();
+    tank.write_rgba(&mut rgba);
+    let w = 16 * PX_PER_CELL as usize;
+    let at = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        (rgba[i], rgba[i + 2])
+    };
+    let under = at(24, 60);
+    let beside = at(6, 60);
+    assert_eq!(under, beside, "a body should not darken the water under it");
+}
+
+#[test]
 fn sand_falls_onto_the_bedrock_floor() {
     let mut tank = Tank::try_new(1, 8, 16).unwrap();
     place(&mut tank, 3, 12, Cell::sand());
@@ -45,12 +111,39 @@ fn sand_falls_onto_the_bedrock_floor() {
 }
 
 #[test]
-fn stone_does_not_fall() {
+fn stone_falls_and_tumbles() {
     let mut tank = Tank::try_new(1, 8, 16).unwrap();
-    place(&mut tank, 3, 8, Cell::stone());
-    tick_n(&mut tank, 30);
-    assert_eq!(tank.cell_visible(3, 8).id(), MaterialId::Stone);
-    assert_ne!(tank.cell_visible(3, 0).id(), MaterialId::Stone);
+    place(&mut tank, 3, 6, Cell::stone());
+    assert_eq!(tank.cell_visible(3, 6).tumble(), 0);
+    // Two grain passes per tick: one tick drops it two cells and turns twice.
+    tick_n(&mut tank, 1);
+    assert_eq!(tank.cell_visible(3, 4).id(), MaterialId::Stone);
+    assert_eq!(tank.cell_visible(3, 4).tumble(), 2);
+    tick_n(&mut tank, 6);
+    assert_eq!(tank.cell_visible(3, 0).id(), MaterialId::Stone);
+    assert!(tank.cell_visible(3, 4).is_air());
+    assert_ne!(tank.cell_visible(3, 0).tumble(), 0);
+}
+
+#[test]
+fn erase_lifts_one_material_and_leaves_the_rock() {
+    let mut tank = Tank::try_new(3, 8, 8).unwrap();
+    place(&mut tank, 2, 2, Cell::sand());
+    place(&mut tank, 6, 2, Cell::stone());
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![ToolEvent {
+            kind: 2,
+            material: MaterialId::Sand as u8,
+            x: 2,
+            y: 2,
+            r: 0,
+            variant: 0,
+        }],
+        ..TankInput::default()
+    });
+    assert!(tank.cell_visible(2, 2).is_air(), "sand lifts");
+    assert_eq!(tank.cell_visible(6, 2).id(), MaterialId::Stone, "rock stays");
 }
 
 #[test]
@@ -336,11 +429,395 @@ fn swirl_tilt_moves_water_downhill() {
 }
 
 #[test]
-fn loose_rock_stays_put() {
-    let mut tank = Tank::try_new(1, 8, 12).unwrap();
-    place(&mut tank, 3, 8, Cell::solid(MaterialId::LooseRock));
+fn a_paused_rock_falls_as_one_stone_and_turns() {
+    let mut tank = Tank::try_new(1, 12, 16).unwrap();
+    let paint = |x, y| ToolEvent {
+        kind: 1,
+        material: MaterialId::Stone as u8,
+        x,
+        y,
+        r: 0,
+        variant: 0,
+    };
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![paint(3, 10), paint(3, 11), paint(3, 12)],
+        ..TankInput::default()
+    });
+    assert!(tank.cell_visible(3, 12).is_silhouette(), "a paused stroke stays a drawing");
+    assert_eq!(tank.cell_visible(3, 12).id(), MaterialId::Stone);
+    let drawn = stone_cells(&tank);
+    assert!(drawn.len() > 1, "the stroke is a shape");
+    let before = offsets(&drawn);
+    tick_n(&mut tank, 4);
+    let fallen = stone_cells(&tank);
+    assert_eq!(fallen.len(), drawn.len(), "the stroke does not break apart");
+    assert!(fallen.iter().all(|(_, _, c)| c.is_rigid()));
+    let id = fallen[0].2.pad;
+    assert!(fallen.iter().all(|(_, _, c)| c.pad == id));
+    let after = normalize(&fallen.iter().map(|(x, y, _)| (*x, *y)).collect::<Vec<_>>());
+    assert_eq!(after, rotate_offsets(&before), "it tips as it falls {after:?}");
+    assert!(
+        fallen.iter().map(|(_, y, _)| *y).min() < drawn.iter().map(|(_, y, _)| *y).min(),
+        "it has dropped"
+    );
+    tick_n(&mut tank, 24);
+    let resting = stone_cells(&tank);
+    assert_eq!(resting.len(), drawn.len(), "it is still one stone");
+    assert!(resting.iter().all(|(_, _, c)| c.pad == id && c.is_rigid()));
+    assert_eq!(resting.iter().map(|(_, y, _)| *y).min(), Some(0), "it settles on the floor");
+}
+
+#[test]
+fn a_drawn_rock_falls_through_water_as_one_stone() {
+    let mut tank = Tank::try_new(2, 12, 20).unwrap();
+    for y in 0..10 {
+        for x in 0..12 {
+            place(&mut tank, x, y, Cell::water());
+        }
+    }
+    let paint = |x, y| ToolEvent {
+        kind: 1,
+        material: MaterialId::Stone as u8,
+        x,
+        y,
+        r: 0,
+        variant: 0,
+    };
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![paint(4, 16), paint(4, 17), paint(5, 16), paint(5, 17)],
+        ..TankInput::default()
+    });
+    let drawn = stone_cells(&tank);
+    assert!(drawn.len() > 1);
     tick_n(&mut tank, 40);
-    assert_eq!(tank.cell_visible(3, 8).id(), MaterialId::LooseRock);
+    let resting = stone_cells(&tank);
+    assert_eq!(resting.len(), drawn.len(), "water does not shatter the stone");
+    let id = resting[0].2.pad;
+    assert!(id != 0 && resting.iter().all(|(_, _, c)| c.is_rigid() && c.pad == id), "one body id");
+    assert_eq!(
+        resting.iter().map(|(_, y, _)| *y).min(),
+        Some(0),
+        "it rests on the floor, not in the column"
+    );
+}
+
+#[test]
+fn a_stone_does_not_cast_a_column_shadow() {
+    let mut tank = Tank::try_new(3, 8, 16).unwrap();
+    for y in 0..12 {
+        for x in 0..8 {
+            place(&mut tank, x, y, Cell::water());
+        }
+    }
+    place(&mut tank, 3, 10, Cell::stone());
+    tank.tick(&TankInput { always_day: true, ..TankInput::default() });
+    let under = tank.pixel_light_at(3 * 3 + 1, (16 - 1 - 6) * 3 + 1);
+    let beside = tank.pixel_light_at(1 * 3 + 1, (16 - 1 - 6) * 3 + 1);
+    let gap = (under as i32 - beside as i32).abs();
+    assert!(gap <= 2, "a rock should not darken the column under it ({under} vs {beside})");
+}
+
+#[test]
+fn fines_in_one_column_do_not_shade_a_shaft() {
+    let mut tank = water_box(3, 16, 24, 20);
+    tank.add_fines(24, 80.0);
+    tank.tick(&day());
+    let above = tank.pixel_light_at(24, 20);
+    let beside = tank.pixel_light_at(6, 20);
+    let gap = (above as i32 - beside as i32).abs();
+    assert!(
+        gap <= 2,
+        "fines over one spot must not darken that column of water ({above} vs {beside})"
+    );
+}
+
+#[test]
+fn a_tall_rock_lies_down_when_it_hits_another() {
+    let mut tank = Tank::try_new(5, 12, 16).unwrap();
+    let rock = |id: u8| {
+        let mut c = Cell::stone();
+        c.flags |= Cell::RIGID | Cell::BOUND;
+        c.pad = id;
+        c
+    };
+    for x in 2..=4 {
+        tank.place(x, 0, rock(1));
+    }
+    for y in 2..=4 {
+        tank.place(3, y, rock(2));
+    }
+    tick_n(&mut tank, 6);
+    let stones = stone_cells(&tank);
+    let mut by_id: std::collections::BTreeMap<u8, Vec<(i32, i32)>> = std::collections::BTreeMap::new();
+    for (x, y, c) in &stones {
+        by_id.entry(c.pad).or_default().push((*x, *y));
+    }
+    assert_eq!(by_id.get(&1).map(|b| b.len()), Some(3), "the floor stone stays whole");
+    let fallen = by_id.get(&2).expect("the stone that fell");
+    assert_eq!(fallen.len(), 3, "it stays one stone");
+    let miny = fallen.iter().map(|p| p.1).min().unwrap();
+    let maxy = fallen.iter().map(|p| p.1).max().unwrap();
+    let minx = fallen.iter().map(|p| p.0).min().unwrap();
+    let maxx = fallen.iter().map(|p| p.0).max().unwrap();
+    assert!(
+        maxx - minx > maxy - miny,
+        "it should be lying down on the other rock ({fallen:?})"
+    );
+    assert!(miny <= 1, "it rests on the lower stone ({fallen:?})");
+}
+
+fn stone_cells(tank: &Tank) -> Vec<(i32, i32, Cell)> {
+    let (w, h) = tank.visible_size();
+    let mut stones = Vec::new();
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let c = tank.cell_visible(x, y);
+            if c.id() == MaterialId::Stone {
+                stones.push((x, y, c));
+            }
+        }
+    }
+    stones
+}
+
+fn offsets(cells: &[(i32, i32, Cell)]) -> Vec<(i32, i32)> {
+    let pts: Vec<(i32, i32)> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+    normalize(&pts)
+}
+
+fn rotate_offsets(shape: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let maxx = shape.iter().map(|c| c.0).max().unwrap_or(0);
+    let turned: Vec<(i32, i32)> = shape.iter().map(|(x, y)| (*y, maxx - x)).collect();
+    normalize(&turned)
+}
+
+fn normalize(cells: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    let minx = cells.iter().map(|c| c.0).min().unwrap_or(0);
+    let miny = cells.iter().map(|c| c.1).min().unwrap_or(0);
+    let mut v: Vec<(i32, i32)> = cells.iter().map(|(x, y)| (x - minx, y - miny)).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+#[test]
+fn a_drawn_rock_rests_on_sand() {
+    let mut tank = Tank::try_new(1, 8, 12).unwrap();
+    for x in 0..8 {
+        place(&mut tank, x, 0, Cell::sand());
+    }
+    tank.tick(&TankInput {
+        paused: true,
+        tools: vec![
+            ToolEvent { kind: 1, material: MaterialId::Stone as u8, x: 4, y: 6, r: 0, variant: 0 },
+            ToolEvent { kind: 1, material: MaterialId::Stone as u8, x: 4, y: 7, r: 0, variant: 0 },
+        ],
+        ..TankInput::default()
+    });
+    let drawn = tank.count_material(MaterialId::Stone as u8);
+    tick_n(&mut tank, 20);
+    assert_eq!(tank.cell_visible(3, 0).id(), MaterialId::Sand);
+    assert_eq!(tank.count_material(MaterialId::Stone as u8), drawn);
+    let mut min_y = 99i32;
+    for y in 0..12 {
+        for x in 0..8 {
+            if tank.cell_visible(x, y).is_rigid() {
+                min_y = min_y.min(y);
+            }
+        }
+    }
+    assert_eq!(min_y, 1, "the stone sits on the sand");
+}
+
+#[test]
+fn a_sugar_cube_sinks_then_dissolves() {
+    let mut tank = Tank::try_new(1, 8, 16).unwrap();
+    let before = tank.glucose_total();
+    tank.tick(&TankInput {
+        tools: vec![ToolEvent { kind: 10, material: 0, x: 3, y: 10, r: 4, variant: 0 }],
+        ..TankInput::default()
+    });
+    assert_eq!(tank.glucose_total(), before, "the cube is still in the air");
+    tick_n(&mut tank, 2);
+    assert_eq!(tank.glucose_total(), before, "it has not reached the floor");
+    tick_n(&mut tank, 12);
+    assert!(tank.glucose_total() > before, "it dissolves into the sugar feed");
+}
+
+#[test]
+fn a_lime_cube_sinks_then_dissolves() {
+    let mut tank = Tank::try_new(1, 8, 16).unwrap();
+    let before = tank.mineral_total();
+    tank.tick(&TankInput {
+        tools: vec![ToolEvent { kind: 11, material: 0, x: 3, y: 10, r: 0, variant: 0 }],
+        ..TankInput::default()
+    });
+    assert_eq!(tank.mineral_total(), before);
+    tick_n(&mut tank, 16);
+    assert!(tank.mineral_total() > before, "lime joins the mineral field");
+}
+
+#[test]
+fn seed_adds_a_starter_to_a_living_tank() {
+    let mut tank = water_box(3, 16, 16, 8);
+    let first = tank.seed_algae(24, 24).unwrap();
+    let before = tank.live_cells();
+    let wide = tank.visible_size();
+    tank.tick(&TankInput {
+        tools: vec![ToolEvent { kind: 8, material: 0, x: 8, y: 8, r: 3, variant: 0 }],
+        ..day()
+    });
+    assert!(tank.live_cells() > before, "a second starter is added");
+    assert!(tank.cell(first).unwrap().alive);
+    assert_eq!(tank.visible_size(), wide, "the tank is not replaced");
+}
+
+#[test]
+fn loose_rock_falls_and_tumbles() {
+    let mut tank = Tank::try_new(1, 8, 12).unwrap();
+    place(&mut tank, 3, 5, Cell::solid(MaterialId::LooseRock));
+    tick_n(&mut tank, 1);
+    assert_eq!(tank.cell_visible(3, 3).id(), MaterialId::LooseRock);
+    assert_eq!(tank.cell_visible(3, 3).tumble(), 2);
+    tick_n(&mut tank, 6);
+    assert_eq!(tank.cell_visible(3, 0).id(), MaterialId::LooseRock);
+    assert_eq!(tank.cell_visible(3, 0).tumble(), 1);
+    assert!(tank.cell_visible(3, 5).is_air());
+}
+
+#[test]
+fn wet_sand_renders_darker_and_each_block_is_flat() {
+    let mut tank = Tank::try_new(1, 8, 8).unwrap();
+    let mut wet = Cell::sand();
+    wet.sat = crate::cell::water_capacity(MaterialId::Sand);
+    place(&mut tank, 2, 2, Cell::sand());
+    place(&mut tank, 5, 2, wet);
+    let dry = rgb_at(&mut tank, 2, 2, 0, 0);
+    let soaked = rgb_at(&mut tank, 5, 2, 0, 0);
+    assert_eq!(dry, soaked, "wet sand stays the same flat colour (dry {dry:?} wet {soaked:?})");
+    place(&mut tank, 3, 2, Cell::sand());
+    assert_eq!(dry, rgb_at(&mut tank, 2, 2, 2, 1), "one sand block is one colour");
+    assert_eq!(dry, rgb_at(&mut tank, 2, 2, 1, 2), "a block has no border or grain");
+    assert_eq!(dry, rgb_at(&mut tank, 3, 2, 0, 0), "neighbouring sand blocks match");
+}
+
+#[test]
+fn a_stone_block_is_one_flat_colour() {
+    let mut tank = Tank::try_new(1, 8, 8).unwrap();
+    place(&mut tank, 2, 4, Cell::solid(MaterialId::Stone));
+    place(&mut tank, 3, 4, Cell::solid(MaterialId::Stone));
+    let a = rgb_at(&mut tank, 2, 4, 0, 0);
+    assert_eq!(a, rgb_at(&mut tank, 2, 4, 2, 2), "one stone block is one colour");
+    assert_eq!(a, rgb_at(&mut tank, 2, 4, 1, 1), "the middle matches the corner");
+    assert_eq!(a, rgb_at(&mut tank, 3, 4, 0, 0), "neighbouring stone blocks match");
+    assert_eq!(a, rgb_at(&mut tank, 3, 4, 2, 2));
+}
+
+#[test]
+fn a_bed_is_one_colour_along_a_row_and_a_diagonal() {
+    let mut tank = Tank::try_new(1, 16, 16).unwrap();
+    for i in 0..12u32 {
+        place(&mut tank, i as i32, 3, Cell::sand());
+        place(&mut tank, i as i32, i as i32 + 4, Cell::solid(MaterialId::Stone));
+    }
+    let sand = rgb_at(&mut tank, 0, 3, 0, 0);
+    let stone = rgb_at(&mut tank, 0, 4, 0, 0);
+    for i in 1..12u32 {
+        assert_eq!(sand, rgb_at(&mut tank, i, 3, 0, 0), "sand does not change along a row");
+        assert_eq!(
+            stone,
+            rgb_at(&mut tank, i, i + 4, 0, 0),
+            "stone does not stripe on a diagonal"
+        );
+    }
+}
+
+#[test]
+fn creature_cap_stops_at_five_hundred() {
+    let mut tank = Tank::try_new(1, 24, 24).unwrap();
+    let mut n = 0u32;
+    'outer: for y in 0..72u16 {
+        for x in 0..72u16 {
+            if tank.seed_algae(x, y).is_some() {
+                n += 1;
+                if n == 500 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    assert_eq!(n, 500);
+    assert_eq!(tank.org_counts(1).0, 500);
+    assert!(tank.seed_algae(70, 70).is_none());
+}
+
+fn rgb_at(tank: &mut Tank, vx: u32, vy: u32, dx: u32, dy: u32) -> (u8, u8, u8) {
+    let mut rgba = Vec::new();
+    tank.write_rgba(&mut rgba);
+    let (pw, _ph) = tank.pixel_size();
+    let vis_h = tank.visible_size().1;
+    let px = vx * PX_PER_CELL + dx;
+    let py = (vis_h - 1 - vy) * PX_PER_CELL + dy;
+    let i = ((py * pw + px) * 4) as usize;
+    (rgba[i], rgba[i + 1], rgba[i + 2])
+}
+
+#[test]
+fn glass_is_water_and_one_creature() {
+    let tank = Tank::glass(3);
+    assert_eq!(tank.visible_size(), (GLASS_W, GLASS_H));
+    assert!(tank.live_cells() >= 1, "the starter is in the glass");
+    assert_eq!(tank.count_material(MaterialId::Sand as u8), 0);
+    let (w, h) = tank.visible_size();
+    let mut water = 0;
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let c = tank.cell_visible(x, y);
+            assert!(!c.is_rock(), "no rocks in the glass");
+            if c.is_open() && c.sat > 40 {
+                water += 1;
+            }
+        }
+    }
+    assert!(water > 200, "the glass is water, water={water}");
+    assert!(tank.is_day_now(), "a new glass is lit");
+}
+
+#[test]
+fn jar_is_smaller_than_the_glass() {
+    let glass = Tank::glass(3);
+    let jar = Tank::jar(5);
+    assert_eq!(jar.visible_size(), (JAR_W, JAR_H));
+    let glass_cells = GLASS_W * GLASS_H;
+    let jar_cells = JAR_W * JAR_H;
+    assert!(jar_cells < glass_cells, "jar {jar_cells} < glass {glass_cells}");
+    assert_eq!(jar.live_cells(), 0, "the jar starts empty of life");
+    assert_eq!(jar.count_material(MaterialId::Sand as u8), 0);
+    let (w, h) = jar.visible_size();
+    let mut water = 0;
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let c = jar.cell_visible(x, y);
+            assert!(!c.is_rock(), "no rocks in the jar");
+            if c.is_open() && c.sat > 40 {
+                water += 1;
+            }
+        }
+    }
+    assert!(water > 80, "the jar holds water, water={water}");
+    let mut glass_water = 0;
+    let (gw, gh) = glass.visible_size();
+    for y in 0..gh as i32 {
+        for x in 0..gw as i32 {
+            let c = glass.cell_visible(x, y);
+            if c.is_open() && c.sat > 40 {
+                glass_water += 1;
+            }
+        }
+    }
+    assert!(water < glass_water, "jar water {water} < glass water {glass_water}");
 }
 
 #[test]
@@ -710,7 +1187,7 @@ fn straw_breeds_true_for_ten_generations() {
 #[test]
 fn bitten_tail_regrows_into_its_slot() {
     use crate::bio::Genome;
-    let mut tank = water_box(5, 24, 24, 16);
+    let mut tank = water_box(5, 24, 24, 22);
     let mut g = Genome::straw();
     for m in g.modes.iter_mut() {
         m.regrow = true;
@@ -1654,10 +2131,10 @@ fn colour_heterotroph_and_glass_detectors_work_on_the_model() {
     assert_eq!(kinds(&mut out), vec![ev::GLASS], "a cleaned pane re-arms the detector");
 }
 
-/// Phase 3 — the species layer (§c.4): tuning mutations stay in the
-/// founder's species, a structural change or a long parametric drift
-/// founds a new one, names are a pure function of the tree, and the
-/// layer survives a save/load round trip.
+/// Phase 3 — the species layer: tuning and long parametric drift stay
+/// in the founder's species, a structural change founds a new one, names
+/// are a pure function of the tree, and the layer survives a save/load
+/// round trip.
 #[test]
 fn species_split_on_structure_or_drift_and_are_named() {
     use crate::bio::species::{param_distance_q8, signature, SPECIES_D_Q8};
@@ -1685,15 +2162,19 @@ fn species_split_on_structure_or_drift_and_are_named() {
     pig.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
     assert_ne!(signature(&pig), signature(&tuned));
     let p = genomes.intern_child(t, pig.clone());
+    assert_eq!(genomes.species_of(p), root_sp, "a childless variant does not take a row");
+    genomes.on_birth(p);
+    genomes.on_birth(p);
     let p_sp = genomes.species_of(p);
-    assert_ne!(p_sp, root_sp);
+    assert_ne!(p_sp, root_sp, "offspring earns the new body plan a row");
     let rec = genomes.species(p_sp).unwrap();
     assert_eq!(rec.parent, root_sp);
     assert_eq!(rec.depth, 2);
     assert!(rec.name.contains("ros"), "a red pigment adds its syllable ({})", rec.name);
     assert!(rec.name.ends_with(" II"), "numeral is the species depth ({})", rec.name);
 
-    // Drift only: same structure, keys walked far → a sibling-named species.
+    // Drift only: same body plan, keys walked far. The distance is still
+    // measured, but it no longer founds a species.
     let mut drift = tuned.clone();
     drift.wall_key = 180;
     drift.glue_key = drift.glue_key.wrapping_add(90);
@@ -1702,29 +2183,25 @@ fn species_split_on_structure_or_drift_and_are_named() {
     assert_eq!(signature(&drift), signature(&tuned));
     assert!(param_distance_q8(&drift, &Genome::algae()) > SPECIES_D_Q8, "{}", param_distance_q8(&drift, &Genome::algae()));
     let d = genomes.intern_child(t, drift.clone());
-    let d_sp = genomes.species_of(d);
-    assert_ne!(d_sp, root_sp);
-    assert_ne!(d_sp, p_sp);
-    let drec = genomes.species(d_sp).unwrap();
-    assert_eq!(drec.parent, root_sp);
-    assert_eq!(drec.name, format!("{} II", root_name.trim_end_matches(" I")), "pure drift keeps the stem");
-    // A second drifted sibling with the same name gets a letter.
+    assert_eq!(genomes.species_of(d), root_sp, "numeric drift stays with the starter");
     let mut drift2 = drift.clone();
     drift2.temp_opt = 10;
     drift2.wall_key = 70;
     let d2 = genomes.intern_child(t, drift2);
-    let d2_sp = genomes.species_of(d2);
-    assert_ne!(d2_sp, d_sp);
-    assert!(genomes.species(d2_sp).unwrap().name.ends_with("II-b"), "{}", genomes.species(d2_sp).unwrap().name);
-    // Children of the drifted species measure against *its* founder.
+    assert_eq!(genomes.species_of(d2), root_sp);
     let mut near = drift.clone();
     near.temp_width = near.temp_width.wrapping_add(3);
     let n = genomes.intern_child(d, near);
-    assert_eq!(genomes.species_of(n), d_sp);
+    assert_eq!(genomes.species_of(n), root_sp);
 
     // Round trip through a tank save.
     let mut tank = water_box(61, 24, 24, 20);
     let id = tank.seed_genome_at(36, 36, pig.clone()).expect("seed");
+    let geno = tank.genotype_of_cell(id).unwrap();
+    tank.genomes_mut().on_birth(geno);
+    let mut heir = pig.clone();
+    heir.wall_key = heir.wall_key.wrapping_add(4);
+    tank.genomes_mut().intern_child(geno, heir);
     let sp = tank.inspect(36, 36).species;
     assert_ne!(sp, NO_SPECIES);
     let card = tank.lineage_card(id).expect("card");
@@ -1746,6 +2223,55 @@ fn species_split_on_structure_or_drift_and_are_named() {
     let after = loaded.lineage_card(id).expect("card after load");
     assert_eq!(after.species_name, card.species_name);
     assert_eq!(after.species, card.species);
+}
+
+/// A saved bush of tuned starter algae folds into the parent on load.
+/// A real new block stays, and its parent link skips the folded row.
+/// An archived copy of the same plan keeps its own row.
+#[test]
+fn same_body_plan_variants_collapse_on_load() {
+    use crate::bio::{Block, Entry, Genome};
+    let mut tank = water_box(61, 24, 24, 8);
+    let root = tank.genomes_mut().seed_algae();
+    let root_sp = tank.genomes().species_of(root);
+    let mut drift = Genome::algae();
+    drift.wall_key = 180;
+    drift.temp_opt = 200;
+    let child = tank.genomes_mut().intern_child(root, drift);
+    let variant = tank.genomes_mut().plant_same_plan_child_for_test(root_sp, child);
+    let mut twin = Genome::algae();
+    twin.temp_opt = 40;
+    let twin_g = tank.genomes_mut().intern_child(root, twin);
+    let archived = tank.genomes_mut().plant_same_plan_child_for_test(root_sp, twin_g);
+    tank.genomes_mut().species_mut(archived).unwrap().archived = true;
+    let mut pig = Genome::algae();
+    pig.modes[0].push_entry(Entry::with_params(Block::Pigment, 3, 0, 0));
+    let pigment = tank.genomes_mut().intern_child(child, pig.clone());
+    tank.genomes_mut().on_birth(pigment);
+    tank.genomes_mut().on_birth(pigment);
+    let mut heir = pig.clone();
+    heir.temp_opt = 30;
+    tank.genomes_mut().intern_child(pigment, heir);
+    let pigment_sp = tank.genomes().species_of(pigment);
+    assert_eq!(tank.genomes().species(pigment_sp).unwrap().parent, variant);
+    assert!(tank.species_tree().iter().any(|n| n.id == variant));
+
+    let bytes = tank.save_bytes().unwrap();
+    let mut loaded = Tank::load_bytes(&bytes).unwrap();
+    assert!(loaded.genomes().species(variant).unwrap().collapsed);
+    assert_eq!(loaded.genomes().species_of(child), root_sp);
+    assert!(!loaded.genomes().species(pigment_sp).unwrap().collapsed);
+    assert_eq!(loaded.genomes().species(pigment_sp).unwrap().parent, root_sp);
+    assert!(!loaded.genomes().species(archived).unwrap().collapsed);
+    assert_eq!(loaded.genomes().species_of(twin_g), archived);
+    let tree = loaded.species_tree();
+    assert!(tree.iter().all(|n| n.id != variant));
+    assert!(tree.iter().any(|n| n.id == root_sp));
+    assert!(tree.iter().any(|n| n.id == pigment_sp));
+    assert!(tree.iter().any(|n| n.id == archived));
+    loaded.genomes_mut().collapse_same_body_plan();
+    assert_eq!(loaded.genomes().species_of(child), root_sp);
+    assert_eq!(loaded.genomes().species(pigment_sp).unwrap().parent, root_sp);
 }
 
 /// Phase 3 — glass walls: solid to water and grains, light goes through,
@@ -1785,14 +2311,19 @@ fn glass_wall_holds_water_and_passes_light() {
         tank.evaporated_sat()
     );
     assert_eq!(outside, 0, "nothing leaks through glass");
-    // Light under a pane is almost full; under stone it is not.
+    // The pane passes light. Stone is side-lit, and the water under it
+    // stays readable — a roof no longer blacks out the bed.
     place(&mut tank, 1, 8, Cell::glass());
+    // Bedrock holds the sample stone; loose cobbles would drop on the tick.
+    place(&mut tank, 10, 7, Cell::bedrock());
     place(&mut tank, 10, 8, Cell::stone());
     tank.tick(&TankInput { always_day: true, ..TankInput::default() });
     let under_glass = tank.pixel_light_at(3 + 1, (12 - 1 - 7) * 3 + 1);
+    let stone_face = tank.pixel_light_at(10 * 3 + 1, (12 - 1 - 8) * 3 + 1);
     let under_stone = tank.pixel_light_at(10 * 3 + 1, (12 - 1 - 7) * 3 + 1);
-    assert!(under_glass > 220, "light through glass {under_glass}");
-    assert!(under_stone < under_glass / 2, "stone shades {under_stone} vs glass {under_glass}");
+    assert!(under_glass > 200, "light through glass {under_glass}");
+    assert!(stone_face > 180, "stone is side-lit {stone_face}");
+    assert!(under_stone > 160, "water under stone stays lit {under_stone}");
     // Erase takes it away; the save keeps it.
     let bytes = tank.save_bytes().unwrap();
     let loaded = Tank::load_bytes(&bytes).unwrap();
@@ -1937,8 +2468,10 @@ fn portraits_are_deterministic_and_show_the_body() {
     use crate::archive::portrait;
     use crate::bio::Genome;
     let (w, h, px) = portrait(&Genome::algae());
-    assert_eq!((w, h), (1, 1));
-    assert_eq!(px[3], 255, "the algae is one opaque pixel");
+    assert_eq!((w, h), (9, 9), "four pixels of air around the one cell");
+    let opaque = px.chunks(4).filter(|p| p[3] == 255).count();
+    assert_eq!(opaque, 1, "the algae is one opaque pixel");
+    assert_eq!(px[(4 * 9 + 4) * 4 + 3], 255, "the cell sits in the middle");
     let (w, h, straw) = portrait(&Genome::straw());
     let opaque = straw.chunks(4).filter(|p| p[3] == 255).count();
     assert!(opaque >= 3, "straw portrait has a chain ({w}×{h}, {opaque} px)");
@@ -1950,6 +2483,79 @@ fn portraits_are_deterministic_and_show_the_body() {
     let (sw, sh, spiny) = portrait(&Genome::spiny());
     let ivory = spiny.chunks(4).filter(|p| p[..3] == [0xEF, 0xE7, 0xDA]).count();
     assert!(ivory >= 1, "spiny portrait shows its bone ({sw}×{sh})");
+}
+
+#[test]
+fn species_card_names_the_blocks() {
+    let mut tank = water_box(9, 16, 16, 12);
+    tank.seed_algae(24, 24).unwrap();
+    let sp = tank.inspect(24, 24).species;
+    let page = tank.species_page(sp).expect("card");
+    assert!(page.contains("PHOTO 5"), "{page}");
+    assert!(page.contains("\nGENE\n"), "{page}");
+    assert!(page.contains("  SIZE "), "{page}");
+    assert!(!page.contains("MODE"), "{page}");
+    assert!(page.contains("GROW"), "{page}");
+    assert!(page.contains("AGE"), "{page}");
+    assert!(page.contains("CELLS"), "{page}");
+    assert!(page.contains("KIN"), "{page}");
+    assert!(!page.contains("Block"), "{page}");
+}
+
+#[test]
+fn a_gene_card_groups_the_body_then_each_mode() {
+    use crate::archive::genetics_lines;
+    use crate::bio::Genome;
+    let algae = genetics_lines(&Genome::algae());
+    let gene = algae.iter().position(|l| l == "GENE").expect("one gene");
+    let buoy = algae.iter().position(|l| l.starts_with("BUOY")).unwrap();
+    let wall = algae.iter().position(|l| l.starts_with("WALL KEY")).unwrap();
+    let glue = algae.iter().position(|l| l.starts_with("GLUE KEY")).unwrap();
+    assert!(buoy < wall && wall < glue && glue < gene, "{algae:?}");
+    assert_eq!(algae.iter().filter(|l| l.starts_with("GENE")).count(), 1);
+    assert!(algae.iter().any(|l| l.starts_with("  SIZE ")));
+    assert!(algae.iter().any(|l| l.starts_with("  SPLITS ")));
+    let straw = genetics_lines(&Genome::straw());
+    assert!(straw.iter().any(|l| l == "GENE 1"), "{straw:?}");
+    assert!(straw.iter().any(|l| l == "GENE 2"), "{straw:?}");
+    assert!(straw.iter().any(|l| l.starts_with("  GROW ") || l.starts_with("  WHEN ")));
+}
+
+#[test]
+fn adding_a_specimen_keeps_what_is_already_alive() {
+    use crate::archive::Specimen;
+    let mut tank = water_box(4, 24, 24, 16);
+    let id = tank.seed_algae(30, 40).unwrap();
+    let before = tank.live_cells();
+    let sp = Specimen::starter(0).expect("moss");
+    let placed = tank.seed_specimen_copies(&sp, 1);
+    assert!(placed >= 1, "one copy lands in the open water");
+    assert!(tank.live_cells() > before);
+    assert!(tank.cell(id).is_some(), "the original cell stays");
+    assert_eq!(tank.visible_size(), (24, 24));
+}
+
+/// The pale-pink cilia trail is part of the swimmer: a tap on it selects
+/// the cell, the tracking box reaches it, and the book portrait draws it.
+#[test]
+fn cilia_fringe_is_part_of_the_swimmer() {
+    use crate::archive::portrait;
+    use crate::bio::Genome;
+    let (w, h, pic) = portrait(&Genome::swimmer());
+    let pink = pic.chunks(4).filter(|p| *p == [0xF0, 0xA6, 0xC0, 255]).count();
+    assert!(pink >= 1, "swimmer portrait includes its cilia ({w}×{h}, pink={pink})");
+
+    let mut tank = water_box(11, 16, 16, 14);
+    tank.set_lambda_scale_q8(0);
+    let id = tank.seed_genome_at(24, 24, Genome::swimmer()).expect("seed");
+    let c = *tank.cell(id).expect("alive");
+    // A placed seed heads up (heading 2); the fringe trails one pixel down.
+    let hit = tank.inspect(c.px as u32, c.py as u32 + 1);
+    assert_eq!(hit.cell, id, "a tap on the pink fringe selects the swimmer");
+    assert_eq!(hit.org, c.org);
+    let bb = tank.org_bbox(c.org).expect("bbox");
+    assert!(bb.3 >= c.py + 1, "the box reaches the fringe ({bb:?})");
+    assert!(bb.0 <= c.px && bb.2 >= c.px && bb.1 <= c.py);
 }
 
 /// Phase 3 — archive a creature, start a new tank from it: the record
@@ -1987,6 +2593,8 @@ fn archive_specimen_and_seed_a_new_tank_from_it() {
     assert_eq!(back, sp);
     assert!(Specimen::from_bytes(&bytes[..bytes.len() / 2]).is_none());
     assert!(sp.page_text().contains(&sp.species_name));
+    assert!(sp.page_text().contains("GENETICS"), "the page carries the full program");
+    assert!(sp.page_text().contains("PHOTO"), "the program names its blocks");
 
     // New tank, seeded from the specimen.
     let mut fresh = water_box(22, 32, 24, 20);
@@ -2250,8 +2858,10 @@ fn humidity_rises_over_water_and_dew_forms_on_glass_at_night() {
     for vy in 10..24 {
         place(&mut tank, 20, vy, Cell::glass());
     }
+    // Limestone stays put, so the block can hang in the humid air the
+    // way the old static stone did. Painted stone now falls.
     for vy in 12..15 {
-        place(&mut tank, 4, vy, Cell::stone());
+        place(&mut tank, 4, vy, Cell::solid(MaterialId::Limestone));
     }
     for _ in 0..1200 {
         tank.tick(&day());
@@ -2589,4 +3199,331 @@ fn starter_specimens_seed_into_a_tank() {
         let id = tank.seed_specimen(&spec, 36, 30).expect("seed");
         assert!(tank.cell(id).is_some());
     }
+}
+
+/// 5.0 M0 — a fed muscle body contracts its soft-body spring and the
+/// raster moves at least one cell over a few hundred ticks.
+#[test]
+fn muscle_body_twitches_on_its_soft_springs() {
+    use crate::bio::Genome;
+    let mut tank = water_box(5, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::twitcher())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    // Grow the bonded pair.
+    for _ in 0..400 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 2, "twitcher should grow a bonded pair (alive={alive})");
+    let before: Vec<(u16, u16)> = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .map(|(_, c)| (c.px, c.py))
+        .collect();
+    let mut moved = false;
+    for _ in 0..600 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        let now: Vec<(u16, u16)> = tank
+            .cells()
+            .iter_alive()
+            .filter(|(_, c)| c.org == org)
+            .map(|(_, c)| (c.px, c.py))
+            .collect();
+        if now != before {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "soft-body muscle should displace at least one cell");
+}
+
+/// 5.1 M1 — hard–soft–hard hinge: bone ends stay as separate rigid parts
+/// with a muscle joint between them.
+#[test]
+fn hinge_body_has_two_bone_parts_and_a_muscle_joint() {
+    use crate::bio::{bones, Genome};
+    let mut tank = water_box(7, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::hinge())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    for _ in 0..800 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 3, "hinge should grow bone–muscle–bone (alive={alive})");
+    let g = bones::activate(tank.cells(), tank.genomes(), org).expect("bone graph");
+    let bone_parts = g.parts.iter().filter(|p| p.kind == bones::PartKind::Bone).count();
+    assert!(
+        bone_parts >= 2,
+        "expected ≥2 bone parts, got {bone_parts} (parts={})",
+        g.parts.len()
+    );
+    assert!(
+        g.joints.iter().any(|j| j.muscle),
+        "expected a muscle joint between bone parts"
+    );
+}
+
+/// 5.2 M2 — a nerved body gets a StudioNet and its effectors run.
+#[test]
+fn nerved_body_builds_a_studio_net_and_drives() {
+    use crate::bio::Genome;
+    let mut tank = water_box(11, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::nerved())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut saw_running = false;
+    for _ in 0..500 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        if tank
+            .cells()
+            .iter_alive()
+            .filter(|(_, c)| c.org == org)
+            .any(|(_, c)| c.running)
+        {
+            saw_running = true;
+            break;
+        }
+    }
+    assert!(saw_running, "nerved muscle should be driven by the net or links");
+    assert!(Genome::nerved().is_valid());
+}
+
+/// 5.4 M4 — chamber predator grows a geometric mouth (hard + enzyme + muscle).
+#[test]
+fn chamber_mouth_fires_the_chamber_milestone() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(17, 32, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    assert!(Genome::chamber_predator().is_valid());
+    let id = tank
+        .seed_genome_at(48, 60, Genome::chamber_predator())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    let mut chamber = false;
+    for _ in 0..5_000 {
+        tank.tick(&day());
+        tank.feed_org_full(org);
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::CHAMBER || e.kind == ev::MS_CHAMBER {
+                chamber = true;
+            }
+        }
+        if chamber {
+            break;
+        }
+    }
+    let alive = tank
+        .cells()
+        .org(org)
+        .map(|o| o.n_alive)
+        .unwrap_or(0);
+    assert!(alive >= 5, "U should form (alive={alive})");
+    assert!(chamber, "geometric chamber milestone should fire");
+}
+
+/// 5.4 M4 — unmatched prey enclosed then freed (eater dies) fires ESCAPE.
+#[test]
+fn enclosed_prey_escape_fires_when_freed() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(17, 32, 24, 24);
+    tank.set_lambda_scale_q8(0);
+    let id = tank
+        .seed_genome_at(48, 60, Genome::chamber_predator())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    for _ in 0..4_000 {
+        tank.tick(&day());
+        tank.feed_org_full(org);
+        if tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 7 {
+            break;
+        }
+    }
+    assert!(
+        tank.cells().org(org).map(|o| o.n_alive).unwrap_or(0) >= 7,
+        "U never finished"
+    );
+    let base = tank
+        .cells()
+        .iter_alive()
+        .find(|(_, c)| c.org == org && c.mode == 0)
+        .map(|(_, c)| (c.px, c.py))
+        .expect("base");
+    let cavity = (base.0, base.1 - 1);
+    // Unmatched wall_key so the lining does not lyse the prey quickly.
+    let mut prey_g = Genome::algae();
+    prey_g.wall_key = 200;
+    prey_g.buoy = -20;
+    let prey = tank
+        .seed_genome_at(cavity.0, cavity.1, prey_g)
+        .expect("prey");
+    let prey_org = tank.cell(prey).unwrap().org;
+    tank.pin_cell_for_test(prey);
+    // Wait until SCAN_EVERY records the swallowed set (≥ 2 periods).
+    for _ in 0..160 {
+        tank.tick(&day());
+        assert!(
+            tank.cells().get(prey).is_some(),
+            "unmatched prey should survive the cavity briefly"
+        );
+    }
+    // Destroy the eater — cavity vanishes; prey stays alive ⇒ escape.
+    let eater_cells: Vec<u32> = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .map(|(id, _)| id)
+        .collect();
+    for cid in eater_cells {
+        tank.kill_cell(cid);
+    }
+    let mut escape = false;
+    for _ in 0..200 {
+        tank.tick(&day());
+        while let Some(e) = tank.poll_event() {
+            if (e.kind == ev::ESCAPE || e.kind == ev::MS_ESCAPE) && e.arg0 == prey_org {
+                escape = true;
+            }
+        }
+        if escape {
+            break;
+        }
+    }
+    assert!(
+        tank.cells().get(prey).is_some(),
+        "prey should still be alive after the eater dies"
+    );
+    assert!(escape, "freed unmatched prey should fire ESCAPE");
+}
+
+/// 5.4 M4 — SENSOR(colour) returns a high match when looking at a yellow tip.
+#[test]
+fn colour_sensor_matches_a_pigment_target() {
+    use crate::bio::profile::{Block, Entry, SENSOR_COLOUR};
+    use crate::bio::Genome;
+    let mut tank = water_box(13, 24, 24, 20);
+    tank.set_lambda_scale_q8(0);
+    // Yellow crown tip above the seeker (pigment hue 43).
+    let mut crown = Genome::algae();
+    crown.modes[0].n_entries = 0;
+    crown.modes[0].push_entry(Entry::with_params(Block::Pigment, 6, 43, 0));
+    crown.modes[0].push_entry(Entry::new(Block::Photo, 1));
+    crown.modes[0].n_children = 0;
+    assert!(crown.is_valid());
+    // Heading 0 = east: tip sits to the right of the seeker.
+    let seeker = tank
+        .seed_genome_at(30, 40, Genome::colour_seeker())
+        .expect("seeker");
+    tank.pin_cell_for_test(seeker);
+    let tip = tank.seed_genome_at(36, 40, crown).expect("tip");
+    tank.pin_cell_for_test(tip);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut sense = 0u8;
+    for _ in 0..60 {
+        tank.tick(&input);
+        if let Some(c) = tank.cell(seeker) {
+            sense = c.sense;
+            if sense > 100 {
+                break;
+            }
+        }
+    }
+    let mc = tank
+        .genomes()
+        .coeffs(tank.genotype_of_cell(seeker).unwrap(), 0);
+    assert_eq!(mc.sensor_kind, SENSOR_COLOUR);
+    assert!(
+        sense > 80,
+        "colour sensor should match yellow tip (sense={sense})"
+    );
+    assert!(Genome::colour_seeker().is_valid());
+}
+
+/// 5.3 M3 — an eyed body fires the geometric eye milestone.
+#[test]
+fn eyed_body_fires_the_eye_milestone() {
+    use crate::bio::{ev, Genome};
+    let mut tank = water_box(13, 32, 32, 24);
+    tank.set_lambda_scale_q8(0);
+    assert!(Genome::eyed().is_valid());
+    let id = tank
+        .seed_genome_at(16 * 3 + 1, (31 - 12) * 3 + 1, Genome::eyed())
+        .expect("seed");
+    let org = tank.cell(id).unwrap().org;
+    tank.feed_org_full(org);
+    let input = TankInput {
+        always_day: true,
+        ..TankInput::default()
+    };
+    let mut eye = false;
+    for _ in 0..2_000 {
+        tank.tick(&input);
+        tank.feed_org_full(org);
+        while let Some(e) = tank.poll_event() {
+            if e.kind == ev::EYE || e.kind == ev::MS_EYE {
+                eye = true;
+            }
+        }
+        if eye {
+            break;
+        }
+    }
+    let alive = tank
+        .cells()
+        .iter_alive()
+        .filter(|(_, c)| c.org == org)
+        .count();
+    assert!(alive >= 3, "eyed body should grow window + two sensors (alive={alive})");
+    assert!(eye, "geometric eye milestone should fire");
+}
+
+#[test]
+fn a_genotype_gap_still_has_coeffs() {
+    use crate::bio::genome::NONE;
+    use crate::bio::{Genome, GenomeStore};
+    let g = Genome::algae();
+    let store = GenomeStore::import(&[(0, NONE, 0, g.clone()), (2, 0, 1, g)]);
+    let gap = store.get(1).expect("gap id");
+    assert!(gap.tombstone);
+    assert!(!gap.coeffs.is_empty(), "a saved cell naming this id must be able to render");
+    let _ = store.coeffs(1, 0);
+    let _ = store.genome(1);
 }

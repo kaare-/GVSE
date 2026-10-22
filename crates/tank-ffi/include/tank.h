@@ -62,11 +62,13 @@ typedef struct InspectRec {
  * 10 lifeless 11 glass needs cleaning 12 brood released 13 shed 14 fragment
  * 15 regrown 16 predation 17 poison 18 signalling 19 heterotroph 20 fungus
  * 21 something moved 22 new species 23 warm-blooded 24 cloudy 25 life on land
- * 26 cutting took root 27 colour crown; milestones (once per tank) 32 first
+ * 26 cutting took root 27 colour crown 28 eye 29 locomotion 30 escape
+ * 31 chamber; milestones (once per tank) 32 first
  * life 33 first division 34 first death 35 new colour (per lineage)
  * 36 multicellular 37 giant cell 38 fungus 39 heterotroph 40 predation
  * 41 poison 42 signalling 43 something moved 44 new species
- * 45 warm-blooded 46 life on land 47 cutting took root 48 colour crown.
+ * 45 warm-blooded 46 life on land 47 cutting took root 48 colour crown
+ * 49 eye 50 locomotion 51 escape 52 chamber.
  * kind 0 = none. */
 typedef struct EventRec {
   uint32_t kind;
@@ -159,6 +161,15 @@ typedef struct SpecimenInfoRec {
 TankHandle *tank_new(uint64_t seed, uint32_t w_cells, uint32_t h_cells);
 TankHandle *tank_preset(uint64_t seed);
 TankHandle *tank_empty(uint64_t seed);
+/* Main glass: three jar-widths, same height. Jars stay on tank_empty. */
+TankHandle *tank_main_empty(uint64_t seed);
+TankHandle *tank_main_preset(uint64_t seed);
+/* Opening tumbler: water and one starter creature, no sand or stone. */
+TankHandle *tank_glass(uint64_t seed);
+/* Shelf sample jar: water, smaller than the tumbler, no starter. */
+TankHandle *tank_jar(uint64_t seed);
+/* Copy a narrower tank into the middle of visible_w. 1 if it grew. */
+uint8_t tank_widen(TankHandle *handle, uint32_t visible_w);
 uint32_t tank_seed_algae(TankHandle *handle, uint32_t px, uint32_t py);
 uint32_t tank_live_cells(const TankHandle *handle);
 uint32_t tank_swipe_film(TankHandle *handle, int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t radius);
@@ -190,7 +201,22 @@ uint8_t tank_org_bbox(const TankHandle *handle, uint32_t org, uint16_t *x0, uint
 LineageRec tank_lineage(const TankHandle *handle, uint32_t cell);
 uint32_t tank_species_name(const TankHandle *handle, uint16_t species, uint8_t *buf, uint32_t cap);
 uint32_t tank_species_count(const TankHandle *handle);
+/* Saved species and the ancestors that connect them. Unsaved life is omitted. */
 uint32_t tank_species_tree(const TankHandle *handle, SpeciesNodeRec *out, uint32_t cap);
+/* Genetics card, UTF-8, two-call sizing. Portrait is RGBA of the founder. */
+uint32_t tank_species_card(const TankHandle *handle, uint16_t species, uint8_t *buf, uint32_t cap);
+size_t tank_species_portrait(const TankHandle *handle, uint16_t species, uint16_t *w, uint16_t *h,
+                             uint8_t *buf, size_t cap);
+/* Filing-cabinet sample. */
+typedef struct CensusRec {
+  uint32_t live;
+  uint32_t species;
+  uint32_t water;
+  uint32_t sand;
+  uint32_t stone;
+  uint32_t photo;
+} CensusRec;
+CensusRec tank_census(const TankHandle *handle);
 uint8_t tank_mark_species_archived(TankHandle *handle, uint16_t species, uint8_t on);
 
 /* Archive (Phase 3). A specimen is an opaque byte record the shell stores
