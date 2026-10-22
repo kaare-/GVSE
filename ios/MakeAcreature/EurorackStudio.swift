@@ -44,7 +44,10 @@ struct EurorackStudio: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear { hear() }
+        .onAppear {
+            // Exclusive rack voice — ambient playlist is already cut by the desk.
+            session.beginRackSolo(take)
+        }
         .onDisappear { session.endSolo() }
         .onReceive(tick) { _ in
             guard recording else { return }
@@ -489,8 +492,8 @@ struct EurorackStudio: View {
     }
 
     private func hear() {
+        // Keep a single rack slot — never layer over the shelf playlist.
         session.soloTake(take)
-        AmbientAudio.shared.ensureRunning()
     }
 
     private func toggleRecord() {

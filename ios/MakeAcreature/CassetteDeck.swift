@@ -10,16 +10,22 @@ struct CassetteDeck: View {
     @State private var showRack = false
     @State private var dragID: UUID?
     @State private var dragX: CGFloat = 0
-    @State private var shelfWidth: CGFloat = 1
+    /// Tape currently seated in the player for preview.
+    @State private var seated: UUID?
 
-    private let slotW: CGFloat = 28
+    private let slotW: CGFloat = 32
+
+    private var seatedTape: ShelfTape? {
+        guard let seated else { return nil }
+        return session.shelf.first { $0.id == seated }
+    }
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.28)
                 .ignoresSafeArea()
-                .onTapGesture(perform: onClose)
-            VStack(alignment: .leading, spacing: 16) {
+                .onTapGesture(perform: closeDesk)
+            VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     PixelLabel(text: "SHELF", scale: 2, color: Palette.highlight)
                     Spacer()
@@ -36,12 +42,12 @@ struct CassetteDeck: View {
                     }
                     .buttonStyle(.plain)
                     .a11yButton(session.tapePlaying ? "Deck power, on" : "Deck power, off")
-                    Button(action: onClose) {
+                    Button(action: closeDesk) {
                         PixelPanel { PixelLabel(text: "CLOSE", scale: 2) }
                     }
                     .buttonStyle(.plain)
                 }
-                PixelLabel(text: "DRAG TO REORDER  TAP TO PULL", scale: 1, color: Palette.dimPaper)
+                PixelLabel(text: "TAP TO PULL  DRAG TO REORDER", scale: 1, color: Palette.dimPaper)
                 shelf
                 pile
                 player
@@ -54,8 +60,25 @@ struct CassetteDeck: View {
             .padding(.vertical, 48)
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            if seated == nil, session.shelf.indices.contains(session.tape) {
+                seated = session.shelf[session.tape].id
+            }
+        }
         .fullScreenCover(isPresented: $showRack) {
-            EurorackStudio(session: session) { showRack = false }
+            EurorackStudio(session: session) {
+                showRack = false
+                // Playlist only — never leave the rack voice under the desk.
+                session.endSolo()
+            }
+        }
+        .onChange(of: showRack) { open in
+            if open {
+                // Cut the ambient playlist the moment the rack opens.
+                session.beginRackSolo(AmbientAudio.Take.fresh)
+            } else {
+                session.endSolo()
+            }
         }
     }
 
@@ -69,19 +92,18 @@ struct CassetteDeck: View {
                     shelfTape(tape, index: index)
                         .position(x: x, y: 43)
                         .zIndex(dragID == tape.id ? 10 : Double(index))
+                        .onTapGesture { pull(tape.id) }
                         .gesture(shelfDrag(tape: tape, width: geo.size.width))
                 }
             }
             .frame(width: geo.size.width, height: 86, alignment: .leading)
             .coordinateSpace(name: "shelf")
-            .onAppear { shelfWidth = geo.size.width }
-            .onChange(of: geo.size.width) { w in shelfWidth = w }
         }
         .frame(height: 86)
     }
 
     private func shelfDrag(tape: ShelfTape, width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .named("shelf"))
+        DragGesture(minimumDistance: 16, coordinateSpace: .named("shelf"))
             .onChanged { value in
                 if dragID == nil { dragID = tape.id }
                 guard dragID == tape.id else { return }
@@ -89,18 +111,12 @@ struct CassetteDeck: View {
                 let maxX = max(minX, width - slotW / 2)
                 dragX = min(max(minX, value.location.x), maxX)
             }
-            .onEnded { value in
+            .onEnded { _ in
                 let was = dragID
                 let dropX = dragX
                 dragID = nil
                 dragX = 0
                 guard was == tape.id else { return }
-                let dx = value.translation.width
-                let dy = value.translation.height
-                if abs(dx) < 14, abs(dy) < 14 {
-                    if pulled.contains(tape.id) { restore(tape.id) } else { pull(tape.id) }
-                    return
-                }
                 let dest = Int((dropX / slotW).rounded())
                 let clamped = min(max(0, dest), max(0, session.shelf.count - 1))
                 if let from = session.shelf.firstIndex(where: { $0.id == tape.id }) {
@@ -109,22 +125,22 @@ struct CassetteDeck: View {
             }
     }
 
-    /// A cassette box seen edge-on. Pulling it out leaves the slot empty.
     private func shelfTape(_ tape: ShelfTape, index: Int) -> some View {
-        let playing = session.tape == index && session.tapePlaying
+        let playing = session.tape == index && session.tapePlaying && !showRack
         let out = pulled.contains(tape.id)
+        let onPlayer = seated == tape.id
         return ZStack {
             RoundedRectangle(cornerRadius: 1)
                 .fill(Color(red: 0.08, green: 0.06, blue: 0.05))
-                .frame(width: 18, height: 68)
+                .frame(width: 20, height: 68)
             if !out {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(spineColor(index))
-                    .frame(width: 14, height: 64)
+                    .frame(width: 16, height: 64)
                     .overlay(
                         RoundedRectangle(cornerRadius: 1)
                             .stroke(
-                                playing
+                                playing || onPlayer
                                     ? Color(red: 0.22, green: 0.72, blue: 0.28)
                                     : Color(white: 0.55),
                                 lineWidth: 1
@@ -133,24 +149,16 @@ struct CassetteDeck: View {
                 PixelLabel(text: tape.name, scale: 1, color: Palette.paper)
                     .frame(width: 58, height: 12)
                     .rotationEffect(.degrees(-90))
-                    .frame(width: 14, height: 60)
+                    .frame(width: 16, height: 60)
                     .allowsHitTesting(false)
             }
         }
         .frame(width: slotW, height: 72, alignment: .leading)
         .contentShape(Rectangle())
         .a11yButton(
-            out ? "Empty slot" : tape.name,
-            hint: "Drag sideways to reorder. Tap to pull out"
+            out ? "Empty slot \(tape.name)" : tape.name,
+            hint: "Tap to pull out. Drag to reorder"
         )
-        .accessibilityAction(named: "Move left") {
-            guard let from = session.shelf.firstIndex(where: { $0.id == tape.id }), from > 0 else { return }
-            session.moveTape(from: from, to: from - 1)
-        }
-        .accessibilityAction(named: "Move right") {
-            guard let from = session.shelf.firstIndex(where: { $0.id == tape.id }) else { return }
-            session.moveTape(from: from, to: from + 1)
-        }
         .accessibilityAction(named: out ? "Put back" : "Pull out") {
             if out { restore(tape.id) } else { pull(tape.id) }
         }
@@ -173,53 +181,86 @@ struct CassetteDeck: View {
     }
 
     private var pile: some View {
-        ZStack(alignment: .topLeading) {
-            if pulled.isEmpty {
-                PixelLabel(text: "PULL A TAPE", scale: 1, color: Palette.dimPaper)
-            }
-            ForEach(Array(pulled.enumerated()), id: \.element) { i, id in
-                if let tape = session.shelf.first(where: { $0.id == id }) {
-                    frontTape(tape)
-                        .offset(x: CGFloat(i) * 14, y: CGFloat(i) * 10)
+        VStack(alignment: .leading, spacing: 8) {
+            PixelLabel(
+                text: pulled.isEmpty ? "PULL A TAPE FROM THE SHELF" : "PULLED",
+                scale: 1,
+                color: Palette.dimPaper
+            )
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(pulled, id: \.self) { id in
+                        if let tape = session.shelf.first(where: { $0.id == id }) {
+                            frontTape(tape)
+                        }
+                    }
                 }
             }
+            .frame(minHeight: pulled.isEmpty ? 24 : 120)
         }
-        .frame(maxWidth: .infinity, minHeight: 88, alignment: .topLeading)
     }
 
-    /// Record opens the eurorack page. A blank rides onto the player there.
+    /// Seated tape for preview. Record opens the eurorack (playlist stops).
     private var player: some View {
-        HStack(alignment: .center, spacing: 14) {
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color(red: 0.08, green: 0.07, blue: 0.06))
-                    .frame(width: 168, height: 64)
-                PixelLabel(text: "PLAYER", scale: 1, color: Palette.dimPaper)
-                    .padding(.leading, 8)
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color(red: 0.55, green: 0.5, blue: 0.42))
-                    .frame(width: 46, height: 30)
-                    .overlay(PixelLabel(text: "EMPTY", scale: 1, color: Color(red: 0.12, green: 0.08, blue: 0.04)))
-                    .offset(x: 100)
-            }
-            .frame(width: 230, height: 64, alignment: .leading)
-            Button { showRack = true } label: {
-                ZStack {
-                    Circle()
-                        .fill(Color(red: 0.82, green: 0.12, blue: 0.1))
-                        .frame(width: 28, height: 28)
-                    Circle()
-                        .fill(Color(red: 0.55, green: 0.08, blue: 0.08))
-                        .frame(width: 12, height: 12)
+        VStack(alignment: .leading, spacing: 8) {
+            PixelLabel(text: "PLAYER", scale: 1, color: Palette.dimPaper)
+            HStack(alignment: .center, spacing: 12) {
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(red: 0.08, green: 0.07, blue: 0.06))
+                        .frame(width: 180, height: 64)
+                    if let tape = seatedTape {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color(red: 0.55, green: 0.5, blue: 0.42))
+                            .frame(width: 92, height: 40)
+                            .overlay(
+                                VStack(spacing: 2) {
+                                    PixelLabel(text: tape.name, scale: 1, color: Color(red: 0.12, green: 0.08, blue: 0.04))
+                                    PixelLabel(text: clock(tape.duration), scale: 1, color: Color(red: 0.25, green: 0.18, blue: 0.1))
+                                }
+                            )
+                            .offset(x: 16)
+                    } else {
+                        PixelLabel(text: "NO TAPE", scale: 1, color: Palette.dimPaper)
+                            .offset(x: 16)
+                    }
                 }
+                .frame(width: 180, height: 64, alignment: .leading)
+                .onTapGesture { previewSeated() }
+
+                Button(action: previewSeated) {
+                    PixelPanel {
+                        PixelLabel(
+                            text: session.tapePlaying && seated != nil ? "STOP" : "PLAY",
+                            scale: 2,
+                            color: session.tapePlaying
+                                ? Color(red: 0.22, green: 0.72, blue: 0.28)
+                                : Palette.highlight
+                        )
+                    }
+                }
+                .buttonStyle(.plain)
+                .a11yButton("Preview tape", hint: "Play the seated cassette")
+
+                Button { showRack = true } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color(red: 0.82, green: 0.12, blue: 0.1))
+                            .frame(width: 28, height: 28)
+                        Circle()
+                            .fill(Color(red: 0.55, green: 0.08, blue: 0.08))
+                            .frame(width: 12, height: 12)
+                    }
+                }
+                .buttonStyle(.plain)
+                .a11yButton("Record", hint: "Open the eurorack. Ambient playlist stops")
             }
-            .buttonStyle(.plain)
-            .a11yButton("Record", hint: "Open the eurorack and record a tape")
         }
     }
 
     private func frontTape(_ tape: ShelfTape) -> some View {
-        VStack(spacing: 6) {
+        let onPlayer = seated == tape.id
+        return VStack(spacing: 6) {
             HStack(spacing: 16) {
                 Circle().stroke(Palette.dimPaper, lineWidth: 2).frame(width: 22, height: 22)
                 Circle().stroke(Palette.dimPaper, lineWidth: 2).frame(width: 22, height: 22)
@@ -237,22 +278,17 @@ struct CassetteDeck: View {
             .a11yButton("Name tag \(tape.name)", hint: "Rename")
             PixelLabel(text: clock(tape.duration), scale: 1, color: Palette.paper)
             HStack(spacing: 6) {
-                Button {
-                    if let from = session.shelf.firstIndex(where: { $0.id == tape.id }), from > 0 {
-                        session.moveTape(from: from, to: from - 1)
+                Button { seatAndPreview(tape) } label: {
+                    PixelPanel {
+                        PixelLabel(
+                            text: onPlayer ? "PLAYING" : "PLAY",
+                            scale: 1,
+                            color: onPlayer ? Palette.highlight : Palette.paper
+                        )
                     }
-                } label: {
-                    PixelPanel { PixelLabel(text: "<", scale: 1) }
                 }
                 .buttonStyle(.plain)
-                Button {
-                    if let from = session.shelf.firstIndex(where: { $0.id == tape.id }) {
-                        session.moveTape(from: from, to: from + 1)
-                    }
-                } label: {
-                    PixelPanel { PixelLabel(text: ">", scale: 1) }
-                }
-                .buttonStyle(.plain)
+                .a11yButton("Play \(tape.name)", hint: "Seat it in the player and preview")
                 Button { restore(tape.id) } label: {
                     PixelPanel { PixelLabel(text: "SHELF", scale: 1, color: Palette.paper) }
                 }
@@ -262,16 +298,58 @@ struct CassetteDeck: View {
         }
         .padding(10)
         .background(Color(red: 0.42, green: 0.28, blue: 0.16))
-        .overlay(Rectangle().stroke(Color(red: 0.85, green: 0.7, blue: 0.4), lineWidth: 2))
+        .overlay(
+            Rectangle().stroke(
+                onPlayer ? Color(red: 0.22, green: 0.72, blue: 0.28) : Color(red: 0.85, green: 0.7, blue: 0.4),
+                lineWidth: 2
+            )
+        )
     }
 
     private func pull(_ id: UUID) {
-        guard !pulled.contains(id) else { return }
+        if pulled.contains(id) {
+            // Second tap on an empty slot puts it back.
+            restore(id)
+            return
+        }
         pulled.append(id)
+        // Seat it so PLAY is ready.
+        if let tape = session.shelf.first(where: { $0.id == id }) {
+            seated = tape.id
+        }
     }
 
     private func restore(_ id: UUID) {
         pulled.removeAll { $0 == id }
+        if seated == id { seated = nil }
+    }
+
+    private func seatAndPreview(_ tape: ShelfTape) {
+        seated = tape.id
+        session.previewTape(id: tape.id)
+    }
+
+    private func previewSeated() {
+        guard let tape = seatedTape else {
+            // Fall back to the playlist head.
+            if session.shelf.indices.contains(session.tape) {
+                seated = session.shelf[session.tape].id
+                session.previewTape(id: session.shelf[session.tape].id)
+            }
+            return
+        }
+        if session.tapePlaying,
+           let i = session.shelf.firstIndex(where: { $0.id == tape.id }),
+           session.tape == i {
+            session.toggleDeck()
+        } else {
+            session.previewTape(id: tape.id)
+        }
+    }
+
+    private func closeDesk() {
+        session.endSolo()
+        onClose()
     }
 
     private func clock(_ secs: Double) -> String {

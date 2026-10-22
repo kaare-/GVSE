@@ -604,7 +604,28 @@ final class TankSession: ObservableObject {
         UserDefaults.standard.set(tape, forKey: "tape")
     }
 
-    /// Hear a take while patching or recording. The shelf returns in `keepTake`.
+    /// Seat a shelf tape in the desk player and preview it (playlist head).
+    func previewTape(id: UUID) {
+        guard let index = shelf.firstIndex(where: { $0.id == id }) else { return }
+        endSolo()
+        tape = index
+        deckOn = true
+        UserDefaults.standard.set(tape, forKey: "tape")
+        UserDefaults.standard.set(true, forKey: "deckOn")
+        pushDeck(resetHead: true)
+        showHint(shelf[index].name)
+    }
+
+    /// Open the eurorack: kill the ambient playlist, only the rack voice.
+    func beginRackSolo(_ take: AmbientAudio.Take) {
+        soloing = true
+        let slot = AmbientAudio.PlaySlot(voice: -1, duration: 3600, take: take)
+        AmbientAudio.shared.setDeck(on: true, slots: [slot], start: 0, resetHead: true)
+        AmbientAudio.shared.setMuted(false)
+        AmbientAudio.shared.ensureRunning()
+    }
+
+    /// Update the rack voice while patching. Playlist stays cut.
     func soloTake(_ take: AmbientAudio.Take) {
         soloing = true
         let slot = AmbientAudio.PlaySlot(voice: -1, duration: 3600, take: take)
@@ -617,7 +638,7 @@ final class TankSession: ObservableObject {
     func endSolo() {
         guard soloing else { return }
         soloing = false
-        pushDeck(resetHead: false)
+        pushDeck(resetHead: true)
     }
 
     /// The blank cassette leaves the player and joins the right end of the shelf.
