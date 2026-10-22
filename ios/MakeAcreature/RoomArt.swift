@@ -121,12 +121,8 @@ enum RoomArt {
     /// The lantern on the top shelf. A double tap turns it on or off.
     static let shelfLamp = Spot(x: 60, y: 14, w: 12, h: 20)
 
-    /// The candle. A swipe blows it out. Light it from the matchbox.
+    /// The candle. A double tap lights or puts it out. A swipe blows it out.
     static let candleHit = Spot(x: 104, y: 118, w: 16, h: 40)
-
-    /// Matchbox on the desk, left of the candle. A tap lights the candle.
-    static let matchbox = Spot(x: 88, y: 146, w: 14, h: 10)
-    static let matchboxHit = Spot(x: 86, y: 144, w: 18, h: 14)
 
     /// Small frame on the wall under the scissor hook.
     static let favFrame = Spot(x: 98, y: 68, w: 18, h: 24)
@@ -717,20 +713,7 @@ private final class Pix {
 
     private func lamps() {
         deskLamp(2)
-        matchbox()
         candle(106)
-    }
-
-    /// Flat matchbox on the desk. Red sleeve, dark striker, pale label.
-    private func matchbox() {
-        let b = RoomArt.matchbox
-        fill(b.x, b.y + 2, b.w, b.h - 2, Ink.redDk)
-        fill(b.x, b.y, b.w, 2, Ink.red)
-        fill(b.x, b.y + 3, 2, b.h - 4, 0x2A241C)
-        fill(b.x + 3, b.y + 3, b.w - 5, 4, Ink.ivory)
-        set(b.x + 4, b.y + 4, Ink.red)
-        set(b.x + b.w - 3, b.y + 5, Ink.redLt)
-        fill(b.x + 1, b.y + b.h, b.w - 2, 1, 0x120C0E)
     }
 
     /// The right-hand light. A short wax column and a flame, not a second lamp.
