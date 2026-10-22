@@ -11,14 +11,129 @@ final class AmbientAudio {
     /// How long each voice plays before the playlist fades into the next.
     static let tapeDurations: [TimeInterval] = [48, 36, 72, 40, 56, 34, 80, 44]
 
-    /// A take written onto a cassette. Control voltage indexes are
-    /// day, rain, lamp, candle, room. `-1` means the jack is empty.
+    /// One patched take on a cassette. Knobs plus cable routes from the
+    /// eurorack page. Old saves that only had pitch/level still decode.
     struct Take: Equatable, Codable {
-        var pitch: Float
-        var level: Float
-        var bright: Bool
-        var pitchCv: Int
-        var levelCv: Int
+        var pitch: Float = 0.42
+        var level: Float = 0.65
+        var bright: Bool = false
+        /// Legacy room-CV jacks (−1 empty). Kept so old takes still play.
+        var pitchCv: Int = -1
+        var levelCv: Int = -1
+        /// Morph 0…1: sine → triangle → saw → square (Plaits-ish).
+        var wave: Float = 0.18
+        var cutoff: Float = 0.72
+        var reso: Float = 0.18
+        var attack: Float = 0.08
+        var decay: Float = 0.28
+        var sustain: Float = 0.55
+        var release: Float = 0.35
+        var lfoRate: Float = 0.28
+        var lfoAmt: Float = 0.22
+        var noise: Float = 0.04
+        var clock: Float = 0.42
+        /// Eight pitch offsets for the step sequencer (0…1).
+        var steps: [Float] = [0.0, 0.18, 0.36, 0.18, 0.55, 0.36, 0.27, 0.0]
+        /// Patch cables: source jack → destination jack.
+        var cables: [Cable] = []
+
+        struct Cable: Equatable, Codable {
+            var from: Int
+            var to: Int
+        }
+
+        /// Jack ids used by the rack UI and the voice.
+        enum Jack: Int, CaseIterable {
+            case lfo = 0, env, noiseOut, seq
+            case day, rain, lamp, candle, room
+            case pitch = 20, wave, cutoff, level, clock, reso
+
+            var isSource: Bool { rawValue < 20 }
+            var label: String {
+                switch self {
+                case .lfo: return "LFO"
+                case .env: return "ENV"
+                case .noiseOut: return "NOISE"
+                case .seq: return "SEQ"
+                case .day: return "DAY"
+                case .rain: return "RAIN"
+                case .lamp: return "LAMP"
+                case .candle: return "CANDLE"
+                case .room: return "ROOM"
+                case .pitch: return "PITCH"
+                case .wave: return "WAVE"
+                case .cutoff: return "CUT"
+                case .level: return "LEVEL"
+                case .clock: return "CLK"
+                case .reso: return "RES"
+                }
+            }
+        }
+
+        static let fresh = Take()
+
+        init(
+            pitch: Float = 0.42,
+            level: Float = 0.65,
+            bright: Bool = false,
+            pitchCv: Int = -1,
+            levelCv: Int = -1,
+            wave: Float = 0.18,
+            cutoff: Float = 0.72,
+            reso: Float = 0.18,
+            attack: Float = 0.08,
+            decay: Float = 0.28,
+            sustain: Float = 0.55,
+            release: Float = 0.35,
+            lfoRate: Float = 0.28,
+            lfoAmt: Float = 0.22,
+            noise: Float = 0.04,
+            clock: Float = 0.42,
+            steps: [Float] = [0.0, 0.18, 0.36, 0.18, 0.55, 0.36, 0.27, 0.0],
+            cables: [Cable] = []
+        ) {
+            self.pitch = pitch
+            self.level = level
+            self.bright = bright
+            self.pitchCv = pitchCv
+            self.levelCv = levelCv
+            self.wave = wave
+            self.cutoff = cutoff
+            self.reso = reso
+            self.attack = attack
+            self.decay = decay
+            self.sustain = sustain
+            self.release = release
+            self.lfoRate = lfoRate
+            self.lfoAmt = lfoAmt
+            self.noise = noise
+            self.clock = clock
+            self.steps = steps
+            self.cables = cables
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            pitch = try c.decodeIfPresent(Float.self, forKey: .pitch) ?? 0.42
+            level = try c.decodeIfPresent(Float.self, forKey: .level) ?? 0.65
+            bright = try c.decodeIfPresent(Bool.self, forKey: .bright) ?? false
+            pitchCv = try c.decodeIfPresent(Int.self, forKey: .pitchCv) ?? -1
+            levelCv = try c.decodeIfPresent(Int.self, forKey: .levelCv) ?? -1
+            wave = try c.decodeIfPresent(Float.self, forKey: .wave) ?? 0.18
+            cutoff = try c.decodeIfPresent(Float.self, forKey: .cutoff) ?? 0.72
+            reso = try c.decodeIfPresent(Float.self, forKey: .reso) ?? 0.18
+            attack = try c.decodeIfPresent(Float.self, forKey: .attack) ?? 0.08
+            decay = try c.decodeIfPresent(Float.self, forKey: .decay) ?? 0.28
+            sustain = try c.decodeIfPresent(Float.self, forKey: .sustain) ?? 0.55
+            release = try c.decodeIfPresent(Float.self, forKey: .release) ?? 0.35
+            lfoRate = try c.decodeIfPresent(Float.self, forKey: .lfoRate) ?? 0.28
+            lfoAmt = try c.decodeIfPresent(Float.self, forKey: .lfoAmt) ?? 0.22
+            noise = try c.decodeIfPresent(Float.self, forKey: .noise) ?? 0.04
+            clock = try c.decodeIfPresent(Float.self, forKey: .clock) ?? 0.42
+            steps = try c.decodeIfPresent([Float].self, forKey: .steps)
+                ?? [0.0, 0.18, 0.36, 0.18, 0.55, 0.36, 0.27, 0.0]
+            cables = try c.decodeIfPresent([Cable].self, forKey: .cables) ?? []
+        }
     }
 
     struct PlaySlot {
@@ -49,6 +164,16 @@ final class AmbientAudio {
     private var heldStep: UInt64 = UInt64.max
     private var heldIndex = 0
     private var heldOctave: Float = 1
+    /// Voice state for a patched take (eurorack page / recorded tape).
+    private var takePhase: Float = 0
+    private var takeLfo: Float = 0
+    private var takeEnv: Float = 0
+    private var takeEnvStage: Int = 0
+    private var takeStep = 0
+    private var takeStepInto: Float = 0
+    private var takeLp: Float = 0
+    private var takeBp: Float = 0
+    private var takeNoise: UInt32 = 1
 
     func setTape(_ index: Int) {
         tape = min(Self.tapeNames.count - 1, max(0, index))
@@ -64,7 +189,17 @@ final class AmbientAudio {
             into = 0
         } else {
             let next = min(max(0, start), slots.count - 1)
-            if resetHead { into = 0 }
+            if resetHead {
+                into = 0
+                takePhase = 0
+                takeLfo = 0
+                takeEnv = 0
+                takeEnvStage = 0
+                takeStep = 0
+                takeStepInto = 0
+                takeLp = 0
+                takeBp = 0
+            }
             slot = next
             let voice = slots[next].voice
             if slots[next].take == nil {
@@ -195,23 +330,117 @@ final class AmbientAudio {
         }
     }
 
-    /// A recorded cassette. Sliders set the tone; patched jacks add the room.
+    /// Patched eurorack voice: sequencer, morph osc, ladder-ish filter, ADSR.
     private func played(t: Float, take: Take) -> Float {
-        func src(_ index: Int) -> Float {
+        let rate: Float = 22_050
+        func room(_ index: Int) -> Float {
             guard index >= 0, cv.indices.contains(index) else { return 0 }
             return cv[index]
         }
-        let pitch = min(1, max(0, take.pitch + (take.pitchCv >= 0 ? src(take.pitchCv) * 0.5 : 0)))
-        let freq = 90 * pow(3.2, pitch)
-        var amp = take.level
-        if take.levelCv >= 0 {
-            amp *= 0.25 + 0.75 * src(take.levelCv)
+        func source(_ jack: Int) -> Float {
+            switch jack {
+            case Take.Jack.lfo.rawValue: return sin(takeLfo)
+            case Take.Jack.env.rawValue: return takeEnv
+            case Take.Jack.noiseOut.rawValue:
+                takeNoise = takeNoise &* 1_664_525 &+ 1_013_904_223
+                return Float(Int(takeNoise >> 16) & 0x7FFF) / 16_384 - 1
+            case Take.Jack.seq.rawValue:
+                let steps = take.steps.isEmpty ? [0] : take.steps
+                return steps[takeStep % steps.count] * 2 - 1
+            case Take.Jack.day.rawValue: return room(0) * 2 - 1
+            case Take.Jack.rain.rawValue: return room(1) * 2 - 1
+            case Take.Jack.lamp.rawValue: return room(2) * 2 - 1
+            case Take.Jack.candle.rawValue: return room(3) * 2 - 1
+            case Take.Jack.room.rawValue: return room(4) * 2 - 1
+            default: return 0
+            }
         }
-        var sample = sin(2 * .pi * freq * t) * amp * 0.34
+        func mod(_ dest: Take.Jack, base: Float, amount: Float = 0.45) -> Float {
+            var v = base
+            for cable in take.cables where cable.to == dest.rawValue {
+                v += source(cable.from) * amount
+            }
+            // Legacy jacks from the first rack draft.
+            if dest == .pitch, take.pitchCv >= 0 { v += room(take.pitchCv) * 0.35 }
+            if dest == .level, take.levelCv >= 0 { v *= 0.25 + 0.75 * room(take.levelCv) }
+            return min(1, max(0, v))
+        }
+
+        let clock = mod(.clock, base: take.clock)
+        let stepHz = 0.35 + clock * 6.5
+        takeStepInto += stepHz / rate
+        if takeStepInto >= 1 {
+            takeStepInto -= 1
+            let steps = take.steps.isEmpty ? [Float](repeating: 0, count: 8) : take.steps
+            takeStep = (takeStep + 1) % max(steps.count, 1)
+            takeEnvStage = 0
+        }
+
+        let atk = max(0.005, take.attack)
+        let dec = max(0.01, take.decay)
+        let rel = max(0.02, take.release)
+        switch takeEnvStage {
+        case 0:
+            takeEnv += (1 / (atk * rate))
+            if takeEnv >= 1 { takeEnv = 1; takeEnvStage = 1 }
+        case 1:
+            takeEnv -= (1 - take.sustain) / (dec * rate)
+            if takeEnv <= take.sustain { takeEnv = take.sustain; takeEnvStage = 2 }
+        default:
+            let gateLen: Float = 0.55
+            if takeStepInto > gateLen {
+                takeEnv -= takeEnv / (rel * rate)
+            }
+        }
+
+        let twoPi = Float.pi * 2
+        takeLfo += twoPi * (0.05 + take.lfoRate * 8) / rate
+        if takeLfo > twoPi { takeLfo -= twoPi }
+
+        let steps = take.steps.isEmpty ? [Float](repeating: 0, count: 8) : take.steps
+        let stepPitch = steps[takeStep % steps.count]
+        var pitch = mod(.pitch, base: take.pitch * 0.65 + stepPitch * 0.35)
+        pitch += sin(takeLfo) * take.lfoAmt * 0.12
+        let freq = 70 * powf(4.0, pitch)
+
+        let wave = mod(.wave, base: take.wave)
+        takePhase += freq / rate
+        if takePhase >= 1 { takePhase -= 1 }
+        let ph = takePhase
+        let sine = sin(twoPi * ph)
+        let tri: Float = ph < 0.5 ? ph * 4 - 1 : 3 - ph * 4
+        let saw: Float = ph * 2 - 1
+        let square: Float = ph < 0.5 ? 1 : -1
+        let osc: Float = {
+            if wave < 0.33 {
+                let u = wave / 0.33
+                return sine * (1 - u) + tri * u
+            } else if wave < 0.66 {
+                let u = (wave - 0.33) / 0.33
+                return tri * (1 - u) + saw * u
+            } else {
+                let u = (wave - 0.66) / 0.34
+                return saw * (1 - u) + square * u
+            }
+        }()
+
+        takeNoise = takeNoise &* 1_664_525 &+ 1_013_904_223
+        let noiseSamp = Float(Int(takeNoise >> 16) & 0x7FFF) / 16_384 - 1
+        var sample = osc + noiseSamp * take.noise
+
+        let cut = mod(.cutoff, base: take.cutoff)
+        let res = mod(.reso, base: take.reso)
+        let f = 0.02 + cut * cut * 0.55
+        takeLp += f * (sample - takeLp + takeBp * res * 3.2)
+        takeBp += f * (sample - takeLp - takeBp)
+        sample = takeLp
         if take.bright {
-            sample += sin(2 * .pi * freq * 2 * t) * amp * 0.12
+            sample += osc * 0.12
         }
-        return sample * max(intensity, 0.2)
+
+        var amp = mod(.level, base: take.level, amount: 0.55)
+        amp *= 0.15 + 0.85 * takeEnv
+        return sample * amp * 0.38 * max(intensity, 0.22)
     }
 
     /// Drone, a two-note chord, and a line that steps. Envelopes sit on

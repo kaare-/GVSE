@@ -599,7 +599,7 @@ final class TankSession: ObservableObject {
         UserDefaults.standard.set(tape, forKey: "tape")
     }
 
-    /// Hear a take while it is recording. The shelf comes back in `keepTake`.
+    /// Hear a take while patching or recording. The shelf returns in `keepTake`.
     func soloTake(_ take: AmbientAudio.Take) {
         soloing = true
         let slot = AmbientAudio.PlaySlot(voice: -1, duration: 3600, take: take)
@@ -607,13 +607,27 @@ final class TankSession: ObservableObject {
         AmbientAudio.shared.setMuted(false)
     }
 
+    /// Leave the solo voice and restore the shelf playlist.
+    func endSolo() {
+        guard soloing else { return }
+        soloing = false
+        pushDeck(resetHead: false)
+    }
+
     /// The blank cassette leaves the player and joins the right end of the shelf.
-    func keepTake(_ take: AmbientAudio.Take, duration: Double) {
+    func keepTake(_ take: AmbientAudio.Take, duration: Double, name: String? = nil) {
         let n = shelf.filter { $0.voice < 0 }.count + 1
+        let label: String = {
+            if let name {
+                let up = name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                if !up.isEmpty { return String(up.prefix(12)) }
+            }
+            return "TAKE \(n)"
+        }()
         shelf.append(
             ShelfTape(
                 id: UUID(),
-                name: "TAKE \(n)",
+                name: label,
                 voice: -1,
                 duration: duration,
                 take: take
@@ -626,6 +640,7 @@ final class TankSession: ObservableObject {
         soloing = false
         saveShelf()
         pushDeck(resetHead: true)
+        showHint(label)
     }
 
     private func loadShelf() {

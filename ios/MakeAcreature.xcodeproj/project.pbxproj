@@ -29,6 +29,8 @@
 		B10000000000000000000017 /* SpriteSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000017 /* SpriteSheet.swift */; };
 		B10000000000000000000018 /* scissors.png in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000018 /* scissors.png */; };
 		B10000000000000000000019 /* power.png in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000019 /* power.png */; };
+		B1000000000000000000001A /* CassetteDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001A /* CassetteDeck.swift */; };
+		B1000000000000000000001B /* EurorackStudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000001B /* EurorackStudio.swift */; };
 		B10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -55,6 +57,8 @@
 		F10000000000000000000017 /* SpriteSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpriteSheet.swift; sourceTree = "<group>"; };
 		F10000000000000000000018 /* scissors.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = scissors.png; sourceTree = "<group>"; };
 		F10000000000000000000019 /* power.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = power.png; sourceTree = "<group>"; };
+		F1000000000000000000001A /* CassetteDeck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CassetteDeck.swift; sourceTree = "<group>"; };
+		F1000000000000000000001B /* EurorackStudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EurorackStudio.swift; sourceTree = "<group>"; };
 		F10000000000000000000006 /* Tank-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Tank-Bridging-Header.h"; sourceTree = "<group>"; };
 		F10000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F10000000000000000000008 /* MakeAcreature.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MakeAcreature.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -99,6 +103,8 @@
 				F1000000000000000000000F /* EventToasts.swift */,
 				F10000000000000000000010 /* FuseBoxSettings.swift */,
 				F10000000000000000000011 /* AmbientAudio.swift */,
+				F1000000000000000000001A /* CassetteDeck.swift */,
+				F1000000000000000000001B /* EurorackStudio.swift */,
 				F10000000000000000000012 /* PhotoMode.swift */,
 				F10000000000000000000013 /* StartGuide.swift */,
 				F10000000000000000000014 /* PixelKeyboard.swift */,
@@ -207,6 +213,8 @@
 				B1000000000000000000000F /* EventToasts.swift in Sources */,
 				B10000000000000000000010 /* FuseBoxSettings.swift in Sources */,
 				B10000000000000000000011 /* AmbientAudio.swift in Sources */,
+				B1000000000000000000001A /* CassetteDeck.swift in Sources */,
+				B1000000000000000000001B /* EurorackStudio.swift in Sources */,
 				B10000000000000000000012 /* PhotoMode.swift in Sources */,
 				B10000000000000000000013 /* StartGuide.swift in Sources */,
 				B10000000000000000000014 /* PixelKeyboard.swift in Sources */,
