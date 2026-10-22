@@ -71,12 +71,13 @@ enum TankContainer: Equatable {
     }
 
     static func stored() -> TankContainer {
-        let raw = UserDefaults.standard.string(forKey: "openContainer") ?? "main"
+        let raw = UserDefaults.standard.string(forKey: "openContainer") ?? "glass"
         if raw == "glass" { return .glass }
+        if raw == "main" { return .main }
         if raw.hasPrefix("sample-"), let n = Int(raw.dropFirst("sample-".count)), (0..<3).contains(n) {
             return .sample(n)
         }
-        return .main
+        return .glass
     }
 }
 
@@ -155,6 +156,29 @@ final class TankSession: ObservableObject {
     @Published private(set) var showStartGuide = false
     /// Bumps when a tank file is replaced, so the lobby glass can refresh.
     @Published private(set) var savesChanged = 0
+    /// Lobby script index. 0 = opening tumbler. 1 = first jar after something moved.
+    @Published private(set) var lobbyBeat = 0
+
+    /// What the study shows for the unlocked beat.
+    var roomCast: RoomCast { LobbyScript.cast(beat: lobbyBeat) }
+
+    /// The room crop for the open desk glass (tumbler or first jar).
+    var deskView: RoomArt.Spot {
+        switch container {
+        case .sample(0) where lobbyBeat >= 1: return RoomArt.jarView
+        case .glass: return RoomArt.glassView
+        default: return RoomArt.glassView
+        }
+    }
+
+    /// True when the open container is drawn into a hole in the study.
+    var deskGlass: Bool {
+        switch container {
+        case .glass: return true
+        case .sample(0) where lobbyBeat >= 1: return true
+        default: return false
+        }
+    }
     /// Samples for the filing-cabinet charts, oldest first.
     @Published private(set) var chart: [ChartPoint] = []
     /// Cassette in the deck. Index into `shelf`, left to right.
@@ -205,7 +229,13 @@ final class TankSession: ObservableObject {
 
     init() {
         TelemetryClient.installCrashHook()
+        lobbyBeat = UserDefaults.standard.integer(forKey: "lobbyBeat")
         container = TankContainer.stored()
+        // Opening beat runs the tumbler in the background so locomotion can fire.
+        if lobbyBeat == 0, container == .main {
+            container = .glass
+            UserDefaults.standard.set(TankContainer.glass.key, forKey: "openContainer")
+        }
         swirl = UserDefaults.standard.bool(forKey: "swirlEnabled")
         pauseOnEvent = UserDefaults.standard.bool(forKey: "pauseOnEvent")
         soundOn = UserDefaults.standard.object(forKey: "soundOn") as? Bool ?? true
@@ -350,7 +380,22 @@ final class TankSession: ObservableObject {
     }
 
     func openSample(_ index: Int) {
+        glassZoom = 1
+        glassPan = .zero
         switchTo(.sample(max(0, min(2, index))))
+    }
+
+    /// Beat 2: something moved. One jar on the shelf, system cue.
+    func unlockMovedBeat() {
+        guard lobbyBeat < 1 else { return }
+        lobbyBeat = 1
+        UserDefaults.standard.set(1, forKey: "lobbyBeat")
+        if let jar = tank_jar(UInt64(Date().timeIntervalSince1970) &+ 17) {
+            write(handle: jar, to: .sample(0))
+            tank_free(jar)
+        }
+        savesChanged &+= 1
+        SystemCue.play(LobbyScript.beats[1].sound)
     }
 
     /// A carried creature stays in the bucket so it can be poured into another vial.
@@ -382,7 +427,7 @@ final class TankSession: ObservableObject {
             showHint("EMPTY")
             return
         }
-        guard let fresh = tank_empty(UInt64(Date().timeIntervalSince1970)) else { return }
+        guard let fresh = tank_jar(UInt64(Date().timeIntervalSince1970)) else { return }
         write(handle: fresh, to: .sample(index))
         tank_free(fresh)
         showHint("EMPTY")
@@ -413,6 +458,8 @@ final class TankSession: ObservableObject {
         UserDefaults.standard.set("", forKey: "doorName")
         UserDefaults.standard.removeObject(forKey: "favouriteId")
         UserDefaults.standard.set(false, forKey: "startGuideDone")
+        UserDefaults.standard.set(0, forKey: "lobbyBeat")
+        lobbyBeat = 0
         AmbientAudio.shared.setMuted(false)
         let targets: [TankContainer] = [.glass, .main, .sample(0), .sample(1), .sample(2)]
         for (i, target) in targets.enumerated() {
@@ -420,8 +467,8 @@ final class TankSession: ObservableObject {
             write(handle: fresh, to: target)
             tank_free(fresh)
         }
-        container = .main
-        UserDefaults.standard.set(TankContainer.main.key, forKey: "openContainer")
+        container = .glass
+        UserDefaults.standard.set(TankContainer.glass.key, forKey: "openContainer")
         loadContainer()
         showStartGuide = true
         showHint("RESET")
@@ -1001,7 +1048,7 @@ final class TankSession: ObservableObject {
             case .main:
                 handle = tank_main_preset(1)
             case .sample(let index):
-                handle = tank_empty(UInt64(index + 11))
+                handle = tank_jar(UInt64(index + 11))
             }
         }
         if case .main = container, let handle {
@@ -1023,7 +1070,7 @@ final class TankSession: ObservableObject {
         case .main:
             return tank_main_empty(seed)
         case .sample:
-            return tank_empty(seed)
+            return tank_jar(seed)
         }
     }
 
@@ -1236,7 +1283,7 @@ final class TankSession: ObservableObject {
     }
 
     private func clampedGlassPan(_ pan: CGSize, zoom: CGFloat, view: CGSize) -> CGSize {
-        let seen = RoomArt.glassView
+        let seen = deskView
         let fit = min(view.width / CGFloat(seen.w), view.height / CGFloat(seen.h))
         let w = CGFloat(seen.w) * fit * zoom
         let h = CGFloat(seen.h) * fit * zoom
@@ -1409,7 +1456,7 @@ final class TankSession: ObservableObject {
                 grav_x: lastGravX,
                 grav_y: lastGravY,
                 paused: paused ? 1 : 0,
-                always_day: (alwaysDay || container == .glass) ? 1 : 0,
+                always_day: (alwaysDay || deskGlass) ? 1 : 0,
                 swirl: effectiveSwirl ? 1 : 0,
                 _pad1: 0,
                 light_slider: Float(lightSlider),
@@ -1514,6 +1561,10 @@ final class TankSession: ObservableObject {
             }
             if let sting = EventToast.soundTrigger(kind: ev.kind) {
                 AmbientAudio.shared.playSting(sting)
+            }
+            // Beat 2: locomotion / something moved unlocks the first jar.
+            if ev.kind == 43 || ev.kind == 50 || ev.kind == 21 {
+                unlockMovedBeat()
             }
             if hapticsOn, EventToast.shouldPause(kind: ev.kind) {
                 haptic.impactOccurred()

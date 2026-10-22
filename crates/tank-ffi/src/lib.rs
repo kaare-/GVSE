@@ -226,6 +226,15 @@ pub extern "C" fn tank_glass(seed: u64) -> *mut TankHandle {
     }))
 }
 
+/// A shelf sample jar: water, smaller than the tumbler, no starter.
+#[no_mangle]
+pub extern "C" fn tank_jar(seed: u64) -> *mut TankHandle {
+    Box::into_raw(Box::new(TankHandle {
+        tank: Tank::jar(seed),
+        rgba: Vec::new(),
+    }))
+}
+
 /// Place a narrower tank in the middle of `visible_w`. Returns 1 when
 /// the width changed. Jars stay on `tank_empty`; only the main glass
 /// asks for this.
@@ -1383,6 +1392,7 @@ mod tests {
             "tank_t_local_at",
             "tank_cloud_mean",
             "tank_glass",
+            "tank_jar",
             "tank_starter_specimen",
             "tank_take_enclosure_bucket",
         ] {

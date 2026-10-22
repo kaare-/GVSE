@@ -9,7 +9,8 @@ use crate::bio::{self, CellStore, Genome, GenomeStore};
 use crate::cell::Cell;
 use crate::clock::{self, day_factor};
 use crate::consts::{
-    GLASS_H, GLASS_W, MAIN_W, MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H, PRESET_W,
+    GLASS_H, GLASS_W, JAR_H, JAR_W, MAIN_W, MAX_VISIBLE_H, MAX_VISIBLE_W, MIN_VISIBLE, PRESET_H,
+    PRESET_W,
     PX_PER_CELL,
     SAVE_VERSION, TISSUE_DAM_PIXELS,
 };
@@ -508,6 +509,23 @@ impl Tank {
         let px = (w as u32 / 2) * 3;
         let py = ((h - water_top + 3) as u32) * 3;
         let _ = tank.seed_algae(px as u16, py as u16);
+        tank.light_dirty = true;
+        tank.rebuild_light();
+        tank
+    }
+
+    /// A shelf sample jar of water. Smaller than the tumbler. No sand, no stone,
+    /// no starter — it is a place to put a scoop.
+    pub fn jar(seed: u64) -> Self {
+        let mut tank = Self::try_new(seed, JAR_W, JAR_H).expect("jar size");
+        let w = tank.grid.visible_w();
+        let h = tank.grid.visible_h();
+        let water_top = (h as f32 * 0.78) as i32;
+        for vy in 0..water_top {
+            for vx in 0..w {
+                tank.grid.set_visible(vx, vy, Cell::water());
+            }
+        }
         tank.light_dirty = true;
         tank.rebuild_light();
         tank

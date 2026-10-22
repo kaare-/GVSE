@@ -158,6 +158,10 @@ enum RoomArt {
     /// Widest view after pinching in. The tumbler and the table under it.
     /// The rest of the study stays in the lobby.
     static let glassView = Spot(x: 20, y: 102, w: 48, h: 70)
+    /// Widest view for the first shelf jar. The jar sits on the shelf.
+    static let jarView = Spot(x: 12, y: 6, w: 28, h: 40)
+    /// Water inside the first vial. Matches the jar world's aspect.
+    static var jarWater: Spot { vialGlass(0) }
 
     static func cgImage(cast: RoomCast = RoomCast(), mood: RoomMood = RoomMood()) -> CGImage {
         let pix = Pix(w: w, h: h, cast: cast, mood: mood)
@@ -186,17 +190,16 @@ enum RoomArt {
     #endif
 }
 
-/// The tumbler on the table, once you have pinched in.
+/// A desk glass (tumbler or shelf jar) once you have pinched in.
 /// `crop` is that view. `picture` is the top-left of the room bitmap.
-/// `water` stays locked to the tumbler, so a pinch scales the whole view.
+/// `water` stays locked to the glass, so a pinch scales the whole view.
 struct GlassStage {
     var s: CGFloat
     var picture: CGPoint
     var crop: CGRect
     var water: CGRect
 
-    init(size: CGSize, zoom: CGFloat, pan: CGSize) {
-        let view = RoomArt.glassView
+    init(size: CGSize, zoom: CGFloat, pan: CGSize, view: RoomArt.Spot, waterSpot: RoomArt.Spot) {
         let zoom = min(max(zoom, 1), 8)
         let fit = min(
             size.width / CGFloat(view.w),
@@ -218,31 +221,41 @@ struct GlassStage {
             width: CGFloat(view.w) * scale,
             height: CGFloat(view.h) * scale
         )
-        let spot = RoomArt.openingWater
         water = CGRect(
-            x: picture.x + CGFloat(spot.x) * scale,
-            y: picture.y + CGFloat(spot.y) * scale,
-            width: CGFloat(spot.w) * scale,
-            height: CGFloat(spot.h) * scale
+            x: picture.x + CGFloat(waterSpot.x) * scale,
+            y: picture.y + CGFloat(waterSpot.y) * scale,
+            width: CGFloat(waterSpot.w) * scale,
+            height: CGFloat(waterSpot.h) * scale
         )
+    }
+
+    static func tumbler(size: CGSize, zoom: CGFloat, pan: CGSize) -> GlassStage {
+        GlassStage(size: size, zoom: zoom, pan: pan, view: RoomArt.glassView, waterSpot: RoomArt.openingWater)
+    }
+
+    static func jar(size: CGSize, zoom: CGFloat, pan: CGSize) -> GlassStage {
+        GlassStage(size: size, zoom: zoom, pan: pan, view: RoomArt.jarView, waterSpot: RoomArt.jarWater)
     }
 }
 
 /// What a beat has put in the room. Later beats fill these in.
 struct RoomCast {
-    var tank = true
-    var jars = true
+    var tank = false
+    /// How many shelf vials are on screen (0, 1, or 3).
+    var jarCount = 0
     var bench = true
     var openingGlass = false
+
+    var jars: Bool { jarCount > 0 }
 }
 
 /// Ordered beats. A beat can show or hide room objects, choose which glass
 /// is on screen, and play a short system sound. The cassette is separate.
-/// Only the opening beat is played. The rest are empty hooks.
+/// Beats past the unlocked index stay as empty hooks.
 struct LobbyBeat {
     var name: String
     var tank: Bool?
-    var jars: Bool?
+    var jars: Int?
     var bench: Bool?
     var glass: String?
     var sound: String?
@@ -250,23 +263,38 @@ struct LobbyBeat {
 
 enum LobbyScript {
     static let beats: [LobbyBeat] = [
-        LobbyBeat(name: "opening", tank: false, jars: false, bench: true, glass: "glass", sound: "move"),
+        LobbyBeat(name: "opening", tank: false, jars: 0, bench: true, glass: "glass", sound: "move"),
+        LobbyBeat(name: "moved", tank: false, jars: 1, bench: true, glass: "glass", sound: "moved"),
         LobbyBeat(name: "bench", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
         LobbyBeat(name: "tank", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
-        LobbyBeat(name: "jars", tank: nil, jars: nil, bench: nil, glass: nil, sound: nil),
     ]
 
-    /// The beat on screen. Hooks past this are not played.
+    /// The first beat. Later beats unlock from tank events.
     static let opening = beats[0]
 
-    static var cast: RoomCast {
-        RoomCast(
-            tank: opening.tank ?? false,
-            jars: opening.jars ?? false,
-            bench: opening.bench ?? false,
-            openingGlass: opening.glass != nil
+    /// Cast for an unlocked beat index (0 = opening, 1 = something moved).
+    static func cast(beat: Int) -> RoomCast {
+        let index = min(max(beat, 0), beats.count - 1)
+        var tank = false
+        var jarCount = 0
+        var bench = true
+        var glass: String? = nil
+        for i in 0...index {
+            let b = beats[i]
+            if let v = b.tank { tank = v }
+            if let v = b.jars { jarCount = v }
+            if let v = b.bench { bench = v }
+            if let v = b.glass { glass = v }
+        }
+        return RoomCast(
+            tank: tank,
+            jarCount: jarCount,
+            bench: bench,
+            openingGlass: glass != nil
         )
     }
+
+    static var cast: RoomCast { cast(beat: 0) }
 }
 
 /// A short cue for a beat. It does not start or stop the cassette.
@@ -623,7 +651,7 @@ private final class Pix {
         fill(3, 25, 14, 2, Ink.potLt)
         fill(7, 28, 6, 3, 0x3E2818)
 
-        for spot in RoomArt.vials where cast.jars {
+        for (i, spot) in RoomArt.vials.enumerated() where i < cast.jarCount {
             vial(spot.x, spot.y)
         }
 

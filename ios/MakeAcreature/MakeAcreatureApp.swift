@@ -89,13 +89,21 @@ struct MakeAcreatureApp: App {
         VStack(spacing: 0) {
             topMenu
             GeometryReader { geo in
-                let stage: GlassStage? = session.container == .glass
-                    ? GlassStage(size: geo.size, zoom: session.glassZoom, pan: session.glassPan)
-                    : nil
+                let stage: GlassStage? = {
+                    guard session.deskGlass else { return nil }
+                    switch session.container {
+                    case .glass:
+                        return .tumbler(size: geo.size, zoom: session.glassZoom, pan: session.glassPan)
+                    case .sample(0):
+                        return .jar(size: geo.size, zoom: session.glassZoom, pan: session.glassPan)
+                    default:
+                        return nil
+                    }
+                }()
                 ZStack {
                     if let stage {
                         Color(red: 0.20, green: 0.14, blue: 0.10)
-                        GlassBackdrop(stage: stage)
+                        GlassBackdrop(session: session, stage: stage)
                             .frame(width: stage.crop.width, height: stage.crop.height)
                             .clipped()
                             .position(x: stage.crop.midX, y: stage.crop.midY)
@@ -272,8 +280,9 @@ struct MakeAcreatureApp: App {
     }
 }
 
-/// The tumbler and the table, scaled together by the pinch.
+/// The desk glass and the study around it, scaled together by the pinch.
 private struct GlassBackdrop: View {
+    @ObservedObject var session: TankSession
     var stage: GlassStage
     @State private var mood = RoomMood(
         phase: RoomMood.phase(),
@@ -284,7 +293,7 @@ private struct GlassBackdrop: View {
     private let clock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Image(uiImage: RoomArt.picture(LobbyScript.cast, mood: mood))
+        Image(uiImage: RoomArt.picture(session.roomCast, mood: mood))
             .resizable()
             .interpolation(.none)
             .frame(width: CGFloat(RoomArt.w) * stage.s, height: CGFloat(RoomArt.h) * stage.s)

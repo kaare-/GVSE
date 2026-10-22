@@ -30,9 +30,10 @@ struct RoomView: View {
     @State private var lampOn = RoomMood.storedLamp
     @State private var shelfOn = RoomMood.storedShelf
     @State private var candleLit = RoomMood.storedCandle
-    private let cast = LobbyScript.cast
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private let skyClock = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private var cast: RoomCast { session.roomCast }
 
     private var roomMood: RoomMood {
         RoomMood(phase: skyPhase, lampOn: lampOn, shelfOn: shelfOn, candleLit: candleLit)
@@ -41,6 +42,7 @@ struct RoomView: View {
     var body: some View {
         GeometryReader { geo in
             let layout = RoomLayout(size: geo.size)
+            let cast = session.roomCast
             ZStack {
                 Color(red: 0.20, green: 0.14, blue: 0.10)
                 Image(uiImage: RoomArt.picture(cast, mood: roomMood))
@@ -55,8 +57,8 @@ struct RoomView: View {
                 if cast.tank {
                     glassThumb(thumbs[0], RoomArt.tankGlass, layout)
                 }
-                if cast.jars {
-                    ForEach(0..<3, id: \.self) { i in
+                if cast.jarCount > 0 {
+                    ForEach(0..<cast.jarCount, id: \.self) { i in
                         glassThumb(thumbs[i + 1], RoomArt.vialGlass(i), layout)
                     }
                 }
@@ -72,8 +74,8 @@ struct RoomView: View {
                 if cast.tank {
                     place(RoomArt.tank, layout) { tankButton }
                 }
-                if cast.jars {
-                    ForEach(0..<3, id: \.self) { i in
+                if cast.jarCount > 0 {
+                    ForEach(0..<cast.jarCount, id: \.self) { i in
                         place(RoomArt.vials[i], layout) { vialButton(i) }
                     }
                 }
@@ -121,6 +123,9 @@ struct RoomView: View {
             refreshThumbs(others: false)
         }
         .onChange(of: session.savesChanged) { _ in
+            refreshThumbs(others: true)
+        }
+        .onChange(of: session.lobbyBeat) { _ in
             refreshThumbs(others: true)
         }
         .confirmationDialog(
@@ -657,18 +662,19 @@ struct RoomView: View {
     }
 
     private func refreshThumbs(others: Bool) {
-        guard cast.tank || cast.jars else { return }
+        let cast = session.roomCast
+        guard cast.tank || cast.jarCount > 0 else { return }
         if cast.tank {
             let glass = RoomArt.tankGlass
             thumbs[0] = session.lobbyPreview(.main, width: glass.w, height: glass.h)
         }
-        guard cast.jars else { return }
+        guard cast.jarCount > 0 else { return }
         if others {
-            for i in 0..<3 {
+            for i in 0..<cast.jarCount {
                 let g = RoomArt.vialGlass(i)
                 thumbs[i + 1] = session.lobbyPreview(.sample(i), width: g.w, height: g.h)
             }
-        } else if let i = session.container.sampleIndex {
+        } else if let i = session.container.sampleIndex, i < cast.jarCount {
             let g = RoomArt.vialGlass(i)
             thumbs[i + 1] = session.lobbyPreview(.sample(i), width: g.w, height: g.h)
         }

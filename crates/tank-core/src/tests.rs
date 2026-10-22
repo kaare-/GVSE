@@ -1,7 +1,7 @@
 use wk_material::MaterialId;
 
 use crate::cell::Cell;
-use crate::consts::{GLASS_H, GLASS_W, MAIN_W, PRESET_H, PRESET_W, PX_PER_CELL};
+use crate::consts::{GLASS_H, GLASS_W, JAR_H, JAR_W, MAIN_W, PRESET_H, PRESET_W, PX_PER_CELL};
 use crate::tank::{Tank, TankInput, ToolEvent};
 
 fn tick_n(tank: &mut Tank, n: u32) {
@@ -783,6 +783,41 @@ fn glass_is_water_and_one_creature() {
     }
     assert!(water > 200, "the glass is water, water={water}");
     assert!(tank.is_day_now(), "a new glass is lit");
+}
+
+#[test]
+fn jar_is_smaller_than_the_glass() {
+    let glass = Tank::glass(3);
+    let jar = Tank::jar(5);
+    assert_eq!(jar.visible_size(), (JAR_W, JAR_H));
+    let glass_cells = GLASS_W * GLASS_H;
+    let jar_cells = JAR_W * JAR_H;
+    assert!(jar_cells < glass_cells, "jar {jar_cells} < glass {glass_cells}");
+    assert_eq!(jar.live_cells(), 0, "the jar starts empty of life");
+    assert_eq!(jar.count_material(MaterialId::Sand as u8), 0);
+    let (w, h) = jar.visible_size();
+    let mut water = 0;
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let c = jar.cell_visible(x, y);
+            assert!(!c.is_rock(), "no rocks in the jar");
+            if c.is_open() && c.sat > 40 {
+                water += 1;
+            }
+        }
+    }
+    assert!(water > 80, "the jar holds water, water={water}");
+    let mut glass_water = 0;
+    let (gw, gh) = glass.visible_size();
+    for y in 0..gh as i32 {
+        for x in 0..gw as i32 {
+            let c = glass.cell_visible(x, y);
+            if c.is_open() && c.sat > 40 {
+                glass_water += 1;
+            }
+        }
+    }
+    assert!(water < glass_water, "jar water {water} < glass water {glass_water}");
 }
 
 #[test]

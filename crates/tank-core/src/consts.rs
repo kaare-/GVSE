@@ -27,6 +27,10 @@ pub const PRESET_H: u32 = 256;
 pub const GLASS_W: u32 = 40;
 pub const GLASS_H: u32 = 56;
 
+/// A shelf sample jar. Smaller volume than the tumbler.
+pub const JAR_W: u32 = 24;
+pub const JAR_H: u32 = 32;
+
 /// The phone's main tank: three jar-widths side by side. Jars stay
 /// [`PRESET_W`] wide.
 pub const MAIN_W: u32 = PRESET_W * 3;
