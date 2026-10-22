@@ -490,6 +490,7 @@ struct EurorackStudio: View {
 
     private func hear() {
         session.soloTake(take)
+        AmbientAudio.shared.ensureRunning()
     }
 
     private func toggleRecord() {

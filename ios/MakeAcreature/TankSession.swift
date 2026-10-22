@@ -294,7 +294,12 @@ final class TankSession: ObservableObject {
         running = true
         playing = true
         startMotion()
-        if soundOn { AmbientAudio.shared.startIfNeeded() }
+        if soloing {
+            AmbientAudio.shared.setMuted(false)
+            AmbientAudio.shared.ensureRunning()
+        } else {
+            pushDeck(resetHead: false)
+        }
         guard link == nil else { return }
         let pump = DisplayPump()
         pump.onFrame = { [weak self] dt in self?.advance(dt) }
@@ -605,6 +610,7 @@ final class TankSession: ObservableObject {
         let slot = AmbientAudio.PlaySlot(voice: -1, duration: 3600, take: take)
         AmbientAudio.shared.setDeck(on: true, slots: [slot], start: 0, resetHead: false)
         AmbientAudio.shared.setMuted(false)
+        AmbientAudio.shared.ensureRunning()
     }
 
     /// Leave the solo voice and restore the shelf playlist.
@@ -661,11 +667,15 @@ final class TankSession: ObservableObject {
     }
 
     private func pushDeck(resetHead: Bool) {
+        // While the eurorack page is auditioning, leave its solo voice alone.
+        if soloing { return }
         let slots = shelf.map {
             AmbientAudio.PlaySlot(voice: $0.voice, duration: $0.duration, take: $0.take)
         }
-        AmbientAudio.shared.setDeck(on: deckOn && soundOn, slots: slots, start: tape, resetHead: resetHead)
-        AmbientAudio.shared.setMuted(!(deckOn && soundOn))
+        let on = deckOn && soundOn
+        AmbientAudio.shared.setDeck(on: on, slots: slots, start: tape, resetHead: resetHead)
+        AmbientAudio.shared.setMuted(!on)
+        if on { AmbientAudio.shared.ensureRunning() }
     }
 
     private static func freshShelf() -> [ShelfTape] {

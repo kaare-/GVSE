@@ -157,6 +157,9 @@ final class AmbientAudio {
     private var stingFreq: Float = 0
     private var seed: UInt64 = 1
     private var tick: UInt64 = 0
+    /// Hardware rate from the output node. Hardcoding 22.05 kHz can start
+    /// the engine then emit silence on newer iOS devices.
+    private var sampleRate: Double = 44_100
     /// One-pole warmth so a new note does not click.
     private var warm: Float = 0
     private var tape = 0
@@ -235,6 +238,14 @@ final class AmbientAudio {
         }
     }
 
+    /// Force the engine up after a pause or a failed start. Safe to call often.
+    func ensureRunning() {
+        if muted { return }
+        if engine?.isRunning == true { return }
+        stop()
+        startIfNeeded()
+    }
+
     /// Population / activity → drone loudness (0…1).
     func setIntensity(liveCells: UInt32) {
         let n = Float(liveCells)
@@ -259,16 +270,21 @@ final class AmbientAudio {
     }
 
     func startIfNeeded() {
-        guard !muted, engine == nil else { return }
+        guard !muted else { return }
+        if engine?.isRunning == true { return }
+        stop()
         let eng = AVAudioEngine()
-        let format = AVAudioFormat(standardFormatWithSampleRate: 22_050, channels: 1)!
-        let node = AVAudioSourceNode { [weak self] _, _, frameCount, abl in
+        let hw = eng.outputNode.inputFormat(forBus: 0).sampleRate
+        let rate = hw > 1_000 ? hw : 44_100
+        sampleRate = rate
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1) else { return }
+        let node = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, abl in
             guard let self else { return noErr }
             let buf = UnsafeMutableAudioBufferListPointer(abl)
             guard let data = buf[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
             let n = Int(frameCount)
             let now = CFAbsoluteTimeGetCurrent()
-            let rate: Float = 22_050
+            let rate = Float(self.sampleRate)
             let sting: Float = now < self.stingUntil ? self.stingFreq : 0
             self.gate.lock()
             let playing = self.deckOn && !self.slots.isEmpty
@@ -302,9 +318,11 @@ final class AmbientAudio {
                     }
                 }
                 if sting > 0 {
-                    sample += sin(2 * .pi * sting * t) * 0.08
+                    sample += sin(2 * Float.pi * sting * t) * 0.08
                 }
+                if sample.isNaN || sample.isInfinite { sample = 0 }
                 self.warm += (sample - self.warm) * 0.18
+                if self.warm.isNaN || self.warm.isInfinite { self.warm = 0 }
                 data[i] = max(-1, min(1, self.warm))
             }
             if playing {
@@ -317,10 +335,12 @@ final class AmbientAudio {
         }
         eng.attach(node)
         eng.connect(node, to: eng.mainMixerNode, format: format)
-        eng.mainMixerNode.outputVolume = 0.7
+        eng.mainMixerNode.outputVolume = 0.85
         do {
-            try AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default, options: [.mixWithOthers])
-            try AVAudioSession.sharedInstance().setActive(true)
+            let session = AVAudioSession.sharedInstance()
+            // Playback so the rack and playlist are heard with the silent switch on.
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try session.setActive(true)
             try eng.start()
             engine = eng
             source = node
@@ -332,7 +352,7 @@ final class AmbientAudio {
 
     /// Patched eurorack voice: sequencer, morph osc, ladder-ish filter, ADSR.
     private func played(t: Float, take: Take) -> Float {
-        let rate: Float = 22_050
+        let rate = Float(max(sampleRate, 1_000))
         func room(_ index: Int) -> Float {
             guard index >= 0, cv.indices.contains(index) else { return 0 }
             return cv[index]
@@ -345,7 +365,7 @@ final class AmbientAudio {
                 takeNoise = takeNoise &* 1_664_525 &+ 1_013_904_223
                 return Float(Int(takeNoise >> 16) & 0x7FFF) / 16_384 - 1
             case Take.Jack.seq.rawValue:
-                let steps = take.steps.isEmpty ? [0] : take.steps
+                let steps = take.steps.isEmpty ? [Float(0)] : take.steps
                 return steps[takeStep % steps.count] * 2 - 1
             case Take.Jack.day.rawValue: return room(0) * 2 - 1
             case Take.Jack.rain.rawValue: return room(1) * 2 - 1
@@ -360,7 +380,6 @@ final class AmbientAudio {
             for cable in take.cables where cable.to == dest.rawValue {
                 v += source(cable.from) * amount
             }
-            // Legacy jacks from the first rack draft.
             if dest == .pitch, take.pitchCv >= 0 { v += room(take.pitchCv) * 0.35 }
             if dest == .level, take.levelCv >= 0 { v *= 0.25 + 0.75 * room(take.levelCv) }
             return min(1, max(0, v))
@@ -405,7 +424,7 @@ final class AmbientAudio {
 
         let wave = mod(.wave, base: take.wave)
         takePhase += freq / rate
-        if takePhase >= 1 { takePhase -= 1 }
+        takePhase -= floor(takePhase)
         let ph = takePhase
         let sine = sin(twoPi * ph)
         let tri: Float = ph < 0.5 ? ph * 4 - 1 : 3 - ph * 4
@@ -429,18 +448,22 @@ final class AmbientAudio {
         var sample = osc + noiseSamp * take.noise
 
         let cut = mod(.cutoff, base: take.cutoff)
-        let res = mod(.reso, base: take.reso)
+        let res = min(0.85, mod(.reso, base: take.reso))
         let f = 0.02 + cut * cut * 0.55
-        takeLp += f * (sample - takeLp + takeBp * res * 3.2)
+        takeLp += f * (sample - takeLp + takeBp * res * 2.4)
         takeBp += f * (sample - takeLp - takeBp)
+        if takeLp.isNaN || takeLp.isInfinite { takeLp = 0 }
+        if takeBp.isNaN || takeBp.isInfinite { takeBp = 0 }
         sample = takeLp
         if take.bright {
             sample += osc * 0.12
         }
 
+        // Keep a floor so the rack is never fully silent while open.
         var amp = mod(.level, base: take.level, amount: 0.55)
-        amp *= 0.15 + 0.85 * takeEnv
-        return sample * amp * 0.38 * max(intensity, 0.22)
+        amp *= 0.25 + 0.75 * max(takeEnv, take.sustain * 0.35)
+        let out = sample * amp * 0.42 * max(intensity, 0.25)
+        return out.isNaN || out.isInfinite ? 0 : out
     }
 
     /// Drone, a two-note chord, and a line that steps. Envelopes sit on
